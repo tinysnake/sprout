@@ -8,6 +8,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
+- **Sanitization**: Never include personal sensitive info (machine usernames, private IPs, local home paths, credentials) in issue titles, bodies, or comments. Replace them with generic placeholders.
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
