@@ -183,14 +183,12 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 - The human operator can understand and control the complete workflow from the Web client.
 - Every M1 success check above links to acceptance evidence.
 
-## Initial frontier
+## Frontier after O3
 
-O1 and O2 form the initial outcome frontier and may be explored in parallel within the same development map. O3 becomes eligible only after both have enough evidence to support a real vertical slice.
+O1 and O2 remain the frontier. O3 is evidenced, and evidencing it moved both forward without completing either: O1 covers four engines and O2 covers three environment kinds, while the slice implemented one of each.
 
-The first development maps reduce the external uncertainty around the four engines, fixed macOS/Windows environments, and cloneable containers. Map #1 produced evidence for the container, macOS, Pi, and Codex `exec` paths; it did **not** settle the Codex transport, nor validate Windows.
+The next map reduces the environment-side uncertainty first. The environment seam is proven for access and leasing but not for execution, and ADR-0003 settles how that gap is closed: every environment, including a local macOS machine, is a network environment hosting a long-lived Sprout worker that supervises engine processes. Container is the first environment where that model is genuinely load-bearing, so it is the smallest piece of work that tests it.
 
-Independent research input: `github.com/yetone/cumora` (MIT) implements a ten-engine adapter layer for these same CLIs and is treated as a cited primary source rather than rediscovered.
-
-Use the selection and re-evaluation process in `docs/agents/development-loop.md` to update this map. This file records outcome state and evidence; it does not define the development workflow.
+Windows and engine breadth follow. `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
 After O7 is evidenced, mark M1 **Evidenced**, return to `docs/goal.md`, and replace the current medium-term goal and supporting outcome graph rather than extending M1 mechanically.
