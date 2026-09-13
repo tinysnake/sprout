@@ -117,10 +117,10 @@ test('a turn reports text as one block per hop and completes from process exit',
 
   // The prompt travels on stdin, never argv.
   const args = argv[0] ?? [];
+  assert.equal(args[0], 'run', 'the subcommand must be present');
   assert.ok(args.includes('--format') && args.includes('json'));
   assert.ok(args.includes('--auto'), 'headless runs need tools permitted');
   assert.ok(!args.includes('run echo'), 'the prompt is not in argv');
-  assert.equal(args.at(-1) === 'run echo', false);
 });
 
 test('the engine-assigned session id is captured and reused on the next turn', async () => {

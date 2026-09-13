@@ -194,6 +194,9 @@ export class OpenCodeSession implements EngineSession {
   #turnArgs(): string[] {
     const session = this.#lastSessionId !== undefined ? ['--session', this.#lastSessionId] : [];
     return [
+      // The subcommand is what makes this a run rather than a bare CLI invocation;
+      // without it `opencode` prints its help and exits 1.
+      'run',
       '--format',
       'json',
       // The daemon is headless and the agent's home is operator-owned, so tools
