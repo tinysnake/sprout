@@ -5,85 +5,150 @@
 #
 # Verifies, in order, each invariant the Windows carrier depends on. Every probe
 # prints its evidence; a failure names the next action, not just the symptom.
-# Run from the Sprout repo on macOS. Requires: ssh, sftp, node (local).
+# Run from the Sprout repo on macOS. Requires: ssh, sftp (local node not needed:
+# the probe scripts run on the remote host).
+#
+# Design note: remote scripts are deployed as real files over sftp and executed,
+# never passed inline. Inline `node -e` does not survive PowerShell's argument
+# mangling (Win32-OpenSSH issue #1082), and deploying files is what the real
+# carrier does anyway.
 set -uo pipefail
 
 TARGET="${1:?usage: probe-windows-ssh.sh user@windows-host [port]}"
 FWD_PORT="${2:-12731}"
-REMOTE_DIR='C:/sprout-probe'
+REMOTE_WIN='C:\sprout-probe'
+REMOTE_FWD='C:/sprout-probe'
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0
 
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 head() { printf '\n== %s ==\n' "$1"; }
+remote() { ssh -o BatchMode=yes -o ServerAliveInterval=30 -T "$TARGET" "$@"; }
+
+# ---------------------------------------------------------------- probe files
+
+cat > "$WORK/stdin-echo.js" <<'EOF'
+// Byte-for-byte stdin-to-stdout pipe. No encoding layer, no newline fixing:
+// whatever arrives must come back identical.
+process.stdin.pipe(process.stdout);
+EOF
+
+cat > "$WORK/echo-server.js" <<'EOF'
+// A stand-in for the Sprout worker daemon: bound to the Windows loopback only.
+const net = require('net');
+net.createServer((socket) => socket.pipe(socket))
+  .listen(Number(process.argv[2]), '127.0.0.1');
+EOF
 
 head "Probe 1: SSH connectivity and default shell"
-shell_info=$(ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T "$TARGET" '$PSVersionTable.PSVersion.ToString(); [System.Environment]::OSVersion.VersionString' 2>&1 | tr -d '\r')
-if [ $? -eq 0 ] && [ -n "$shell_info" ]; then
-  ok "ssh reachable; remote reports: $(echo "$shell_info" | tr '\n' ' ')"
-  echo "$shell_info" | grep -q '^7\.' && ok "default shell is PowerShell 7" \
-    || bad "default shell is not PowerShell 7 — set HKLM:\SOFTWARE\OpenSSH\DefaultShell to pwsh.exe (docs/research/windows-ssh.md §4)"
-else
-  bad "ssh failed: $shell_info"
-  bad "check: server running, key authorized (Administrators group needs C:\ProgramData\ssh\administrators_authorized_keys with strict ACLs)"
+shell_info=$(remote '$PSVersionTable.PSVersion.ToString(); [System.Environment]::OSVersion.VersionString' 2>&1 | LC_ALL=C tr -d '\r')
+ssh_status=${PIPESTATUS[0]}
+if [ "$ssh_status" -ne 0 ]; then
+  bad "ssh failed (exit $ssh_status): $shell_info"
+  bad "check: server running, key authorized (Administrators group needs C:\\ProgramData\\ssh\\administrators_authorized_keys with strict ACLs)"
   exit 1
 fi
-
-head "Probe 2: sftp file deployment"
-tmpf=$(mktemp); printf 'sprout-probe %s\n' "$(date -u +%FT%TZ)" > "$tmpf"
-if sftp -o BatchMode=yes "$TARGET" >/dev/null 2>&1 <<SFTP
-put "$tmpf" $REMOTE_DIR/probe.txt
-SFTP
-then
-  back=$(ssh -T "$TARGET" "Get-Content $REMOTE_DIR/probe.txt" 2>&1 | tr -d '\r')
-  grep -q 'sprout-probe' <<< "$back" && ok "sftp put + read-back round-trip" || bad "file landed but content differs: $back"
-else
-  bad "sftp put failed — create the directory on the Windows host first: mkdir $REMOTE_DIR"
+if echo "$shell_info" | LC_ALL=C grep -qE 'PSReadLine|profile\.ps1'; then
+  bad "ssh works, but the remote PowerShell profile errors in non-interactive sessions and pollutes every channel:"
+  echo "$shell_info" | head -4 | sed 's/^/       /'
+  bad "fix on the Windows host: wrap the PSReadLine lines in Microsoft.PowerShell_profile.ps1 in: if ([Environment]::UserInteractive) { ... }"
+  echo
+  exit 1
 fi
-rm -f "$tmpf"
+ok "ssh reachable; remote reports: $(echo "$shell_info" | tr '\n' ' ')"
+echo "$shell_info" | LC_ALL=C grep -q '^7\.' && ok "default shell is PowerShell 7" \
+  || bad "default shell is not PowerShell 7 — set HKLM:\\SOFTWARE\\OpenSSH\\DefaultShell to pwsh.exe (docs/research/windows-ssh.md §4)"
 
-head "Probe 3: node exists on the Windows host"
-node_ver=$(ssh -T "$TARGET" 'node --version' 2>&1 | tr -d '\r')
+head "Probe 2: sftp deployment (directory creation + put + read-back)"
+remote "New-Item -ItemType Directory -Force -Path $REMOTE_WIN | Out-Null" >/dev/null 2>&1
+printf 'sprout-probe %s\n' "$(date -u +%FT%TZ)" > "$WORK/probe.txt"
+sftp_err=$(sftp -o BatchMode=yes "$TARGET" <<SFTP 2>&1)
+put "$WORK/probe.txt" $REMOTE_FWD/probe.txt
+SFTP
+if [ $? -ne 0 ]; then
+  bad "sftp put failed: $sftp_err"
+else
+  back=$(remote "Get-Content $REMOTE_FWD/probe.txt" 2>/dev/null | LC_ALL=C tr -d '\r')
+  grep -q 'sprout-probe' <<< "$back" && ok "file deployed and read back intact" \
+    || bad "file landed but content differs: '$back'"
+fi
+
+head "Probe 3: node on the remote PATH"
+node_ver=$(remote 'node --version' 2>/dev/null | LC_ALL=C tr -d '\r')
 [[ "$node_ver" =~ ^v[0-9]+ ]] && ok "node $node_ver on PATH" \
   || bad "node not on the SSH session's PATH: '$node_ver' — the daemon will need its absolute path or a machine-level PATH entry"
 
 head "Probe 4: byte-clean round-trip through sshd (non-PTY)"
-payload='{"jsonrpc":"2.0","id":7,"params":{"text":"芽 🚀 λ — 100%"}}'
-echo "$payload" | ssh -T "$TARGET" 'node -e "process.stdin.setEncoding(\"utf8\");process.stdin.on(\"data\",d=>process.stdout.write(d))"' > /tmp/probe-rt.txt 2>/dev/null
-if cmp -s <(echo "$payload") /tmp/probe-rt.txt; then
-  ok "bytes identical both directions (UTF-8, no CRLF injection, no VT escapes)"
+printf '{"jsonrpc":"2.0","id":7,"params":{"text":"芽 🚀 λ — 100%%"}}' > "$WORK/payload.bin"
+if sftp -o BatchMode=yes "$TARGET" >/dev/null 2>&1 <<SFTP
+put "$WORK/stdin-echo.js" $REMOTE_FWD/stdin-echo.js
+SFTP
+then
+  remote "node $REMOTE_FWD/stdin-echo.js" < "$WORK/payload.bin" > "$WORK/resp.bin" 2>/dev/null
+  if cmp -s "$WORK/payload.bin" "$WORK/resp.bin"; then
+    ok "bytes identical both directions (UTF-8, no CRLF injection, no VT escapes)"
+  else
+    bad "stream corrupted:"; diff "$WORK/payload.bin" "$WORK/resp.bin" | head -4 | sed 's/^/       /'
+  fi
 else
-  bad "stream corrupted:"; diff <(echo "$payload") /tmp/probe-rt.txt | head -4 | sed 's/^/       /'
+  bad "could not deploy stdin-echo.js — Probe 2 must pass first"
 fi
 
-head "Probe 5: loopback endpoint reachable through an SSH forward"
-# Simulates the M1 shape: a daemon bound to the Windows loopback, reached via ssh -L.
-ssh -T "$TARGET" "node -e \"const l=require('net').createServer(s=>{s.on('data',d=>s.write(d))});l.listen($FWD_PORT,'127.0.0.1',()=>console.log('up'))\" > $REMOTE_DIR/probe-echo.log 2>&1 & sleep 2; Get-Content $REMOTE_DIR/probe-echo.log" > /tmp/probe-listen.txt 2>&1
-grep -q 'up' /tmp/probe-listen.txt || { bad "could not start loopback echo server on the Windows host: $(cat /tmp/probe-listen.txt)"; echo; exit 1; }
-ssh -f -N -L "$FWD_PORT:127.0.0.1:$FWD_PORT" -o ExitOnForwardFailure=yes "$TARGET"
-fwd_pid=$!
+head "Probe 5: loopback daemon reachable through an SSH forward"
+if ! sftp -o BatchMode=yes "$TARGET" >/dev/null 2>&1 <<SFTP
+put "$WORK/echo-server.js" $REMOTE_FWD/echo-server.js
+SFTP
+then
+  bad "could not deploy echo-server.js — Probe 2 must pass first"
+  echo; exit 1
+fi
+# Start detached via WMI: the process is parented to WmiPrvSE, outside the SSH
+# session's Job Object, so it survives the session — the property the real
+# daemon depends on. (PowerShell `&` creates a session-bound job that dies with
+# the session; this was verified live in an earlier probe run.)
+remote "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='node $REMOTE_FWD/echo-server.js $FWD_PORT'} | Out-Null" >/dev/null 2>&1
 sleep 2
-resp=$(echo "sprout-tunnel-ok" | timeout 10 node -e "
-const net = require('net');
-const c = net.connect($FWD_PORT, '127.0.0.1', () => {});
-let buf='';
-c.on('data', d => { buf += d; c.end(); });
-c.on('error', e => { console.error(e.message); process.exit(1); });
-c.on('close', () => { process.stdout.write(buf); });
-" 2>&1)
-kill "$fwd_pid" 2>/dev/null
-grep -q 'sprout-tunnel-ok' <<< "$resp" && ok "loopback endpoint reachable through ssh -L (byte round-trip)" \
-  || bad "tunnel round-trip failed: '$resp'"
-ssh -T "$TARGET" "Get-Process node -ErrorAction SilentlyContinue | Where-Object {(Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$_.Id)\").CommandLine -like '*$FWD_PORT*'} | Stop-Process -Force" >/dev/null 2>&1
-
-head "Probe 6: no published port on the Windows LAN interface"
-bound=$(ssh -T "$TARGET" "Get-NetTCPConnection -LocalPort $FWD_PORT -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalAddress" 2>/dev/null | tr -d '\r' | sort -u | paste -sd, -)
+bound=$(remote "(Get-NetTCPConnection -LocalPort $FWD_PORT -State Listen -ErrorAction SilentlyContinue).LocalAddress" 2>/dev/null | LC_ALL=C tr -d '\r' | sort -u | paste -sd, -)
 if [ -z "$bound" ]; then
-  ok "nothing listening (echo server already stopped — lifecycle cleanup works)"
-elif [ "$bound" = "127.0.0.1" ]; then
-  ok "bound to loopback only"
+  bad "nothing listening on $FWD_PORT on the Windows host — echo-server.js did not start"
+  echo; exit 1
+fi
+ssh -f -N -L "$FWD_PORT:127.0.0.1:$FWD_PORT" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "$TARGET"
+fwd_pid=$!
+sleep 1
+printf 'sprout-tunnel-ok' > "$WORK/tunnel-payload.bin"
+timeout 10 node -e "
+const net = require('net');
+const fs = require('fs');
+const payload = fs.readFileSync(process.argv[1]);
+const c = net.connect($FWD_PORT, '127.0.0.1', () => c.write(payload));
+let buf = Buffer.alloc(0);
+c.on('data', d => { buf = Buffer.concat([buf, d]); if (buf.length >= payload.length) c.end(); });
+c.on('error', () => process.exit(1));
+c.on('close', () => process.stdout.write(buf));
+" "$WORK/tunnel-payload.bin" > "$WORK/tunnel-resp.bin" 2>/dev/null
+kill "$fwd_pid" 2>/dev/null
+if cmp -s "$WORK/tunnel-payload.bin" "$WORK/tunnel-resp.bin"; then
+  ok "loopback daemon reachable through ssh -L, byte round-trip intact"
 else
-  bad "listener bound to non-loopback address: $bound — the daemon MUST bind 127.0.0.1 (ADR-0003, no published ports)"
+  bad "tunnel round-trip failed (empty or corrupted response)"
+fi
+
+head "Probe 6: bound to loopback only, and cleaned up on request"
+if [ "$bound" = "127.0.0.1" ]; then
+  ok "daemon bound to 127.0.0.1 only (no published port, per ADR-0003)"
+else
+  bad "daemon bound to non-loopback address: $bound — it MUST bind 127.0.0.1"
+fi
+remote "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*echo-server.js*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" >/dev/null 2>&1
+sleep 1
+still=$(remote "(Get-NetTCPConnection -LocalPort $FWD_PORT -State Listen -ErrorAction SilentlyContinue).LocalAddress" 2>/dev/null | LC_ALL=C tr -d '\r')
+if [ -z "$still" ]; then
+  ok "daemon stopped cleanly via SSH (provisioning channel works for lifecycle)"
+else
+  bad "echo server still listening after Stop-Process — check manually: Get-Process node"
 fi
 
 echo
