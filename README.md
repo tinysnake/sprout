@@ -17,8 +17,8 @@ The first end-to-end slice (issue #10) plus the environment-worker seam (issue #
 - Progress streams to the client; a run can be stopped and its terminal result or
   failure inspected.
 
-This is not the finished MVP. Container and Windows environments, the other three
-engines, and durable lease recovery are not implemented yet.
+Container environments are implemented alongside macOS; Windows, the other three
+engines, and durable lease recovery are not.
 
 ## Requirements
 
@@ -35,6 +35,10 @@ npm run web:build    # build the client into web/dist
 npm start            # start the Sprout runtime
 ```
 
+Sprout starts an environment worker and reaches it over the worker protocol; the
+core itself spawns no engine process (ADR-0003). Engine CLIs must be installed
+where the worker runs, which for the local macOS environment is this host.
+
 Then open <http://127.0.0.1:5174>.
 
 For client development with hot reload, run `npm start` in one terminal and
@@ -46,10 +50,16 @@ Environment overrides: `SPROUT_PORT`, `SPROUT_DATABASE`, `SPROUT_WORKDIR`,
 ## Test
 
 ```bash
-npm test             # automated tests (no engine or network needed)
-npm run typecheck    # server and client type checking
-npm run smoke        # live check: real Codex on the real macOS host
+npm test                # automated tests (no engine, network, or Docker needed)
+npm run typecheck       # server and client type checking
+npm run smoke           # live check: real Codex in a worker on the macOS host
+npm run image:build     # build the container environment image
+npm run smoke:container # live check: real Codex inside a real container
 ```
+
+See [`environments/container/README.md`](environments/container/README.md) for the
+container environment: how the image is built, how an instance is created, and
+the platform facts that are easy to get wrong.
 
 `npm test` uses controlled adapters at the engine and environment seams, so it
 needs neither Codex nor Docker. `npm run smoke` is the opposite: it exercises the

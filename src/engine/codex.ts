@@ -37,9 +37,26 @@ export interface CodexAdapterOptions {
   /** Extra argv, e.g. `['--strict-config']`. Configuration is the caller's job. */
   readonly args?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * The Codex sandbox mode for sessions this adapter starts.
+   *
+   * Defaults to `read-only`, which is Sprout's posture on a shared host where
+   * Codex is not the only thing running. An environment that is *itself* the
+   * isolation boundary — a container — sets `danger-full-access`, because Codex's
+   * own sandbox is then both redundant and, inside an unprivileged container,
+   * broken: `bwrap` cannot create a user namespace and every turn fails with
+   * "No permissions to create a new namespace".
+   *
+   * This is an engine-level setting rather than a Sprout policy decision: what a
+   * run may touch is the environment's business, and the environment told Sprout
+   * it is a container.
+   */
+  readonly sandbox?: CodexSandboxMode;
   /** Overrides for tests; production uses the real child process. */
   readonly spawnProcess?: (binaryPath: string, args: readonly string[]) => CodexProcess;
 }
+
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 export interface CodexProcess {
   readonly stdin: Writable;
@@ -89,7 +106,7 @@ export class CodexEngineAdapter implements EngineAdapter {
 
     const started = await transport.request<{ thread: { id: string } }>('thread/start', {
       cwd: request.workingDirectory,
-      sandbox: 'read-only',
+      sandbox: this.#options.sandbox ?? 'read-only',
       approvalPolicy: 'never',
       ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
     });

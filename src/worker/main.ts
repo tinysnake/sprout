@@ -22,6 +22,15 @@ import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 const environmentInstanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
 const host = process.env.SPROUT_WORKER_HOST ?? '127.0.0.1';
 const port = Number(process.env.SPROUT_WORKER_PORT ?? 0);
+/**
+ * How this worker is reached.
+ *
+ * `stdio` when the carrier already holds a connected pipe — a container reached
+ * through the runtime's exec channel — and `endpoint` when the worker must
+ * publish an address for the core to dial, which is the local machine's case.
+ * ADR-0003: the protocol is identical either way and only the carrier differs.
+ */
+const transportMode = process.env.SPROUT_WORKER_TRANSPORT ?? 'endpoint';
 
 /** Codex must be launched through its real path; a PATH symlink fails sandboxed. */
 function resolveCodexBinary(): string | undefined {
@@ -37,9 +46,24 @@ function resolveCodexBinary(): string | undefined {
 const engines = new Map<string, EngineAdapter>();
 const codexBinary = resolveCodexBinary();
 if (codexBinary !== undefined) {
+  /**
+   * The environment's platform decides the engine's sandbox posture.
+   *
+   * On a shared host, Codex must stay bounded, because other agents and the
+   * owner's own work are on the same machine. Inside a container the container is
+   * the boundary, and Codex's own sandbox is both redundant and non-functional:
+   * an unprivileged container cannot create the user namespace `bwrap` needs, so
+   * every turn fails. This is a fact about the environment, so it is decided here
+   * where the environment is known, not in the core.
+   */
+  const sandbox = process.env.SPROUT_ENV_PLATFORM === 'container' ? 'danger-full-access' : 'read-only';
   engines.set(
     'codex',
-    new CodexEngineAdapter({ binaryPath: codexBinary, args: ['--strict-config'] }),
+    new CodexEngineAdapter({
+      binaryPath: codexBinary,
+      args: ['--strict-config'],
+      sandbox,
+    }),
   );
 }
 
@@ -57,38 +81,55 @@ const log = (line: string) => process.stderr.write(`[sprout-worker] ${line}\n`);
  * reconnection does not pay a cold start, while session state stays scoped to
  * the connection that owns it.
  */
-const endpoint = await serveWorkerEndpoint({
-  host,
-  port,
-  serve: (socket) => {
-    // A socket is bidirectional and satisfies both halves of the transport.
-    const worker = new EnvironmentWorker({
-      environmentInstanceId,
-      engines,
-      input: socket,
-      output: socket,
-      onLog: log,
-    });
-    socket.on('error', () => undefined);
-    socket.on('close', () => {
-      void worker.shutdown();
-    });
-  },
-});
-
-// The core discovers the address from this line, which is why a real port is
-// published even for a local machine: a worker is a network endpoint, not a
-// special case (ADR-0003).
-process.stdout.write(
-  `${WORKER_READY_PREFIX}${JSON.stringify({ host: endpoint.ready.host, port: endpoint.ready.port })}\n`,
-);
-log(
-  `listening on ${endpoint.ready.host}:${endpoint.ready.port} ` +
-    `as ${environmentInstanceId}, engines: ${[...engines.keys()].join(', ')}`,
-);
-
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    void endpoint.close().then(() => process.exit(0));
+if (transportMode === 'stdio') {
+  // The carrier owns the channel: this process's stdio *is* the transport, so
+  // there is no address to publish and nothing to listen on.
+  const worker = new EnvironmentWorker({
+    environmentInstanceId,
+    engines,
+    input: process.stdin,
+    output: process.stdout,
+    onLog: log,
   });
+  process.stdin.on('error', () => undefined);
+  process.stdin.on('close', () => {
+    void worker.shutdown();
+  });
+  log(`serving over stdio as ${environmentInstanceId}, engines: ${[...engines.keys()].join(', ')}`);
+} else {
+  const endpoint = await serveWorkerEndpoint({
+    host,
+    port,
+    serve: (socket) => {
+      // A socket is bidirectional and satisfies both halves of the transport.
+      const worker = new EnvironmentWorker({
+        environmentInstanceId,
+        engines,
+        input: socket,
+        output: socket,
+        onLog: log,
+      });
+      socket.on('error', () => undefined);
+      socket.on('close', () => {
+        void worker.shutdown();
+      });
+    },
+  });
+
+  // The core discovers the address from this line, which is why a real port is
+  // published even for a local machine: a worker is a network endpoint, not a
+  // special case (ADR-0003).
+  process.stdout.write(
+    `${WORKER_READY_PREFIX}${JSON.stringify({ host: endpoint.ready.host, port: endpoint.ready.port })}\n`,
+  );
+  log(
+    `listening on ${endpoint.ready.host}:${endpoint.ready.port} ` +
+      `as ${environmentInstanceId}, engines: ${[...engines.keys()].join(', ')}`,
+  );
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      void endpoint.close().then(() => process.exit(0));
+    });
+  }
 }

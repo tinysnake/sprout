@@ -13,7 +13,9 @@
     "start": "node src/main.ts",
     "smoke": "node scripts/live-smoke.ts",
     "web:build": "vite build",
-    "web:dev": "vite"
+    "web:dev": "vite",
+    "smoke:container": "node scripts/live-container.ts",
+    "image:build": "sh environments/container/build.sh"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",

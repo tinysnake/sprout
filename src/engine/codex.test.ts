@@ -356,3 +356,37 @@ test('closing a session settles an in-flight turn as interrupted', async () => {
 
   assert.deepEqual(await turn.completion, { status: 'interrupted' });
 });
+
+test('the sandbox posture is configurable, because a container is its own boundary', async () => {
+  // A container cannot create the user namespace Codex's sandbox needs, so every
+  // turn fails inside one unless Codex's own sandbox is disabled there. The
+  // environment decides this, so the adapter must accept it rather than hard-code
+  // the shared-host posture.
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+  });
+
+  const adapter = new CodexEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    sandbox: 'danger-full-access',
+    spawnProcess: () => server.process,
+  });
+  await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/sprout' });
+
+  const start = server.requests.find((request) => request.method === 'thread/start');
+  assert.equal((start?.params as Record<string, unknown>).sandbox, 'danger-full-access');
+});
+
+test('the default sandbox posture keeps Codex bounded on a shared host', async () => {
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+  });
+
+  const adapter = startAdapter(server);
+  await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
+
+  const start = server.requests.find((request) => request.method === 'thread/start');
+  assert.equal((start?.params as Record<string, unknown>).sandbox, 'read-only');
+});

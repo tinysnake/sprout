@@ -97,7 +97,7 @@ Container, macOS, and Windows environments can be treated as a shared capability
 
 **Evidence so far**: the environment model is settled and all checks below hold for **container and macOS**. Windows is unproven (#5).
 
-**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Containers are still probe-only; no container adapter is implemented.
+**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Containers are still probe-only; no container adapter is implemented.
 
 **Outcome checks**:
 

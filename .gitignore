@@ -9,6 +9,10 @@ node_modules/
 web/dist/
 
 # Local runtime state
+# Codex auth is never copied into an image or committed; it is mounted read-only
+# into a container at run time.
+auth.json
+codexhome/
 *.db
 *.db-journal
 sprout.db
