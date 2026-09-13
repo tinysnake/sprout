@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sprout</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Sprout</h1>
+      <p class="subtitle">Submit a request to an agent and watch its run progress.</p>
+
+      <form id="request-form">
+        <label for="agent">Agent</label>
+        <select id="agent" name="agent"></select>
+
+        <label for="prompt">Request</label>
+        <textarea id="prompt" name="prompt" rows="4" required
+          placeholder="e.g. List the top-level files in this project."></textarea>
+
+        <button type="submit">Run</button>
+      </form>
+
+      <section id="runs" aria-live="polite"></section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
