@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter } from '../engine/codex.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
+import { AgyEngineAdapter } from '../engine/agy.ts';
 import { EnvironmentWorker } from './server.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
@@ -91,6 +92,23 @@ if (piBinary !== undefined) {
       ...(process.env.SPROUT_PI_SESSION_DIR !== undefined
         ? { sessionDirectory: process.env.SPROUT_PI_SESSION_DIR }
         : {}),
+    }),
+  );
+}
+
+/**
+ * Headless `agy` cannot prompt for tool permission, so tools are auto-denied and
+ * the run produces nothing. An environment that is itself the isolation boundary
+ * therefore has to allow them; a shared host keeps them denied until an explicit
+ * decision is made about it.
+ */
+const agyBinary = resolveBinary('agy');
+if (agyBinary !== undefined) {
+  engines.set(
+    'agy',
+    new AgyEngineAdapter({
+      binaryPath: agyBinary,
+      skipPermissions: process.env.SPROUT_ENV_PLATFORM === 'container',
     }),
   );
 }
