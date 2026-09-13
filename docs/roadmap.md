@@ -66,16 +66,16 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 **Status**: In progress  
 **Depends on**: None
 
-Codex and Pi can both be controlled through one Sprout-facing run model rather than being embedded as machine-specific agents.
+Codex and Pi can both be controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
 
 **Outcome checks**:
 
 - Codex and Pi can each receive assembled input, start, stream observable results, and stop.
-  - Pi `--mode json` streams natively. Codex `exec` does **not** stream; Codex `app-server` does. The streaming check is therefore unproven for Codex until the transport decision is made.
+  - **Streaming granularity is a declared per-adapter capability**, not a universal guarantee (ADR-0001). Pi `--mode json` streams natively. Codex streams via `app-server` only; `exec` never does. `agy` streams but discards partial output on interrupt; `opencode` 1.18.29 does not stream.
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
-  - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, and how standing instructions are supplied.
+  - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, lifecycle (Codex `app-server` needs a supervised daemon), and how standing instructions are supplied.
 - Agent identity and project configuration are not owned by either CLI installation.
-  - Unproven. Codex keeps sessions in `~/.codex/sessions/` outside any project; Pi's session location is caller-controllable via `--session-dir`.
+  - Unproven. Codex keeps sessions in `~/.codex/sessions/` outside any project; Pi's session location is caller-controllable via `--session-dir`; opencode resumes via `--session`; `agy` via `--continue`/`--conversation`.
 
 ### O2 — Schedulable environment pool
 
