@@ -46,6 +46,7 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 - The product runs locally and exposes a cross-platform Web client.
 - Core modules remain independently testable and verifiable.
 - Framework, language, and database choices are made when implementation evidence requires them and recorded as ADRs when appropriate.
+- `zcode` support is deferred until after M1: it requires an ACP bridge on top of the engine, which is extra wiring rather than a first-class engine CLI.
 
 **Non-goals for M1**:
 
