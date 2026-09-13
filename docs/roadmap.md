@@ -69,6 +69,8 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 
 Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
 
+**Implementation evidence**: Codex is implemented and runs end to end through Sprout's run interface (#10): `startSession` → streaming events → interrupt/close → terminal result, on a real leased environment. `src/engine/port.ts` is the run seam and `src/engine/codex.ts` the first adapter. Pi, `agy`, and `opencode` remain unproven against that seam outside probing; the streaming-granularity declaration is exercised by only one adapter so far.
+
 **Outcome checks**:
 
 - Each engine can receive assembled input, start, report observable results, and stop.
@@ -95,6 +97,8 @@ Container, macOS, and Windows environments can be treated as a shared capability
 
 **Evidence so far**: the environment model is settled and all checks below hold for **container and macOS**. Windows is unproven (#5).
 
+**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Containers are still probe-only; no container adapter is implemented.
+
 **Outcome checks**:
 
 - Each target environment can report availability and relevant capabilities.
@@ -108,10 +112,14 @@ Container, macOS, and Windows environments can be treated as a shared capability
 
 ### O3 — First end-to-end run
 
-**Status**: Unproven  
+**Status**: Evidenced  
 **Depends on**: O1, O2
 
 One human request can travel through Sprout to one Agent and one environment, with its progress returned through a minimal Web interface.
+
+**Acceptance evidence**: Web request → Codex `app-server` → fixed macOS environment under a capacity lease → streamed progress → stop → terminal result (#10, work record and acceptance comments). Check 2 reads "obtains environment access when required", and one Agent on one environment satisfies the outcome, so all four checks below are met for real rather than with fakes.
+
+**Note**: O3 being evidenced does not make O1 or O2 evidenced. Those cover four engines and three platforms, and this slice exercised one of each.
 
 **Outcome checks**:
 
