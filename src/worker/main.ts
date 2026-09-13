@@ -4,6 +4,7 @@ import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter } from '../engine/codex.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
+import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
 import { EnvironmentWorker } from './server.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
@@ -110,6 +111,14 @@ if (agyBinary !== undefined) {
       binaryPath: agyBinary,
       skipPermissions: process.env.SPROUT_ENV_PLATFORM === 'container',
     }),
+  );
+}
+
+const opencodeBinary = resolveBinary('opencode');
+if (opencodeBinary !== undefined) {
+  engines.set(
+    'opencode',
+    new OpenCodeEngineAdapter({ binaryPath: opencodeBinary }),
   );
 }
 
