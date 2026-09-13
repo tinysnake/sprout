@@ -12,6 +12,7 @@ import { SqliteRunStore } from './run/sqlite-store.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
+import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
 import { WorkerSupervisor } from './worker/supervisor.ts';
 
 /**
@@ -38,10 +39,14 @@ const workingDirectory = process.env.SPROUT_WORKDIR ?? projectRoot;
 const port = Number(process.env.SPROUT_PORT ?? 5174);
 const instanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
 const engineId = process.env.SPROUT_ENGINE ?? 'codex';
-/** `local` (a machine Sprout runs on) or `container` (an environment it does not). */
+/** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
 const environmentKind = process.env.SPROUT_ENV_KIND ?? 'local';
 /** For a container environment: the instance's container name. */
 const containerName = process.env.SPROUT_CONTAINER_NAME ?? instanceId;
+/** For a Windows environment: the SSH target of the host running the daemon. */
+const windowsTarget = process.env.SPROUT_WINDOWS_TARGET;
+/** For a Windows environment: where the readiness file lives on that host. */
+const windowsReadyFile = process.env.SPROUT_WINDOWS_READY_FILE ?? 'C:/sprout-daemon/worker-ready.json';
 
 /**
  * Where the worker's code lives inside the environment.
@@ -80,6 +85,23 @@ async function startEnvironmentWorker(): Promise<WorkerConnection> {
       },
       label: `container:${containerName}`,
       onLog: (line) => process.stderr.write(`[container-worker] ${line}\n`),
+    }).start();
+  }
+
+  if (environmentKind === 'windows') {
+    if (windowsTarget === undefined || windowsTarget === '') {
+      throw new Error('SPROUT_WINDOWS_TARGET is required for SPROUT_ENV_KIND=windows (e.g. user@host)');
+    }
+    // Read the daemon's address from the provisioning channel.
+    const ready = await readWindowsReadyFile({ target: windowsTarget, remotePath: windowsReadyFile });
+    return new SshTunnelCarrier({
+      target: windowsTarget,
+      daemonPort: ready.port,
+      // Collisions across concurrent cores on this machine are an operator
+      // concern at M1 size; the port is stable so reconnects are predictable.
+      localPort: Number(process.env.SPROUT_WINDOWS_TUNNEL_PORT ?? 12741),
+      label: `windows:${windowsTarget}`,
+      onLog: (line) => process.stderr.write(`[windows-worker] ${line}\n`),
     }).start();
   }
 
@@ -122,14 +144,23 @@ if (!initialEngines.has(engineId)) {
 const definition: EnvironmentDefinition =
   environmentKind === 'container'
     ? containerEnvironmentDefinition({ id: 'container-linux', image: containerName })
-    : {
-        id: 'macos-workstation',
-        platform: 'macos',
-        capabilities: [
-          { name: 'agent-run', requiresLease: true },
-          { name: 'read-only-investigation', requiresLease: false },
-        ],
-      };
+    : environmentKind === 'windows'
+      ? {
+          id: 'windows-workstation',
+          platform: 'windows',
+          capabilities: [
+            { name: 'agent-run', requiresLease: true },
+            { name: 'read-only-investigation', requiresLease: false },
+          ],
+        }
+      : {
+          id: 'macos-workstation',
+          platform: 'macos',
+          capabilities: [
+            { name: 'agent-run', requiresLease: true },
+            { name: 'read-only-investigation', requiresLease: false },
+          ],
+        };
 
 const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
 const environmentInstances: readonly EnvironmentInstance[] = [
@@ -137,7 +168,11 @@ const environmentInstances: readonly EnvironmentInstance[] = [
 ];
 
 /** A run's working directory is a fact about the environment, not about Sprout. */
-const runWorkingDirectory = environmentKind === 'container' ? containerMountRoot : workingDirectory;
+const windowsRunWorkdir = process.env.SPROUT_WINDOWS_WORKDIR ?? 'C:/sprout-work';
+const runWorkingDirectory =
+  environmentKind === 'container' ? containerMountRoot
+  : environmentKind === 'windows' ? windowsRunWorkdir
+  : workingDirectory;
 
 const agents: readonly AgentDefinition[] = [
   {

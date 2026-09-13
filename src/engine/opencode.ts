@@ -52,6 +52,7 @@ export interface OpenCodeAdapterOptions {
     endStdin(): void;
     kill(): void;
     onExit(handler: (code: number | null) => void): void;
+  onSpawnError(handler: (error: Error) => void): void;
   };
 }
 
@@ -151,6 +152,13 @@ export class OpenCodeSession implements EngineSession {
         message: state.failure ?? `opencode exited without settling the turn (code ${String(code)})`,
       });
     });
+    turnProcess.onSpawnError((error) => {
+      // Spawn failures fire 'error' without 'exit'; without this the turn
+      // would hang forever after a bad working directory or missing binary.
+      if (!settled) {
+        finish({ status: 'failed', message: `opencode failed to start: ${error.message}` });
+      }
+    });
 
     let buffer = '';
     turnProcess.stdout.on('data', (chunk: Buffer | string) => {
@@ -242,9 +250,13 @@ function spawnOpenCode(
   endStdin(): void;
   kill(): void;
   onExit(handler: (code: number | null) => void): void;
+  onSpawnError(handler: (error: Error) => void): void;
 } {
   const child: ChildProcess = spawn(binaryPath, [...args], {
     cwd,
+    // On Windows the resolved binary is often a .cmd shim, which node only
+    // executes through the shell. Without this, spawn fails with ENOENT.
+    ...(process.platform === 'win32' ? { shell: true } : {}),
     stdio: ['pipe', 'pipe', 'pipe'],
     ...(env !== undefined ? { env } : {}),
   });
@@ -269,6 +281,11 @@ function spawnOpenCode(
     },
     onExit: (handler) => {
       child.on('exit', (code) => handler(code));
+    },
+    // Spawn failures fire 'error' without 'exit'; without this the turn would
+    // hang forever after a bad working directory or missing binary.
+    onSpawnError: (handler) => {
+      child.on('error', (error: Error) => handler(error));
     },
   };
 }

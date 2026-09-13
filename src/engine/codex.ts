@@ -64,6 +64,7 @@ export interface CodexProcess {
   readonly stderr: Readable;
   kill(signal?: NodeJS.Signals): void;
   onExit(handler: (code: number | null) => void): void;
+  onSpawnError(handler: (error: Error) => void): void;
 }
 
 export class CodexEngineAdapter implements EngineAdapter {
@@ -90,6 +91,13 @@ export class CodexEngineAdapter implements EngineAdapter {
       onClose: (reason) => session?.handleTransportClosed(reason),
     });
     let session: CodexSession | undefined;
+
+    // A spawn failure (bad binary, ENOENT) fires 'error' without 'exit':
+    // without closing the transport here, the initialize request would hang
+    // forever instead of failing.
+    process.onSpawnError(() => {
+      transport.close();
+    });
 
     try {
       await transport.request('initialize', {
@@ -128,6 +136,8 @@ function spawnCodex(
 ): CodexProcess {
   const child: ChildProcess = spawn(binaryPath, [...args], {
     stdio: ['pipe', 'pipe', 'pipe'],
+    // On Windows the resolved binary may be a .cmd shim; see pi.ts.
+    ...(process.platform === 'win32' ? { shell: true } : {}),
     ...(env !== undefined ? { env } : {}),
   });
   if (!child.stdin || !child.stdout || !child.stderr) {
@@ -147,6 +157,11 @@ function spawnCodex(
     },
     onExit: (handler) => {
       child.on('exit', (code) => handler(code));
+    },
+    // Spawn failures fire 'error' without 'exit'; without this the turn would
+    // hang forever after a bad working directory or missing binary.
+    onSpawnError: (handler) => {
+      child.on('error', (error: Error) => handler(error));
     },
   };
 }

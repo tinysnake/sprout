@@ -43,7 +43,7 @@ export interface PiAdapterOptions {
   readonly spawnProcess?: (
     binaryPath: string,
     args: readonly string[],
-  ) => { readonly stdout: NodeJS.ReadableStream; readonly stderr: NodeJS.ReadableStream; kill(): void; onExit(h: (code: number | null) => void): void };
+  ) => PiSpawnedProcess;
 }
 
 export class PiEngineAdapter implements EngineAdapter {
@@ -149,6 +149,13 @@ export class PiSession implements EngineSession {
         });
       }
     });
+    turnProcess.onSpawnError((error) => {
+      // Spawn failures fire 'error' without 'exit'; without this the turn
+      // would hang forever after a bad working directory or missing binary.
+      if (!settled) {
+        finish({ status: 'failed', message: `pi failed to start: ${error.message}` });
+      }
+    });
 
     let buffer = '';
     turnProcess.stdout.on('data', (chunk: Buffer | string) => {
@@ -233,10 +240,21 @@ function spawnPi(
   args: readonly string[],
   cwd: string,
   env: NodeJS.ProcessEnv | undefined,
-): { stdout: NodeJS.ReadableStream; stderr: NodeJS.ReadableStream; kill(): void; onExit(h: (code: number | null) => void): void } {
-  const child: ChildProcess = spawn(binaryPath, [...args], {
+): PiSpawnedProcess {
+  // With shell:true node joins argv into a single command line that cmd.exe
+  // re-parses — WITHOUT adding quotes itself, so any argument containing
+  // spaces (prompts, system-prompt text) arrives split into pieces (found
+  // live: the engine saw one message per word). Quote such arguments in the
+  // joined form; cmd.exe's own quoting rules use doubled quotes for literals.
+  const joinedArgs = process.platform === 'win32'
+    ? args.map((arg) => (/^[A-Za-z0-9_.:/=-]+$/.test(arg) ? arg : `\"${arg.replaceAll('"', '\\\"')}\"`))
+    : args;
+  const child: ChildProcess = spawn(binaryPath, [...joinedArgs], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // On Windows the resolved binary is often a .cmd shim, which node only
+    // executes through the shell. Without this, spawn fails with ENOENT.
+    ...(process.platform === 'win32' ? { shell: true } : {}),
     ...(env !== undefined ? { env } : {}),
   });
   if (!child.stdout || !child.stderr) {
@@ -252,7 +270,21 @@ function spawnPi(
     onExit: (handler) => {
       child.on('exit', (code) => handler(code));
     },
+    // A spawn failure (bad cwd, missing binary) fires 'error' and NEVER 'exit':
+    // swallowing the error would hang the turn forever, and leaving it
+    // unhandled would crash the whole worker (both found live on Windows).
+    onSpawnError: (handler) => {
+      child.on('error', (error: Error) => handler(error));
+    },
   };
+}
+
+export interface PiSpawnedProcess {
+  readonly stdout: NodeJS.ReadableStream;
+  readonly stderr: NodeJS.ReadableStream;
+  kill(): void;
+  onExit(h: (code: number | null) => void): void;
+  onSpawnError(h: (error: Error) => void): void;
 }
 
 export type { AgentRunEvent };

@@ -75,8 +75,18 @@ function resolveBinary(command: string): string | undefined {
   const override = process.env[`SPROUT_${command.toUpperCase()}_BIN`];
   if (override !== undefined) return override;
   try {
-    const found = execFileSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8' }).trim();
-    return found === '' ? undefined : found;
+    // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
+    const lookup = process.platform === 'win32'
+      ? { file: 'where.exe', args: [command] }
+      : { file: '/bin/sh', args: ['-lc', `command -v ${command}`] };
+    const found = execFileSync(lookup.file, lookup.args, { encoding: 'utf8' });
+    const candidates = found.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '');
+    if (candidates.length === 0) return undefined;
+    if (process.platform !== 'win32') return candidates[0];
+    // npm puts an extensionless sh script FIRST in `where` output; node on
+    // Windows cannot execute it (found live). An .exe or .cmd actually runs.
+    const executable = candidates.find((c) => /\.(exe|cmd|bat)$/i.test(c));
+    return executable ?? candidates[0];
   } catch {
     return undefined;
   }
@@ -181,6 +191,15 @@ if (transportMode === 'stdio') {
   process.stdout.write(
     `${WORKER_READY_PREFIX}${JSON.stringify({ host: endpoint.ready.host, port: endpoint.ready.port })}\n`,
   );
+
+  // A daemon started detached (Windows WMI, no console) has no stdout to read,
+  // so the readiness address is also persisted where its provisioning channel
+  // can find it. Best-effort: local discovery does not depend on it.
+  const readyFile = process.env.SPROUT_READY_FILE;
+  if (readyFile !== undefined && readyFile !== '') {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(readyFile, JSON.stringify(endpoint.ready));
+  }
   log(
     `listening on ${endpoint.ready.host}:${endpoint.ready.port} ` +
       `as ${environmentInstanceId}, engines: ${[...engines.keys()].join(', ')}`,

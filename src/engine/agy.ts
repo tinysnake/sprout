@@ -65,6 +65,7 @@ export interface AgyAdapterOptions {
     readonly stderr: NodeJS.ReadableStream;
     kill(): void;
     onExit(handler: (code: number | null) => void): void;
+  onSpawnError(handler: (error: Error) => void): void;
   };
 }
 
@@ -164,6 +165,13 @@ export class AgySession implements EngineSession {
         });
       }
     });
+    turnProcess.onSpawnError((error) => {
+      // Spawn failures fire 'error' without 'exit'; without this the turn
+      // would hang forever after a bad working directory or missing binary.
+      if (!settled) {
+        finish({ status: 'failed', message: `agy failed to start: ${error.message}` });
+      }
+    });
 
     let buffer = '';
     turnProcess.stdout.on('data', (chunk: Buffer | string) => {
@@ -219,7 +227,13 @@ export class AgySession implements EngineSession {
       ...(this.#options.args ?? []),
       // No system-prompt flag exists, so standing instructions are deliberately
       // NOT passed here; see the class comment.
-      `--print=${prompt}`,
+      //
+      // Under shell:true (Windows .cmd shim) node joins argv into one command
+      // line that cmd.exe re-parses, so the joined form needs Windows quoting
+      // (found live).
+      (process.platform === 'win32'
+        ? `"--print=${prompt.replaceAll('"', '\\"')}"`
+        : `--print=${prompt}`),
     ];
   }
 
@@ -258,9 +272,17 @@ function spawnAgy(
   readonly stderr: NodeJS.ReadableStream;
   kill(): void;
   onExit(handler: (code: number | null) => void): void;
+  onSpawnError(handler: (error: Error) => void): void;
 } {
   const child: ChildProcess = spawn(binaryPath, [...args], {
+    // A spawn failure (ENOENT) must settle the turn, not crash the worker;
+    // this handler swallows the error event so exit handling can run.
+    // See pi.ts for the live finding from Windows.
+
     cwd,
+    // On Windows the resolved binary is often a .cmd shim, which node only
+    // executes through the shell. Without this, spawn fails with ENOENT.
+    ...(process.platform === 'win32' ? { shell: true } : {}),
     stdio: ['ignore', 'pipe', 'pipe'],
     ...(env !== undefined ? { env } : {}),
   });
@@ -276,6 +298,11 @@ function spawnAgy(
     },
     onExit: (handler) => {
       child.on('exit', (code) => handler(code));
+    },
+    // Spawn failures fire 'error' without 'exit'; without this the turn would
+    // hang forever after a bad working directory or missing binary.
+    onSpawnError: (handler) => {
+      child.on('error', (error: Error) => handler(error));
     },
   };
 }
