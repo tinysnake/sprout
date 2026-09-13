@@ -14,7 +14,7 @@ Future outcomes may be split, merged, reordered, or removed when evidence change
 
 ### M1 — Local single-user MVP
 
-**Status**: Unproven
+**Status**: In progress
 
 Prove that one technical lead can use Sprout locally to coordinate multiple coding Agents across heterogeneous development environments without binding Agent identity or context to a device.
 
@@ -63,7 +63,7 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 
 ### O1 — Controllable agent runs
 
-**Status**: Unproven  
+**Status**: In progress  
 **Depends on**: None
 
 Codex and Pi can both be controlled through one Sprout-facing run model rather than being embedded as machine-specific agents.
@@ -71,23 +71,31 @@ Codex and Pi can both be controlled through one Sprout-facing run model rather t
 **Outcome checks**:
 
 - Codex and Pi can each receive assembled input, start, stream observable results, and stop.
+  - Pi `--mode json` streams natively. Codex `exec` does **not** stream; Codex `app-server` does. The streaming check is therefore unproven for Codex until the transport decision is made.
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
+  - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, and how standing instructions are supplied.
 - Agent identity and project configuration are not owned by either CLI installation.
+  - Unproven. Codex keeps sessions in `~/.codex/sessions/` outside any project; Pi's session location is caller-controllable via `--session-dir`.
 
 ### O2 — Schedulable environment pool
 
-**Status**: Unproven  
+**Status**: In progress  
 **Depends on**: None
 
 Container, macOS, and Windows environments can be treated as a shared capability pool with safe access and lease semantics.
 
+**Evidence so far**: the environment model is settled and all checks below hold for **container and macOS**. Windows is unproven (#5).
+
 **Outcome checks**:
 
 - Each target environment can report availability and relevant capabilities.
-- An Agent can perform permitted read-only investigation without a lease.
+  - Container and macOS checked. Windows unproven.
+- An Agent can perform permitted read-only investigation without a lease. — evidenced
 - Capacity-intensive or mutating work requires a lease, and conflicting use is prevented.
-- Fixed and cloneable environments can both be represented without leaking platform rules to callers.
+  - Model settled: capabilities declare `requiresLease`. Docker does **not** enforce mutual exclusion, so the lease registry must.
+- Fixed and cloneable environments can both be represented without leaking platform rules to callers. — evidenced
 - Interrupted dirty work can be identified and kept from unsafe reassignment.
+  - Container evidenced: `stop`/`start` preserves work, `commit`/`export` captures it, `rm -f` is the only irrecoverable action. Fixed-host checkpointing remains fog for O4.
 
 ### O3 — First end-to-end run
 
@@ -162,7 +170,9 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 
 O1 and O2 form the initial outcome frontier and may be explored in parallel within the same development map. O3 becomes eligible only after both have enough evidence to support a real vertical slice.
 
-The first development maps should reduce the external uncertainty around Codex, Pi, fixed macOS/Windows environments, and cloneable containers. They should not commit to the full production architecture before those facts are observed.
+The first development maps reduce the external uncertainty around Codex, Pi, fixed macOS/Windows environments, and cloneable containers. Map #1 produced evidence for the container, macOS, Pi, and Codex `exec` paths; it did **not** settle the Codex transport, nor validate Windows.
+
+Independent research input: `github.com/yetone/cumora` (MIT) implements a ten-engine adapter layer for these same CLIs and is treated as a cited primary source rather than rediscovered.
 
 Use the selection and re-evaluation process in `docs/agents/development-loop.md` to update this map. This file records outcome state and evidence; it does not define the development workflow.
 
