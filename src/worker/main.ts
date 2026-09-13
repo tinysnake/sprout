@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter } from '../engine/codex.ts';
+import { PiEngineAdapter } from '../engine/pi.ts';
 import { EnvironmentWorker } from './server.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
@@ -63,6 +64,33 @@ if (codexBinary !== undefined) {
       binaryPath: codexBinary,
       args: ['--strict-config'],
       sandbox,
+    }),
+  );
+}
+
+/** Pi is resolved the same way, since a worker may host either engine. */
+function resolveBinary(command: string): string | undefined {
+  const override = process.env[`SPROUT_${command.toUpperCase()}_BIN`];
+  if (override !== undefined) return override;
+  try {
+    const found = execFileSync('/bin/sh', ['-lc', `command -v ${command}`], { encoding: 'utf8' }).trim();
+    return found === '' ? undefined : found;
+  } catch {
+    return undefined;
+  }
+}
+
+const piBinary = resolveBinary('pi');
+if (piBinary !== undefined) {
+  engines.set(
+    'pi',
+    new PiEngineAdapter({
+      binaryPath: piBinary,
+      // Sessions live under Sprout's control rather than the user's default, so
+      // one agent's conversation does not depend on a machine-local store.
+      ...(process.env.SPROUT_PI_SESSION_DIR !== undefined
+        ? { sessionDirectory: process.env.SPROUT_PI_SESSION_DIR }
+        : {}),
     }),
   );
 }
