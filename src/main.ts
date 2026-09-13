@@ -6,10 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import { EnvironmentPool } from './environment/pool.ts';
+import { DockerRuntime, containerEnvironmentDefinition } from './environment/container.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteRunStore } from './run/sqlite-store.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
+import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { WorkerSupervisor } from './worker/supervisor.ts';
 
 /**
@@ -20,8 +22,12 @@ import { WorkerSupervisor } from './worker/supervisor.ts';
  * inside the environment by its worker, and the core only orchestrates. The core
  * therefore contains no engine process management at all.
  *
- * Configuration is read from the environment with local defaults rather than
- * being hard-coded, because these are host facts, not product decisions.
+ * An environment is chosen here rather than by branching inside the core, and the
+ * only thing that differs between a local machine and a container is the
+ * **carrier** (ADR-0003): the protocol and its semantics are identical either way.
+ *
+ * Configuration is read from the environment with local defaults, because these
+ * are host facts rather than product decisions.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -31,26 +37,56 @@ const databasePath = process.env.SPROUT_DATABASE ?? join(projectRoot, 'sprout.db
 const workingDirectory = process.env.SPROUT_WORKDIR ?? projectRoot;
 const port = Number(process.env.SPROUT_PORT ?? 5174);
 const instanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
-/** The engine the agent should use; it must be one the worker hosts. */
 const engineId = process.env.SPROUT_ENGINE ?? 'codex';
+/** `local` (a machine Sprout runs on) or `container` (an environment it does not). */
+const environmentKind = process.env.SPROUT_ENV_KIND ?? 'local';
+/** For a container environment: the instance's container name. */
+const containerName = process.env.SPROUT_CONTAINER_NAME ?? instanceId;
 
 /**
- * Starts the environment's worker.
+ * Where the worker's code lives inside the environment.
  *
- * A local macOS machine is reached over a real loopback endpoint exactly like any
- * other environment (ADR-0003): a worker is not a special case, only its carrier
- * differs. A container would be started here through its runtime's exec channel
- * instead.
+ * A container mounts the repository, so it runs the same worker source as the
+ * core; that keeps a stale image a mount problem rather than a silent protocol
+ * mismatch.
  */
+const containerMountRoot = process.env.SPROUT_CONTAINER_MOUNT ?? '/sprout';
+
+/** The host proxy, translated to the name a container uses for the host. */
+function containerProxy(): Record<string, string> {
+  const raw = process.env.SPROUT_DOCKER_PROXY ?? process.env.HTTPS_PROXY ?? process.env.https_proxy;
+  if (!raw) return {};
+  const translated = raw.replace(/127\.0\.0\.1|localhost/g, 'host.docker.internal');
+  return { HTTPS_PROXY: translated, HTTP_PROXY: translated, NO_PROXY: 'localhost,127.0.0.1' };
+}
+
+/** Starts a worker for the configured environment. Called again after a death. */
 async function startEnvironmentWorker(): Promise<WorkerConnection> {
-  const workerEntry = join(here, 'worker', 'main.ts');
+  if (environmentKind === 'container') {
+    const runtime = new DockerRuntime();
+    const availability = await runtime.available();
+    if (!availability.available) {
+      throw new Error(`container environment unavailable: ${availability.detail}`);
+    }
+    return new ContainerCarrier({
+      runtime,
+      containerName,
+      workerEntryPath: containerWorkerEntry(containerMountRoot),
+      environmentInstanceId: instanceId,
+      workingDirectory: containerMountRoot,
+      environment: {
+        CODEX_HOME: process.env.SPROUT_CONTAINER_CODEX_HOME ?? '/codexhome',
+        ...containerProxy(),
+      },
+      label: `container:${containerName}`,
+      onLog: (line) => process.stderr.write(`[container-worker] ${line}\n`),
+    }).start();
+  }
+
   return EndpointCarrier.start({
     command: process.execPath,
-    args: [workerEntry],
-    env: {
-      ...process.env,
-      SPROUT_ENV_INSTANCE: instanceId,
-    },
+    args: [join(here, 'worker', 'main.ts')],
+    env: { ...process.env, SPROUT_ENV_INSTANCE: instanceId },
     label: 'sprout-worker',
   });
 }
@@ -76,20 +112,32 @@ if (!initialEngines.has(engineId)) {
   process.exit(2);
 }
 
-const environmentDefinitions: readonly EnvironmentDefinition[] = [
-  {
-    id: 'macos-workstation',
-    platform: 'macos',
-    capabilities: [
-      { name: 'agent-run', requiresLease: true },
-      { name: 'read-only-investigation', requiresLease: false },
-    ],
-  },
+/**
+ * The environment definition.
+ *
+ * Only the platform and the capabilities' names differ. Both kinds declare
+ * `requiresLease` the same way, which is why the lease registry needs no
+ * platform-specific rule and exclusivity works identically for a container.
+ */
+const definition: EnvironmentDefinition =
+  environmentKind === 'container'
+    ? containerEnvironmentDefinition({ id: 'container-linux', image: containerName })
+    : {
+        id: 'macos-workstation',
+        platform: 'macos',
+        capabilities: [
+          { name: 'agent-run', requiresLease: true },
+          { name: 'read-only-investigation', requiresLease: false },
+        ],
+      };
+
+const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
+const environmentInstances: readonly EnvironmentInstance[] = [
+  { id: instanceId, definitionId: definition.id },
 ];
 
-const environmentInstances: readonly EnvironmentInstance[] = [
-  { id: instanceId, definitionId: 'macos-workstation' },
-];
+/** A run's working directory is a fact about the environment, not about Sprout. */
+const runWorkingDirectory = environmentKind === 'container' ? containerMountRoot : workingDirectory;
 
 const agents: readonly AgentDefinition[] = [
   {
@@ -98,7 +146,7 @@ const agents: readonly AgentDefinition[] = [
     engine: engineId,
     environmentInstanceId: instanceId,
     capability: 'agent-run',
-    workingDirectory,
+    workingDirectory: runWorkingDirectory,
     instructions:
       'You are Scout, a careful engineering assistant working inside the Sprout project. ' +
       'Answer the request directly and report what you observed.',
@@ -140,7 +188,8 @@ process.stdout.write(
   `Sprout listening on http://127.0.0.1:${boundPort}\n` +
     `  agent:      ${agents.map((agent) => agent.id).join(', ')}\n` +
     `  engine:     ${[...initialEngines.keys()].join(', ')} (via environment worker)\n` +
-    `  environment: ${instanceId} (macos, cwd ${workingDirectory})\n` +
+    `  environment: ${instanceId} (${definition.platform}` +
+    `${environmentKind === 'container' ? `, container ${containerName}` : `, cwd ${workingDirectory}`})\n` +
     `  database:   ${databasePath}\n`,
 );
 
@@ -154,6 +203,9 @@ if (orphaned.length > 0) {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     void api.close().then(async () => {
+      // The supervisor owns the worker channel. A *container* is not destroyed
+      // here: `rm` is the only irrecoverable action (#4), so its lifecycle is an
+      // explicit operator decision rather than a shutdown side effect.
       await supervisor.close();
       store.close();
       process.exit(0);
