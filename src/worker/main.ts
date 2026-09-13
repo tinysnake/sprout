@@ -98,10 +98,14 @@ if (piBinary !== undefined) {
 }
 
 /**
- * Headless `agy` cannot prompt for tool permission, so tools are auto-denied and
- * the run produces nothing. An environment that is itself the isolation boundary
- * therefore has to allow them; a shared host keeps them denied until an explicit
- * decision is made about it.
+ * `agy`'s permission model is binary: auto-deny every tool, or skip all
+ * permissions. Headless runs cannot prompt, so denial means the run produces
+ * nothing but an empty answer.
+ *
+ * The owner chose skip-permissions unconditionally: `agy` runs tools with no
+ * sandbox tier between denied and unrestricted. That is an accepted trade-off
+ * rather than an oversight, and it is recorded in ADR-0003's terms — what a run
+ * may touch is the environment's business.
  */
 const agyBinary = resolveBinary('agy');
 if (agyBinary !== undefined) {
@@ -109,7 +113,7 @@ if (agyBinary !== undefined) {
     'agy',
     new AgyEngineAdapter({
       binaryPath: agyBinary,
-      skipPermissions: process.env.SPROUT_ENV_PLATFORM === 'container',
+      skipPermissions: true,
     }),
   );
 }
