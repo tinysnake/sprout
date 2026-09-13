@@ -49,13 +49,21 @@ A durable unit of multi-run or automated work that preserves its goal, state, co
 _Avoid_: Message, agent run
 
 **Environment definition**:
-A description of a kind of work environment, including its capabilities, platform, capacity, and provisioning mode.
+A description of a kind of work environment, including its declared capabilities, platform, capacity, and provisioning mode.
 _Avoid_: Machine, environment instance
+
+**Environment capability**:
+A named operation an environment definition declares it can perform, together with whether that operation requires an environment lease.
+_Avoid_: Tool, command
 
 **Environment instance**:
 An actual physical system, VM, or container made available for work under an environment definition.
 _Avoid_: Environment definition, workspace
 
 **Environment lease**:
-A time-bounded right for an agent run to modify an environment instance or use its capacity-intensive development capabilities. Uncommitted working files remain with the lease until preserved or discarded.
+A time-bounded right for an agent run to use an environment instance's lease-requiring capabilities. Uncommitted working files remain with the lease until preserved or discarded.
 _Avoid_: Agent environment, lock
+
+**Lease recovery**:
+The state an environment instance enters after a lease expires or its holder dies, during which the instance is not reassignable until its uncommitted work is captured or discarded.
+_Avoid_: Cleanup, lock timeout
