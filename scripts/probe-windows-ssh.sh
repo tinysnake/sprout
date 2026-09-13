@@ -8,10 +8,17 @@
 # Run from the Sprout repo on macOS. Requires: ssh, sftp (local node not needed:
 # the probe scripts run on the remote host).
 #
-# Design note: remote scripts are deployed as real files over sftp and executed,
-# never passed inline. Inline `node -e` does not survive PowerShell's argument
-# mangling (Win32-OpenSSH issue #1082), and deploying files is what the real
-# carrier does anyway.
+# Design notes, each earned by a live failure against the real host:
+# - Remote scripts are deployed as real files over sftp and executed, never
+#   passed inline: inline `node -e` does not survive PowerShell's argument
+#   mangling (Win32-OpenSSH issue #1082). Deploying files is what the real
+#   carrier does anyway.
+# - sftp reads commands from a batch file (-b). A heredoc piped into sftp's
+#   stdin is NOT reliable inside command substitution, and put-lines have ended
+#   up executed by bash itself (`put: command not found`).
+# - The daemon stand-in starts detached via WMI Win32_Process: PowerShell
+#   background jobs die with the SSH session (Windows Job Object semantics),
+#   which is exactly the property the real daemon must escape.
 set -uo pipefail
 
 TARGET="${1:?usage: probe-windows-ssh.sh user@windows-host [port]}"
@@ -26,6 +33,15 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 head() { printf '\n== %s ==\n' "$1"; }
 remote() { ssh -o BatchMode=yes -o ServerAliveInterval=30 -T "$TARGET" "$@"; }
+
+# Deploy one local file to the remote host. sftp -b takes a batch file; the
+# destination path must use forward slashes.
+deploy_file() {
+  local src="$1" dest="$2"
+  local batch="$WORK/sftp-batch.txt"
+  printf 'put %s %s\n' "$src" "$dest" > "$batch"
+  sftp -o BatchMode=yes -b "$batch" "$TARGET" >/dev/null 2>&1
+}
 
 # ---------------------------------------------------------------- probe files
 
@@ -64,15 +80,12 @@ echo "$shell_info" | LC_ALL=C grep -q '^7\.' && ok "default shell is PowerShell 
 head "Probe 2: sftp deployment (directory creation + put + read-back)"
 remote "New-Item -ItemType Directory -Force -Path $REMOTE_WIN | Out-Null" >/dev/null 2>&1
 printf 'sprout-probe %s\n' "$(date -u +%FT%TZ)" > "$WORK/probe.txt"
-sftp_err=$(sftp -o BatchMode=yes "$TARGET" <<SFTP 2>&1)
-put "$WORK/probe.txt" $REMOTE_FWD/probe.txt
-SFTP
-if [ $? -ne 0 ]; then
-  bad "sftp put failed: $sftp_err"
-else
+if deploy_file "$WORK/probe.txt" "$REMOTE_FWD/probe.txt"; then
   back=$(remote "Get-Content $REMOTE_FWD/probe.txt" 2>/dev/null | LC_ALL=C tr -d '\r')
   grep -q 'sprout-probe' <<< "$back" && ok "file deployed and read back intact" \
     || bad "file landed but content differs: '$back'"
+else
+  bad "sftp put failed — check the Windows host has OpenSSH's sftp server subsystem enabled"
 fi
 
 head "Probe 3: node on the remote PATH"
@@ -82,10 +95,7 @@ node_ver=$(remote 'node --version' 2>/dev/null | LC_ALL=C tr -d '\r')
 
 head "Probe 4: byte-clean round-trip through sshd (non-PTY)"
 printf '{"jsonrpc":"2.0","id":7,"params":{"text":"芽 🚀 λ — 100%%"}}' > "$WORK/payload.bin"
-if sftp -o BatchMode=yes "$TARGET" >/dev/null 2>&1 <<SFTP
-put "$WORK/stdin-echo.js" $REMOTE_FWD/stdin-echo.js
-SFTP
-then
+if deploy_file "$WORK/stdin-echo.js" "$REMOTE_FWD/stdin-echo.js"; then
   remote "node $REMOTE_FWD/stdin-echo.js" < "$WORK/payload.bin" > "$WORK/resp.bin" 2>/dev/null
   if cmp -s "$WORK/payload.bin" "$WORK/resp.bin"; then
     ok "bytes identical both directions (UTF-8, no CRLF injection, no VT escapes)"
@@ -97,10 +107,7 @@ else
 fi
 
 head "Probe 5: loopback daemon reachable through an SSH forward"
-if ! sftp -o BatchMode=yes "$TARGET" >/dev/null 2>&1 <<SFTP
-put "$WORK/echo-server.js" $REMOTE_FWD/echo-server.js
-SFTP
-then
+if ! deploy_file "$WORK/echo-server.js" "$REMOTE_FWD/echo-server.js"; then
   bad "could not deploy echo-server.js — Probe 2 must pass first"
   echo; exit 1
 fi
@@ -142,7 +149,7 @@ if [ "$bound" = "127.0.0.1" ]; then
 else
   bad "daemon bound to non-loopback address: $bound — it MUST bind 127.0.0.1"
 fi
-remote "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*echo-server.js*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" >/dev/null 2>&1
+remote "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { \$_.CommandLine -like '*echo-server.js*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" >/dev/null 2>&1
 sleep 1
 still=$(remote "(Get-NetTCPConnection -LocalPort $FWD_PORT -State Listen -ErrorAction SilentlyContinue).LocalAddress" 2>/dev/null | LC_ALL=C tr -d '\r')
 if [ -z "$still" ]; then
