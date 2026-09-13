@@ -60,6 +60,10 @@ _Avoid_: Tool, command
 An actual physical system, VM, or container made available for work under an environment definition.
 _Avoid_: Environment definition, workspace
 
+**Environment worker**:
+The Sprout-owned process inside one environment instance that starts and supervises engine sessions on behalf of agent runs. It supervises an engine CLI; it does not implement an agent runtime.
+_Avoid_: Agent, daemon, backend
+
 **Environment lease**:
 A time-bounded right for an agent run to use an environment instance's lease-requiring capabilities. Uncommitted working files remain with the lease until preserved or discarded.
 _Avoid_: Agent environment, lock
