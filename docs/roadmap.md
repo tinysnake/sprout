@@ -97,16 +97,16 @@ Container, macOS, and Windows environments can be treated as a shared capability
 
 **Evidence so far**: the environment model is settled and all checks below hold for **container and macOS**. Windows is unproven (#5).
 
-**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Containers are still probe-only; no container adapter is implemented.
+**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Since #13 **container** environments are implemented too: a real container instance hosts a worker that executes real Codex runs over the runtime exec channel, with Sprout's lease registry — not Docker — enforcing exclusivity. Windows is unproven (#5).
 
 **Outcome checks**:
 
 - Each target environment can report availability and relevant capabilities.
-  - Container and macOS checked. Windows unproven.
+  - Container and macOS implemented and checked. Windows unproven.
 - An Agent can perform permitted read-only investigation without a lease. — evidenced
 - Capacity-intensive or mutating work requires a lease, and conflicting use is prevented.
-  - Model settled: capabilities declare `requiresLease`. Docker does **not** enforce mutual exclusion, so the lease registry must.
-- Fixed and cloneable environments can both be represented without leaking platform rules to callers. — evidenced
+  - Implemented for macOS (#10) and container (#13). Docker does **not** enforce mutual exclusion, so the lease registry does; verified live by refusing a second concurrent container run.
+- Fixed and cloneable environments can both be represented without leaking platform rules to callers. — evidenced: macOS is fixed (#10), a container is cloneable (#13), and the lease registry needs no platform-specific rule for either
 - Interrupted dirty work can be identified and kept from unsafe reassignment.
   - Container evidenced: `stop`/`start` preserves work, `commit`/`export` captures it, `rm -f` is the only irrecoverable action. Fixed-host checkpointing remains fog for O4.
 
