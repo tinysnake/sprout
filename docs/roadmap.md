@@ -21,7 +21,7 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 **Scope**:
 
 1. One local human uses Sprout through a Web client.
-2. Codex and Pi are the first Agent implementations.
+2. Codex, Pi, `agy`, and `opencode` are the first Agent implementations (four engines, so the run interface is proven by more than a two-adapter seam).
 3. Container, macOS, and Windows are the first environment targets.
 4. Agent identity, configuration, and context remain independent of a specific environment.
 5. A project can define its goal, members, responsibilities, rules, and available environments before work starts.
@@ -34,7 +34,7 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 
 **Success checks**:
 
-- Codex and Pi participate as independent Agents in the same project.
+- All four engines participate as independent Agents in the same project.
 - Agents can be allocated across container, macOS, and Windows environments according to work needs.
 - Multiple Agents collaborate without conflicting over exclusive environments.
 - Restarting Sprout restores project messages, tasks, and observable work state.
@@ -46,7 +46,7 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 - The product runs locally and exposes a cross-platform Web client.
 - Core modules remain independently testable and verifiable.
 - Framework, language, and database choices are made when implementation evidence requires them and recorded as ADRs when appropriate.
-- `zcode` support is deferred until after M1: it requires an ACP bridge on top of the engine, which is extra wiring rather than a first-class engine CLI.
+- The M1 engine set is Codex, Pi, `agy`, and `opencode`. `zcode` support is deferred until after M1: it requires an ACP bridge on top of the engine, which is extra wiring rather than a first-class engine CLI.
 
 **Non-goals for M1**:
 
@@ -67,13 +67,20 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 **Status**: In progress  
 **Depends on**: None
 
-Codex and Pi can both be controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
+Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
 
 **Outcome checks**:
 
-- Codex and Pi can each receive assembled input, start, stream observable results, and stop.
+- Each engine can receive assembled input, start, report observable results, and stop.
   - **Streaming granularity is a declared per-adapter capability, and non-streaming delivery is acceptable** (see the streaming policy below). Adapters declare what they actually provide rather than the core assuming a uniform guarantee.
-- **Streaming policy**: an adapter that streams poorly or not at all uses non-streaming delivery. What matters for observability is that tool calls and progress remain visible; the final message text may arrive as one unit. Measured: Codex `exec` delivers `command_execution` events progressively but its final text as a blob; opencode emits one `text` event per turn; Pi and Codex `app-server` stream incrementally; `agy` streams but discards partial output on interrupt.
+- **Streaming policy**: an adapter that streams poorly or not at all uses non-streaming delivery. What matters for observability is that tool calls and progress remain visible; the final message text may arrive as one unit. Measured per engine:
+
+| Engine | Mode for M1 | Streaming | Session key |
+| --- | --- | --- | --- |
+| Codex | `app-server` (ADR-0001) | incremental per item, incl. tool calls | `thread/resume` |
+| Pi | `--mode json` | incremental | caller-chosen `--session-id` |
+| `agy` | `--output-format stream-json` | incremental `text_delta` | `--continue` / `--conversation` |
+| `opencode` | `run --format json` | **non-streaming** — one `text` event per turn | `--session` |
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
   - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, lifecycle (Codex `app-server` needs a supervised daemon), and how standing instructions are supplied.
 - Agent identity and project configuration are not owned by either CLI installation.
@@ -144,7 +151,7 @@ Project contracts and Agent context remain coherent when the same Agent works ac
 **Status**: Unproven  
 **Depends on**: O4, O5
 
-Codex and Pi can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
+All four engines can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
 
 **Outcome checks**:
 
@@ -162,7 +169,7 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 
 **Outcome checks**:
 
-- Multiple Codex and Pi project members work across container, macOS, and Windows environments.
+- Multiple project members running different engines work across container, macOS, and Windows environments.
 - A high-resource editor environment remains exclusive while other useful work proceeds elsewhere.
 - Context continues across environments, resource conflicts are prevented, and interrupted work recovers.
 - The human operator can understand and control the complete workflow from the Web client.
@@ -172,7 +179,7 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 
 O1 and O2 form the initial outcome frontier and may be explored in parallel within the same development map. O3 becomes eligible only after both have enough evidence to support a real vertical slice.
 
-The first development maps reduce the external uncertainty around Codex, Pi, fixed macOS/Windows environments, and cloneable containers. Map #1 produced evidence for the container, macOS, Pi, and Codex `exec` paths; it did **not** settle the Codex transport, nor validate Windows.
+The first development maps reduce the external uncertainty around the four engines, fixed macOS/Windows environments, and cloneable containers. Map #1 produced evidence for the container, macOS, Pi, and Codex `exec` paths; it did **not** settle the Codex transport, nor validate Windows.
 
 Independent research input: `github.com/yetone/cumora` (MIT) implements a ten-engine adapter layer for these same CLIs and is treated as a cited primary source rather than rediscovered.
 
