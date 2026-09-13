@@ -69,7 +69,9 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 
 Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
 
-**Implementation evidence**: Codex is implemented and runs end to end through Sprout's run interface (#10): `startSession` → streaming events → interrupt/close → terminal result, on a real leased environment. `src/engine/port.ts` is the run seam and `src/engine/codex.ts` the first adapter. Pi, `agy`, and `opencode` remain unproven against that seam outside probing; the streaming-granularity declaration is exercised by only one adapter so far.
+**Implementation evidence**: all four engines are implemented behind `src/engine/port.ts` (#10, #15, and the `agy`/`opencode` records), and they run **inside the environment worker**, so the core spawns no engine process (ADR-0003). Codex (#10) and Pi (#15) are verified end to end live, including tool progress, stop, and terminal states; `agy` is verified live through a real worker as well; `opencode` is implemented and covered by tests replaying its contract-verified protocol, but could not be exercised live (its default provider account has an insufficient balance), which is recorded as fog on the map.
+
+**The run seam needed no change for any of the four lifecycles.** Codex is a long-lived supervised daemon, Pi is one process per turn resumed by a caller-chosen session id, `agy` is one process per turn resumed by an engine-assigned conversation id, and `opencode` is one process per turn resumed by an engine-assigned session id. That a single interface covers all four is the strongest evidence O1 has.
 
 **Outcome checks**:
 
@@ -79,14 +81,14 @@ Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing ru
 
 | Engine | Mode for M1 | Streaming | Session key |
 | --- | --- | --- | --- |
-| Codex | `app-server` (ADR-0001) | incremental per item, incl. tool calls | `thread/resume` |
-| Pi | `--mode json` | incremental | caller-chosen `--session-id` |
-| `agy` | `--output-format stream-json` | incremental `text_delta` | `--continue` / `--conversation` |
-| `opencode` | `run --format json` | **non-streaming** — one `text` event per turn | `--session` |
+| Codex | `app-server` (ADR-0001) | incremental per item, incl. tool calls | `thread/resume` (engine-assigned) |
+| Pi | `--mode json` | incremental | caller-chosen `--session-id` (Sprout-chosen) |
+| `agy` | `--output-format stream-json` | incremental `text_delta` | `--conversation <engine-assigned id>` |
+| `opencode` | `run --format json` | **non-streaming** — one `text` event per turn | `--session <engine-assigned id>` |
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
-  - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, lifecycle (Codex `app-server` needs a supervised daemon), and how standing instructions are supplied.
+  - Implemented: four adapters behind `src/engine/port.ts`, each declaring its own streaming granularity and none leaking engine concepts upward. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, and lifecycle — Codex `app-server` needs a supervised daemon while Pi, `agy`, and `opencode` are one process per turn. **How a session key is obtained now differs by engine:** Sprout *chooses* it for Pi and *captures* it for `agy` and `opencode`, and each is verified by test.
 - Agent identity and project configuration are not owned by either CLI installation.
-  - Unproven. Codex keeps sessions in `~/.codex/sessions/` outside any project; Pi's session location is caller-controllable via `--session-dir`; opencode resumes via `--session`; `agy` via `--continue`/`--conversation`.
+  - Partly proven. Sprout owns the agent definition and does not derive it from any installation. **Carrying context across runs is still unproven** and is O5's portable-context work: the run seam has no way to hand a previous session id forward yet, a gap the Pi and `agy` adapters are what surfaced. **Standing instructions have no uniform channel** — Codex and Pi both accept out-of-band instructions, while `agy` has no system-prompt surface at all, so the project contract reaches it only through `AGENTS.md` in the working directory.
 
 ### O2 — Schedulable environment pool
 
