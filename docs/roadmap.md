@@ -71,7 +71,8 @@ Codex and Pi can both be controlled through one Sprout-facing run model rather t
 **Outcome checks**:
 
 - Codex and Pi can each receive assembled input, start, stream observable results, and stop.
-  - **Streaming granularity is a declared per-adapter capability**, not a universal guarantee (ADR-0001). Pi `--mode json` streams natively. Codex streams via `app-server` only; `exec` never does. `agy` streams but discards partial output on interrupt; `opencode` 1.18.29 does not stream.
+  - **Streaming granularity is a declared per-adapter capability, and non-streaming delivery is acceptable** (see the streaming policy below). Adapters declare what they actually provide rather than the core assuming a uniform guarantee.
+- **Streaming policy**: an adapter that streams poorly or not at all uses non-streaming delivery. What matters for observability is that tool calls and progress remain visible; the final message text may arrive as one unit. Measured: Codex `exec` delivers `command_execution` events progressively but its final text as a blob; opencode emits one `text` event per turn; Pi and Codex `app-server` stream incrementally; `agy` streams but discards partial output on interrupt.
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
   - A draft interface exists with provider-specific facts marked. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, lifecycle (Codex `app-server` needs a supervised daemon), and how standing instructions are supplied.
 - Agent identity and project configuration are not owned by either CLI installation.
