@@ -16,7 +16,15 @@ import type { RunStore } from './store.ts';
  */
 
 export interface RunOrchestratorOptions {
-  readonly engines: ReadonlyMap<string, EngineAdapter>;
+  /**
+   * Where engine adapters come from.
+   *
+   * A plain map satisfies this for tests and for adapters that never disappear.
+   * A function is used when adapters must be resolved per run, which is what lets
+   * an environment worker be restarted after it dies instead of failing every
+   * later run against a dead connection (ADR-0003).
+   */
+  readonly engines: ReadonlyMap<string, EngineAdapter> | (() => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
   readonly pool: EnvironmentPool;
   readonly store: RunStore;
@@ -32,7 +40,7 @@ export interface SubmitRunRequest {
 }
 
 export class RunOrchestrator {
-  readonly #engines: ReadonlyMap<string, EngineAdapter>;
+  readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
@@ -202,7 +210,9 @@ export class RunOrchestrator {
   }
 
   async #execute(initial: AgentRun, agent: AgentDefinition): Promise<AgentRun> {
-    const adapter = this.#engines.get(agent.engine);
+    const engines =
+      typeof this.#engines === 'function' ? await this.#engines() : this.#engines;
+    const adapter = engines.get(agent.engine);
     if (!adapter) {
       return this.#finish(initial, 'failed', {
         status: 'failed',

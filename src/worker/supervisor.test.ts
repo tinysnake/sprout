@@ -1,0 +1,132 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import type { EngineAdapter, EngineSession, EngineTurn, StartSessionRequest } from '../engine/port.ts';
+import { EventQueue } from '../engine/event-queue.ts';
+import type { WorkerConnection } from './carrier.ts';
+import { WorkerSupervisor } from './supervisor.ts';
+
+/**
+ * A stand-in for a worker connection whose liveness the test controls.
+ */
+class FakeConnection implements WorkerConnection {
+  readonly info = { pid: 1, environmentInstanceId: 'mac-mini-1', engines: [] };
+  readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  #alive = true;
+  closes = 0;
+
+  constructor() {
+    this.adapters = new Map<string, EngineAdapter>([['scripted', new FakeAdapter()]]);
+  }
+
+  get alive(): boolean {
+    return this.#alive;
+  }
+
+  die(): void {
+    this.#alive = false;
+  }
+
+  async close(): Promise<void> {
+    this.closes += 1;
+  }
+}
+
+class FakeAdapter implements EngineAdapter {
+  readonly id = 'scripted';
+  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  async startSession(_request: StartSessionRequest): Promise<EngineSession> {
+    const queue = new EventQueue();
+    queue.end();
+    const turn: EngineTurn = {
+      events: queue,
+      completion: Promise.resolve({ status: 'completed', text: 'done' }),
+    };
+    return {
+      sessionId: 's1',
+      run: () => turn,
+      interrupt: async () => true,
+      close: async () => undefined,
+    };
+  }
+}
+
+test('a dead worker is replaced before the next run instead of failing it', async () => {
+  // Regression from the live runtime: one worker death left every later run
+  // failing with "channel is closed" and no worker ever came back, turning a
+  // transient crash into a permanent outage of the whole environment.
+  const connections: FakeConnection[] = [];
+  const supervisor = new WorkerSupervisor({
+    connect: async () => {
+      const connection = new FakeConnection();
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  const first = await supervisor.adapters();
+  assert.equal(supervisor.starts, 1);
+  assert.equal(supervisor.alive, true);
+  assert.ok(first.has('scripted'));
+
+  connections[0]?.die();
+  assert.equal(supervisor.alive, false);
+
+  const second = await supervisor.adapters();
+  assert.ok(second.has('scripted'));
+  assert.equal(supervisor.starts, 2, 'a fresh worker was started');
+  assert.equal(supervisor.alive, true);
+  assert.equal(connections.length, 2);
+});
+
+test('a live worker is reused rather than restarted on every run', async () => {
+  const connections: FakeConnection[] = [];
+  const supervisor = new WorkerSupervisor({
+    connect: async () => {
+      const connection = new FakeConnection();
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  await supervisor.adapters();
+  await supervisor.adapters();
+  await supervisor.adapters();
+
+  assert.equal(supervisor.starts, 1, 'the long-lived worker is reused across runs');
+});
+
+test('a worker that fails to start reports the failure and can be retried', async () => {
+  let attempts = 0;
+  const supervisor = new WorkerSupervisor({
+    connect: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('docker is not running');
+      return new FakeConnection();
+    },
+  });
+
+  await assert.rejects(supervisor.adapters(), /docker is not running/);
+  assert.equal(supervisor.alive, false);
+
+  const recovered = await supervisor.adapters();
+  assert.ok(recovered.has('scripted'), 'a later run can start a worker successfully');
+  assert.equal(attempts, 2);
+});
+
+test('closing the supervisor closes the live worker and refuses further use', async () => {
+  const connections: FakeConnection[] = [];
+  const supervisor = new WorkerSupervisor({
+    connect: async () => {
+      const connection = new FakeConnection();
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  await supervisor.adapters();
+  await supervisor.close();
+
+  assert.equal(connections[0]?.closes, 1);
+  await assert.rejects(supervisor.adapters(), /supervisor is closed/);
+});

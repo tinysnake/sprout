@@ -3,7 +3,6 @@ import { realpathSync } from 'node:fs';
 import type { Readable, Writable } from 'node:stream';
 
 import type {
-  AgentRunEvent,
   EngineAdapter,
   EngineSession,
   EngineTurn,
@@ -11,6 +10,7 @@ import type {
   StartSessionRequest,
 } from './port.ts';
 import { LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
+import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
 
 /**
@@ -264,56 +264,5 @@ export class CodexSession implements EngineSession {
     this.#settleTurn?.({ status: 'interrupted' });
     this.#transport.close();
     this.#process.kill('SIGTERM');
-  }
-}
-
-/**
- * Bridges push-style notifications into an async iterable.
- *
- * A run's events are consumed by a `for await` loop while the protocol pushes
- * them from stream callbacks, so a push-to-pull buffer is required. It also
- * turns a failure into a thrown error, which is how the orchestrator learns
- * about it without a separate channel.
- */
-class EventQueue implements AsyncIterable<AgentRunEvent> {
-  readonly #items: AgentRunEvent[] = [];
-  readonly #waiters: ((result: IteratorResult<AgentRunEvent>) => void)[] = [];
-  #done = false;
-  #error: Error | undefined;
-
-  push(event: AgentRunEvent): void {
-    if (this.#done) return;
-    const waiter = this.#waiters.shift();
-    if (waiter) waiter({ value: event, done: false });
-    else this.#items.push(event);
-  }
-
-  end(): void {
-    if (this.#done) return;
-    this.#done = true;
-    for (const waiter of this.#waiters.splice(0)) {
-      waiter({ value: undefined, done: true });
-    }
-  }
-
-  fail(error: Error): void {
-    if (this.#done) return;
-    this.#done = true;
-    this.#error = error;
-    for (const waiter of this.#waiters.splice(0)) {
-      waiter({ value: undefined, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<AgentRunEvent> {
-    return {
-      next: () => {
-        const queued = this.#items.shift();
-        if (queued) return Promise.resolve({ value: queued, done: false });
-        if (this.#error) return Promise.reject(this.#error);
-        if (this.#done) return Promise.resolve({ value: undefined, done: true });
-        return new Promise((resolve) => this.#waiters.push(resolve));
-      },
-    };
   }
 }

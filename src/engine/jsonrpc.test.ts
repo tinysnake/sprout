@@ -157,3 +157,21 @@ test('the stream ending fails pending calls', async (t) => {
   serverToClient.end();
   await assert.rejects(pending, /transport closed/);
 });
+
+test('a request issued after the stream ended rejects instead of hanging', async (t) => {
+  // Regression: the transport only marked itself closed in `close()`, so after
+  // the underlying stream died a later request waited forever for a reply that
+  // could never arrive. A dead environment worker hung run cleanup this way.
+  const { transport, serverToClient } = connected(t);
+  serverToClient.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const pending = transport.request('session/close');
+  const outcome = await Promise.race([
+    pending.then(() => 'resolved').catch((error: Error) => `rejected: ${error.message}`),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 500)),
+  ]);
+
+  assert.match(String(outcome), /^rejected/);
+  assert.doesNotMatch(String(outcome), /hung/);
+});

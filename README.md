@@ -6,12 +6,19 @@ its outcome map are in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## What currently exists
 
-The first end-to-end slice (issue #10): one request from a local Web client
-travels through Sprout to a real Codex agent running on a leased macOS
-environment, with observable progress and a working stop command.
+The first end-to-end slice (issue #10) plus the environment-worker seam (issue #12):
 
-This is not the finished MVP. Containers, Windows, the other three engines, and
-durable lease recovery are not implemented yet.
+- One request from a local Web client travels through Sprout to a real Codex agent.
+- The agent's **engine runs inside a separate worker process** for the environment,
+  not inside the Sprout core (ADR-0003). The worker is a long-lived network
+  endpoint, reused across runs, and restarted automatically if it dies.
+- A capacity-intensive environment instance is protected by a lease, so two runs
+  cannot share it.
+- Progress streams to the client; a run can be stopped and its terminal result or
+  failure inspected.
+
+This is not the finished MVP. Container and Windows environments, the other three
+engines, and durable lease recovery are not implemented yet.
 
 ## Requirements
 
@@ -56,8 +63,10 @@ src/
   environment/  environment model and the lease registry
   engine/       the run seam, JSON-RPC transport, Codex adapter
   run/          run orchestration, run storage (SQLite and in-memory)
+  worker/       the environment worker: protocol, server, carrier, supervisor
   web/          the HTTP + SSE surface for the client
-  main.ts       the only module that names concrete adapters
+  main.ts       the core: orchestrates runs, spawns no engine itself
+  worker/main.ts the worker entry point that runs inside an environment
 web/            the Vite Web client
 scripts/        live smoke check
 docs/           goal, roadmap, ADRs, and the development loop
@@ -67,7 +76,12 @@ Design rules that the code depends on:
 
 - The domain vocabulary lives in [`CONTEXT.md`](CONTEXT.md); use it exactly.
 - Engine and environment specifics stay behind their seams. The core never
-  learns about JSON-RPC, argv, or Docker.
+  learns about JSON-RPC, argv, or Docker, and it spawns no engine process.
+- **Every environment is a network environment** (ADR-0003). A worker is an
+  addressable endpoint speaking one uniform protocol; only the carrier differs
+  between a local machine and a container. There is no in-process fast path.
+- Engine protocols are *not* uniform and the worker does not make them so. Only
+  the core-to-worker protocol is uniform.
 - Streaming granularity is a declared per-adapter capability, not an assumption.
 - The engine's own output is not the system of record: the run's recorded events
   are. An interrupted run is re-runnable, never silently lost.

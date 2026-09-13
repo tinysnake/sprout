@@ -65,6 +65,7 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
   readonly #onClose: ((reason: string) => void) | undefined;
   #nextId = 1;
   #closed = false;
+  #closeReason: string | undefined;
   #buffer = '';
 
   constructor(options: JsonRpcTransportOptions) {
@@ -81,7 +82,9 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
 
   request<T>(method: string, params?: unknown): Promise<T> {
     if (this.#closed) {
-      return Promise.reject(new JsonRpcError(method, -32_000, 'transport closed'));
+      return Promise.reject(
+        new JsonRpcError(method, -32_000, this.#closeReason ?? 'transport closed'),
+      );
     }
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -122,7 +125,6 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
   }
 
   close(): void {
-    this.#closed = true;
     this.#failAll('transport closed');
     this.#notifications.clear();
     this.#serverRequests.clear();
@@ -188,7 +190,17 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
     }
   }
 
+  /**
+   * Mark the transport dead and fail everything still pending.
+   *
+   * The transport must stay dead: if the underlying stream has ended, a later
+   * `request` would wait forever for a reply that cannot arrive, which is
+   * exactly the silent hang this module exists to prevent. Once the stream ends, a
+   * request issued afterwards rejects immediately instead.
+   */
   #failAll(reason: string): void {
+    this.#closed = true;
+    this.#closeReason ??= reason;
     for (const [id, pending] of this.#pending) {
       this.#pending.delete(id);
       pending.reject(new JsonRpcError(pending.method, -32_000, reason));
