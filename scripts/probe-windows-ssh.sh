@@ -24,7 +24,13 @@ set -uo pipefail
 TARGET="${1:?usage: probe-windows-ssh.sh user@windows-host [port]}"
 FWD_PORT="${2:-12731}"
 REMOTE_WIN='C:\sprout-probe'
-REMOTE_FWD='C:/sprout-probe'
+# Path forms differ per tool and this cost a live run to learn:
+# - sftp treats `C:/...` as RELATIVE (it becomes /C:/Users/<user>/C:/...); its
+#   absolute form needs a leading slash: /C:/sprout-probe
+# - PowerShell rejects /C:/... outright; it wants C:\sprout-probe or C:/...
+# Deployments therefore use SFTP_FWD; remote shell commands use PS_FWD.
+SFTP_FWD='/C:/sprout-probe'
+PS_FWD='C:/sprout-probe'
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0
@@ -80,8 +86,8 @@ echo "$shell_info" | LC_ALL=C grep -q '^7\.' && ok "default shell is PowerShell 
 head "Probe 2: sftp deployment (directory creation + put + read-back)"
 remote "New-Item -ItemType Directory -Force -Path $REMOTE_WIN | Out-Null" >/dev/null 2>&1
 printf 'sprout-probe %s\n' "$(date -u +%FT%TZ)" > "$WORK/probe.txt"
-if deploy_file "$WORK/probe.txt" "$REMOTE_FWD/probe.txt"; then
-  back=$(remote "Get-Content $REMOTE_FWD/probe.txt" 2>/dev/null | LC_ALL=C tr -d '\r')
+if deploy_file "$WORK/probe.txt" "$SFTP_FWD/probe.txt"; then
+  back=$(remote "Get-Content $PS_FWD/probe.txt" 2>/dev/null | LC_ALL=C tr -d '\r')
   grep -q 'sprout-probe' <<< "$back" && ok "file deployed and read back intact" \
     || bad "file landed but content differs: '$back'"
 else
@@ -95,8 +101,8 @@ node_ver=$(remote 'node --version' 2>/dev/null | LC_ALL=C tr -d '\r')
 
 head "Probe 4: byte-clean round-trip through sshd (non-PTY)"
 printf '{"jsonrpc":"2.0","id":7,"params":{"text":"芽 🚀 λ — 100%%"}}' > "$WORK/payload.bin"
-if deploy_file "$WORK/stdin-echo.js" "$REMOTE_FWD/stdin-echo.js"; then
-  remote "node $REMOTE_FWD/stdin-echo.js" < "$WORK/payload.bin" > "$WORK/resp.bin" 2>/dev/null
+if deploy_file "$WORK/stdin-echo.js" "$SFTP_FWD/stdin-echo.js"; then
+  remote "node $PS_FWD/stdin-echo.js" < "$WORK/payload.bin" > "$WORK/resp.bin" 2>/dev/null
   if cmp -s "$WORK/payload.bin" "$WORK/resp.bin"; then
     ok "bytes identical both directions (UTF-8, no CRLF injection, no VT escapes)"
   else
@@ -107,7 +113,7 @@ else
 fi
 
 head "Probe 5: loopback daemon reachable through an SSH forward"
-if ! deploy_file "$WORK/echo-server.js" "$REMOTE_FWD/echo-server.js"; then
+if ! deploy_file "$WORK/echo-server.js" "$SFTP_FWD/echo-server.js"; then
   bad "could not deploy echo-server.js — Probe 2 must pass first"
   echo; exit 1
 fi
@@ -115,23 +121,26 @@ fi
 # session's Job Object, so it survives the session — the property the real
 # daemon depends on. (PowerShell `&` creates a session-bound job that dies with
 # the session; this was verified live in an earlier probe run.)
-remote "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='node $REMOTE_FWD/echo-server.js $FWD_PORT'} | Out-Null" >/dev/null 2>&1
+remote "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='node $PS_FWD/echo-server.js $FWD_PORT'} | Out-Null" >/dev/null 2>&1
 sleep 2
 bound=$(remote "(Get-NetTCPConnection -LocalPort $FWD_PORT -State Listen -ErrorAction SilentlyContinue).LocalAddress" 2>/dev/null | LC_ALL=C tr -d '\r' | sort -u | paste -sd, -)
 if [ -z "$bound" ]; then
   bad "nothing listening on $FWD_PORT on the Windows host — echo-server.js did not start"
   echo; exit 1
 fi
-ssh -f -N -L "$FWD_PORT:127.0.0.1:$FWD_PORT" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "$TARGET"
+ssh -N -L "$FWD_PORT:127.0.0.1:$FWD_PORT" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "$TARGET" &
 fwd_pid=$!
 sleep 1
 printf 'sprout-tunnel-ok' > "$WORK/tunnel-payload.bin"
-timeout 10 node -e "
+# Timeout lives inside the node client below; macOS's non-interactive PATH has
+# no GNU timeout, and this cost a live run to learn.
+node -e "
 const net = require('net');
 const fs = require('fs');
 const payload = fs.readFileSync(process.argv[1]);
 const c = net.connect($FWD_PORT, '127.0.0.1', () => c.write(payload));
 let buf = Buffer.alloc(0);
+c.setTimeout(8000, () => { c.destroy(); process.exit(1); });
 c.on('data', d => { buf = Buffer.concat([buf, d]); if (buf.length >= payload.length) c.end(); });
 c.on('error', () => process.exit(1));
 c.on('close', () => process.stdout.write(buf));
