@@ -111,6 +111,10 @@ class FakeAgyProcess {
     this.exit(0);
   }
 
+  onSpawnError(_handler: (error: Error) => void): void {
+    // Fakes never fail to spawn.
+  }
+
   onExit(handler: (code: number | null) => void): void {
     this.#exitHandlers.push(handler);
   }

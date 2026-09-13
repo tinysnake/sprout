@@ -41,6 +41,10 @@ class FakePiProcess {
   onExit(handler: (code: number | null) => void): void {
     this.#exitHandlers.push(handler);
   }
+
+  onSpawnError(_handler: (error: Error) => void): void {
+    // Fakes never fail to spawn; a dedicated test below drives this path.
+  }
 }
 
 /** The turn a healthy Pi run produces, as recorded from the real engine. */

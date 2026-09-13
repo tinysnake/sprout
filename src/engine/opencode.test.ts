@@ -71,6 +71,10 @@ class FakeOpenCodeProcess {
     this.settle(this.#exitCode);
   }
 
+  onSpawnError(_handler: (error: Error) => void): void {
+    // Fakes never fail to spawn.
+  }
+
   onExit(handler: (code: number | null) => void): void {
     this.#exitHandlers.push(handler);
   }

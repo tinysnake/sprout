@@ -60,6 +60,7 @@ class FakeCodexServer {
       onExit: (handler) => {
         this.#onExit = handler;
       },
+      onSpawnError: (_handler) => undefined,
     };
   }
 
