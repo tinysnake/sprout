@@ -1,1 +1,19 @@
+# Local Simplified-Chinese reading aids (see AGENTS.local.md); the English
+# Markdown files are canonical and the zh-cn counterparts are optional.
 *.zh-cn.md
+
+# Dependencies
+node_modules/
+
+# Build output
+web/dist/
+
+# Local runtime state
+*.db
+*.db-journal
+sprout.db
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
