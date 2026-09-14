@@ -363,36 +363,47 @@ export class RunOrchestrator {
     }
 
     const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
-
-    // Assemble what this run is presented with, before the session starts: the
-    // project contract (standing instructions, on every run) and, when the run
-    // moved to a different environment instance than the agent's previous run, a
-    // fact-form hand-off. Both are deterministic functions of persisted facts.
-    const assembled = await this.#assembleInput(initial, agent, running.id);
-    const presented = await this.#advance(running, {
-      ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
-    });
-
-    // The continuation slot is `(agent, engine, environment instance, working
-    // directory)`. All four must match for a stored key to be reusable: the key
-    // belongs to one engine, lives in one environment's engine store, and (for
-    // Pi and opencode, #19) is coupled to the directory it was created in.
-    const identity: SessionKeyIdentity = {
-      agentId: agent.id,
-      engine: agent.engine,
-      environmentInstanceId: initial.environmentInstanceId,
-      workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
-    };
-    const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+    let prepared = running;
 
     try {
+      // Assemble what this run is presented with, before the session starts: the
+      // project contract (standing instructions, on every run) and, when the run
+      // moved to a different environment instance than the agent's previous run, a
+      // fact-form hand-off. Both are deterministic functions of persisted facts.
+      // Keep all setup inside the lease guard so a rejected assembly is persisted
+      // as a terminal failure and cannot leave the acquired lease active.
+      const workingDirectory = resolveWorkingDirectory(
+        this.#pool,
+        initial.environmentInstanceId,
+        agent,
+      );
+      const assembled = await this.#assembleInput(initial, agent, running.id);
+      prepared = await this.#advance(running, {
+        ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
+      });
+
+      // The continuation slot is `(agent, engine, environment instance, working
+      // directory)`. All four must match for a stored key to be reusable: the key
+      // belongs to one engine, lives in one environment's engine store, and (for
+      // Pi and opencode, #19) is coupled to the directory it was created in.
+      // Resolve it inside the lease guard: an absent instance directory and agent
+      // fallback is an explicit failed run, not a rejected promise that leaks a lease.
+      const identity: SessionKeyIdentity = {
+        agentId: agent.id,
+        engine: agent.engine,
+        environmentInstanceId: initial.environmentInstanceId,
+        workingDirectory,
+      };
+      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+
       let attempt = await this.#runSession(
         adapter,
         agent,
         assembled.prompt,
-        presented,
+        prepared,
         stored?.key,
         assembled.instructions,
+        workingDirectory,
       );
 
       // A stored key the engine refuses must not fail the run. Pi and `agy`
@@ -411,9 +422,10 @@ export class RunOrchestrator {
           adapter,
           agent,
           assembled.prompt,
-          presented,
+          prepared,
           undefined,
           assembled.instructions,
+          workingDirectory,
         );
       }
 
@@ -434,6 +446,11 @@ export class RunOrchestrator {
         }
       }
       return await this.#settleWithResult(attempt.run, attempt.result);
+    } catch (error) {
+      return this.#finish(prepared, 'failed', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       this.#pool.releaseLease(acquired.lease.id);
     }
@@ -458,13 +475,13 @@ export class RunOrchestrator {
     running: AgentRun,
     resumeKey: string | undefined,
     instructions: string | undefined,
+    workingDirectory: string,
   ): Promise<SessionAttempt> {
-    const initial = running;
     let session: EngineSession;
     try {
       session = await adapter.startSession({
         agentId: agent.id,
-        workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
+        workingDirectory,
         // The assembled project contract is re-sent on every run, because it is
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).
