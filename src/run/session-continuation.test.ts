@@ -6,6 +6,8 @@ import { EnvironmentPool } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import { AgentRegistry, type AgentDefinition } from '../agent/registry.ts';
+import { ProjectRegistry } from '../project/registry.ts';
+import type { Project } from '../project/model.ts';
 import { InMemoryRunStore } from './store.ts';
 import { InMemorySessionKeyStore } from './session-key-store.ts';
 import { RunOrchestrator } from './orchestrator.ts';
@@ -26,6 +28,32 @@ const definition: EnvironmentDefinition = {
 };
 const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
 
+/**
+ * The project that grants Scout its environment access (O5, #18).
+ *
+ * An agent names no environment instance: a run's instance comes from the
+ * project it is a member of, so the instance dimension of the session-key
+ * identity is a membership fact rather than an agent fact. The primary project
+ * grants `mac-mini-1`; a test that needs another instance changes the pool set
+ * here instead of the agent.
+ */
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    id: 'project-sprout',
+    goal: 'Continue a conversation across runs',
+    rules: ['Stay inside the working directory'],
+    availableEnvironmentInstanceIds: ['mac-mini-1'],
+    memberships: [
+      {
+        agentId: 'agent-scout',
+        responsibilities: ['Run the task'],
+        collaborationInstructions: 'Report what you observed',
+      },
+    ],
+    ...overrides,
+  };
+}
+
 const events: readonly AgentRunEvent[] = [{ type: 'message', text: 'done', final: true }];
 const completed = { status: 'completed', text: 'done' } as const;
 
@@ -37,19 +65,24 @@ function build(options: {
   failStart?: string;
   sessionKeys?: InMemorySessionKeyStore;
   store?: InMemoryRunStore;
+  projects?: readonly Project[];
+  instances?: readonly EnvironmentInstance[];
 }) {
   const agent: AgentDefinition = {
     id: 'agent-scout',
     name: 'Scout',
     engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
     capability: 'agent-run',
+    // No environment instance on the agent (#18): the project decides which
+    // pool instance a run resolves to. This value is only the fallback working
+    // directory for an instance that declares none, which is exactly the
+    // dimension the directory test varies.
     workingDirectory: '/srv/work',
     ...options.agent,
   };
   const pool = new EnvironmentPool({
     definitions: [definition],
-    instances: [
+    instances: options.instances ?? [
       instance,
       { id: 'mac-mini-2', definitionId: 'macos-workstation' },
       { id: 'other-def', definitionId: 'some-other-definition' },
@@ -69,6 +102,7 @@ function build(options: {
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: new AgentRegistry([agent]),
+    projects: new ProjectRegistry(options.projects ?? [project()]),
     pool,
     store,
     sessionKeys,
@@ -136,6 +170,69 @@ test('a run in a different working directory does not receive the old key', asyn
   assert.equal(adapter.requests[0]?.resumeSessionKey, undefined);
 });
 
+/**
+ * The working-directory dimension of the identity is the directory the run
+ * actually executes in, which the resolved instance owns and the agent only
+ * fallbacks to (ADR-0003, #18). The next two tests pin both halves: the
+ * instance value is what gets stored, and a *different* instance directory is a
+ * different continuation slot even when the agent's fallback is unchanged.
+ */
+test('the stored key records the instance-resolved working directory, not the agent fallback', async () => {
+  const { orchestrator, adapter, sessionKeys } = build({
+    // The agent's fallback differs from the instance's own directory, so only
+    // the instance value can be the one the run used and stored.
+    agent: { workingDirectory: '/srv/agent-fallback' },
+    instances: [
+      { id: 'mac-mini-1', definitionId: 'macos-workstation', workingDirectory: '/srv/instance' },
+    ],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
+  await orchestrator.waitFor(id);
+
+  assert.equal(adapter.requests[0]?.workingDirectory, '/srv/instance');
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/instance',
+  });
+  assert.equal(stored?.key, 'scripted-key-1', 'the key is stored under the instance directory');
+  const underFallback = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/agent-fallback',
+  });
+  assert.equal(underFallback, undefined, 'the agent fallback is not a continuation slot');
+});
+
+test('a run on an instance with a different directory does not receive the old key', async () => {
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/instance-one',
+    key: 'key-from-another-instance-directory',
+    updatedAt: 1_000,
+  });
+
+  const { orchestrator, adapter } = build({
+    // Same agent fallback, same engine, same instance id — only the directory
+    // the resolved instance declares moved, and that alone must miss the key.
+    agent: { workingDirectory: '/srv/agent-fallback' },
+    instances: [
+      { id: 'mac-mini-1', definitionId: 'macos-workstation', workingDirectory: '/srv/instance-two' },
+    ],
+    sessionKeys,
+  });
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
+  await orchestrator.waitFor(id);
+
+  assert.equal(adapter.requests[0]?.resumeSessionKey, undefined);
+});
+
 test('a run in a different environment instance does not receive the old key', async () => {
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
@@ -148,7 +245,9 @@ test('a run in a different environment instance does not receive the old key', a
   });
 
   const { orchestrator, adapter } = build({
-    agent: { environmentInstanceId: 'mac-mini-2' },
+    // A different resolved instance, reached through the project's available
+    // set rather than an agent-pinned device (#18).
+    projects: [project({ availableEnvironmentInstanceIds: ['mac-mini-2'] })],
     sessionKeys,
   });
   const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
@@ -440,11 +539,11 @@ test('a key is not persisted for a run that never completed', async () => {
         id: 'agent-scout',
         name: 'Scout',
         engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/srv/work',
       },
     ]),
+    projects: new ProjectRegistry([project()]),
     pool,
     store: new InMemoryRunStore(),
     sessionKeys,
@@ -467,11 +566,11 @@ test('runs without a session-key store keep their old fresh-session behaviour', 
         id: 'agent-scout',
         name: 'Scout',
         engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/srv/work',
       },
     ]),
+    projects: new ProjectRegistry([project()]),
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store: new InMemoryRunStore(),
   });
