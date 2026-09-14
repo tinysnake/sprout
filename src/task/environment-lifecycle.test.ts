@@ -11,7 +11,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 import { SqliteStore } from '../run/sqlite-store.ts';
 import type { AgentRun } from '../run/model.ts';
 import { InMemoryTaskStore } from './store.ts';
-import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
+import { DurableWriteCrash, TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { Task } from './model.ts';
 
 const definition: EnvironmentDefinition = { id: 'mac', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
@@ -47,7 +47,7 @@ test('begin binds a Task-owned non-expiring lease; nested settlement retains it 
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.holderKind, 'task');
 
   const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'go');
-  await assert.rejects(scenario.lifecycle.advanceRun('task-1', 'pi', 'again'), /running and cannot advance/);
+  await assert.rejects(scenario.lifecycle.advanceRun('task-1', 'pi', 'again'), /already has an active run/);
   await assert.rejects(scenario.lifecycle.end('task-1'), /while run/);
   await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'completed'));
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
@@ -112,4 +112,61 @@ test('SQLite begin and ending crash windows restart as blocking recovery and acc
     assert.equal(two.environmentLifecycleState, 'discarded');
     finalStore.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('durable begin/end fault boundaries recover across SQLite restart without an unowned lease', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-durable-fault-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    const firstPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: first.leases, idFactory: () => 'lease-1' });
+    await first.tasks.create(task());
+    const crashAfterBeginCommit = new TaskEnvironmentLifecycle({
+      store: first.tasks, pool: firstPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) },
+      faults: { afterBeginningCommit: () => { throw new DurableWriteCrash('simulated process crash after beginning commit'); } },
+    });
+    await assert.rejects(crashAfterBeginCommit.begin('task-1'), /simulated process crash/);
+    first.close();
+
+    const second = new SqliteStore({ filename });
+    const secondPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: second.leases, idFactory: () => 'lease-2' });
+    const resumed = new TaskEnvironmentLifecycle({ store: second.tasks, pool: secondPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) } });
+    await resumed.reconcile();
+    assert.equal((await second.tasks.get('task-1'))?.environmentLeaseId, 'lease-1');
+    assert.equal(secondPool.getLease('lease-1')?.holderKind, 'task');
+    await resumed.recover('task-1', 'resume');
+    const crashAfterEndCommit = new TaskEnvironmentLifecycle({
+      store: second.tasks, pool: secondPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) },
+      faults: { afterTerminalCommit: () => { throw new DurableWriteCrash('simulated process crash after terminal commit'); } },
+    });
+    await assert.rejects(crashAfterEndCommit.end('task-1'), /simulated process crash/);
+    second.close();
+
+    const final = new SqliteStore({ filename });
+    const finalPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: final.leases });
+    const ended = await final.tasks.get('task-1');
+    assert.equal(ended?.environmentLifecycleState, 'ended');
+    assert.equal(finalPool.getLease('lease-1')?.state, 'released');
+    final.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('worker channel loss enters owner recovery and validation retains the Task lease', async () => {
+  const scenario = build();
+  await scenario.store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'go');
+  await scenario.lifecycle.settleRun('task-1', {
+    ...run(advanced.runId, 'failed'),
+    failure: 'environment worker channel closed: disconnected',
+  });
+  assert.equal((await scenario.store.get('task-1'))?.environmentLifecycleState, 'recovery');
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+  await scenario.lifecycle.recover('task-1', 'resume');
+  const awaiting = await scenario.lifecycle.awaitHumanValidation('task-1');
+  assert.equal(awaiting.environmentLifecycleState, 'awaiting-validation');
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+  scenario.pool.markRecovering(begun.environmentLeaseId!);
+  assert.equal(scenario.pool.resolveRecovery(begun.environmentLeaseId!), undefined);
+  assert.equal(scenario.pool.releaseLease(begun.environmentLeaseId!), undefined);
 });

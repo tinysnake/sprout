@@ -72,18 +72,12 @@ function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly ret
     onTaskRunSettled: (input) => service.onRunSettled(input),
     leaseTtlMs: 60_000,
   });
-  const lifecycle = options.retainedLease
-    ? new TaskEnvironmentLifecycle({
-        store: taskStore,
-        pool,
-        agents: registry,
-        projects,
-        runs: orchestrator,
-      })
-    : undefined;
+  const lifecycle = new TaskEnvironmentLifecycle({
+    store: taskStore, pool, agents: registry, projects, runs: orchestrator,
+  });
   // The retained test needs the same pool as the orchestrator. Its compact
   // factory below supplies that directly instead of exposing a production field.
-  service = new TaskService({ store: taskStore, runs: orchestrator, ...(lifecycle !== undefined ? { lifecycle } : {}) });
+  service = new TaskService({ store: taskStore, runs: orchestrator, lifecycle });
   const api: RunApi = createRunApi({ orchestrator, agents: registry, projects, tasks: service });
   return { api, service };
 }
@@ -124,6 +118,10 @@ async function waitForRun(base: string, id: string): Promise<Record<string, unkn
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('run did not settle');
+}
+
+async function beginTask(base: string, taskId: string): Promise<void> {
+  assert.equal((await fetch(`${base}/api/tasks/${taskId}/begin`, { method: 'POST' })).status, 200);
 }
 
 test('a Task can be created and listed through the API', async () => {
@@ -167,6 +165,9 @@ test('begin, retained nested advance, end, and recovery routes use precise 404/4
     assert.equal(activeEnd.status, 409);
     const { runId } = (await advance.json()) as { runId: string };
     assert.equal((await waitForRun(base, runId)).status, 'completed');
+    const validation = await fetch(`${base}/api/tasks/${task.id}/validation`, { method: 'POST' });
+    assert.equal(validation.status, 200);
+    assert.equal(((await validation.json()) as { task: Record<string, unknown> }).task.environmentLifecycleState, 'awaiting-validation');
     const ended = await fetch(`${base}/api/tasks/${task.id}/end`, { method: 'POST' });
     assert.equal(ended.status, 200);
     const endedBody = (await ended.json()) as { task: Record<string, unknown> };
@@ -189,6 +190,7 @@ test('a malformed Task creation is rejected with a reason', async () => {
 test('advancing a Task starts a run and records it in the run links', async () => {
   await withServer(async (base) => {
     const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    await beginTask(base, task.id);
     const advance = await fetch(`${base}/api/tasks/${task.id}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -219,6 +221,7 @@ test('advancing a Task starts a run and records it in the run links', async () =
 test('a Task can be advanced more than once', async () => {
   await withServer(async (base) => {
     const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    await beginTask(base, task.id);
     const first = (await (
       await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' })
     ).json()) as { runId: string };
@@ -242,6 +245,7 @@ test('advancing a Task with a live prior run returns 409', async () => {
   await withServer(
     async (base) => {
       const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+      await beginTask(base, task.id);
       const first = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
       assert.equal(first.status, 202);
       const { runId } = (await first.json()) as { runId: string };

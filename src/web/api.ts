@@ -298,6 +298,15 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // POST /api/tasks/:id/validation — retain the binding while a human checks work.
+    if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'validation' && tasks) {
+      const taskId = segments[2] ?? '';
+      if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      try { sendJson(response, 200, { task: toTaskView(await tasks.awaitHumanValidation(taskId)) }); }
+      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+
     // GET /api/tasks/:id — one Task with its ordered run links.
     if (
       request.method === 'GET' &&
@@ -347,6 +356,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         });
         return;
       }
+      try {
       const updated = await tasks.update(taskId, {
         ...(typeof body.title === 'string' ? { title: body.title } : {}),
         ...(typeof body.goal === 'string' ? { goal: body.goal } : {}),
@@ -369,6 +379,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
             : {}),
       });
       sendJson(response, 200, { task: toTaskView(updated) });
+      } catch (error) {
+        sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
 

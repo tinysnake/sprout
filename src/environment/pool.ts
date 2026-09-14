@@ -118,7 +118,7 @@ export class EnvironmentPool {
 
     if (options.leases) {
       for (const lease of options.leases) {
-        this.#leases.set(lease.id, lease);
+        this.#leases.set(lease.id, normalizeLease(lease));
       }
     }
     if (this.#store) {
@@ -126,7 +126,7 @@ export class EnvironmentPool {
       if (Array.isArray(stored)) {
         for (const lease of stored) {
           if (!this.#leases.has(lease.id)) {
-            this.#leases.set(lease.id, lease);
+            this.#leases.set(lease.id, normalizeLease(lease));
           }
         }
       }
@@ -139,7 +139,7 @@ export class EnvironmentPool {
     const stored = await this.#store.list();
     for (const lease of stored) {
       if (!this.#leases.has(lease.id)) {
-        this.#leases.set(lease.id, lease);
+        this.#leases.set(lease.id, normalizeLease(lease));
       }
     }
     return this.leases();
@@ -168,6 +168,26 @@ export class EnvironmentPool {
    * observable state; a conflicting request never silently queues.
    */
   acquireLease(request: AcquireLeaseRequest): AcquireLeaseResult {
+    return this.#acquireLease(request, true);
+  }
+
+  /** Reserve a Task lease for the lifecycle's atomic begin transaction. */
+  reserveTaskLease(request: AcquireLeaseRequest): AcquireLeaseResult {
+    if (request.taskId === undefined) throw new Error('only a Task lifecycle may reserve a Task lease');
+    return this.#acquireLease(request, false);
+  }
+
+  /** Make a transactionally persisted Task lease visible in this pool. */
+  adoptLease(lease: EnvironmentLease): void {
+    this.#leases.set(lease.id, normalizeLease(lease));
+  }
+
+  /** Undo an unpersisted reservation after its enclosing transaction fails. */
+  abandonReservation(leaseId: string): void {
+    this.#leases.delete(leaseId);
+  }
+
+  #acquireLease(request: AcquireLeaseRequest, persist: boolean): AcquireLeaseResult {
     const found = this.#lookup(request.instanceId, request.capability);
     if (!found) {
       return {
@@ -203,8 +223,13 @@ export class EnvironmentPool {
       expiresAt: now + request.ttlMs,
       state: 'active',
     };
-    this.#leases.set(lease.id, lease);
-    this.#store?.save(lease);
+    // A lifecycle reservation is only a candidate until its Task binding and
+    // lease row commit together. Keeping it out of observable pool state avoids
+    // exposing an unowned live Task lease in the begin crash window.
+    if (persist) {
+      this.#leases.set(lease.id, lease);
+      this.#store?.save(lease);
+    }
     return { ok: true, lease };
   }
 
@@ -224,7 +249,7 @@ export class EnvironmentPool {
   /** Release a lease; the instance immediately becomes acquirable again. */
   releaseLease(leaseId: string): EnvironmentLease | undefined {
     const lease = this.#byId(leaseId);
-    if (!lease) return undefined;
+    if (!lease || lease.holderKind === 'task') return undefined;
     const released: EnvironmentLease = { ...lease, state: 'released' };
     this.#leases.set(released.id, released);
     this.#store?.save(released);
@@ -246,8 +271,19 @@ export class EnvironmentPool {
   /** Resolve recovery for a lease, releasing the instance. */
   resolveRecovery(leaseId: string): EnvironmentLease | undefined {
     const lease = this.#leases.get(leaseId);
-    if (!lease || lease.state !== 'recovering') return undefined;
+    if (!lease || lease.holderKind === 'task' || lease.state !== 'recovering') return undefined;
     return this.releaseLease(leaseId);
+  }
+
+  /** Complete a Task lifecycle release already committed with its terminal Task. */
+  releaseTaskLease(leaseId: string): EnvironmentLease | undefined {
+    const lease = this.#leases.get(leaseId);
+    if (!lease || lease.holderKind !== 'task') return undefined;
+    if (lease.state === 'released') return lease;
+    if (lease.state !== 'active' && lease.state !== 'recovering') return undefined;
+    const released: EnvironmentLease = { ...lease, state: 'released' };
+    this.#leases.set(released.id, released);
+    return released;
   }
 
   /** Resume a retained Task lease. Run leases must resolve recovery by release. */
@@ -314,4 +350,9 @@ export class EnvironmentPool {
     }
     return undefined;
   }
+}
+
+/** Legacy rows predate holder_kind and are explicitly one-round Run leases. */
+function normalizeLease(lease: EnvironmentLease): EnvironmentLease {
+  return lease.holderKind === undefined ? { ...lease, holderKind: 'run' } : lease;
 }

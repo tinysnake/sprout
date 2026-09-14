@@ -242,6 +242,17 @@ export class RunOrchestrator {
     }
     const taskRun: AgentRun = { ...run, prompt };
 
+    // Task runs are created exclusively by TaskEnvironmentLifecycle. A partial
+    // binding used to fall through to the normal one-round lease path, inventing
+    // a second lifecycle for a Task; reject it before resolving or acquiring.
+    if (request.taskId !== undefined && (request.environmentInstanceId === undefined || request.environmentLeaseId === undefined)) {
+      await this.settleTaskRun(await this.#finish(taskRun, 'failed', {
+        status: 'failed',
+        message: `task run ${request.taskId} requires lifecycle lease and environment bindings`,
+      }));
+      return { id: taskRun.id };
+    }
+
     // Do not permit a Task caller to fall back to the agent's other projects.
     // TaskService always provides this field from the durable Task; rejecting a
     // malformed direct call is safer than silently executing its Task elsewhere.
