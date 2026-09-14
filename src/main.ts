@@ -287,6 +287,8 @@ const api = createRunApi({
   // The project channel is served over the same core: delivery, wake dispatch,
   // and projected replies all go through the one coordinator above.
   collaboration,
+  // Members the Web composer may address (#27); read-only from the registry.
+  projects,
   staticRoot,
   readFile: async (path) => {
     if (!existsSync(path)) return undefined;

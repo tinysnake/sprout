@@ -8,7 +8,7 @@
     "node": ">=23"
   },
   "scripts": {
-    "test": "node --test 'src/**/*.test.ts'",
+    "test": "node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "start": "node src/main.ts",
     "smoke": "node scripts/live-smoke.ts",
