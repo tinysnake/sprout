@@ -19,7 +19,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { InMemoryTaskStore } from '../task/store.ts';
 import { TaskService } from '../task/service.ts';
-import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
+import { TaskEnvironmentLifecycle, type TaskContextWorker } from '../task/environment-lifecycle.ts';
 import { createRunApi, type RunApi } from './api.ts';
 
 const definition: EnvironmentDefinition = {
@@ -52,7 +52,11 @@ function completed(text: string): ScriptedTurn {
   };
 }
 
-function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {}) {
+function build(options: {
+  readonly turns?: readonly ScriptedTurn[];
+  readonly retainedLease?: boolean;
+  readonly worker?: TaskContextWorker;
+} = {}) {
   const adapter = new ScriptedEngineAdapter({
     turns: options.turns ?? [completed('First step done.'), completed('Second step done.')],
   });
@@ -73,7 +77,12 @@ function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly ret
     leaseTtlMs: 60_000,
   });
   const lifecycle = new TaskEnvironmentLifecycle({
-    store: taskStore, pool, agents: registry, projects, runs: orchestrator,
+    store: taskStore,
+    pool,
+    agents: registry,
+    projects,
+    runs: orchestrator,
+    ...(options.worker !== undefined ? { worker: options.worker } : {}),
   });
   // The retained test needs the same pool as the orchestrator. Its compact
   // factory below supplies that directly instead of exposing a production field.
@@ -84,7 +93,11 @@ function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly ret
 
 async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
-  options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {},
+  options: {
+    readonly turns?: readonly ScriptedTurn[];
+    readonly retainedLease?: boolean;
+    readonly worker?: TaskContextWorker;
+  } = {},
 ): Promise<void> {
   const context = build(options);
   const { port } = await context.api.listen(0);
@@ -153,6 +166,24 @@ test('a competing Task begin reports the owning Task and retained lease state', 
     assert.match(body.error, new RegExp(first.task.id));
     assert.match(body.error, /active/);
   });
+});
+
+test('a competing begin visibly identifies a recovering owning Task', async () => {
+  const unavailableWorker: TaskContextWorker = {
+    async prepare() {
+      throw new Error('the Worker is unavailable');
+    },
+    async recycle() {},
+  };
+  await withServer(async (base) => {
+    const first = (await (await createTask(base, { title: 'Recovering holder' })).json()) as { task: { id: string } };
+    const second = (await (await createTask(base, { title: 'Blocked contender' })).json()) as { task: { id: string } };
+
+    assert.equal((await fetch(`${base}/api/tasks/${first.task.id}/begin`, { method: 'POST' })).status, 409);
+    const conflict = await fetch(`${base}/api/tasks/${second.task.id}/begin`, { method: 'POST' });
+    assert.equal(conflict.status, 409);
+    assert.match((await conflict.json() as { error: string }).error, new RegExp(`${first.task.id} \\(recovering\\)`));
+  }, { worker: unavailableWorker });
 });
 
 test('a Task can be created with an environment preference', async () => {
@@ -315,6 +346,21 @@ test('a Task can be patched into blocked with a reason and back to todo', async 
     const reopenedBody = (await reopened.json()) as { task: Record<string, unknown> };
     assert.equal(reopenedBody.task.status, 'todo');
     assert.equal('blockerReason' in reopenedBody.task, false);
+  });
+});
+
+test('a begun Task rejects terminal PATCH status changes', async () => {
+  await withServer(async (base) => {
+    const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    await beginTask(base, task.id);
+
+    const terminalPatch = await fetch(`${base}/api/tasks/${task.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'done' }),
+    });
+    assert.equal(terminalPatch.status, 409);
+    assert.match((await terminalPatch.json() as { error: string }).error, /must end through the Task environment lifecycle/);
   });
 });
 

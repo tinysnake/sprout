@@ -44,6 +44,7 @@ interface LeaseView {
   readonly instanceId: string;
   readonly capability: string;
   readonly holderId: string;
+  readonly holderKind?: 'run' | 'task';
   readonly state: string;
 }
 
@@ -848,7 +849,10 @@ function renderLeaseItem(lease: LeaseView): HTMLLIElement {
   label.textContent = `${lease.instanceId} (${lease.capability}) — ${lease.holderId} [${lease.state}]`;
   item.append(label);
 
-  if (lease.state === 'recovering') {
+  // A Task-held lease is resolved only through its owning Task's recovery
+  // controls. Offering the run-lease release action here would imply that an
+  // operator can discard unfinished Task work without its cleanup path.
+  if (lease.state === 'recovering' && lease.holderKind !== 'task') {
     const releaseBtn = document.createElement('button');
     releaseBtn.type = 'button';
     releaseBtn.textContent = 'Release Recovery';
