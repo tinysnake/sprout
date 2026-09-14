@@ -80,6 +80,9 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
+      ...(request.resumeSessionKey !== undefined
+        ? { resumeSessionId: request.resumeSessionKey }
+        : {}),
     });
   }
 }
@@ -89,6 +92,8 @@ interface OpenCodeSessionOptions {
   readonly workingDirectory: string;
   readonly options: OpenCodeAdapterOptions;
   readonly sessionId: string;
+  /** A stored engine session id to continue (`--session`). */
+  readonly resumeSessionId?: string;
 }
 
 /**
@@ -112,6 +117,21 @@ export class OpenCodeSession implements EngineSession {
     this.#workingDirectory = options.workingDirectory;
     this.#options = options.options;
     this.sessionId = options.sessionId;
+    // A stored id from a previous run is offered through `--session`. If it is
+    // stale the engine fails the turn hard (#19), which is why the core only
+    // offers keys it can trust and records what the run actually used.
+    this.#lastSessionId = options.resumeSessionId;
+  }
+
+  /**
+   * The engine session key to hand to the core.
+   *
+   * `opencode` assigns `ses_…` ids and reports them on every frame, so this is
+   * the id seen so far. A stored id that was never confirmed by the engine is
+   * still the honest answer for a run that produced nothing.
+   */
+  get engineSessionKey(): string | undefined {
+    return this.#lastSessionId;
   }
 
   run(prompt: string): EngineTurn {
@@ -139,6 +159,10 @@ export class OpenCodeSession implements EngineSession {
       : spawnOpenCode(this.#binaryPath, args, this.#workingDirectory, this.#options.env);
     this.#current = turnProcess;
 
+    // stderr is never session state (the protocol is stdout-only), but it is the
+    // only place opencode states *why* a resume was refused, so it is buffered
+    // solely to classify a session-start refusal for the core.
+    let stderrText = '';
     turnProcess.onExit((code) => {
       if (settled) return;
       // Process exit is authoritative: the event loop can omit the terminal
@@ -147,9 +171,16 @@ export class OpenCodeSession implements EngineSession {
         finish({ status: 'completed', text: state.text });
         return;
       }
+      const refused =
+        this.#lastSessionId !== undefined &&
+        state.failure === undefined &&
+        isSessionNotFound(stderrText);
+      const message =
+        state.failure ?? `opencode exited without settling the turn (code ${String(code)})`;
       finish({
         status: 'failed',
-        message: state.failure ?? `opencode exited without settling the turn (code ${String(code)})`,
+        message,
+        ...(refused ? { resumeRefused: true } : {}),
       });
     });
     turnProcess.onSpawnError((error) => {
@@ -184,9 +215,11 @@ export class OpenCodeSession implements EngineSession {
     });
 
     // The protocol is stdout-only, so stderr is never treated as session state
-    // or as a provider error; it is only forwarded for diagnostics.
+    // or as a provider error; it is only forwarded for diagnostics and inspected
+    // to recognise a refused resume (see the exit handler above).
     turnProcess.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
+      stderrText += text;
       if (text.trim() !== '' && this.#options.env?.['SPROUT_OPENCODE_VERBOSE'] === '1') {
         process.stderr.write(`[opencode] ${text}`);
       }
@@ -236,6 +269,19 @@ export class OpenCodeSession implements EngineSession {
     this.#current?.kill();
     this.#current = undefined;
   }
+}
+
+/**
+ * Whether stderr is opencode's refused-resume diagnostic.
+ *
+ * opencode writes `Error: Session not found` to stderr and exits 1 when
+ * `--session <id>` names a session it does not have (#19, re-probed against
+ * 1.18.30). Nothing else it prints for a missing session-start key looks like
+ * this, and an unrelated failure (provider error, bad cwd) does not, so the
+ * core only degrades a key that was actually refused.
+ */
+function isSessionNotFound(stderr: string): boolean {
+  return /session not found/i.test(stderr);
 }
 
 function spawnOpenCode(

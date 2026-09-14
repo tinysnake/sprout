@@ -45,6 +45,7 @@ class FakeAdapter implements EngineAdapter {
     };
     return {
       sessionId: 's1',
+      engineSessionKey: 's1',
       run: () => turn,
       interrupt: async () => true,
       close: async () => undefined,

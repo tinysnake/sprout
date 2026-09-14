@@ -1,11 +1,13 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import { resolveEnvironmentInstance } from '../project/resolve.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
+import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
@@ -43,6 +45,14 @@ export interface RunOrchestratorOptions {
   readonly projects?: ProjectRegistry;
   readonly pool: EnvironmentPool;
   readonly store: RunStore;
+  /**
+   * Durable engine session keys, so a later run in the same environment and
+   * working directory continues the prior conversation instead of repeating it.
+   *
+   * Optional: a map of empty stores (and tests that do not exercise
+   * continuation) leaves every run on its fresh-session path.
+   */
+  readonly sessionKeys?: SessionKeyStore;
   readonly leaseTtlMs?: number;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
@@ -54,12 +64,38 @@ export interface SubmitRunRequest {
   readonly prompt: string;
 }
 
+/**
+ * The outcome of one attempt to run a session.
+ *
+ * A failure carries `resumeRefused`: true only when the engine explicitly told
+ * us it would not resume the supplied key and did no work. That is the one
+ * failure the caller may retry from a fresh session. Everything else — an
+ * initialization failure, a missing binary, an authentication failure, a turn
+ * that failed after emitting events — is reported as a plain failure so the
+ * stored key is neither discarded nor reused unsafely.
+ */
+type SessionAttempt =
+  | {
+      readonly ok: true;
+      readonly run: AgentRun;
+      readonly result: EngineTurnResult;
+      readonly engineSessionKey: string | undefined;
+    }
+  | {
+      readonly ok: false;
+      readonly run: AgentRun;
+      readonly message: string;
+      /** True only when the engine refused the supplied key and did no work. */
+      readonly resumeRefused: boolean;
+    };
+
 export class RunOrchestrator {
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
   readonly #projects: ProjectRegistry | undefined;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
+  readonly #sessionKeys: SessionKeyStore | undefined;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
 
@@ -75,6 +111,7 @@ export class RunOrchestrator {
     this.#projects = options.projects;
     this.#pool = options.pool;
     this.#store = options.store;
+    this.#sessionKeys = options.sessionKeys;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
@@ -315,42 +352,149 @@ export class RunOrchestrator {
 
     const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
 
+    // The continuation slot is `(agent, engine, environment instance, working
+    // directory)`. All four must match for a stored key to be reusable: the key
+    // belongs to one engine, lives in one environment's engine store, and (for
+    // Pi and opencode, #19) is coupled to the directory it was created in.
+    const identity: SessionKeyIdentity = {
+      agentId: agent.id,
+      engine: agent.engine,
+      environmentInstanceId: agent.environmentInstanceId,
+      workingDirectory: agent.workingDirectory,
+    };
+    const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+
+    try {
+      let attempt = await this.#runSession(adapter, agent, initial.prompt, running, stored?.key);
+
+      // A stored key the engine refuses must not fail the run. Pi and `agy`
+      // soft-fall-back themselves (#19), but Codex and `opencode` hard-fail on a
+      // stale key, so the orchestrator degrades for them: forget the refused key
+      // and retry once from a fresh session. The `resumeRefused` gate is the
+      // important part — it is set only when the engine *explicitly* refused the
+      // supplied key and did no work. An initialization failure, a missing
+      // binary, an authentication failure, or a valid resume whose first turn
+      // fails before emitting events is a plain failure: retrying it fresh would
+      // hide a real engine problem and would discard a key that may still be
+      // good, so it is reported instead.
+      if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
+        if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
+        attempt = await this.#runSession(adapter, agent, initial.prompt, running, undefined);
+      }
+
+      if (!attempt.ok) {
+        return this.#finish(attempt.run, 'failed', {
+          status: 'failed',
+          message: attempt.message,
+        });
+      }
+
+      // Persist the key the run actually used, not the one it was handed. A
+      // run that degraded to a fresh session stores the fresh key, so the next
+      // run continues *that* session rather than re-offering the refused one.
+      if (this.#sessionKeys && attempt.result.status === 'completed') {
+        const key = attempt.engineSessionKey;
+        if (key !== undefined && key !== '') {
+          await this.#sessionKeys.save({ ...identity, key, updatedAt: this.#clock.now() });
+        }
+      }
+      return await this.#settleWithResult(attempt.run, attempt.result);
+    } finally {
+      this.#pool.releaseLease(acquired.lease.id);
+    }
+  }
+
+  /**
+   * One attempt at a run's engine session.
+   *
+   * Owns the session's lifetime and event streaming, but not the lease or the
+   * run's terminal state: the caller decides whether to retry a resume-key
+   * refusal before settling the run. `resumeRefused` exists so that decision is
+   * based on the engine's own classification of the failure, not on parsing
+   * engine messages or on the bare fact that no event was emitted. It is true
+   * for a refused session start and for an engine that reports a refused resume
+   * through its turn result; a session that starts and then fails for any other
+   * reason is not a refusal.
+   */
+  async #runSession(
+    adapter: EngineAdapter,
+    agent: AgentDefinition,
+    prompt: string,
+    running: AgentRun,
+    resumeKey: string | undefined,
+  ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
         ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
+        ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
     } catch (error) {
-      this.#pool.releaseLease(acquired.lease.id);
-      return this.#finish(running, 'failed', {
-        status: 'failed',
+      return {
+        ok: false,
+        run: running,
         message: error instanceof Error ? error.message : String(error),
-      });
+        // Only the engine's explicit refusal of the supplied key is retryable.
+        // Any other start failure is a real failure and must not discard a key.
+        resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
+      };
     }
 
     this.#sessions.set(running.id, session);
-
+    let current = running;
     try {
-      const turn = session.run(initial.prompt);
-      let current = running;
-      for await (const event of turn.events) {
-        current = await this.#advance(current, {
-          events: [...current.events, event],
-        });
+      const turn = session.run(prompt);
+      // The events iterator throws when a turn fails, so the *authoritative*
+      // outcome is read from `completion` afterwards. Reading it there is what
+      // lets a turn-level refusal (opencode exits 1 on a stale `--session`) be
+      // told apart from any other turn failure.
+      let streamError: unknown;
+      try {
+        for await (const event of turn.events) {
+          current = await this.#advance(current, {
+            events: [...current.events, event],
+          });
+        }
+      } catch (error) {
+        streamError = error;
       }
-
       const result = await turn.completion;
-      return await this.#settleWithResult(current, result);
+      if (result.status === 'failed') {
+        // A turn-level failure is an attempt failure, not a completed run. It is
+        // retryable only when the engine classified it as a refused resume;
+        // every other failure (provider error, bad authentication, a crash) is
+        // reported as-is so the stored key survives untouched.
+        return {
+          ok: false,
+          run: current,
+          message: result.message,
+          resumeRefused: result.resumeRefused === true,
+        };
+      }
+      if (streamError !== undefined) {
+        // The stream failed without the turn reporting failure. That is not a
+        // refusal, and it must not be retried fresh.
+        return {
+          ok: false,
+          run: current,
+          message: streamError instanceof Error ? streamError.message : String(streamError),
+          resumeRefused: false,
+        };
+      }
+      return { ok: true, run: current, result, engineSessionKey: session.engineSessionKey };
     } catch (error) {
-      return this.#finish(running, 'failed', {
-        status: 'failed',
+      return {
+        ok: false,
+        run: current,
         message: error instanceof Error ? error.message : String(error),
-      });
+        // A thrown error is never a resume refusal: the engine had a working
+        // session and failed while doing the work (or reading its result).
+        resumeRefused: false,
+      };
     } finally {
       this.#sessions.delete(running.id);
-      this.#pool.releaseLease(acquired.lease.id);
       await session.close();
     }
   }

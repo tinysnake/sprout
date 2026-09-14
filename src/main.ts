@@ -251,6 +251,9 @@ const orchestrator = new RunOrchestrator({
   projects,
   pool,
   store: store.runs,
+  // Durable engine session keys, so the same agent on the same environment and
+  // working directory continues its prior conversation across runs (O5, #20).
+  sessionKeys: store.sessionKeys,
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 

@@ -10,6 +10,7 @@ import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { AgentRegistry } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
+import { InMemorySessionKeyStore } from '../run/session-key-store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { WORKER_METHODS } from './protocol.ts';
 import { EnvironmentWorker } from './server.ts';
@@ -50,6 +51,9 @@ interface ConnectedWorker {
 async function connectedWorker(options: {
   turns?: readonly ScriptedTurn[];
   failStart?: string;
+  refuseStartKey?: string;
+  knownSessionKeys?: readonly string[];
+  staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
 }): Promise<ConnectedWorker> {
   const coreToWorker = new PassThrough();
   const workerToCore = new PassThrough();
@@ -58,6 +62,11 @@ async function connectedWorker(options: {
   const engine = new ScriptedEngineAdapter({
     turns: options.turns ?? [],
     ...(options.failStart !== undefined ? { failStart: options.failStart } : {}),
+    ...(options.refuseStartKey !== undefined ? { refuseStartKey: options.refuseStartKey } : {}),
+    ...(options.knownSessionKeys !== undefined
+      ? { knownSessionKeys: options.knownSessionKeys }
+      : {}),
+    ...(options.staleResumeKey !== undefined ? { staleResumeKey: options.staleResumeKey } : {}),
   });
 
   const worker = new EnvironmentWorker({
@@ -104,7 +113,10 @@ async function connectedWorker(options: {
   };
 }
 
-function buildOrchestrator(adapters: ReadonlyMap<string, WorkerClient>) {
+function buildOrchestrator(
+  adapters: ReadonlyMap<string, WorkerClient>,
+  sessionKeys?: InMemorySessionKeyStore,
+) {
   const pool = new EnvironmentPool({
     definitions: [definition],
     instances: [instance],
@@ -135,6 +147,7 @@ function buildOrchestrator(adapters: ReadonlyMap<string, WorkerClient>) {
     ]),
     pool,
     store: new InMemoryRunStore(),
+    ...(sessionKeys !== undefined ? { sessionKeys } : {}),
     leaseTtlMs: 60_000,
   });
   return { orchestrator, pool };
@@ -289,6 +302,39 @@ test('one worker serves several runs and a session is created per run', async (t
   assert.equal(infoRequests.length, 1, 'the worker is identified once, not per run');
 });
 
+test('a resume key crosses the worker boundary and continues the run', async (t) => {
+  // The core-to-worker protocol must carry the resume-input seam without
+  // exposing any engine concept: it is a neutral `sessionKey` on the session
+  // start, and the engine-reported key returns with the settlement. Two runs
+  // through a core+worker pair prove the key survives the boundary in both
+  // directions.
+  const worker = await connectedWorker({
+    turns: [
+      { events: successEvents, result: { status: 'completed', text: 'first' } },
+      { events: successEvents, result: { status: 'completed', text: 'second' } },
+    ],
+  });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
+  await orchestrator.waitFor(first.id);
+  const second = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'two' });
+  await orchestrator.waitFor(second.id);
+
+  const firstKey = worker.engine.sessions[0]?.engineSessionKey;
+  assert.ok(firstKey, 'the worker reported the first run\'s engine key to the core');
+  assert.equal(worker.engine.requests[0]?.resumeSessionKey, undefined);
+  assert.equal(
+    worker.engine.requests[1]?.resumeSessionKey,
+    firstKey,
+    'the core handed the first run\'s key back through the worker',
+  );
+  assert.equal(worker.engine.sessions[1]?.engineSessionKey, firstKey);
+});
+
 test('a worker refuses an engine it does not host', () => {
   assert.throws(
     () =>
@@ -318,4 +364,150 @@ test('an engine that fails to start becomes a failed run through the worker', as
   assert.equal(run.status, 'failed');
   assert.match(run.failure ?? '', /codex binary missing/);
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
+});
+
+test('an unrelated start failure through the worker keeps the stored key and is not retried', async (t) => {
+  // SK-001 across the worker boundary: a start failure that is not a refused
+  // resume must not be reported to the core as a refusal, so the core neither
+  // retries fresh nor deletes the key.
+  const worker = await connectedWorker({ turns: [], failStart: 'codex binary missing' });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+    key: 'a-valid-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'boom' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /codex binary missing/);
+  assert.equal(worker.engine.requests.length, 1, 'the unrelated failure was not retried');
+  assert.equal(worker.engine.requests[0]?.resumeSessionKey, 'a-valid-key');
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+  });
+  assert.equal(stored?.key, 'a-valid-key', 'the key survives across the worker boundary');
+});
+
+test('a refused resume crosses the worker boundary and is retried fresh', async (t) => {
+  // The neutral refusal classification must survive the wire: the worker reports
+  // a protocol code, the core turns it back into the port error, and only then
+  // does it forget the key and retry fresh.
+  const worker = await connectedWorker({
+    turns: [
+      { events: successEvents, result: { status: 'completed', text: 'first' } },
+      { events: successEvents, result: { status: 'completed', text: 'recovered' } },
+    ],
+    knownSessionKeys: ['some-other-key'],
+    staleResumeKey: 'fail',
+  });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+    key: 'stale-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  assert.equal(worker.engine.requests.length, 2, 'the refusal was retried once');
+  assert.equal(worker.engine.requests[0]?.resumeSessionKey, 'stale-key');
+  assert.equal(worker.engine.requests[1]?.resumeSessionKey, undefined);
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+  });
+  assert.equal(stored?.key, 'scripted-key-1', 'the fresh key replaced the refused one');
+});
+
+test('a turn-level resume refusal crosses the worker boundary and is retried fresh', async (t) => {
+  // opencode's refusal arrives on the *turn*, not at session start. The worker
+  // reads the authoritative completion rather than the thrown event-stream
+  // error, so the neutral classification survives and the core retries once.
+  const worker = await connectedWorker({
+    turns: [
+      { events: successEvents, result: { status: 'completed', text: 'first' } },
+      { events: successEvents, result: { status: 'completed', text: 'recovered' } },
+    ],
+    knownSessionKeys: ['some-other-key'],
+    staleResumeKey: 'fail-turn',
+  });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+    key: 'stale-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  assert.equal(worker.engine.requests.length, 2, 'the turn refusal was retried once');
+  assert.equal(worker.engine.requests[1]?.resumeSessionKey, undefined);
+});
+
+test('an empty non-refusal turn failure through the worker keeps the stored key', async (t) => {
+  // SK-001 across the worker boundary at the turn level: a valid resume whose
+  // turn fails without a refusal classification must not be retried and must not
+  // delete the key.
+  const worker = await connectedWorker({
+    turns: [
+      { events: [], result: { status: 'failed', message: 'provider authentication failed' } },
+    ],
+  });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+    key: 'a-valid-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /provider authentication failed/);
+  assert.equal(worker.engine.requests.length, 1, 'an empty non-refusal turn is not retried');
+  assert.equal(worker.engine.requests[0]?.resumeSessionKey, 'a-valid-key');
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+  });
+  assert.equal(stored?.key, 'a-valid-key', 'the key survives an empty non-refusal failure');
 });

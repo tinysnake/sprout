@@ -4,8 +4,6 @@ import type { AgentRun, AgentRunStatus } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { RunStore } from './store.ts';
 import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
-import type { Project } from '../project/model.ts';
-import type { ProjectStore } from '../project/store.ts';
 
 /**
  * SQLite-backed storage for runs and leases (ADR-0002).
@@ -29,7 +27,6 @@ interface RunRow {
   readonly agent_id: string;
   readonly prompt: string;
   readonly environment_instance_id: string;
-  readonly project_id: string | null;
   readonly status: string;
   readonly events: string;
   readonly lease_id: string | null;
@@ -61,7 +58,6 @@ export class SqliteRunStore implements RunStore {
         agent_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
-        project_id TEXT,
         status TEXT NOT NULL,
         events TEXT NOT NULL,
         lease_id TEXT,
@@ -71,25 +67,14 @@ export class SqliteRunStore implements RunStore {
         completed_at INTEGER
       );
     `);
-    // Added after the table shipped; a database from before this column still
-    // has its runs, they simply have no recorded project.
-    this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
-  }
-
-  #addColumnIfMissing(table: string, column: string, type: string): void {
-    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly {
-      readonly name: string;
-    }[];
-    if (columns.some((entry) => entry.name === column)) return;
-    this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   async save(run: AgentRun): Promise<void> {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, status, events, lease_id, failure, result, created_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, status, events, lease_id, failure, result, created_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -103,7 +88,6 @@ export class SqliteRunStore implements RunStore {
         run.agentId,
         run.prompt,
         run.environmentInstanceId,
-        run.projectId ?? null,
         run.status,
         JSON.stringify(run.events),
         run.leaseId ?? null,
@@ -226,67 +210,6 @@ export interface SqliteStoreOptions {
 }
 
 /**
- * SQLite-backed storage for projects (ADR-0002).
- *
- * A project is read and written as a whole — its rules, environment set, and
- * memberships belong together — so it is stored as one JSON document keyed by
- * id rather than normalized into child tables.
- */
-export class SqliteProjectStore implements ProjectStore {
-  readonly #db: DatabaseSync;
-  readonly #ownsDb: boolean;
-
-  constructor(options: { filename: string } | { db: DatabaseSync }) {
-    if ('db' in options) {
-      this.#db = options.db;
-      this.#ownsDb = false;
-    } else {
-      this.#db = new DatabaseSync(options.filename);
-      this.#ownsDb = true;
-    }
-    this.#init();
-  }
-
-  #init(): void {
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS projects (
-        id TEXT PRIMARY KEY,
-        document TEXT NOT NULL
-      );
-    `);
-  }
-
-  async save(project: Project): Promise<void> {
-    this.#db
-      .prepare(
-        `INSERT INTO projects (id, document) VALUES (?, ?)
-         ON CONFLICT(id) DO UPDATE SET document = excluded.document`,
-      )
-      .run(project.id, JSON.stringify(project));
-  }
-
-  async get(projectId: string): Promise<Project | undefined> {
-    const row = this.#db.prepare('SELECT document FROM projects WHERE id = ?').get(projectId) as
-      | { readonly document: string }
-      | undefined;
-    return row ? (JSON.parse(row.document) as Project) : undefined;
-  }
-
-  async list(): Promise<readonly Project[]> {
-    const rows = this.#db
-      .prepare('SELECT document FROM projects ORDER BY id')
-      .all() as unknown as readonly { readonly document: string }[];
-    return rows.map((row) => JSON.parse(row.document) as Project);
-  }
-
-  close(): void {
-    if (this.#ownsDb) {
-      this.#db.close();
-    }
-  }
-}
-
-/**
  * Unified SQLite storage for Sprout, managing both runs and leases
  * through a single database handle (ADR-0002).
  */
@@ -294,13 +217,11 @@ export class SqliteStore {
   readonly db: DatabaseSync;
   readonly runs: SqliteRunStore;
   readonly leases: SqliteLeaseStore;
-  readonly projects: SqliteProjectStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
     this.runs = new SqliteRunStore({ db: this.db });
     this.leases = new SqliteLeaseStore({ db: this.db });
-    this.projects = new SqliteProjectStore({ db: this.db });
   }
 
   close(): void {
@@ -328,7 +249,6 @@ function toRun(row: RunRow): AgentRun {
     agentId: row.agent_id,
     prompt: row.prompt,
     environmentInstanceId: row.environment_instance_id,
-    ...(row.project_id !== null ? { projectId: row.project_id } : {}),
     status: row.status as AgentRunStatus,
     events: JSON.parse(row.events) as AgentRunEvent[],
     ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),

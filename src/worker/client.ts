@@ -7,9 +7,11 @@ import type {
   StartSessionRequest,
   StreamingGranularity,
 } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
-import type { JsonRpcTransport } from '../engine/jsonrpc.ts';
+import { JsonRpcError, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
+  WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
   type RunResult,
@@ -109,21 +111,44 @@ export class WorkerClient implements EngineAdapter {
   async startSession(request: StartSessionRequest): Promise<EngineSession> {
     if (this.#closed) throw new Error('environment worker channel is closed');
 
-    const { sessionId } = await this.#transport.request<StartSessionResult>(
-      WORKER_METHODS.startSession,
-      {
-        engine: this.id,
-        agentId: request.agentId,
-        workingDirectory: request.workingDirectory,
-        ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
-      },
-    );
+    let started: StartSessionResult;
+    try {
+      started = await this.#transport.request<StartSessionResult>(
+        WORKER_METHODS.startSession,
+        {
+          engine: this.id,
+          agentId: request.agentId,
+          workingDirectory: request.workingDirectory,
+          ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+          ...(request.resumeSessionKey !== undefined
+            ? { resumeSessionKey: request.resumeSessionKey }
+            : {}),
+        },
+      );
+    } catch (error) {
+      // The worker marks an engine's rejected resume with a protocol code. Turn
+      // it back into the neutral port error so the core retries only for a real
+      // refusal; every other worker failure stays a plain error.
+      if (
+        error instanceof JsonRpcError &&
+        error.code === WORKER_ERROR_CODES.resumeRefused &&
+        request.resumeSessionKey !== undefined
+      ) {
+        throw new EngineResumeRefusedError(request.resumeSessionKey, error.message);
+      }
+      throw error;
+    }
 
     return new WorkerEngineSession(
       {
         transport: this.#transport,
-        sessionId,
+        sessionId: started.sessionId,
         supportsInterrupt: this.capabilities.supportsInterrupt,
+        // Known up front for engines whose key the worker already holds (Pi,
+        // Codex). For `agy`/`opencode` it arrives with the settlement below.
+        ...(started.engineSessionKey !== undefined
+          ? { engineSessionKey: started.engineSessionKey }
+          : {}),
       },
       (handler: ChannelClosedHandler) => {
         this.#live.add(handler);
@@ -137,10 +162,19 @@ interface WorkerSessionOptions {
   readonly transport: JsonRpcTransport;
   readonly sessionId: string;
   readonly supportsInterrupt: boolean;
+  readonly engineSessionKey?: string;
 }
 
 class WorkerEngineSession implements EngineSession {
   readonly sessionId: string;
+  /**
+   * The engine-native key, mirrored from the worker.
+   *
+   * It is seeded from the session-start response and updated when a settlement
+   * carries the key the engine actually used, so a resumed-then-refused key is
+   * replaced by the fresh one rather than reported stale.
+   */
+  engineSessionKey: string | undefined;
   readonly #transport: JsonRpcTransport;
   readonly #supportsInterrupt: boolean;
   readonly #watchChannel: (handler: ChannelClosedHandler) => () => void;
@@ -153,6 +187,7 @@ class WorkerEngineSession implements EngineSession {
   ) {
     this.#transport = options.transport;
     this.sessionId = options.sessionId;
+    this.engineSessionKey = options.engineSessionKey;
     this.#supportsInterrupt = options.supportsInterrupt;
     this.#watchChannel = watchChannel;
   }
@@ -185,6 +220,9 @@ class WorkerEngineSession implements EngineSession {
       if (notification.method !== WORKER_NOTIFICATIONS.settled) return;
       const params = notification.params as TurnSettledParams;
       if (params.sessionId !== this.sessionId) return;
+      if (params.engineSessionKey !== undefined) {
+        this.engineSessionKey = params.engineSessionKey;
+      }
       finish(params.result);
     });
     // A dead channel must fail the turn: the worker can never report on it again,

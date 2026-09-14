@@ -83,12 +83,19 @@ export class AgyEngineAdapter implements EngineAdapter {
     // Sandboxed launch cannot traverse a symlink chain, so the real path is
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
-    return new AgySession({
+    const session = new AgySession({
       binaryPath,
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `agy-${++this.#sessionCounter}-${Date.now().toString(36)}`,
     });
+    // A stored key from a previous run resumes `agy`'s conversation. `agy`
+    // assigns conversation ids, so this is a *hint*: if it is stale the engine
+    // warns and starts a fresh conversation with a new id (#19 soft fallback).
+    if (request.resumeSessionKey !== undefined) {
+      session.hintConversationId(request.resumeSessionKey);
+    }
+    return session;
   }
 }
 
@@ -113,6 +120,8 @@ export class AgySession implements EngineSession {
   readonly #options: AgyAdapterOptions;
   /** The conversation id `agy` reported, used to resume on later turns. */
   #conversationId: string | undefined;
+  /** A stored id this session should try to resume before the first turn. */
+  #resumeWith: string | undefined;
   #current: { kill(): void } | undefined;
   #settle: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
@@ -127,6 +136,29 @@ export class AgySession implements EngineSession {
   /** The id `agy` assigned, once a turn has started. */
   get conversationId(): string | undefined {
     return this.#conversationId;
+  }
+
+  /**
+   * The engine session key to hand to the core.
+   *
+   * `agy` assigns the id, so it is only known after the `init` frame; before
+   * that the stored hint is the best available answer. Reporting the hint when
+   * the engine has not spoken yet is deliberate: a run that fails to start still
+   * leaves the next run trying the same conversation rather than discarding it.
+   */
+  get engineSessionKey(): string | undefined {
+    return this.#conversationId ?? this.#resumeWith;
+  }
+
+  /**
+   * Try to resume `agy`'s conversation by id on the next turn.
+   *
+   * Set before the first turn. Once `agy` reports its `init` frame the reported
+   * id wins, because `agy`'s own answer is authoritative about which
+   * conversation the turn actually used (#19).
+   */
+  hintConversationId(id: string): void {
+    this.#resumeWith = id;
   }
 
   run(prompt: string): EngineTurn {
@@ -187,6 +219,10 @@ export class AgySession implements EngineSession {
             // alongside `init` itself rather than inside it.
             if (decoded['event'] === 'init' && typeof decoded['conversation_id'] === 'string') {
               this.#conversationId = decoded['conversation_id'];
+              // `agy` is authoritative: a stale hint degrades to a fresh
+              // conversation with a new id, and every later turn in this session
+              // must use that new id rather than re-offering the refused one.
+              this.#resumeWith = decoded['conversation_id'];
             }
             const outcome = mapAgyEvent(decoded, state);
             for (const event of outcome.events) queue.push(event);
@@ -216,7 +252,7 @@ export class AgySession implements EngineSession {
    * next flag as its prompt. The prompt itself is attached to the flag.
    */
   #turnArgs(prompt: string): string[] {
-    const conversation = this.#conversationId !== undefined ? ['--conversation', this.#conversationId] : [];
+    const conversation = this.#resumeWith !== undefined ? ['--conversation', this.#resumeWith] : [];
     return [
       // Without this the prompt prints as plain text and there is no protocol to
       // parse, so the turn would exit having reported nothing.
