@@ -4,18 +4,19 @@ import assert from 'node:assert/strict';
 import type { EngineAdapter, EngineSession, EngineTurn, StartSessionRequest } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
 import type { WorkerConnection } from './carrier.ts';
-import { WorkerSupervisor } from './supervisor.ts';
+import { EnvironmentWorkerRegistry, WorkerSupervisor } from './supervisor.ts';
 
 /**
  * A stand-in for a worker connection whose liveness the test controls.
  */
 class FakeConnection implements WorkerConnection {
-  readonly info = { pid: 1, environmentInstanceId: 'mac-mini-1', engines: [] };
+  readonly info: { pid: number; environmentInstanceId: string; engines: [] };
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
   #alive = true;
   closes = 0;
 
-  constructor() {
+  constructor(environmentInstanceId = 'mac-mini-1') {
+    this.info = { pid: 1, environmentInstanceId, engines: [] };
     this.adapters = new Map<string, EngineAdapter>([['scripted', new FakeAdapter()]]);
   }
 
@@ -129,4 +130,43 @@ test('closing the supervisor closes the live worker and refuses further use', as
 
   assert.equal(connections[0]?.closes, 1);
   await assert.rejects(supervisor.adapters(), /supervisor is closed/);
+});
+
+test('the instance-keyed registry starts one worker per requested instance', async () => {
+  const connections: FakeConnection[] = [];
+  const requested: string[] = [];
+  const registry = new EnvironmentWorkerRegistry({
+    connect: async (instanceId) => {
+      requested.push(instanceId);
+      const connection = new FakeConnection(instanceId);
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  const mac = await registry.adapters('mac-mini-1');
+  const container = await registry.adapters('container-1');
+
+  assert.ok(mac.has('scripted'));
+  assert.ok(container.has('scripted'));
+  assert.deepEqual(requested, ['mac-mini-1', 'container-1'], 'each instance gets its own worker');
+
+  // The same instance reuses its worker rather than restarting it.
+  await registry.adapters('mac-mini-1');
+  assert.deepEqual(requested, ['mac-mini-1', 'container-1']);
+  assert.equal(registry.starts, 2);
+  await registry.close();
+  assert.equal(connections.length, 2);
+});
+
+test('the registry refuses a worker whose own instance does not match the resolved one', async () => {
+  // Regression guard for F1 (#18): executing on the wrong machine while recording
+  // another must be a loud wiring error, never a silent success.
+  const registry = new EnvironmentWorkerRegistry({
+    // The worker claims to be mac-mini-1 whatever instance was requested.
+    connect: async () => new FakeConnection('mac-mini-1'),
+  });
+
+  await assert.rejects(registry.adapters('container-1'), /instance mismatch/i);
+  assert.ok((await registry.adapters('mac-mini-1')).has('scripted'));
 });

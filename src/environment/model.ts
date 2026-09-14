@@ -22,6 +22,15 @@ export interface EnvironmentDefinition {
 export interface EnvironmentInstance {
   readonly id: string;
   readonly definitionId: string;
+  /**
+   * The directory runs execute in on this instance.
+   *
+   * A path is a fact about a system, not about an agent (ADR-0003): the same
+   * agent needs a different path inside a container than on a host. An agent may
+   * still name a fallback for instances that declare none, but the instance is
+   * authoritative when it does.
+   */
+  readonly workingDirectory?: string;
 }
 
 export interface Environment {

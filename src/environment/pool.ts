@@ -140,6 +140,16 @@ export class EnvironmentPool {
     return this.leases();
   }
 
+  /**
+   * One environment instance by id.
+   *
+   * Lets a run read instance-local facts (its working directory) without the
+   * orchestrator holding its own copy of the instance table.
+   */
+  instance(instanceId: string): EnvironmentInstance | undefined {
+    return this.#instances.get(instanceId);
+  }
+
   /** Whether a capability must be leased before it can be used. */
   requiresLease(instanceId: string, capability: string): boolean | undefined {
     const found = this.#lookup(instanceId, capability);

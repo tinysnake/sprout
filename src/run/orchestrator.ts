@@ -19,14 +19,21 @@ import type { RunStore } from './store.ts';
 
 export interface RunOrchestratorOptions {
   /**
-   * Where engine adapters come from.
+   * Where engine adapters come from, keyed by environment instance.
    *
-   * A plain map satisfies this for tests and for adapters that never disappear.
-   * A function is used when adapters must be resolved per run, which is what lets
-   * an environment worker be restarted after it dies instead of failing every
-   * later run against a dead connection (ADR-0003).
+   * A plain map is the single-instance case: it satisfies this for tests and for
+   * callers with one fixed worker. A function keyed by instance id is what makes
+   * execution follow the resolved and leased instance instead of a global pool,
+   * which is the F1 fix (#18): the adapter that runs a run must belong to the
+   * same environment instance the run leases and records.
+   *
+   * A function (rather than a value) also lets an environment worker be restarted
+   * after it dies instead of failing every later run against a dead connection
+   * (ADR-0003).
    */
-  readonly engines: ReadonlyMap<string, EngineAdapter> | (() => Promise<ReadonlyMap<string, EngineAdapter>>);
+  readonly engines:
+    | ReadonlyMap<string, EngineAdapter>
+    | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
   /**
    * Where an agent's project memberships come from. Optional so existing callers
@@ -259,8 +266,23 @@ export class RunOrchestrator {
   }
 
   async #execute(initial: AgentRun, agent: AgentDefinition): Promise<AgentRun> {
-    const engines =
-      typeof this.#engines === 'function' ? await this.#engines() : this.#engines;
+    // Adapters are resolved *for the instance this run resolved and will lease*,
+    // never from a global pool: a run that leases container-1 must execute on
+    // container-1's worker, or the run record would name a machine it never used.
+    let engines: ReadonlyMap<string, EngineAdapter>;
+    try {
+      engines =
+        typeof this.#engines === 'function'
+          ? await this.#engines(initial.environmentInstanceId)
+          : this.#engines;
+    } catch (error) {
+      // A worker that cannot be started is a run failure with a reason, not a
+      // rejected promise the caller has to interpret.
+      return this.#finish(initial, 'failed', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     const adapter = engines.get(agent.engine);
     if (!adapter) {
       return this.#finish(initial, 'failed', {
@@ -297,7 +319,7 @@ export class RunOrchestrator {
     try {
       session = await adapter.startSession({
         agentId: agent.id,
-        workingDirectory: agent.workingDirectory,
+        workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
         ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
       });
     } catch (error) {
@@ -365,4 +387,25 @@ export class RunOrchestrator {
     for (const observer of this.#observers) observer(next);
     return next;
   }
+}
+
+/**
+ * The directory a run executes in, inside the instance it actually uses.
+ *
+ * A path is a fact about the environment (ADR-0003): the same agent needs
+ * `/sprout` inside a container and a host path on macOS. The resolved instance is
+ * therefore authoritative, and the agent's value is only a fallback for an
+ * environment that cannot state its own directory (F1 suggestion, #18).
+ */
+function resolveWorkingDirectory(
+  pool: Pick<EnvironmentPool, 'instance'>,
+  instanceId: string,
+  agent: AgentDefinition,
+): string {
+  const fromInstance = pool.instance(instanceId)?.workingDirectory;
+  if (fromInstance !== undefined) return fromInstance;
+  if (agent.workingDirectory !== undefined) return agent.workingDirectory;
+  throw new Error(
+    `no working directory for environment instance ${instanceId} and agent ${agent.id}`,
+  );
 }

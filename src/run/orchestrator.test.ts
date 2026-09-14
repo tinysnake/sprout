@@ -4,12 +4,38 @@ import assert from 'node:assert/strict';
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
 import { EnvironmentPool, InMemoryLeaseStore } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
-import type { AgentRunEvent } from '../engine/port.ts';
+import type { AgentRunEvent, EngineAdapter } from '../engine/port.ts';
 import { AgentRegistry } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
+import type { WorkerConnection } from '../worker/carrier.ts';
+import { EnvironmentWorkerRegistry } from '../worker/supervisor.ts';
 import { InMemoryRunStore } from './store.ts';
 import { RunOrchestrator } from './orchestrator.ts';
+
+/**
+ * One environment instance's worker, as the core sees it: an instance identity
+ * plus the engine adapters that execute there. Distinct fakes stand in for
+ * distinct machines in the F1 acceptance test.
+ */
+class FakeWorkerConnection implements WorkerConnection {
+  readonly info: { pid: number; environmentInstanceId: string; engines: [] };
+  readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  #alive = true;
+
+  constructor(instanceId: string, adapter: EngineAdapter) {
+    this.info = { pid: 1, environmentInstanceId: instanceId, engines: [] };
+    this.adapters = new Map([['scripted', adapter]]);
+  }
+
+  get alive(): boolean {
+    return this.#alive;
+  }
+
+  async close(): Promise<void> {
+    this.#alive = false;
+  }
+}
 
 const definition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -522,6 +548,96 @@ test('an agent with no fixed environment runs on an instance resolved from its p
   assert.equal(run.environmentInstanceId, 'container-1');
   assert.equal(run.projectId, 'project-portable');
   assert.equal(pool.leases()[0]?.instanceId, 'container-1');
+});
+
+test('the project-selected environment instance selects the executing worker, and the run records it', async () => {
+  // F1 acceptance check (#18): a run that leases container-1 must execute on
+  // container-1's worker. Two distinct worker connections each hold their own
+  // adapter, and the project names container-1, so a pass proves execution
+  // followed the resolved instance rather than one global adapter map.
+  const definitionFor = (id: string, platform: EnvironmentDefinition['platform']): EnvironmentDefinition => ({
+    id,
+    platform,
+    capabilities: [{ name: 'agent-run', requiresLease: true }],
+  });
+  const macInstance: EnvironmentInstance = {
+    id: 'mac-mini-1',
+    definitionId: 'macos-workstation',
+    workingDirectory: '/tmp/mac-work',
+  };
+  const containerInstance: EnvironmentInstance = {
+    id: 'container-1',
+    definitionId: 'container-linux',
+    workingDirectory: '/sprout',
+  };
+  const macAdapter = new ScriptedEngineAdapter({
+    turns: [{ events: successEvents, result: completed }],
+  });
+  const containerAdapter = new ScriptedEngineAdapter({
+    turns: [{ events: successEvents, result: { status: 'completed', text: 'from container' } }],
+  });
+  const workers: Record<string, FakeWorkerConnection> = {
+    'mac-mini-1': new FakeWorkerConnection('mac-mini-1', macAdapter),
+    'container-1': new FakeWorkerConnection('container-1', containerAdapter),
+  };
+  const requestedInstances: string[] = [];
+  const workerRegistry = new EnvironmentWorkerRegistry({
+    connect: (instanceId) => {
+      requestedInstances.push(instanceId);
+      return Promise.resolve(workers[instanceId]!);
+    },
+  });
+
+  const pool = new EnvironmentPool({
+    definitions: [definitionFor('macos-workstation', 'macos'), definitionFor('container-linux', 'container')],
+    instances: [macInstance, containerInstance],
+    clock: { now: () => 1_000 },
+  });
+  const registry = new AgentRegistry([
+    {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      capability: 'agent-run',
+      // No fixed directory: the resolved instance supplies it.
+    },
+  ]);
+  const projects = new ProjectRegistry([
+    project({ id: 'project-portable', availableEnvironmentInstanceIds: ['container-1'] }),
+  ]);
+  const store = new InMemoryRunStore();
+  const orchestrator = new RunOrchestrator({
+    // Production wiring: adapters come from the worker serving the run's instance.
+    engines: (instanceId) => workerRegistry.adapters(instanceId),
+    agents: registry,
+    projects,
+    pool,
+    store,
+    leaseTtlMs: 60_000,
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'say hi' });
+  const run = await orchestrator.waitFor(id);
+  await workerRegistry.close();
+
+  assert.equal(run.status, 'completed');
+  assert.deepEqual(requestedInstances, ['container-1'], 'the worker for the leased instance was used');
+  assert.equal(containerAdapter.requests.length, 1, "the selected instance's worker executed the run");
+  assert.equal(macAdapter.requests.length, 0, 'the other instance never executed it');
+  assert.equal(
+    containerAdapter.requests[0]?.workingDirectory,
+    '/sprout',
+    "the run's directory came from the resolved instance",
+  );
+  assert.equal(run.environmentInstanceId, 'container-1');
+  assert.equal(pool.leases()[0]?.instanceId, 'container-1');
+
+  const stored = await store.get(id);
+  assert.equal(stored?.environmentInstanceId, 'container-1', 'the record agrees with the executing worker');
+  assert.equal(
+    store.writes.every((write) => write.environmentInstanceId === 'container-1'),
+    true,
+  );
 });
 
 test('a run records the environment instance it used, observably through the store', async () => {

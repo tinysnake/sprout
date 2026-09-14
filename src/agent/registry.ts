@@ -17,8 +17,15 @@ export interface AgentDefinition {
   readonly engine: string;
   /** The lease-requiring capability this agent's runs must hold. */
   readonly capability: string;
-  /** The working directory for runs inside whichever environment is resolved. */
-  readonly workingDirectory: string;
+  /**
+   * A fallback working directory for runs whose resolved instance declares none.
+   *
+   * The directory is a fact about the environment (ADR-0003), so an instance's
+   * own `workingDirectory` wins when it has one; this exists only for
+   * environments that cannot state it. An agent therefore names no single path
+   * it is pinned to.
+   */
+  readonly workingDirectory?: string;
   /** Standing instructions assembled by the project contract. */
   readonly instructions?: string;
 }

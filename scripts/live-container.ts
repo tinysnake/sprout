@@ -127,14 +127,13 @@ const connection = await carrier.start();
 log(`[worker] engines reported inside the container: ${[...connection.adapters.keys()].join(', ') || '(none)'}`);
 
 const orchestrator = new RunOrchestrator({
-  engines: connection.adapters,
+  engines: () => Promise.resolve(connection.adapters),
   agents: new AgentRegistry([
     {
       id: 'scout',
       name: 'Scout',
       engine: 'codex',
       capability: 'agent-run',
-      workingDirectory: mountRoot,
       instructions: 'You are Scout. Answer directly and briefly.',
     },
   ]),
@@ -160,7 +159,7 @@ const orchestrator = new RunOrchestrator({
         ],
       },
     ],
-    instances: [{ id: instanceId, definitionId: 'container-linux' }],
+    instances: [{ id: instanceId, definitionId: 'container-linux', workingDirectory: mountRoot }],
   }),
   store: new InMemoryRunStore(),
   leaseTtlMs: 600_000,

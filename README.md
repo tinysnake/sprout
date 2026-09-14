@@ -16,7 +16,8 @@ The first end-to-end slice (issue #10) plus the environment-worker seam (issue #
   cannot share it.
 - An agent names no environment device: a run's environment instance is resolved
   from the project the agent is a member of, and the run records which instance it
-  actually used.
+  actually used. The worker that executes the run is the one serving that
+  resolved instance, so the record always agrees with where the work ran.
 - Progress streams to the client; a run can be stopped and its terminal result or
   failure inspected.
 
