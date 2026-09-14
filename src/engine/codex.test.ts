@@ -123,6 +123,7 @@ test('the adapter initialises, starts a thread, and launches the app-server tran
   });
 
   assert.equal(session.sessionId, 'thread-1');
+  assert.equal(session.engineSessionKey, 'thread-1');
   assert.deepEqual(
     server.requests.map((request) => request.method),
     ['initialize', 'thread/start'],
@@ -132,6 +133,55 @@ test('the adapter initialises, starts a thread, and launches the app-server tran
   assert.equal(start.cwd, '/tmp');
   assert.equal(start.baseInstructions, 'You are Scout.');
   assert.equal(start.sandbox, 'read-only');
+});
+
+test('a stored key resumes the thread instead of starting a new one', async () => {
+  // Codex assigns thread ids but `thread/resume` keeps the same id (#19), so a
+  // stored key resumes the same thread. `thread/start` must not be called: a
+  // resumed thread is the whole point of passing the key.
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/resume') self.respond(request.id, { thread: { id: 'thread-9' } });
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-new' } });
+  });
+
+  const adapter = startAdapter(server);
+  const session = await adapter.startSession({
+    agentId: 'agent-scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'thread-9',
+  });
+
+  assert.equal(session.engineSessionKey, 'thread-9');
+  assert.deepEqual(
+    server.requests.map((request) => request.method),
+    ['initialize', 'thread/resume'],
+  );
+  const resume = server.requests[1]?.params as Record<string, unknown>;
+  assert.equal(resume.threadId, 'thread-9');
+  assert.equal(resume.cwd, '/tmp');
+});
+
+test('a stale thread id is a hard failure at session start, not a silent fresh session', async () => {
+  // Codex documents `no rollout found for thread id …` and does not fall back
+  // (#19). Surfacing that at session start is what lets the orchestrator decide
+  // to forget the key and retry; swallowing it here would hide the stale key.
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/resume') {
+      self.reject(request.id, 'no rollout found for thread id thread-gone');
+    }
+  });
+
+  const adapter = startAdapter(server);
+  await assert.rejects(
+    adapter.startSession({
+      agentId: 'agent-scout',
+      workingDirectory: '/tmp',
+      resumeSessionKey: 'thread-gone',
+    }),
+    /no rollout found for thread id/,
+  );
 });
 
 test('a turn streams assistant text, tool calls, and tool output before completing', async () => {

@@ -53,7 +53,7 @@ interface LiveSession {
 /** Where a session's run events go. Swappable so the worker is testable. */
 export interface EventSink {
   event(turnId: string, event: AgentRunEvent): void;
-  settled(turnId: string, result: EngineTurnResult): void;
+  settled(turnId: string, result: EngineTurnResult, engineSessionKey?: string): void;
 }
 
 export class EnvironmentWorker {
@@ -138,6 +138,9 @@ export class EnvironmentWorker {
       agentId: params.agentId,
       workingDirectory: params.workingDirectory,
       ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
+      ...(params.resumeSessionKey !== undefined
+        ? { resumeSessionKey: params.resumeSessionKey }
+        : {}),
     });
 
     const sessionId = `session-${++this.#counter}`;
@@ -152,15 +155,21 @@ export class EnvironmentWorker {
             turnId,
             event,
           }),
-        settled: (turnId, result) =>
+        settled: (turnId, result, engineSessionKey) =>
           this.#transport.notify(WORKER_NOTIFICATIONS.settled, {
             sessionId,
             turnId,
             result,
+            ...(engineSessionKey !== undefined ? { engineSessionKey } : {}),
           }),
       },
     });
-    return { sessionId };
+    return {
+      sessionId,
+      ...(session.engineSessionKey !== undefined
+        ? { engineSessionKey: session.engineSessionKey }
+        : {}),
+    };
   }
 
   /**
@@ -179,7 +188,7 @@ export class EnvironmentWorker {
         for await (const event of turn.events) {
           live.events.event(turnId, event);
         }
-        live.events.settled(turnId, await turn.completion);
+        live.events.settled(turnId, await turn.completion, live.session.engineSessionKey);
       } catch (error) {
         live.events.settled(turnId, {
           status: 'failed',

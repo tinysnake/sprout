@@ -80,6 +80,9 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
+      ...(request.resumeSessionKey !== undefined
+        ? { resumeSessionId: request.resumeSessionKey }
+        : {}),
     });
   }
 }
@@ -89,6 +92,8 @@ interface OpenCodeSessionOptions {
   readonly workingDirectory: string;
   readonly options: OpenCodeAdapterOptions;
   readonly sessionId: string;
+  /** A stored engine session id to continue (`--session`). */
+  readonly resumeSessionId?: string;
 }
 
 /**
@@ -112,6 +117,21 @@ export class OpenCodeSession implements EngineSession {
     this.#workingDirectory = options.workingDirectory;
     this.#options = options.options;
     this.sessionId = options.sessionId;
+    // A stored id from a previous run is offered through `--session`. If it is
+    // stale the engine fails the turn hard (#19), which is why the core only
+    // offers keys it can trust and records what the run actually used.
+    this.#lastSessionId = options.resumeSessionId;
+  }
+
+  /**
+   * The engine session key to hand to the core.
+   *
+   * `opencode` assigns `ses_…` ids and reports them on every frame, so this is
+   * the id seen so far. A stored id that was never confirmed by the engine is
+   * still the honest answer for a run that produced nothing.
+   */
+  get engineSessionKey(): string | undefined {
+    return this.#lastSessionId;
   }
 
   run(prompt: string): EngineTurn {

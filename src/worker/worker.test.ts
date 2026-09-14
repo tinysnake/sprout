@@ -9,6 +9,7 @@ import type { AgentRunEvent } from '../engine/port.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { AgentRegistry } from '../agent/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
+import { InMemorySessionKeyStore } from '../run/session-key-store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { WORKER_METHODS } from './protocol.ts';
 import { EnvironmentWorker } from './server.ts';
@@ -103,7 +104,10 @@ async function connectedWorker(options: {
   };
 }
 
-function buildOrchestrator(adapters: ReadonlyMap<string, WorkerClient>) {
+function buildOrchestrator(
+  adapters: ReadonlyMap<string, WorkerClient>,
+  sessionKeys?: InMemorySessionKeyStore,
+) {
   const pool = new EnvironmentPool({
     definitions: [definition],
     instances: [instance],
@@ -124,6 +128,7 @@ function buildOrchestrator(adapters: ReadonlyMap<string, WorkerClient>) {
     ]),
     pool,
     store: new InMemoryRunStore(),
+    ...(sessionKeys !== undefined ? { sessionKeys } : {}),
     leaseTtlMs: 60_000,
   });
   return { orchestrator, pool };
@@ -276,6 +281,39 @@ test('one worker serves several runs and a session is created per run', async (t
   assert.equal(worker.engine.requests.length, 2, 'each run got its own engine session');
   const infoRequests = worker.requests.filter((method) => method === WORKER_METHODS.info);
   assert.equal(infoRequests.length, 1, 'the worker is identified once, not per run');
+});
+
+test('a resume key crosses the worker boundary and continues the run', async (t) => {
+  // The core-to-worker protocol must carry the resume-input seam without
+  // exposing any engine concept: it is a neutral `sessionKey` on the session
+  // start, and the engine-reported key returns with the settlement. Two runs
+  // through a core+worker pair prove the key survives the boundary in both
+  // directions.
+  const worker = await connectedWorker({
+    turns: [
+      { events: successEvents, result: { status: 'completed', text: 'first' } },
+      { events: successEvents, result: { status: 'completed', text: 'second' } },
+    ],
+  });
+  t.after(() => worker.killChannel());
+
+  const sessionKeys = new InMemorySessionKeyStore();
+  const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
+
+  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
+  await orchestrator.waitFor(first.id);
+  const second = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'two' });
+  await orchestrator.waitFor(second.id);
+
+  const firstKey = worker.engine.sessions[0]?.engineSessionKey;
+  assert.ok(firstKey, 'the worker reported the first run\'s engine key to the core');
+  assert.equal(worker.engine.requests[0]?.resumeSessionKey, undefined);
+  assert.equal(
+    worker.engine.requests[1]?.resumeSessionKey,
+    firstKey,
+    'the core handed the first run\'s key back through the worker',
+  );
+  assert.equal(worker.engine.sessions[1]?.engineSessionKey, firstKey);
 });
 
 test('a worker refuses an engine it does not host', () => {

@@ -112,12 +112,19 @@ export class CodexEngineAdapter implements EngineAdapter {
     }
     transport.notify('initialized', {});
 
-    const started = await transport.request<{ thread: { id: string } }>('thread/start', {
-      cwd: request.workingDirectory,
-      sandbox: this.#options.sandbox ?? 'read-only',
-      approvalPolicy: 'never',
-      ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
-    });
+    // Codex assigns thread ids, but `thread/resume` returns the same id, so a
+    // stored key is passed straight through. A stale key is a hard failure
+    // (`no rollout found for thread id …`, #19); the orchestrator owns degrading
+    // that to a fresh session, so this adapter does not swallow it. The daemon is
+    // closed before rethrowing, because a refused resume must not leak a process.
+    let started: { thread: { id: string } };
+    try {
+      started = await this.#openThread(transport, request);
+    } catch (error) {
+      transport.close();
+      process.kill('SIGTERM');
+      throw error;
+    }
 
     session = new CodexSession({
       transport,
@@ -126,6 +133,28 @@ export class CodexEngineAdapter implements EngineAdapter {
       agentId: request.agentId,
     });
     return session;
+  }
+
+  /** Open the thread for a session: resume a stored one, or start a fresh one. */
+  async #openThread(
+    transport: JsonRpcTransport,
+    request: StartSessionRequest,
+  ): Promise<{ thread: { id: string } }> {
+    if (request.resumeSessionKey !== undefined) {
+      return transport.request<{ thread: { id: string } }>('thread/resume', {
+        threadId: request.resumeSessionKey,
+        cwd: request.workingDirectory,
+        sandbox: this.#options.sandbox ?? 'read-only',
+        approvalPolicy: 'never',
+        ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+      });
+    }
+    return transport.request<{ thread: { id: string } }>('thread/start', {
+      cwd: request.workingDirectory,
+      sandbox: this.#options.sandbox ?? 'read-only',
+      approvalPolicy: 'never',
+      ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+    });
   }
 }
 
@@ -175,6 +204,12 @@ interface CodexSessionOptions {
 
 export class CodexSession implements EngineSession {
   readonly sessionId: string;
+  /**
+   * Codex's engine session key is the thread id. Because `thread/resume` keeps
+   * the same id, it is known as soon as the session starts rather than only
+   * after a turn.
+   */
+  readonly engineSessionKey: string;
   readonly #transport: JsonRpcTransport;
   readonly #process: CodexProcess;
   readonly #threadId: string;
@@ -195,6 +230,7 @@ export class CodexSession implements EngineSession {
     this.#process = options.process;
     this.#threadId = options.threadId;
     this.sessionId = options.threadId;
+    this.engineSessionKey = options.threadId;
   }
 
   run(prompt: string): EngineTurn {

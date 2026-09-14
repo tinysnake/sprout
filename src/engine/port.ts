@@ -36,11 +36,34 @@ export interface StartSessionRequest {
   readonly workingDirectory: string;
   /** Standing instructions assembled by the core, if the adapter accepts them. */
   readonly instructions?: string;
+  /**
+   * A previously persisted engine session key to resume, when the core has one
+   * for this agent, engine, environment instance, and working directory.
+   *
+   * This is the one resume input the core supplies. An adapter passes it to the
+   * engine's own resume path; an engine that cannot reuse a supplied key (or
+   * refuses a stale one) behaves as the engine documents (#19). Sprout never
+   * assumes resumption succeeded: it persists the key the run actually used.
+   */
+  readonly resumeSessionKey?: string;
 }
 
 export interface EngineSession {
   /** The adapter's session key, so the core can resume rather than re-derive. */
   readonly sessionId: string;
+  /**
+   * The engine-native key this session is actually using, once it is known.
+   *
+   * For an engine whose key Sprout chooses (Pi) this equals `sessionId`. For an
+   * engine that assigns its own key (Codex, `agy`, `opencode`) it is only known
+   * after the engine reports it, so the core reads it after a turn settles
+   * rather than at construction. This — not `sessionId`, which may be a
+   * Sprout-local handle — is what the core persists for continuation.
+   *
+   * `undefined` means the engine never reported a key for this session, so
+   * there is nothing worth persisting.
+   */
+  readonly engineSessionKey: string | undefined;
   /** Send one prompt and observe its events. Resolves when the turn ends. */
   run(prompt: string): EngineTurn;
   /** Interrupt the in-progress turn. Returns whether an interrupt was possible. */

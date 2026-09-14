@@ -145,6 +145,28 @@ test('the engine-assigned session id is captured and reused on the next turn', a
   assert.equal(sessionFlag(argv[1] ?? []), 'ses_abc', 'the second turn resumes it');
 });
 
+test('a stored session id is passed to --session on the first turn', async () => {
+  // opencode assigns `ses_…` ids; a stored one is offered through `--session`,
+  // which is its documented resume input (#19). A stale id is a hard failure,
+  // and degrading that is the orchestrator's job, not this adapter's.
+  const { adapter, argv } = adapterFor((process) => {
+    process.line({ type: 'text', sessionID: 'ses_abc', part: { type: 'text', text: 'ok' } });
+    process.settle(0);
+  });
+
+  const session: OpenCodeSession = (await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'ses_stored',
+  })) as OpenCodeSession;
+  assert.equal(session.engineSessionKey, 'ses_stored', 'the stored id is known before the turn');
+  await collect(session.run('continue').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--session') + 1], 'ses_stored');
+  assert.equal(session.engineSessionKey, 'ses_abc', 'the engine-reported id is authoritative');
+});
+
 test('an error frame fails the turn', async () => {
   const { adapter } = adapterFor((process) => {
     process.line({

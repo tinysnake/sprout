@@ -65,8 +65,11 @@ export class PiEngineAdapter implements EngineAdapter {
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
     // Sprout owns session identity: it is the caller-chosen id, not something the
-    // CLI invents.
-    const sessionId = `${request.agentId}-${++this.#sessionCounter}-${Date.now().toString(36)}`;
+    // CLI invents. A stored key from a previous run is that id, so resuming is
+    // the same code path as starting (#19: Pi chooses per `--session-id`).
+    const sessionId =
+      request.resumeSessionKey ??
+      `${request.agentId}-${++this.#sessionCounter}-${Date.now().toString(36)}`;
     return new PiSession({
       binaryPath,
       sessionId,
@@ -94,6 +97,12 @@ interface PiSessionOptions {
  */
 export class PiSession implements EngineSession {
   readonly sessionId: string;
+  /**
+   * Pi's engine session key is the caller-chosen id: Sprout supplies it and Pi
+   * either resumes it or creates it (#19 soft fallback). It is therefore always
+   * equal to `sessionId`.
+   */
+  readonly engineSessionKey: string;
   readonly #binaryPath: string;
   readonly #workingDirectory: string;
   readonly #instructions: string | undefined;
@@ -105,6 +114,7 @@ export class PiSession implements EngineSession {
 
   constructor(options: PiSessionOptions) {
     this.sessionId = options.sessionId;
+    this.engineSessionKey = options.sessionId;
     this.#binaryPath = options.binaryPath;
     this.#workingDirectory = options.workingDirectory;
     this.#instructions = options.instructions;

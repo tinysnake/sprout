@@ -3,6 +3,12 @@ import { DatabaseSync } from 'node:sqlite';
 import type { AgentRun, AgentRunStatus } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { RunStore } from './store.ts';
+import {
+  sessionKeyId,
+  type SessionKeyStore,
+  type SessionKeyIdentity,
+  type StoredSessionKey,
+} from './session-key-store.ts';
 import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
 
 /**
@@ -210,18 +216,102 @@ export interface SqliteStoreOptions {
 }
 
 /**
- * Unified SQLite storage for Sprout, managing both runs and leases
+ * SQLite-backed storage for engine session keys (ADR-0002).
+ *
+ * The table's primary key is the identity tuple, so a re-run for the same agent
+ * in the same environment and working directory replaces its own key rather than
+ * accumulating rows. The key itself is an opaque string: Sprout never parses it.
+ */
+export class SqliteSessionKeyStore implements SessionKeyStore {
+  readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
+
+  constructor(options: { filename: string } | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+    }
+    this.#init();
+  }
+
+  #init(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_session_keys (
+        slot TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        environment_instance_id TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  async get(identity: SessionKeyIdentity): Promise<StoredSessionKey | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM agent_session_keys WHERE slot = ?')
+      .get(sessionKeyId(identity)) as unknown | undefined;
+    return row ? toStoredSessionKey(row as SessionKeyRow) : undefined;
+  }
+
+  async save(record: StoredSessionKey): Promise<void> {
+    this.#db
+      .prepare(
+        `INSERT INTO agent_session_keys
+           (slot, agent_id, engine, environment_instance_id, working_directory, session_key, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(slot) DO UPDATE SET
+           session_key = excluded.session_key,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        sessionKeyId(record),
+        record.agentId,
+        record.engine,
+        record.environmentInstanceId,
+        record.workingDirectory,
+        record.key,
+        record.updatedAt,
+      );
+  }
+
+  async delete(identity: SessionKeyIdentity): Promise<void> {
+    this.#db.prepare('DELETE FROM agent_session_keys WHERE slot = ?').run(sessionKeyId(identity));
+  }
+
+  async list(): Promise<readonly StoredSessionKey[]> {
+    const rows = this.#db
+      .prepare('SELECT * FROM agent_session_keys ORDER BY updated_at DESC')
+      .all() as unknown as SessionKeyRow[];
+    return rows.map(toStoredSessionKey);
+  }
+
+  close(): void {
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
+  }
+}
+
+/**
+ * Unified SQLite storage for Sprout, managing runs, leases, and session keys
  * through a single database handle (ADR-0002).
  */
 export class SqliteStore {
   readonly db: DatabaseSync;
   readonly runs: SqliteRunStore;
   readonly leases: SqliteLeaseStore;
+  readonly sessionKeys: SqliteSessionKeyStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
     this.runs = new SqliteRunStore({ db: this.db });
     this.leases = new SqliteLeaseStore({ db: this.db });
+    this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
   }
 
   close(): void {
@@ -256,5 +346,26 @@ function toRun(row: RunRow): AgentRun {
     ...(result !== undefined ? { result } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
+  };
+}
+
+interface SessionKeyRow {
+  readonly slot: string;
+  readonly agent_id: string;
+  readonly engine: string;
+  readonly environment_instance_id: string;
+  readonly working_directory: string;
+  readonly session_key: string;
+  readonly updated_at: number;
+}
+
+function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
+  return {
+    agentId: row.agent_id,
+    engine: row.engine,
+    environmentInstanceId: row.environment_instance_id,
+    workingDirectory: row.working_directory,
+    key: row.session_key,
+    updatedAt: row.updated_at,
   };
 }

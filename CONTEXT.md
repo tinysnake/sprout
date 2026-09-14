@@ -36,6 +36,10 @@ _Avoid_: Process, bot instance, environment agent
 One bounded activation of an agent in response to a message, task, or system event.
 _Avoid_: Agent, task
 
+**Session key**:
+The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so the next run in the same environment and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
+_Avoid_: Session id, thread id, conversation id
+
 **Work model**:
 The model an agent uses for its primary reasoning and work.
 _Avoid_: Brain, main model

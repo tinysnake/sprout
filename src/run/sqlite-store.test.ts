@@ -141,7 +141,7 @@ test('saving the same lease again updates state and expiry', () => {
   store.close();
 });
 
-test('SqliteStore manages both runs and leases over one SQLite connection', async () => {
+test('SqliteStore manages runs, leases, and session keys over one SQLite connection', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-unified-'));
   const store = new SqliteStore({ filename: join(dir, 'sprout.db') });
 
@@ -156,13 +156,28 @@ test('SqliteStore manages both runs and leases over one SQLite connection', asyn
     expiresAt: 60_000,
     state: 'active',
   });
+  await store.sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'pi',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+    key: 'sess-unified',
+    updatedAt: 2_000,
+  });
 
   const restoredRun = await store.runs.get('run-unified');
   const restoredLease = store.leases.get('lease-unified');
+  const restoredKey = await store.sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'pi',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+  });
 
   assert.equal(restoredRun?.id, 'run-unified');
   assert.equal(restoredLease?.id, 'lease-unified');
   assert.equal(restoredLease?.runId, 'run-unified');
+  assert.equal(restoredKey?.key, 'sess-unified');
 
   store.close();
 });

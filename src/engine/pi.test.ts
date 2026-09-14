@@ -165,6 +165,25 @@ test("a turn is a fresh process, and the session id is reused so context continu
   assert.equal(idFlag(argv[0] ?? []), session.sessionId);
 });
 
+test('a supplied resume key becomes the session id, so a prior run continues', async () => {
+  // Pi's key is caller-chosen (#19), so resuming is exactly the same code path
+  // as starting: the supplied id is passed to `--session-id`. A stale id is
+  // Pi's soft fallback (a warning and a new file with that same id).
+  const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'done'));
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'scout-session-7',
+  });
+  await collect(session.run('continue').events);
+
+  assert.equal(session.sessionId, 'scout-session-7', 'the supplied key is the session id');
+  assert.equal(session.engineSessionKey, 'scout-session-7');
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--session-id') + 1], 'scout-session-7');
+});
+
 test('stopping a Pi turn kills the turn process and settles the turn', async () => {
   const { adapter, spawned } = adapterFor(() => {
     // A turn that never settles on its own, as a long generation would not.

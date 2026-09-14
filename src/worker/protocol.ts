@@ -53,10 +53,27 @@ export interface StartSessionParams {
   readonly agentId: string;
   readonly workingDirectory: string;
   readonly instructions?: string;
+  /**
+   * The engine-native key of the conversation this session should continue.
+   *
+   * This is the resume-input seam of the engine port, carried unchanged to the
+   * engine adapter inside the environment. The core decides which key belongs to
+   * this run; the worker does not look one up itself.
+   */
+  readonly resumeSessionKey?: string;
 }
 
 export interface StartSessionResult {
   readonly sessionId: string;
+  /**
+   * The engine-native key the adapter is using, when it knows one.
+   *
+   * `opencode` reports its id on frames and `agy` in its `init` frame, so their
+   * keys may be unknown at session start. The core reads the key after the turn
+   * settles through the session it already holds, so this field is the key known
+   * at start time (Pi, Codex) and `undefined` otherwise.
+   */
+  readonly engineSessionKey?: string;
 }
 
 export interface RunParams {
@@ -90,4 +107,13 @@ export interface TurnSettledParams {
   readonly sessionId: string;
   readonly turnId: string;
   readonly result: EngineTurnResult;
+  /**
+   * The engine-native session key in effect once the turn settled.
+   *
+   * Engines that assign their own key (`agy`, `opencode`) only reveal it on the
+   * stream, so the core cannot read it at session start; this is where it learns
+   * the key to persist. It travels with the settlement rather than the session
+   * start so it is never stale relative to the turn it describes.
+   */
+  readonly engineSessionKey?: string;
 }

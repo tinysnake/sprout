@@ -28,6 +28,19 @@ export interface ScriptedAdapterOptions {
   readonly onInterrupt?: () => void;
   /** When set, `startSession` rejects with this message. */
   readonly failStart?: string;
+  /**
+   * Engine session keys this fake accepts as resumable.
+   *
+   * Omit to accept any supplied `resumeSessionKey` (a healthy resume). When set,
+   * a key outside this list is stale, and the fake behaves as
+   * `staleResumeKey` says: start a fresh session (`'fresh'`, the default, which
+   * models Pi and `agy`'s documented soft fallback), reject the start
+   * (`'fail'`, which models Codex's `thread/resume` hard failure in #19), or
+   * fail the first turn without emitting events (`'fail-turn'`, which models
+   * `opencode` exiting 1 on a stale `--session` without ever settling the turn).
+   */
+  readonly knownSessionKeys?: readonly string[];
+  readonly staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
 }
 
 export class ScriptedEngineAdapter implements EngineAdapter {
@@ -37,6 +50,7 @@ export class ScriptedEngineAdapter implements EngineAdapter {
   readonly sessions: ScriptedEngineSession[] = [];
   readonly #options: ScriptedAdapterOptions;
   #next = 0;
+  #keyCounter = 0;
 
   constructor(options: ScriptedAdapterOptions) {
     this.#options = options;
@@ -51,9 +65,27 @@ export class ScriptedEngineAdapter implements EngineAdapter {
     const turn = this.#options.turns[this.#next] ?? this.#options.turns.at(-1);
     this.#next += 1;
     if (!turn) throw new Error('scripted adapter has no turns');
+
+    const requested = request.resumeSessionKey;
+    const known = this.#options.knownSessionKeys;
+    const stale = requested !== undefined && known !== undefined && !known.includes(requested);
+    if (stale && this.#options.staleResumeKey === 'fail') {
+      throw new Error(`unknown session: ${requested}`);
+    }
+    // A healthy resume reuses the supplied key; a stale key (or no key) starts
+    // a fresh engine session with an engine-assigned key.
+    const engineSessionKey =
+      requested !== undefined && !stale ? requested : `scripted-key-${++this.#keyCounter}`;
+    // `fail-turn` models opencode: the session starts, but the stale key makes
+    // the turn fail without the engine ever doing work.
+    const failFirstTurn = stale && this.#options.staleResumeKey === 'fail-turn';
+
     const session = new ScriptedEngineSession(
       `scripted-session-${this.#next}`,
-      turn,
+      engineSessionKey,
+      failFirstTurn
+        ? { events: [], result: { status: 'failed', message: `unknown session: ${requested}` } }
+        : turn,
       this.#options.onInterrupt,
     );
     this.sessions.push(session);
@@ -63,6 +95,7 @@ export class ScriptedEngineAdapter implements EngineAdapter {
 
 export class ScriptedEngineSession implements EngineSession {
   readonly sessionId: string;
+  readonly engineSessionKey: string;
   readonly #turn: ScriptedTurn;
   readonly #onInterrupt: (() => void) | undefined;
   #settled = false;
@@ -71,10 +104,12 @@ export class ScriptedEngineSession implements EngineSession {
 
   constructor(
     sessionId: string,
+    engineSessionKey: string,
     turn: ScriptedTurn,
     onInterrupt?: () => void,
   ) {
     this.sessionId = sessionId;
+    this.engineSessionKey = engineSessionKey;
     this.#turn = turn;
     this.#onInterrupt = onInterrupt;
   }

@@ -239,6 +239,52 @@ test('the conversation id from the init frame is reused on the next turn', async
   assert.equal(spawned[0] !== spawned[1], true, 'each turn is its own process');
 });
 
+test('a stored conversation id resumes the conversation on the first turn', async () => {
+  // agy assigns conversation ids, so a stored one is a *hint*: it is offered
+  // via --conversation and the engine reports which conversation it actually
+  // used in its init frame.
+  const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'ok'));
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'prior-conversation-id',
+  });
+  await collect(session.run('continue').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--conversation') + 1], 'prior-conversation-id');
+});
+
+test('a stale conversation id is replaced by the id agy actually used', async () => {
+  // agy soft-falls-back on a stale id (#19): it warns and starts a fresh
+  // conversation with a NEW id. Sprout must then continue that new conversation
+  // on later turns, not re-offer the id agy refused, and must report the new id
+  // so the core persists it.
+  const { adapter, argv } = adapterFor((process) => {
+    // Every turn reports the engine-assigned id, ignoring the stale hint.
+    replaySuccessfulTurn(process, 'ok');
+  });
+
+  const session: AgySession = (await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'stale-id-that-agy-refused',
+  })) as AgySession;
+  assert.equal(session.engineSessionKey, 'stale-id-that-agy-refused', 'the hint is all that is known yet');
+
+  await collect(session.run('first').events);
+  assert.equal(session.engineSessionKey, '1354d8d5-7266-479c-88cc-83abd1282acc');
+
+  await collect(session.run('second').events);
+  const idFlag = (args: readonly string[]) => args[args.indexOf('--conversation') + 1];
+  assert.equal(
+    idFlag(argv[1] ?? []),
+    '1354d8d5-7266-479c-88cc-83abd1282acc',
+    'the second turn uses the id agy assigned, not the stale one',
+  );
+});
+
 test('stopping an agy turn kills the process and settles the turn', async () => {
   const { adapter, spawned } = adapterFor(() => undefined);
   const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
