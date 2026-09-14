@@ -172,10 +172,12 @@ Project contracts and Agent context remain coherent when the same Agent works ac
 
 ### O6 — Multi-agent collaboration
 
-**Status**: Unproven  
+**Status**: In progress
 **Depends on**: O4, O5
 
 All four engines can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
+
+**Active development map**: [#24](https://github.com/tinysnake/sprout/issues/24) starts with the collaboration write-path and wake-contract prototype in #25; production Message, channel, and Task tickets remain intentionally unplanned until that evidence resolves the current transport and delivery fog.
 
 **Outcome checks**:
 
@@ -209,7 +211,7 @@ O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation m
 
 O5 is **Evidenced**: durable project membership resolves an Agent's environment without binding its identity to one; native session keys continue only in their full environment slot; and deterministic project contracts plus privacy-preserving hand-off carry the relevant context across environments ([#18](https://github.com/tinysnake/sprout/issues/18), [#20](https://github.com/tinysnake/sprout/issues/20), [#21](https://github.com/tinysnake/sprout/issues/21)).
 
-The active frontier advances to **O6 — Multi-agent collaboration**. No O6 implementation or acceptance evidence is asserted here.
+The active frontier is **O6 — Multi-agent collaboration**, advanced by development map [#24](https://github.com/tinysnake/sprout/issues/24). No O6 implementation or acceptance evidence is asserted yet.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
