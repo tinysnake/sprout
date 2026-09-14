@@ -7,13 +7,15 @@ import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import { EnvironmentPool } from './environment/pool.ts';
 import { DockerRuntime, containerEnvironmentDefinition } from './environment/container.ts';
+import type { Project } from './project/model.ts';
+import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
-import { WorkerSupervisor } from './worker/supervisor.ts';
+import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
 
 /**
  * The M1 runtime entry point.
@@ -65,8 +67,21 @@ function containerProxy(): Record<string, string> {
   return { HTTPS_PROXY: translated, HTTP_PROXY: translated, NO_PROXY: 'localhost,127.0.0.1' };
 }
 
-/** Starts a worker for the configured environment. Called again after a death. */
-async function startEnvironmentWorker(): Promise<WorkerConnection> {
+/**
+ * Starts a worker for this build's configured environment. Called again after a
+ * death.
+ *
+ * The requested id is checked against the one instance this build serves. A run
+ * that resolves anything else is refused instead of executing locally under
+ * another instance's name, which would be F1 (#18) at the production edge. A
+ * multi-instance build replaces this with a factory keyed by instance id.
+ */
+async function startEnvironmentWorker(requestedInstanceId: string): Promise<WorkerConnection> {
+  if (requestedInstanceId !== instanceId) {
+    throw new Error(
+      `this Sprout serves only environment instance ${instanceId}, not ${requestedInstanceId}`,
+    );
+  }
   if (environmentKind === 'container') {
     const runtime = new DockerRuntime();
     const availability = await runtime.available();
@@ -114,23 +129,24 @@ async function startEnvironmentWorker(): Promise<WorkerConnection> {
 }
 
 /**
- * The supervisor keeps the environment's worker alive across its death, so one
- * worker crash does not permanently poison the environment. It is lazy: a worker
- * is started when a run needs it, not at core startup.
+ * Engines come from the worker serving the run's resolved instance, not a
+ * global map: the adapter that executes a run must belong to the instance the
+ * run leases and records (F1, #18). It is also where ADR-0003's lazy,
+ * replace-a-dead-worker behaviour now lives, per instance.
  */
-const supervisor = new WorkerSupervisor({
-  connect: () => startEnvironmentWorker(),
+const environmentWorkers = new EnvironmentWorkerRegistry({
+  connect: (requested) => startEnvironmentWorker(requested),
   onLog: (line) => process.stderr.write(`[env-worker] ${line}\n`),
 });
 
 // Fail fast on a misconfigured engine rather than discovering it per run.
-const initialEngines = await supervisor.adapters();
+const initialEngines = await environmentWorkers.adapters(instanceId);
 if (!initialEngines.has(engineId)) {
   process.stderr.write(
     `Sprout: the environment worker does not host engine "${engineId}". ` +
       `It hosts: ${[...initialEngines.keys()].join(', ') || '(none)'}\n`,
   );
-  await supervisor.close();
+  await environmentWorkers.close();
   process.exit(2);
 }
 
@@ -163,30 +179,56 @@ const definition: EnvironmentDefinition =
         };
 
 const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
-const environmentInstances: readonly EnvironmentInstance[] = [
-  { id: instanceId, definitionId: definition.id },
-];
 
-/** A run's working directory is a fact about the environment, not about Sprout. */
+/**
+ * A run's working directory is a fact about the environment, not about Sprout.
+ *
+ * It therefore lives on the instance, so the same agent works unchanged on a host
+ * and inside a container whose path differs (F1 suggestion, #18).
+ */
 const windowsRunWorkdir = process.env.SPROUT_WINDOWS_WORKDIR ?? 'C:/sprout-work';
-const runWorkingDirectory =
-  environmentKind === 'container' ? containerMountRoot
-  : environmentKind === 'windows' ? windowsRunWorkdir
-  : workingDirectory;
+const environmentInstances: readonly EnvironmentInstance[] = [
+  {
+    id: instanceId,
+    definitionId: definition.id,
+    workingDirectory:
+      environmentKind === 'container' ? containerMountRoot
+      : environmentKind === 'windows' ? windowsRunWorkdir
+      : workingDirectory,
+  },
+];
 
 const agents: readonly AgentDefinition[] = [
   {
     id: 'scout',
     name: 'Scout',
     engine: engineId,
-    environmentInstanceId: instanceId,
     capability: 'agent-run',
-    workingDirectory: runWorkingDirectory,
     instructions:
       'You are Scout, a careful engineering assistant working inside the Sprout project. ' +
       'Answer the request directly and report what you observed.',
   },
 ];
+
+/**
+ * The default project.
+ *
+ * Its environment set is what a run's environment is resolved from, so adding an
+ * instance here is what makes it usable — the agent no longer names a device.
+ */
+const defaultProject: Project = {
+  id: process.env.SPROUT_PROJECT ?? 'sprout',
+  goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
+  rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
+  availableEnvironmentInstanceIds: [instanceId],
+  memberships: [
+    {
+      agentId: 'scout',
+      responsibilities: ['Answer direct requests from the project lead', 'Investigate the repository'],
+      collaborationInstructions: 'Collaborate through the project channel and keep results concise.',
+    },
+  ],
+};
 
 const registry = new AgentRegistry(agents);
 const store = new SqliteStore({ filename: databasePath });
@@ -195,13 +237,23 @@ const pool = new EnvironmentPool({
   instances: environmentInstances,
   store: store.leases,
 });
+const projects = new ProjectRegistry([defaultProject]);
+// The default project above is host-derived configuration, like the environment
+// definitions. Additional projects can hydrate from the durable store, which is
+// the same store the runs and leases use (ADR-0002); in-memory entries win.
+await projects.load(store.projects);
 const orchestrator = new RunOrchestrator({
-  // Resolved per run, so a worker that died is replaced before the next run
-  // instead of failing it against a dead channel (ADR-0003).
-  engines: () => supervisor.adapters(),
+  // Resolved per run *for the resolved instance*, so a worker that died is
+  // replaced before the next run instead of failing it against a dead channel
+  // (ADR-0003), and so execution follows the leased instance (F1, #18).
+  engines: (instanceId) => environmentWorkers.adapters(instanceId),
   agents: registry,
+  projects,
   pool,
   store: store.runs,
+  // Durable engine session keys, so the same agent on the same environment and
+  // working directory continues its prior conversation across runs (O5, #20).
+  sessionKeys: store.sessionKeys,
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 
@@ -248,10 +300,10 @@ if (recovering.length > 0) {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     void api.close().then(async () => {
-      // The supervisor owns the worker channel. A *container* is not destroyed
+      // The worker registry owns the channels. A *container* is not destroyed
       // here: `rm` is the only irrecoverable action (#4), so its lifecycle is an
       // explicit operator decision rather than a shutdown side effect.
-      await supervisor.close();
+      await environmentWorkers.close();
       store.close();
       process.exit(0);
     });

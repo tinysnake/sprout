@@ -33,7 +33,7 @@ export interface JsonRpcTransport {
 }
 
 export class JsonRpcError extends Error {
-  override readonly name = 'JsonRpcError';
+  override readonly name: string = 'JsonRpcError';
   readonly code: number;
   readonly method: string;
 
@@ -42,6 +42,19 @@ export class JsonRpcError extends Error {
     this.code = code;
     this.method = method;
   }
+}
+
+/**
+ * A request failed because the transport itself died, not because the peer
+ * answered with an error.
+ *
+ * The distinction is load-bearing for resume refusal: a `thread/resume` the
+ * server *answered* with an error is the engine refusing the key, while a
+ * request that never got an answer because the daemon died is a transport
+ * failure. Only the former may be treated as a stale key.
+ */
+export class JsonRpcTransportError extends JsonRpcError {
+  override readonly name: string = 'JsonRpcTransportError';
 }
 
 export interface JsonRpcTransportOptions {
@@ -83,7 +96,7 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
   request<T>(method: string, params?: unknown): Promise<T> {
     if (this.#closed) {
       return Promise.reject(
-        new JsonRpcError(method, -32_000, this.#closeReason ?? 'transport closed'),
+        new JsonRpcTransportError(method, -32_000, this.#closeReason ?? 'transport closed'),
       );
     }
     const id = this.#nextId++;
@@ -203,7 +216,7 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
     this.#closeReason ??= reason;
     for (const [id, pending] of this.#pending) {
       this.#pending.delete(id);
-      pending.reject(new JsonRpcError(pending.method, -32_000, reason));
+      pending.reject(new JsonRpcTransportError(pending.method, -32_000, reason));
     }
     this.#onClose?.(reason);
   }

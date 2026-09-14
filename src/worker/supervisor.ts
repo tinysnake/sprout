@@ -58,6 +58,16 @@ export class WorkerSupervisor {
     return connection.adapters;
   }
 
+  /**
+   * The live worker connection, starting one if needed.
+   *
+   * Exposed so the instance-keyed worker registry can verify that a worker's own
+   * declared instance matches the instance a run resolved and leased.
+   */
+  async connection(): Promise<WorkerConnection> {
+    return this.#ensure();
+  }
+
   async #ensure(): Promise<WorkerConnection> {
     if (this.#closed) throw new Error('environment worker supervisor is closed');
 
@@ -98,5 +108,80 @@ export class WorkerSupervisor {
     const connection = this.#connection;
     this.#connection = undefined;
     if (connection) await connection.close();
+  }
+}
+
+/**
+ * Engine adapters keyed by the environment instance they execute in.
+ *
+ * This is the seam the orchestrator crosses: it resolves and leases one instance
+ * and asks here for **that instance's** engines, so a run cannot lease
+ * `container-1` and then execute on a worker serving a different instance. A
+ * plain `Map` remains the simple case for tests and for callers with one fixed
+ * worker; this is the multi-instance case production needs (F1, #18).
+ *
+ * Each instance owns its own `WorkerSupervisor`, so ADR-0003's lazy
+ * start-and-replace behaviour applies per environment rather than to one global
+ * worker. A worker's own `worker/info` instance id is asserted against the
+ * requested id: a mismatch is a wiring error to surface, not something to paper
+ * over, because executing on the wrong machine while recording another is exactly
+ * the bug this exists to prevent.
+ */
+export class EnvironmentWorkerRegistry {
+  readonly #connect: (instanceId: string) => Promise<WorkerConnection>;
+  readonly #supervisors = new Map<string, WorkerSupervisor>();
+  readonly #onLog: ((line: string) => void) | undefined;
+  #closed = false;
+
+  constructor(options: {
+    readonly connect: (instanceId: string) => Promise<WorkerConnection>;
+    readonly onLog?: (line: string) => void;
+  }) {
+    this.#connect = options.connect;
+    this.#onLog = options.onLog;
+  }
+
+  /** The engines the worker serving `instanceId` currently hosts. */
+  async adapters(instanceId: string): Promise<ReadonlyMap<string, EngineAdapter>> {
+    if (this.#closed) throw new Error('environment worker registry is closed');
+    const supervisor = this.#supervisor(instanceId);
+    const connection = await supervisor.connection();
+    const reported = connection.info.environmentInstanceId;
+    if (reported !== instanceId) {
+      // Do not cache a connection that serves the wrong instance; the next
+      // attempt should be able to start a correct one.
+      await supervisor.close();
+      this.#supervisors.delete(instanceId);
+      throw new Error(
+        `environment instance mismatch: run resolved ${instanceId} but its worker serves ${reported}`,
+      );
+    }
+    return connection.adapters;
+  }
+
+  /** How many workers were started across all instances, so restarts stay observable. */
+  get starts(): number {
+    let total = 0;
+    for (const supervisor of this.#supervisors.values()) total += supervisor.starts;
+    return total;
+  }
+
+  #supervisor(instanceId: string): WorkerSupervisor {
+    let supervisor = this.#supervisors.get(instanceId);
+    if (supervisor === undefined) {
+      supervisor = new WorkerSupervisor({
+        connect: () => this.#connect(instanceId),
+        ...(this.#onLog !== undefined ? { onLog: this.#onLog } : {}),
+      });
+      this.#supervisors.set(instanceId, supervisor);
+    }
+    return supervisor;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    const supervisors = [...this.#supervisors.values()];
+    this.#supervisors.clear();
+    await Promise.all(supervisors.map((supervisor) => supervisor.close()));
   }
 }

@@ -126,11 +126,18 @@ if (piBinary !== undefined) {
  */
 const agyBinary = resolveBinary('agy');
 if (agyBinary !== undefined) {
+  // The environment's platform decides which hook command `agy` will run: it
+  // executes hooks through `sh -c` on Unix and `cmd /c` on Windows. A worker on
+  // Windows is a Windows process, so the running platform is the environment's
+  // platform; passing it explicitly keeps the choice a declared fact rather
+  // than a hidden `process.platform` read inside the hook installer.
+  const hookPlatform = process.platform === 'win32' ? 'windows' : 'posix';
   engines.set(
     'agy',
     new AgyEngineAdapter({
       binaryPath: agyBinary,
       skipPermissions: true,
+      hookPlatform,
     }),
   );
 }

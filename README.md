@@ -14,6 +14,10 @@ The first end-to-end slice (issue #10) plus the environment-worker seam (issue #
   endpoint, reused across runs, and restarted automatically if it dies.
 - A capacity-intensive environment instance is protected by a lease, so two runs
   cannot share it.
+- An agent names no environment device: a run's environment instance is resolved
+  from the project the agent is a member of, and the run records which instance it
+  actually used. The worker that executes the run is the one serving that
+  resolved instance, so the record always agrees with where the work ran.
 - Progress streams to the client; a run can be stopped and its terminal result or
   failure inspected.
 
@@ -69,9 +73,10 @@ real seams and prints the observed evidence.
 
 ```
 src/
-  agent/        agent identity and configuration
+  agent/        agent identity and configuration, independent of any environment
   environment/  environment model and the lease registry
   engine/       the run seam, JSON-RPC transport, Codex adapter
+  project/      projects and project membership, and environment resolution for a run
   run/          run orchestration, run storage (SQLite and in-memory)
   worker/       the environment worker: protocol, server, carrier, supervisor
   web/          the HTTP + SSE surface for the client

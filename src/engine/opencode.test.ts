@@ -127,6 +127,25 @@ test('a turn reports text as one block per hop and completes from process exit',
   assert.ok(!args.includes('run echo'), 'the prompt is not in argv');
 });
 
+test('the run is pinned to the resolved working directory with --dir', async () => {
+  // Without `--dir` the subprocess inherits the worker's cwd, so opencode never
+  // reads a project `AGENTS.md` Sprout delivered to the run's own directory.
+  // Found live: the contract had no effect until the directory was passed.
+  const { adapter, argv } = adapterFor((process) => {
+    process.line({ type: 'text', sessionID: 'ses_1', part: { type: 'text', text: 'ok' } });
+    process.settle(0);
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/srv/run-directory',
+  });
+  await collect(session.run('go').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--dir') + 1], '/srv/run-directory');
+});
+
 test('the engine-assigned session id is captured and reused on the next turn', async () => {
   const { adapter, argv } = adapterFor((process) => {
     process.line({ type: 'text', sessionID: 'ses_abc', part: { type: 'text', text: 'ok' } });
@@ -143,6 +162,97 @@ test('the engine-assigned session id is captured and reused on the next turn', a
   assert.equal(argv.length, 2, 'one process per turn');
   const sessionFlag = (args: readonly string[]) => args[args.indexOf('--session') + 1];
   assert.equal(sessionFlag(argv[1] ?? []), 'ses_abc', 'the second turn resumes it');
+});
+
+test('a stored session id is passed to --session on the first turn', async () => {
+  // opencode assigns `ses_…` ids; a stored one is offered through `--session`,
+  // which is its documented resume input (#19). A stale id is a hard failure,
+  // and degrading that is the orchestrator's job, not this adapter's.
+  const { adapter, argv } = adapterFor((process) => {
+    process.line({ type: 'text', sessionID: 'ses_abc', part: { type: 'text', text: 'ok' } });
+    process.settle(0);
+  });
+
+  const session: OpenCodeSession = (await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'ses_stored',
+  })) as OpenCodeSession;
+  assert.equal(session.engineSessionKey, 'ses_stored', 'the stored id is known before the turn');
+  await collect(session.run('continue').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--session') + 1], 'ses_stored');
+  assert.equal(session.engineSessionKey, 'ses_abc', 'the engine-reported id is authoritative');
+});
+
+test('a refused --session is classified as a resume refusal, not a plain failure', async () => {
+  // SK-001: opencode writes `Error: Session not found` to stderr and exits 1 on
+  // a stale `--session` (#19, re-probed against 1.18.30). Only that diagnostic
+  // on the first turn with a supplied key is a refusal the core may retry fresh.
+  const { adapter } = adapterFor((process) => {
+    process.stderr.write('Error: Session not found\n');
+    process.settle(1);
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'ses_stale',
+  });
+  const turn = session.run('go');
+  // A refusal with no events does not necessarily throw from the stream; the
+  // authoritative outcome is the turn's completion.
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.status === 'failed' && result.resumeRefused, true);
+});
+
+test('a turn failure that is not a missing session is not a resume refusal', async () => {
+  // An authentication or provider failure on a *valid* resume must not be
+  // mistaken for a stale key: the core would otherwise discard a good key and
+  // hide the real failure behind a fresh-session retry.
+  const { adapter } = adapterFor((process) => {
+    process.line({
+      type: 'error',
+      sessionID: 'ses_valid',
+      error: { name: 'APIError', data: { message: 'Invalid API key.' } },
+    });
+    process.settle(1);
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'ses_valid',
+  });
+  const turn = session.run('go');
+  // An error frame settles the turn through its completion; the stream itself
+  // may end normally, so the classification is read from `completion`.
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.equal(result.status, 'failed');
+  assert.ok(!(result.status === 'failed' && result.resumeRefused === true));
+});
+
+test('a missing session on a turn with no supplied key is not a refusal', async () => {
+  // Without a stored key there is nothing to refuse; a `Session not found`
+  // here is engine noise, not a resume the core should degrade.
+  const { adapter } = adapterFor((process) => {
+    process.stderr.write('Error: Session not found\n');
+    process.settle(1);
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('go');
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.equal(result.status, 'failed');
+  assert.ok(!(result.status === 'failed' && result.resumeRefused === true));
 });
 
 test('an error frame fails the turn', async () => {

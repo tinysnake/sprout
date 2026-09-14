@@ -22,10 +22,11 @@ import type { AgentRunEvent } from '../src/engine/port.ts';
 import { MacOsEnvironment } from '../src/environment/macos.ts';
 import { EnvironmentPool } from '../src/environment/pool.ts';
 import { AgentRegistry } from '../src/agent/registry.ts';
+import { ProjectRegistry } from '../src/project/registry.ts';
 import { InMemoryRunStore } from '../src/run/store.ts';
 import { RunOrchestrator } from '../src/run/orchestrator.ts';
 import { EndpointCarrier } from '../src/worker/carrier.ts';
-import { WorkerSupervisor } from '../src/worker/supervisor.ts';
+import { EnvironmentWorkerRegistry } from '../src/worker/supervisor.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,38 +55,48 @@ const uname = await environment.run('uname -s -m && sw_vers -productVersion');
 log(`[environment] uname: ${uname.stdout.trim().replace(/\n/g, ' | ')}`);
 
 // 2. Start a real worker process. Codex is spawned inside it, not here.
-const supervisor = new WorkerSupervisor({
-  connect: () =>
+const environmentWorkers = new EnvironmentWorkerRegistry({
+  connect: (requestedInstanceId) =>
     EndpointCarrier.start({
       command: process.execPath,
       args: [workerEntry],
-      env: { ...process.env, SPROUT_ENV_INSTANCE: 'local-macos' },
+      env: { ...process.env, SPROUT_ENV_INSTANCE: requestedInstanceId },
       label: 'sprout-worker',
       onLog: (line) => log(`[worker] ${line}`),
     }),
   onLog: (line) => log(`[env-worker] ${line}`),
 });
 
-const engines = await supervisor.adapters();
+const engines = await environmentWorkers.adapters('local-macos');
 log(`[worker] engines reported by the worker: ${[...engines.keys()].join(', ') || '(none)'}`);
 if (!engines.has('codex')) {
   log('FAIL: the worker does not host codex');
-  await supervisor.close();
+  await environmentWorkers.close();
   process.exit(1);
 }
 
 const orchestrator = new RunOrchestrator({
-  // Resolved per run, exactly as the runtime does it.
-  engines: () => supervisor.adapters(),
+  // Resolved per run *for the resolved instance*, exactly as the runtime does it:
+  // the executing worker follows the instance the run leases (F1, #18).
+  engines: (instanceId) => environmentWorkers.adapters(instanceId),
   agents: new AgentRegistry([
     {
       id: 'scout',
       name: 'Scout',
       engine: 'codex',
-      environmentInstanceId: 'local-macos',
       capability: 'agent-run',
-      workingDirectory: projectRoot,
       instructions: 'You are Scout. Answer directly and briefly.',
+    },
+  ]),
+  projects: new ProjectRegistry([
+    {
+      id: 'sprout-smoke',
+      goal: 'Verify the live Sprout run path.',
+      rules: [],
+      availableEnvironmentInstanceIds: ['local-macos'],
+      memberships: [
+        { agentId: 'scout', responsibilities: ['Answer directly'], collaborationInstructions: '' },
+      ],
     },
   ]),
   pool: new EnvironmentPool({
@@ -99,7 +110,7 @@ const orchestrator = new RunOrchestrator({
         ],
       },
     ],
-    instances: [{ id: 'local-macos', definitionId: 'macos-workstation' }],
+    instances: [{ id: 'local-macos', definitionId: 'macos-workstation', workingDirectory: projectRoot }],
   }),
   store: new InMemoryRunStore(),
   leaseTtlMs: 600_000,
@@ -179,7 +190,7 @@ const ok =
   uname.exitCode === 0 &&
   engineOwnedByWorker;
 
-await supervisor.close();
+await environmentWorkers.close();
 log('');
 log(
   ok

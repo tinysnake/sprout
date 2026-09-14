@@ -2,12 +2,15 @@ import type { Readable, Writable } from 'node:stream';
 
 import type {
   AgentRunEvent,
+  ContractDelivery,
   EngineAdapter,
   EngineSession,
   EngineTurnResult,
 } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { LineJsonRpcTransport, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
+  WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
   type CloseParams,
@@ -53,7 +56,7 @@ interface LiveSession {
 /** Where a session's run events go. Swappable so the worker is testable. */
 export interface EventSink {
   event(turnId: string, event: AgentRunEvent): void;
-  settled(turnId: string, result: EngineTurnResult): void;
+  settled(turnId: string, result: EngineTurnResult, engineSessionKey?: string): void;
 }
 
 export class EnvironmentWorker {
@@ -108,6 +111,14 @@ export class EnvironmentWorker {
           this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
       }
     } catch (error) {
+      // An engine's rejected resume is a classifyable failure, not a generic
+      // worker error: it is carried as a neutral code so the core can distinguish
+      // "the engine refused this key" from "this worker failed". Everything else
+      // is reported as an ordinary worker error and is never retried.
+      if (error instanceof EngineResumeRefusedError) {
+        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, error.message);
+        return;
+      }
       this.#transport.respondError(
         id,
         -32_603,
@@ -124,6 +135,7 @@ export class EnvironmentWorker {
         id: engine.id,
         streaming: engine.capabilities.streaming,
         supportsInterrupt: engine.capabilities.supportsInterrupt,
+        standingInstructions: engine.capabilities.standingInstructions,
       })),
     };
   }
@@ -138,9 +150,22 @@ export class EnvironmentWorker {
       agentId: params.agentId,
       workingDirectory: params.workingDirectory,
       ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
+      ...(params.resumeSessionKey !== undefined
+        ? { resumeSessionKey: params.resumeSessionKey }
+        : {}),
     });
 
     const sessionId = `session-${++this.#counter}`;
+    // Every contract delivery is reported, not just a refusal. An operator must
+    // be able to tell from the log whether the contract reached the engine and
+    // through which mechanism, for every mechanism — including the two ordinary
+    // successes, so a missing line can never be mistaken for either "delivered"
+    // or "not delivered" (C21-002).
+    const delivery = session.contractDelivery;
+    if (delivery !== undefined) {
+      const line = describeDelivery(params.agentId, params.workingDirectory, delivery);
+      this.#options.onLog?.(line);
+    }
     this.#sessions.set(sessionId, {
       engine: params.engine,
       session,
@@ -152,15 +177,21 @@ export class EnvironmentWorker {
             turnId,
             event,
           }),
-        settled: (turnId, result) =>
+        settled: (turnId, result, engineSessionKey) =>
           this.#transport.notify(WORKER_NOTIFICATIONS.settled, {
             sessionId,
             turnId,
             result,
+            ...(engineSessionKey !== undefined ? { engineSessionKey } : {}),
           }),
       },
     });
-    return { sessionId };
+    return {
+      sessionId,
+      ...(session.engineSessionKey !== undefined
+        ? { engineSessionKey: session.engineSessionKey }
+        : {}),
+    };
   }
 
   /**
@@ -176,10 +207,18 @@ export class EnvironmentWorker {
     void (async () => {
       try {
         const turn = live.session.run(params.prompt);
-        for await (const event of turn.events) {
-          live.events.event(turnId, event);
+        // The events iterator throws when a turn fails, so the authoritative
+        // outcome is `completion`. Reading it there preserves the engine's
+        // `resumeRefused` classification across the worker boundary instead of
+        // replacing it with the stream's generic error message.
+        try {
+          for await (const event of turn.events) {
+            live.events.event(turnId, event);
+          }
+        } catch {
+          // The completion below carries the real terminal result.
         }
-        live.events.settled(turnId, await turn.completion);
+        live.events.settled(turnId, await turn.completion, live.session.engineSessionKey);
       } catch (error) {
         live.events.settled(turnId, {
           status: 'failed',
@@ -224,5 +263,60 @@ export class EnvironmentWorker {
       this.#sessions.delete(sessionId);
       await live.session.close().catch(() => undefined);
     }
+  }
+}
+
+/**
+ * The line to log for a contract delivery.
+ *
+ * **Every mechanism a run can report is logged.** A delivery outcome is not
+ * internal bookkeeping: it is how an operator confirms that the project contract
+ * did or did not reach the engine, and the two "obvious" successes are exactly
+ * the ones whose absence would be hardest to distinguish from a run that was
+ * never given a contract at all (C21-002). Reporting is deliberately uniform —
+ * one line per delivered contract, naming the mechanism and where it went — so
+ * there is no outcome that is observable only by its silence.
+ */
+function describeDelivery(
+  agentId: string,
+  workingDirectory: string,
+  delivery: ContractDelivery,
+): string {
+  const where =
+    delivery.path !== undefined
+      ? ` (${delivery.path})`
+      : ` (${workingDirectory})`;
+  switch (delivery.mechanism) {
+    case 'agents.md':
+      return (
+        `project contract for agent ${agentId} was delivered to the engine's own ` +
+        `AGENTS.md${where}`
+      );
+    case 'sprout-contract-file':
+      return (
+        `project contract for agent ${agentId} was delivered to Sprout's own ` +
+        `file${where}, registered with the engine's instruction list because the ` +
+        `engine does not discover that name`
+      );
+    case 'engine-hook':
+      return (
+        `project contract for agent ${agentId} was delivered through the engine's ` +
+        `config hook${where}`
+      );
+    case 'skipped-user-owned':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `a user-owned file in ${workingDirectory} was left intact`
+      );
+    case 'skipped-unreadable':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `an existing file in ${workingDirectory} could not be read and was left intact`
+      );
+    case 'unavailable':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `${delivery.reason ?? `no writable location in ${workingDirectory}`}`
+      );
   }
 }

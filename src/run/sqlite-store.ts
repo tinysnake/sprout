@@ -1,9 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { AgentRun, AgentRunStatus } from './model.ts';
+import type { AgentRun, AgentRunStatus, RunHandOff } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { RunStore } from './store.ts';
+import {
+  sessionKeyId,
+  type SessionKeyStore,
+  type SessionKeyIdentity,
+  type StoredSessionKey,
+} from './session-key-store.ts';
 import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
+import type { Project } from '../project/model.ts';
+import type { ProjectStore } from '../project/store.ts';
 
 /**
  * SQLite-backed storage for runs and leases (ADR-0002).
@@ -27,6 +35,7 @@ interface RunRow {
   readonly agent_id: string;
   readonly prompt: string;
   readonly environment_instance_id: string;
+  readonly project_id: string | null;
   readonly status: string;
   readonly events: string;
   readonly lease_id: string | null;
@@ -34,6 +43,7 @@ interface RunRow {
   readonly result: string | null;
   readonly created_at: number;
   readonly completed_at: number | null;
+  readonly hand_off: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -58,36 +68,53 @@ export class SqliteRunStore implements RunStore {
         agent_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        project_id TEXT,
         status TEXT NOT NULL,
         events TEXT NOT NULL,
         lease_id TEXT,
         failure TEXT,
         result TEXT,
         created_at INTEGER NOT NULL,
-        completed_at INTEGER
+        completed_at INTEGER,
+        hand_off TEXT
       );
     `);
+    // Added after the table shipped; a database from before this column still
+    // has its runs, they simply carry no recorded hand-off.
+    this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
+  }
+
+  #addColumnIfMissing(table: string, column: string, type: string): void {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly {
+      name: string;
+    }[];
+    if (!columns.some((existing) => existing.name === column)) {
+      this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   async save(run: AgentRun): Promise<void> {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, status, events, lease_id, failure, result, created_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
            lease_id = excluded.lease_id,
            failure = excluded.failure,
            result = excluded.result,
-           completed_at = excluded.completed_at`,
+           completed_at = excluded.completed_at,
+           hand_off = excluded.hand_off`,
       )
       .run(
         run.id,
         run.agentId,
         run.prompt,
         run.environmentInstanceId,
+        run.projectId ?? null,
         run.status,
         JSON.stringify(run.events),
         run.leaseId ?? null,
@@ -95,6 +122,7 @@ export class SqliteRunStore implements RunStore {
         run.result ? JSON.stringify(run.result) : null,
         run.createdAt,
         run.completedAt ?? null,
+        run.handOff ? JSON.stringify(run.handOff) : null,
       );
   }
 
@@ -210,18 +238,165 @@ export interface SqliteStoreOptions {
 }
 
 /**
- * Unified SQLite storage for Sprout, managing both runs and leases
- * through a single database handle (ADR-0002).
+ * SQLite-backed storage for projects (ADR-0002).
+ *
+ * A project is read and written as a whole — its rules, environment set, and
+ * memberships belong together — so it is stored as one JSON document keyed by
+ * id rather than normalized into child tables.
+ */
+export class SqliteProjectStore implements ProjectStore {
+  readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
+
+  constructor(options: { filename: string } | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+    }
+    this.#init();
+  }
+
+  #init(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        document TEXT NOT NULL
+      );
+    `);
+  }
+
+  async save(project: Project): Promise<void> {
+    this.#db
+      .prepare(
+        `INSERT INTO projects (id, document) VALUES (?, ?)
+         ON CONFLICT(id) DO UPDATE SET document = excluded.document`,
+      )
+      .run(project.id, JSON.stringify(project));
+  }
+
+  async get(projectId: string): Promise<Project | undefined> {
+    const row = this.#db.prepare('SELECT document FROM projects WHERE id = ?').get(projectId) as
+      | { readonly document: string }
+      | undefined;
+    return row ? (JSON.parse(row.document) as Project) : undefined;
+  }
+
+  async list(): Promise<readonly Project[]> {
+    const rows = this.#db
+      .prepare('SELECT document FROM projects ORDER BY id')
+      .all() as unknown as readonly { readonly document: string }[];
+    return rows.map((row) => JSON.parse(row.document) as Project);
+  }
+
+  close(): void {
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
+  }
+}
+
+/**
+ * SQLite-backed storage for engine session keys (ADR-0002).
+ *
+ * The table's primary key is the identity tuple, so a re-run for the same agent
+ * in the same environment and working directory replaces its own key rather than
+ * accumulating rows. The key itself is an opaque string: Sprout never parses it.
+ */
+export class SqliteSessionKeyStore implements SessionKeyStore {
+  readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
+
+  constructor(options: { filename: string } | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+    }
+    this.#init();
+  }
+
+  #init(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_session_keys (
+        slot TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        environment_instance_id TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  async get(identity: SessionKeyIdentity): Promise<StoredSessionKey | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM agent_session_keys WHERE slot = ?')
+      .get(sessionKeyId(identity)) as unknown | undefined;
+    return row ? toStoredSessionKey(row as SessionKeyRow) : undefined;
+  }
+
+  async save(record: StoredSessionKey): Promise<void> {
+    this.#db
+      .prepare(
+        `INSERT INTO agent_session_keys
+           (slot, agent_id, engine, environment_instance_id, working_directory, session_key, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(slot) DO UPDATE SET
+           session_key = excluded.session_key,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        sessionKeyId(record),
+        record.agentId,
+        record.engine,
+        record.environmentInstanceId,
+        record.workingDirectory,
+        record.key,
+        record.updatedAt,
+      );
+  }
+
+  async delete(identity: SessionKeyIdentity): Promise<void> {
+    this.#db.prepare('DELETE FROM agent_session_keys WHERE slot = ?').run(sessionKeyId(identity));
+  }
+
+  async list(): Promise<readonly StoredSessionKey[]> {
+    const rows = this.#db
+      .prepare('SELECT * FROM agent_session_keys ORDER BY updated_at DESC')
+      .all() as unknown as SessionKeyRow[];
+    return rows.map(toStoredSessionKey);
+  }
+
+  close(): void {
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
+  }
+}
+
+/**
+ * Unified SQLite storage for Sprout, managing runs, leases, projects, and
+ * session keys through a single database handle (ADR-0002).
  */
 export class SqliteStore {
   readonly db: DatabaseSync;
   readonly runs: SqliteRunStore;
   readonly leases: SqliteLeaseStore;
+  readonly projects: SqliteProjectStore;
+  readonly sessionKeys: SqliteSessionKeyStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
     this.runs = new SqliteRunStore({ db: this.db });
     this.leases = new SqliteLeaseStore({ db: this.db });
+    this.projects = new SqliteProjectStore({ db: this.db });
+    this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
   }
 
   close(): void {
@@ -244,17 +419,42 @@ function toLease(row: LeaseRow): EnvironmentLease {
 
 function toRun(row: RunRow): AgentRun {
   const result = row.result !== null ? (JSON.parse(row.result) as AgentRun['result']) : undefined;
+  const handOff =
+    row.hand_off !== null ? (JSON.parse(row.hand_off) as RunHandOff) : undefined;
   return {
     id: row.id,
     agentId: row.agent_id,
     prompt: row.prompt,
     environmentInstanceId: row.environment_instance_id,
+    ...(row.project_id !== null ? { projectId: row.project_id } : {}),
     status: row.status as AgentRunStatus,
     events: JSON.parse(row.events) as AgentRunEvent[],
+    ...(handOff !== undefined ? { handOff } : {}),
     ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),
     ...(row.failure !== null ? { failure: row.failure } : {}),
     ...(result !== undefined ? { result } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
+  };
+}
+
+interface SessionKeyRow {
+  readonly slot: string;
+  readonly agent_id: string;
+  readonly engine: string;
+  readonly environment_instance_id: string;
+  readonly working_directory: string;
+  readonly session_key: string;
+  readonly updated_at: number;
+}
+
+function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
+  return {
+    agentId: row.agent_id,
+    engine: row.engine,
+    environmentInstanceId: row.environment_instance_id,
+    workingDirectory: row.working_directory,
+    key: row.session_key,
+    updatedAt: row.updated_at,
   };
 }

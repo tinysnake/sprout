@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { AgyEngineAdapter, AgySession } from './agy.ts';
+import { AGY_CONTRACT_HOOK_NAME, AGY_CONTRACT_PAYLOAD_ENV } from './agy-contract-hook.ts';
 import type { AgentRunEvent } from './port.ts';
 
 /**
@@ -125,6 +129,9 @@ function adapterFor(onRun: (process: FakeAgyProcess) => void, options: Record<st
   const argv: string[][] = [];
   const adapter = new AgyEngineAdapter({
     binaryPath: '/usr/bin/true',
+    // Tests never touch the operator's real agy configuration.
+    configDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-config-')),
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
     ...(options.skipPermissions === true ? { skipPermissions: true } : {}),
     spawnProcess: (_binary, args) => {
       argv.push([...args]);
@@ -196,12 +203,26 @@ test('skipPermissions is opt-in and comes before --print', async () => {
   assert.ok(args.indexOf('--dangerously-skip-permissions') < args.indexOf('--print=go'));
 });
 
-test('agy has no system-prompt flag, so instructions are not passed as a flag', async () => {
-  // `agy 1.2.2` has no system-prompt surface at all: `--append-system-prompt`
-  // does not exist. Prepending the project contract to the prompt would make it
-  // per-turn and visible to the model as user content, so the adapter deliberately
-  // does neither and the gap is recorded on the map instead.
-  const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'ok'));
+test('agy has no system-prompt flag, so the contract is injected through its config hook', async () => {
+  // `agy 1.2.2` has no system-prompt surface (`--append-system-prompt` does not
+  // exist) *and* does not read a project `AGENTS.md` in headless mode, so the
+  // adapter installs a `SessionStart` hook in agy's global customization root
+  // that injects the contract as an ephemeral system message. Nothing
+  // contract-shaped ever reaches argv or the prompt.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const payloadDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-payload-'));
+  const argv: string[][] = [];
+  let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory,
+    spawnProcess: (_binary, args, env) => {
+      argv.push([...args]);
+      spawnedEnv = env;
+      return new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok'));
+    },
+  });
   const session = await adapter.startSession({
     agentId: 'scout',
     workingDirectory: '/tmp',
@@ -215,6 +236,77 @@ test('agy has no system-prompt flag, so instructions are not passed as a flag', 
     'agy does not define --append-system-prompt',
   );
   assert.ok(!args.includes('You are Scout.'), 'instructions are not injected into argv');
+
+  // The hook is installed and carries the contract payload; the run is spawned
+  // with the env var that selects that payload.
+  const hooks = JSON.parse(readFileSync(join(configDirectory, 'hooks.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  assert.ok(hooks[AGY_CONTRACT_HOOK_NAME], 'the Sprout contract hook is registered');
+  assert.equal(session.contractDelivery?.mechanism, 'engine-hook');
+  const payloadPath = spawnedEnv?.[AGY_CONTRACT_PAYLOAD_ENV];
+  assert.ok(payloadPath, 'the run is spawned with the env var selecting its contract payload');
+  assert.match(
+    readFileSync(payloadPath, 'utf8'),
+    /You are Scout\./,
+    'the payload carries the assembled contract',
+  );
+
+  await session.close();
+});
+
+test('the agy adapter installs the hook command its platform actually runs', async () => {
+  // C21-005: `agy` runs hook commands through `sh -c` on Unix and `cmd /c` on
+  // Windows, and Windows is a supported environment target (O2, #5). The adapter
+  // must pass the platform through so a Windows environment gets a batch entry
+  // rather than a `sh` invocation that does not exist there.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
+    hookPlatform: 'windows',
+    spawnProcess: () => new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok')),
+  });
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    instructions: 'You are Scout.',
+  });
+
+  const hooks = JSON.parse(readFileSync(join(configDirectory, 'hooks.json'), 'utf8')) as Record<
+    string,
+    { SessionStart?: { command?: string }[] }
+  >;
+  const command = hooks[AGY_CONTRACT_HOOK_NAME]?.SessionStart?.[0]?.command ?? '';
+  assert.match(command, /sprout-project-contract\.cmd/, 'the Windows entry is a batch file');
+  assert.ok(!/^\s*sh\b/.test(command), 'the Windows entry never invokes sh');
+  assert.equal(session.contractDelivery?.mechanism, 'engine-hook');
+  await session.close();
+});
+
+test('the contract hook is inert without the payload env var', async () => {
+  // The hook always runs for agy; it must do nothing unless Sprout set the env
+  // var for this run, so installing it cannot affect agy runs Sprout did not
+  // start.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
+    spawnProcess: () => new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok')),
+  });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  await collect(session.run('go').events);
+
+  assert.equal(session.contractDelivery, undefined, 'no contract, no delivery reported');
+  assert.equal(
+    existsSync(join(configDirectory, 'hooks.json')),
+    false,
+    'no hook is installed when there is no contract',
+  );
+  await session.close();
 });
 
 test('the conversation id from the init frame is reused on the next turn', async () => {
@@ -237,6 +329,52 @@ test('the conversation id from the init frame is reused on the next turn', async
   );
   // agy assigns the id; Sprout does not choose one. Both facts are worth recording.
   assert.equal(spawned[0] !== spawned[1], true, 'each turn is its own process');
+});
+
+test('a stored conversation id resumes the conversation on the first turn', async () => {
+  // agy assigns conversation ids, so a stored one is a *hint*: it is offered
+  // via --conversation and the engine reports which conversation it actually
+  // used in its init frame.
+  const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'ok'));
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'prior-conversation-id',
+  });
+  await collect(session.run('continue').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--conversation') + 1], 'prior-conversation-id');
+});
+
+test('a stale conversation id is replaced by the id agy actually used', async () => {
+  // agy soft-falls-back on a stale id (#19): it warns and starts a fresh
+  // conversation with a NEW id. Sprout must then continue that new conversation
+  // on later turns, not re-offer the id agy refused, and must report the new id
+  // so the core persists it.
+  const { adapter, argv } = adapterFor((process) => {
+    // Every turn reports the engine-assigned id, ignoring the stale hint.
+    replaySuccessfulTurn(process, 'ok');
+  });
+
+  const session: AgySession = (await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    resumeSessionKey: 'stale-id-that-agy-refused',
+  })) as AgySession;
+  assert.equal(session.engineSessionKey, 'stale-id-that-agy-refused', 'the hint is all that is known yet');
+
+  await collect(session.run('first').events);
+  assert.equal(session.engineSessionKey, '1354d8d5-7266-479c-88cc-83abd1282acc');
+
+  await collect(session.run('second').events);
+  const idFlag = (args: readonly string[]) => args[args.indexOf('--conversation') + 1];
+  assert.equal(
+    idFlag(argv[1] ?? []),
+    '1354d8d5-7266-479c-88cc-83abd1282acc',
+    'the second turn uses the id agy assigned, not the stale one',
+  );
 });
 
 test('stopping an agy turn kills the process and settles the turn', async () => {
@@ -305,4 +443,8 @@ test('agy declares incremental streaming and its own id', () => {
   assert.equal(adapter.id, 'agy');
   assert.equal(adapter.capabilities.streaming, 'incremental');
   assert.equal(adapter.capabilities.supportsInterrupt, true);
+  // `agy` has no system-prompt flag, but it does take instructions through its
+  // config hook as an injected system message, which is out-of-band, not a file
+  // the engine discovers.
+  assert.equal(adapter.capabilities.standingInstructions, 'out-of-band');
 });

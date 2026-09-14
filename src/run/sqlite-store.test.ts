@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from './model.ts';
 import { SqliteRunStore, SqliteLeaseStore, SqliteStore } from './sqlite-store.ts';
@@ -74,6 +75,84 @@ test('a run with no optional fields round-trips without inventing them', async (
   store.close();
 });
 
+test('a run records the environment instance and project it used, and they survive a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-project-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ environmentInstanceId: 'container-1', projectId: 'project-sprout' }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.equal(restored?.environmentInstanceId, 'container-1');
+  assert.equal(restored?.projectId, 'project-sprout');
+});
+
+test('a run records the hand-off it was given, so "was a hand-off attached" is durable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-handoff-'));
+  const dbPath = join(dir, 'sprout.db');
+  const handOff = {
+    previousEnvironmentInstanceId: 'mac-mini-1',
+    text: '- Completed in mac-mini-1: earlier work',
+    sourceRunIds: ['run-0'],
+  } as const;
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ environmentInstanceId: 'container-1', handOff }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.deepEqual(restored?.handOff, handOff);
+});
+
+test('a run with no hand-off round-trips without inventing one', async () => {
+  const store = new SqliteRunStore({ filename: ':memory:' });
+  await store.save(sampleRun());
+  const restored = await store.get('run-1');
+  store.close();
+  assert.equal('handOff' in (restored ?? {}), false);
+});
+
+test('a run written before the project and hand-off columns existed still reads back', async () => {
+  // The columns were added after runs shipped; a database from before them must
+  // keep its runs rather than fail, and they simply carry no recorded project or
+  // hand-off.
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      events TEXT NOT NULL,
+      lease_id TEXT,
+      failure TEXT,
+      result TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+  `);
+  db.exec(`INSERT INTO agent_runs
+    (id, agent_id, prompt, environment_instance_id, status, events, created_at)
+    VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  const store = new SqliteRunStore({ db });
+  const restored = await store.get('legacy-1');
+  assert.equal(restored?.environmentInstanceId, 'mac-mini-1');
+  assert.equal('projectId' in (restored ?? {}), false);
+  assert.equal('handOff' in (restored ?? {}), false);
+
+  // And a new run can still be written through the migrated schema.
+  await store.save(sampleRun({ id: 'after-migration' }));
+  assert.equal((await store.get('after-migration'))?.status, 'completed');
+  store.close();
+});
+
 test('listing runs returns them newest first', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   await store.save(sampleRun({ id: 'older', createdAt: 1_000 }));
@@ -141,7 +220,7 @@ test('saving the same lease again updates state and expiry', () => {
   store.close();
 });
 
-test('SqliteStore manages both runs and leases over one SQLite connection', async () => {
+test('SqliteStore manages runs, leases, and session keys over one SQLite connection', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-unified-'));
   const store = new SqliteStore({ filename: join(dir, 'sprout.db') });
 
@@ -156,13 +235,28 @@ test('SqliteStore manages both runs and leases over one SQLite connection', asyn
     expiresAt: 60_000,
     state: 'active',
   });
+  await store.sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'pi',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+    key: 'sess-unified',
+    updatedAt: 2_000,
+  });
 
   const restoredRun = await store.runs.get('run-unified');
   const restoredLease = store.leases.get('lease-unified');
+  const restoredKey = await store.sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'pi',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+  });
 
   assert.equal(restoredRun?.id, 'run-unified');
   assert.equal(restoredLease?.id, 'lease-unified');
   assert.equal(restoredLease?.runId, 'run-unified');
+  assert.equal(restoredKey?.key, 'sess-unified');
 
   store.close();
 });

@@ -20,6 +20,7 @@ import type { AgentRunEvent } from '../src/engine/port.ts';
 import { DockerRuntime } from '../src/environment/container.ts';
 import { EnvironmentPool } from '../src/environment/pool.ts';
 import { AgentRegistry } from '../src/agent/registry.ts';
+import { ProjectRegistry } from '../src/project/registry.ts';
 import { InMemoryRunStore } from '../src/run/store.ts';
 import { RunOrchestrator } from '../src/run/orchestrator.ts';
 import { ContainerCarrier, containerWorkerEntry } from '../src/worker/container-carrier.ts';
@@ -126,16 +127,25 @@ const connection = await carrier.start();
 log(`[worker] engines reported inside the container: ${[...connection.adapters.keys()].join(', ') || '(none)'}`);
 
 const orchestrator = new RunOrchestrator({
-  engines: connection.adapters,
+  engines: () => Promise.resolve(connection.adapters),
   agents: new AgentRegistry([
     {
       id: 'scout',
       name: 'Scout',
       engine: 'codex',
-      environmentInstanceId: instanceId,
       capability: 'agent-run',
-      workingDirectory: mountRoot,
       instructions: 'You are Scout. Answer directly and briefly.',
+    },
+  ]),
+  projects: new ProjectRegistry([
+    {
+      id: 'sprout-container-check',
+      goal: 'Verify the live container run path.',
+      rules: [],
+      availableEnvironmentInstanceIds: [instanceId],
+      memberships: [
+        { agentId: 'scout', responsibilities: ['Answer directly'], collaborationInstructions: '' },
+      ],
     },
   ]),
   pool: new EnvironmentPool({
@@ -149,7 +159,7 @@ const orchestrator = new RunOrchestrator({
         ],
       },
     ],
-    instances: [{ id: instanceId, definitionId: 'container-linux' }],
+    instances: [{ id: instanceId, definitionId: 'container-linux', workingDirectory: mountRoot }],
   }),
   store: new InMemoryRunStore(),
   leaseTtlMs: 600_000,

@@ -1,9 +1,15 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
+import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
+import type { ProjectRegistry } from '../project/registry.ts';
+import { resolveEnvironmentInstance } from '../project/resolve.ts';
+import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
+import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
@@ -17,17 +23,46 @@ import type { RunStore } from './store.ts';
 
 export interface RunOrchestratorOptions {
   /**
-   * Where engine adapters come from.
+   * Where engine adapters come from, keyed by environment instance.
    *
-   * A plain map satisfies this for tests and for adapters that never disappear.
-   * A function is used when adapters must be resolved per run, which is what lets
-   * an environment worker be restarted after it dies instead of failing every
-   * later run against a dead connection (ADR-0003).
+   * A plain map is the single-instance case: it satisfies this for tests and for
+   * callers with one fixed worker. A function keyed by instance id is what makes
+   * execution follow the resolved and leased instance instead of a global pool,
+   * which is the F1 fix (#18): the adapter that runs a run must belong to the
+   * same environment instance the run leases and records.
+   *
+   * A function (rather than a value) also lets an environment worker be restarted
+   * after it dies instead of failing every later run against a dead connection
+   * (ADR-0003).
    */
-  readonly engines: ReadonlyMap<string, EngineAdapter> | (() => Promise<ReadonlyMap<string, EngineAdapter>>);
+  readonly engines:
+    | ReadonlyMap<string, EngineAdapter>
+    | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
+  /**
+   * Where an agent's project memberships come from. Optional so existing callers
+   * and tests that never resolve an environment need not supply one; a run by an
+   * agent with no project fails with an explicit message rather than a guess.
+   */
+  readonly projects?: ProjectRegistry;
   readonly pool: EnvironmentPool;
   readonly store: RunStore;
+  /**
+   * Durable engine session keys, so a later run in the same environment and
+   * working directory continues the prior conversation instead of repeating it.
+   *
+   * Optional: a map of empty stores (and tests that do not exercise
+   * continuation) leaves every run on its fresh-session path.
+   */
+  readonly sessionKeys?: SessionKeyStore;
+  /**
+   * Every persisted run, used to build a cross-environment hand-off.
+   *
+   * Defaults to the run store, so production reads the same durable history the
+   * run is recorded in. Exposed so a test can supply an explicit history without
+   * seeding a store.
+   */
+  readonly runs?: () => Promise<readonly AgentRun[]>;
   readonly leaseTtlMs?: number;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
@@ -39,11 +74,40 @@ export interface SubmitRunRequest {
   readonly prompt: string;
 }
 
+/**
+ * The outcome of one attempt to run a session.
+ *
+ * A failure carries `resumeRefused`: true only when the engine explicitly told
+ * us it would not resume the supplied key and did no work. That is the one
+ * failure the caller may retry from a fresh session. Everything else — an
+ * initialization failure, a missing binary, an authentication failure, a turn
+ * that failed after emitting events — is reported as a plain failure so the
+ * stored key is neither discarded nor reused unsafely.
+ */
+type SessionAttempt =
+  | {
+      readonly ok: true;
+      readonly run: AgentRun;
+      readonly result: EngineTurnResult;
+      readonly engineSessionKey: string | undefined;
+    }
+  | {
+      readonly ok: false;
+      readonly run: AgentRun;
+      readonly message: string;
+      /** True only when the engine refused the supplied key and did no work. */
+      readonly resumeRefused: boolean;
+    };
+
 export class RunOrchestrator {
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
+  readonly #projects: ProjectRegistry | undefined;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
+  readonly #sessionKeys: SessionKeyStore | undefined;
+  /** Reads the durable run history a hand-off is derived from. */
+  readonly #runHistory: () => Promise<readonly AgentRun[]>;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
 
@@ -56,8 +120,11 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#engines = options.engines;
     this.#agents = options.agents;
+    this.#projects = options.projects;
     this.#pool = options.pool;
     this.#store = options.store;
+    this.#sessionKeys = options.sessionKeys;
+    this.#runHistory = options.runs ?? (() => options.store.list());
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
@@ -87,13 +154,38 @@ export class RunOrchestrator {
       return { id: run.id };
     }
 
-    const recorded: AgentRun = { ...run, environmentInstanceId: agent.environmentInstanceId };
+    // Resolve the environment before recording the run, so the persisted run
+    // names the instance it actually used rather than an agent's fixed device.
+    const resolution = resolveEnvironmentInstance(
+      this.#projects?.forAgent(agent.id) ?? [],
+      agent.capability,
+      this.#pool,
+    );
+    if (!resolution.ok) {
+      await this.#finish(run, 'failed', {
+        status: 'failed',
+        message: this.#resolutionFailure(agent, resolution.reason),
+      });
+      return { id: run.id };
+    }
+
+    const recorded: AgentRun = {
+      ...run,
+      environmentInstanceId: resolution.instanceId,
+      projectId: resolution.projectId,
+    };
     this.#runs.set(recorded.id, recorded);
     await this.#store.save(recorded);
 
     const settled = this.#execute(recorded, agent);
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
+  }
+
+  #resolutionFailure(agent: AgentDefinition, reason: 'no-project' | 'no-available-environment'): string {
+    return reason === 'no-project'
+      ? `no project grants agent ${agent.id} access to an environment for capability: ${agent.capability}`
+      : `no available environment for capability: ${agent.capability}`;
   }
 
   /** The current observable state of a run. */
@@ -224,8 +316,23 @@ export class RunOrchestrator {
   }
 
   async #execute(initial: AgentRun, agent: AgentDefinition): Promise<AgentRun> {
-    const engines =
-      typeof this.#engines === 'function' ? await this.#engines() : this.#engines;
+    // Adapters are resolved *for the instance this run resolved and will lease*,
+    // never from a global pool: a run that leases container-1 must execute on
+    // container-1's worker, or the run record would name a machine it never used.
+    let engines: ReadonlyMap<string, EngineAdapter>;
+    try {
+      engines =
+        typeof this.#engines === 'function'
+          ? await this.#engines(initial.environmentInstanceId)
+          : this.#engines;
+    } catch (error) {
+      // A worker that cannot be started is a run failure with a reason, not a
+      // rejected promise the caller has to interpret.
+      return this.#finish(initial, 'failed', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     const adapter = engines.get(agent.engine);
     if (!adapter) {
       return this.#finish(initial, 'failed', {
@@ -233,19 +340,19 @@ export class RunOrchestrator {
         message: `no engine adapter registered for: ${agent.engine}`,
       });
     }
-
     const acquired = this.#pool.acquireLease({
-      instanceId: agent.environmentInstanceId,
+      instanceId: initial.environmentInstanceId,
       capability: agent.capability,
       holderId: agent.id,
       runId: initial.id,
       ttlMs: this.#leaseTtlMs,
     });
     if (!acquired.ok) {
+      const instanceId = initial.environmentInstanceId;
       const busyMessage =
         acquired.state === 'recovering'
-          ? `environment busy: ${agent.environmentInstanceId} is in recovery (held by ${acquired.heldBy ?? 'another run'})`
-          : `environment busy: ${agent.environmentInstanceId} is leased by ${acquired.heldBy ?? 'another run'}`;
+          ? `environment busy: ${instanceId} is in recovery (held by ${acquired.heldBy ?? 'another run'})`
+          : `environment busy: ${instanceId} is leased by ${acquired.heldBy ?? 'another run'}`;
       return this.#finish(initial, 'failed', {
         status: 'failed',
         message:
@@ -256,45 +363,253 @@ export class RunOrchestrator {
     }
 
     const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
+    let prepared = running;
 
-    let session: EngineSession;
     try {
-      session = await adapter.startSession({
+      // Assemble what this run is presented with, before the session starts: the
+      // project contract (standing instructions, on every run) and, when the run
+      // moved to a different environment instance than the agent's previous run, a
+      // fact-form hand-off. Both are deterministic functions of persisted facts.
+      // Keep all setup inside the lease guard so a rejected assembly is persisted
+      // as a terminal failure and cannot leave the acquired lease active.
+      const workingDirectory = resolveWorkingDirectory(
+        this.#pool,
+        initial.environmentInstanceId,
+        agent,
+      );
+      const assembled = await this.#assembleInput(initial, agent, running.id);
+      prepared = await this.#advance(running, {
+        ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
+      });
+
+      // The continuation slot is `(agent, engine, environment instance, working
+      // directory)`. All four must match for a stored key to be reusable: the key
+      // belongs to one engine, lives in one environment's engine store, and (for
+      // Pi and opencode, #19) is coupled to the directory it was created in.
+      // Resolve it inside the lease guard: an absent instance directory and agent
+      // fallback is an explicit failed run, not a rejected promise that leaks a lease.
+      const identity: SessionKeyIdentity = {
         agentId: agent.id,
-        workingDirectory: agent.workingDirectory,
-        ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
-      });
-    } catch (error) {
-      this.#pool.releaseLease(acquired.lease.id);
-      return this.#finish(running, 'failed', {
-        status: 'failed',
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+        engine: agent.engine,
+        environmentInstanceId: initial.environmentInstanceId,
+        workingDirectory,
+      };
+      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
 
-    this.#sessions.set(running.id, session);
+      let attempt = await this.#runSession(
+        adapter,
+        agent,
+        assembled.prompt,
+        prepared,
+        stored?.key,
+        assembled.instructions,
+        workingDirectory,
+      );
 
-    try {
-      const turn = session.run(initial.prompt);
-      let current = running;
-      for await (const event of turn.events) {
-        current = await this.#advance(current, {
-          events: [...current.events, event],
+      // A stored key the engine refuses must not fail the run. Pi and `agy`
+      // soft-fall-back themselves (#19), but Codex and `opencode` hard-fail on a
+      // stale key, so the orchestrator degrades for them: forget the refused key
+      // and retry once from a fresh session. The `resumeRefused` gate is the
+      // important part — it is set only when the engine *explicitly* refused the
+      // supplied key and did no work. An initialization failure, a missing
+      // binary, an authentication failure, or a valid resume whose first turn
+      // fails before emitting events is a plain failure: retrying it fresh would
+      // hide a real engine problem and would discard a key that may still be
+      // good, so it is reported instead.
+      if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
+        if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
+        attempt = await this.#runSession(
+          adapter,
+          agent,
+          assembled.prompt,
+          prepared,
+          undefined,
+          assembled.instructions,
+          workingDirectory,
+        );
+      }
+
+      if (!attempt.ok) {
+        return this.#finish(attempt.run, 'failed', {
+          status: 'failed',
+          message: attempt.message,
         });
       }
 
-      const result = await turn.completion;
-      return await this.#settleWithResult(current, result);
+      // Persist the key the run actually used, not the one it was handed. A
+      // run that degraded to a fresh session stores the fresh key, so the next
+      // run continues *that* session rather than re-offering the refused one.
+      if (this.#sessionKeys && attempt.result.status === 'completed') {
+        const key = attempt.engineSessionKey;
+        if (key !== undefined && key !== '') {
+          await this.#sessionKeys.save({ ...identity, key, updatedAt: this.#clock.now() });
+        }
+      }
+      return await this.#settleWithResult(attempt.run, attempt.result);
     } catch (error) {
-      return this.#finish(running, 'failed', {
+      return this.#finish(prepared, 'failed', {
         status: 'failed',
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      this.#sessions.delete(running.id);
       this.#pool.releaseLease(acquired.lease.id);
+    }
+  }
+
+  /**
+   * One attempt at a run's engine session.
+   *
+   * Owns the session's lifetime and event streaming, but not the lease or the
+   * run's terminal state: the caller decides whether to retry a resume-key
+   * refusal before settling the run. `resumeRefused` exists so that decision is
+   * based on the engine's own classification of the failure, not on parsing
+   * engine messages or on the bare fact that no event was emitted. It is true
+   * for a refused session start and for an engine that reports a refused resume
+   * through its turn result; a session that starts and then fails for any other
+   * reason is not a refusal.
+   */
+  async #runSession(
+    adapter: EngineAdapter,
+    agent: AgentDefinition,
+    prompt: string,
+    running: AgentRun,
+    resumeKey: string | undefined,
+    instructions: string | undefined,
+    workingDirectory: string,
+  ): Promise<SessionAttempt> {
+    let session: EngineSession;
+    try {
+      session = await adapter.startSession({
+        agentId: agent.id,
+        workingDirectory,
+        // The assembled project contract is re-sent on every run, because it is
+        // the standing agreement the agent works under and must not depend on a
+        // prior session having carried it (O5).
+        ...(instructions !== undefined ? { instructions } : {}),
+        ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        run: running,
+        message: error instanceof Error ? error.message : String(error),
+        // Only the engine's explicit refusal of the supplied key is retryable.
+        // Any other start failure is a real failure and must not discard a key.
+        resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
+      };
+    }
+
+    this.#sessions.set(running.id, session);
+    let current = running;
+    try {
+      const turn = session.run(prompt);
+      // The events iterator throws when a turn fails, so the *authoritative*
+      // outcome is read from `completion` afterwards. Reading it there is what
+      // lets a turn-level refusal (opencode exits 1 on a stale `--session`) be
+      // told apart from any other turn failure.
+      let streamError: unknown;
+      try {
+        for await (const event of turn.events) {
+          current = await this.#advance(current, {
+            events: [...current.events, event],
+          });
+        }
+      } catch (error) {
+        streamError = error;
+      }
+      const result = await turn.completion;
+      if (result.status === 'failed') {
+        // A turn-level failure is an attempt failure, not a completed run. It is
+        // retryable only when the engine classified it as a refused resume;
+        // every other failure (provider error, bad authentication, a crash) is
+        // reported as-is so the stored key survives untouched.
+        return {
+          ok: false,
+          run: current,
+          message: result.message,
+          resumeRefused: result.resumeRefused === true,
+        };
+      }
+      if (streamError !== undefined) {
+        // The stream failed without the turn reporting failure. That is not a
+        // refusal, and it must not be retried fresh.
+        return {
+          ok: false,
+          run: current,
+          message: streamError instanceof Error ? streamError.message : String(streamError),
+          resumeRefused: false,
+        };
+      }
+      return { ok: true, run: current, result, engineSessionKey: session.engineSessionKey };
+    } catch (error) {
+      return {
+        ok: false,
+        run: current,
+        message: error instanceof Error ? error.message : String(error),
+        // A thrown error is never a resume refusal: the engine had a working
+        // session and failed while doing the work (or reading its result).
+        resumeRefused: false,
+      };
+    } finally {
+      this.#sessions.delete(running.id);
       await session.close();
     }
+  }
+
+  /**
+   * Assemble what one run is presented with: the project contract and, on an
+   * environment change, a fact-form hand-off.
+   *
+   * Both halves are deterministic and read only persisted facts. The contract is
+   * assembled from the project the run resolved into, plus the agent's own
+   * configuration. The hand-off is derived from the agent's own prior runs and is
+   * attached only when this run's environment instance differs from the previous
+   * run's. When the instance matches, the run is the continued-session case
+   * (ADR-0004), so no hand-off is added and the prompt is the user's alone.
+   */
+  async #assembleInput(
+    run: AgentRun,
+    agent: AgentDefinition,
+    currentRunId: string,
+  ): Promise<{ prompt: string; instructions: string | undefined; handOff: AgentRun['handOff'] }> {
+    const project = run.projectId !== undefined ? this.#projects?.get(run.projectId) : undefined;
+    const contract =
+      project !== undefined
+        ? renderProjectContract(
+            assembleProjectContract({
+              project,
+              agentId: agent.id,
+              ...(agent.instructions !== undefined
+                ? { agentInstructions: agent.instructions }
+                : {}),
+            }),
+          )
+        : // No project means the run could not have resolved an environment, so
+          // this is unreachable in practice; falling back to the agent's own
+          // instructions keeps the agent's standing configuration intact.
+          agent.instructions;
+
+    const handOff = buildHandOffContext(await this.#runHistory(), {
+      agentId: agent.id,
+      currentRunId,
+      currentCreatedAt: run.createdAt,
+    });
+    // ADR-0004: a session key is scoped to one (agent, engine, instance,
+    // directory), so a stored key only exists for the same environment instance.
+    // An environment change therefore means the run is on its fresh-session path,
+    // and a hand-off is exactly what closes the resulting gap.
+    const attach =
+      handOff !== undefined &&
+      shouldAttachHandOff({
+        previousEnvironmentInstanceId: handOff.previousEnvironmentInstanceId,
+        currentEnvironmentInstanceId: run.environmentInstanceId,
+      });
+
+    return {
+      prompt: attach ? renderHandOffPrompt(handOff, run.prompt) : run.prompt,
+      instructions: contract,
+      handOff: attach ? handOff : undefined,
+    };
   }
 
   async #settleWithResult(run: AgentRun, result: EngineTurnResult): Promise<AgentRun> {
@@ -329,4 +644,25 @@ export class RunOrchestrator {
     for (const observer of this.#observers) observer(next);
     return next;
   }
+}
+
+/**
+ * The directory a run executes in, inside the instance it actually uses.
+ *
+ * A path is a fact about the environment (ADR-0003): the same agent needs
+ * `/sprout` inside a container and a host path on macOS. The resolved instance is
+ * therefore authoritative, and the agent's value is only a fallback for an
+ * environment that cannot state its own directory (F1 suggestion, #18).
+ */
+function resolveWorkingDirectory(
+  pool: Pick<EnvironmentPool, 'instance'>,
+  instanceId: string,
+  agent: AgentDefinition,
+): string {
+  const fromInstance = pool.instance(instanceId)?.workingDirectory;
+  if (fromInstance !== undefined) return fromInstance;
+  if (agent.workingDirectory !== undefined) return agent.workingDirectory;
+  throw new Error(
+    `no working directory for environment instance ${instanceId} and agent ${agent.id}`,
+  );
 }

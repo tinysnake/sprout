@@ -9,7 +9,8 @@ import type {
   EngineTurnResult,
   StartSessionRequest,
 } from './port.ts';
-import { LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
+import { EngineResumeRefusedError } from './port.ts';
+import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
 
@@ -69,7 +70,14 @@ export interface CodexProcess {
 
 export class CodexEngineAdapter implements EngineAdapter {
   readonly id = 'codex';
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    // Codex takes standing instructions out-of-band: `baseInstructions` is
+    // passed on `thread/start` and `thread/resume`, so the project contract is
+    // never injected into a prompt.
+    standingInstructions: 'out-of-band',
+  } as const;
   readonly #options: CodexAdapterOptions;
 
   constructor(options: CodexAdapterOptions) {
@@ -112,12 +120,34 @@ export class CodexEngineAdapter implements EngineAdapter {
     }
     transport.notify('initialized', {});
 
-    const started = await transport.request<{ thread: { id: string } }>('thread/start', {
-      cwd: request.workingDirectory,
-      sandbox: this.#options.sandbox ?? 'read-only',
-      approvalPolicy: 'never',
-      ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
-    });
+    // Codex assigns thread ids, but `thread/resume` returns the same id, so a
+    // stored key is passed straight through. A stale key is a hard failure
+    // (`no rollout found for thread id …`, #19); the orchestrator owns degrading
+    // that to a fresh session, so this adapter does not swallow it. The daemon is
+    // closed before rethrowing, because a refused resume must not leak a process.
+    let started: { thread: { id: string } };
+    try {
+      started = await this.#openThread(transport, request);
+    } catch (error) {
+      transport.close();
+      process.kill('SIGTERM');
+      // Only an app-server *answer* that refuses the supplied thread is a resume
+      // refusal. A transport failure (the daemon died before answering) is a
+      // `JsonRpcTransportError`, and any other error — including an
+      // authentication or authorization failure that happens to arrive on this
+      // request — is rethrown unchanged, so the core never discards the stored
+      // key over an unrelated problem.
+      if (
+        request.resumeSessionKey !== undefined &&
+        error instanceof JsonRpcError &&
+        !(error instanceof JsonRpcTransportError) &&
+        error.method === 'thread/resume' &&
+        isRefusedResume(error.message)
+      ) {
+        throw new EngineResumeRefusedError(request.resumeSessionKey, error.message);
+      }
+      throw error;
+    }
 
     session = new CodexSession({
       transport,
@@ -127,6 +157,41 @@ export class CodexEngineAdapter implements EngineAdapter {
     });
     return session;
   }
+
+  /** Open the thread for a session: resume a stored one, or start a fresh one. */
+  async #openThread(
+    transport: JsonRpcTransport,
+    request: StartSessionRequest,
+  ): Promise<{ thread: { id: string } }> {
+    if (request.resumeSessionKey !== undefined) {
+      return transport.request<{ thread: { id: string } }>('thread/resume', {
+        threadId: request.resumeSessionKey,
+        cwd: request.workingDirectory,
+        sandbox: this.#options.sandbox ?? 'read-only',
+        approvalPolicy: 'never',
+        ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+      });
+    }
+    return transport.request<{ thread: { id: string } }>('thread/start', {
+      cwd: request.workingDirectory,
+      sandbox: this.#options.sandbox ?? 'read-only',
+      approvalPolicy: 'never',
+      ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+    });
+  }
+}
+
+/**
+ * Whether an app-server `thread/resume` error is a refused thread.
+ *
+ * Codex answered-but-refused shapes observed against `codex-cli 0.154.0`:
+ * `no rollout found for thread id <id>` for a well-formed id with no stored
+ * rollout, and `invalid session id: …` for an id Codex cannot parse. An
+ * authentication or provider failure that arrives on the same request does not
+ * match, so it stays an ordinary failure.
+ */
+function isRefusedResume(message: string): boolean {
+  return /no rollout found for thread id/i.test(message) || /invalid session id/i.test(message);
 }
 
 function spawnCodex(
@@ -175,6 +240,12 @@ interface CodexSessionOptions {
 
 export class CodexSession implements EngineSession {
   readonly sessionId: string;
+  /**
+   * Codex's engine session key is the thread id. Because `thread/resume` keeps
+   * the same id, it is known as soon as the session starts rather than only
+   * after a turn.
+   */
+  readonly engineSessionKey: string;
   readonly #transport: JsonRpcTransport;
   readonly #process: CodexProcess;
   readonly #threadId: string;
@@ -195,6 +266,7 @@ export class CodexSession implements EngineSession {
     this.#process = options.process;
     this.#threadId = options.threadId;
     this.sessionId = options.threadId;
+    this.engineSessionKey = options.threadId;
   }
 
   run(prompt: string): EngineTurn {

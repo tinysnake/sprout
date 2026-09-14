@@ -5,6 +5,7 @@ import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/
 import { EnvironmentPool } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import { AgentRegistry } from '../agent/registry.ts';
+import { ProjectRegistry } from '../project/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { createRunApi } from './api.ts';
@@ -15,6 +16,19 @@ const definition: EnvironmentDefinition = {
   capabilities: [{ name: 'agent-run', requiresLease: true }],
 };
 const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
+
+/** The project that gives Scout its environment access. */
+const projects = new ProjectRegistry([
+  {
+    id: 'project-sprout',
+    goal: 'Ship Sprout',
+    rules: [],
+    availableEnvironmentInstanceIds: ['mac-mini-1'],
+    memberships: [
+      { agentId: 'agent-scout', responsibilities: ['Investigate'], collaborationInstructions: '' },
+    ],
+  },
+]);
 
 function build(options: { settleAfterMs?: number } = {}) {
   const adapter = new ScriptedEngineAdapter({
@@ -34,7 +48,6 @@ function build(options: { settleAfterMs?: number } = {}) {
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
-      environmentInstanceId: 'mac-mini-1',
       capability: 'agent-run',
       workingDirectory: '/tmp',
     },
@@ -42,6 +55,7 @@ function build(options: { settleAfterMs?: number } = {}) {
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
+    projects,
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store: new InMemoryRunStore(),
     leaseTtlMs: 60_000,
@@ -200,7 +214,6 @@ test('runs persisted by a previous process are listed after a restart', async ()
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
-      environmentInstanceId: 'mac-mini-1',
       capability: 'agent-run',
       workingDirectory: '/tmp',
     },
@@ -214,6 +227,7 @@ test('runs persisted by a previous process are listed after a restart', async ()
   const first = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
+    projects,
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store,
   });
@@ -232,6 +246,7 @@ test('runs persisted by a previous process are listed after a restart', async ()
   const second = new RunOrchestrator({
     engines: new Map(),
     agents: registry,
+    projects,
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store,
   });
