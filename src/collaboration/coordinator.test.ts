@@ -9,7 +9,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
-import { CollaborationCoordinator, renderWakePrompt } from './coordinator.ts';
+import { CollaborationCoordinator, renderWakePrompt, type RunAdmitter } from './coordinator.ts';
 import { InMemoryCollaborationStore } from './store.ts';
 import type { WakeModel } from './model.ts';
 
@@ -179,6 +179,47 @@ test('renderWakePrompt presents the message verbatim without summarising it', ()
     'scout',
   );
   assert.match(prompt, /exact words: 42/);
+});
+
+test('every admitted wake submits the causal Message project as the run scope', async () => {
+  // A minimal admitter records the submission request, so the contract between
+  // the coordinator and the run seam is asserted directly: the run is scoped to
+  // the Message's Project, never left to the agent's first project.
+  const submissions: { agentId: string; prompt: string; projectId: string }[] = [];
+  const store = new InMemoryCollaborationStore();
+  const admitter: RunAdmitter = {
+    submit: async (request) => {
+      submissions.push({ ...request });
+      return { id: `run-${submissions.length}` };
+    },
+    waitFor: async (runId) => ({
+      id: runId,
+      agentId: 'scout',
+      prompt: '',
+      environmentInstanceId: '',
+      status: 'failed',
+      events: [],
+      createdAt: 0,
+    }),
+  };
+  const coordinator = new CollaborationCoordinator({
+    projects: new ProjectRegistry([project]),
+    store,
+    runs: admitter,
+  });
+
+  await coordinator.deliver({
+    projectId: 'project-sprout',
+    channel: 'direct',
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'go',
+    recipients: ['scout'],
+    deliveryKey: 'scope-1',
+  });
+
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0]?.agentId, 'scout');
+  assert.equal(submissions[0]?.projectId, 'project-sprout', 'the run is scoped to the Message project');
 });
 
 test('admission is idempotent even if a wake is admitted twice directly', async () => {
