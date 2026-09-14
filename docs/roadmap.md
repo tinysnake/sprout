@@ -64,12 +64,12 @@ Prove that one technical lead can use Sprout locally to coordinate multiple codi
 
 ### O1 — Controllable agent runs
 
-**Status**: In progress  
+**Status**: Evidenced  
 **Depends on**: None
 
 Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
 
-**Implementation evidence**: all four engines are implemented behind `src/engine/port.ts` (#10, #15, and the `agy`/`opencode` records), and they run **inside the environment worker**, so the core spawns no engine process (ADR-0003). Codex (#10) and Pi (#15) are verified end to end live, including tool progress, stop, and terminal states; `agy` is verified live through a real worker as well; `opencode` is implemented and covered by tests replaying its contract-verified protocol, but could not be exercised live (its default provider account has an insufficient balance), which is recorded as fog on the map.
+**Implementation evidence**: all four engines are implemented behind `src/engine/port.ts` (#10, #15, and the `agy`/`opencode` records in #14), and they run **inside the environment worker**, so the core spawns no engine process (ADR-0003). Codex (#10), Pi (#15), `agy` (#14), and `opencode` (#14) are all verified end to end live through real workers, including tool progress, stop, terminal states, and declared streaming granularities.
 
 **The run seam needed no change for any of the four lifecycles.** Codex is a long-lived supervised daemon, Pi is one process per turn resumed by a caller-chosen session id, `agy` is one process per turn resumed by an engine-assigned conversation id, and `opencode` is one process per turn resumed by an engine-assigned session id. That a single interface covers all four is the strongest evidence O1 has.
 
@@ -97,14 +97,14 @@ Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing ru
 
 Container, macOS, and Windows environments can be treated as a shared capability pool with safe access and lease semantics.
 
-**Evidence so far**: the environment model is settled and all checks below hold for **container and macOS**. Windows is unproven (#5).
+**Evidence so far**: the environment model is settled and all checks below hold for **container, macOS, and Windows** (#5, #10, #13).
 
-**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Since #13 **container** environments are implemented too: a real container instance hosts a worker that executes real Codex runs over the runtime exec channel, with Sprout's lease registry — not Docker — enforcing exclusivity. Windows is unproven (#5).
+**Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Since #13 **container** environments are implemented too: a real container instance hosts a worker that executes real Codex runs over the runtime exec channel, with Sprout's lease registry — not Docker — enforcing exclusivity. Since #5 **Windows** is implemented and live-verified: a remote physical Windows host runs a Sprout worker daemon via an SSH-tunneled carrier with scheduled-task boot autostart, successfully running real Codex and Pi turns end to end.
 
 **Outcome checks**:
 
 - Each target environment can report availability and relevant capabilities.
-  - Container and macOS implemented and checked. Windows unproven.
+  - Container, macOS, and Windows implemented and checked (#5, #10, #13).
 - An Agent can perform permitted read-only investigation without a lease. — evidenced
 - Capacity-intensive or mutating work requires a lease, and conflicting use is prevented.
   - Implemented for macOS (#10) and container (#13). Docker does **not** enforce mutual exclusion, so the lease registry does; verified live by refusing a second concurrent container run.
@@ -185,12 +185,12 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 - The human operator can understand and control the complete workflow from the Web client.
 - Every M1 success check above links to acceptance evidence.
 
-## Frontier after O3
+## Frontier after O1 and O2
 
-O1 and O2 remain the frontier. O3 is evidenced, and evidencing it moved both forward without completing either: O1 covers four engines and O2 covers three environment kinds, while the slice implemented one of each.
+O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers. O2's environment targets (macOS, container, and Windows) are all implemented and verified live (#5, #10, #13).
 
-The next map reduces the environment-side uncertainty first. The environment seam is proven for access and leasing but not for execution, and ADR-0003 settles how that gap is closed: every environment, including a local macOS machine, is a network environment hosting a long-lived Sprout worker that supervises engine processes. Container is the first environment where that model is genuinely load-bearing, so it is the smallest piece of work that tests it.
+The active frontier is **O4 — Durable and recoverable work** (anchored by #16). Work, leases, and run states must survive process interruption rather than silently losing or reassigning unfinished work.
 
-Windows and engine breadth follow. `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
+`docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
 After O7 is evidenced, mark M1 **Evidenced**, return to `docs/goal.md`, and replace the current medium-term goal and supporting outcome graph rather than extending M1 mechanically.
