@@ -26,7 +26,13 @@ export interface AgentDefinition {
    * it is pinned to.
    */
   readonly workingDirectory?: string;
-  /** Standing instructions assembled by the project contract. */
+  /**
+   * The agent's own standing configuration, woven into the project contract.
+   *
+   * This is not the whole contract any more: the orchestrator assembles the
+   * contract from the project plus this value and hands the result to the engine
+   * as its standing instructions (O5, `src/project/contract.ts`).
+   */
   readonly instructions?: string;
 }
 

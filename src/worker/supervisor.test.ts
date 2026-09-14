@@ -35,7 +35,11 @@ class FakeConnection implements WorkerConnection {
 
 class FakeAdapter implements EngineAdapter {
   readonly id = 'scripted';
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    standingInstructions: 'out-of-band',
+  } as const;
   async startSession(_request: StartSessionRequest): Promise<EngineSession> {
     const queue = new EventQueue();
     queue.end();

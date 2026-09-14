@@ -10,6 +10,7 @@ import type {
 } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapOpenCodeEvent, newOpenCodeTurnState } from './opencode-protocol.ts';
+import { deliverContractToWorkingDirectory, type ContractDelivery } from './contract-file.ts';
 
 /**
  * `opencode` engine adapter — the deliberately **non-streaming** one.
@@ -30,6 +31,14 @@ import { mapOpenCodeEvent, newOpenCodeTurnState } from './opencode-protocol.ts';
  * - Continuity comes from passing the emitted `sessionID` back through
  *   `--session <id>`. The id is `opencode`'s; Sprout captures it rather than
  *   choosing it.
+ * - **`--dir` must be passed explicitly.** The process otherwise inherits the
+ *   worker's cwd, so a project `AGENTS.md` Sprout delivered to the run's own
+ *   directory is never read. Found live: the delivered contract had no effect on
+ *   the answer until `--dir <workingDirectory>` was added.
+ * - **`AGENTS.md` in the working directory is the standing-instructions channel.**
+ *   `opencode run` has no system-prompt flag; it discovers `AGENTS.md`
+ *   (and `CLAUDE.md`/`CONTEXT.md`) upward from the working directory. Verified
+ *   live: a contract delivered there changed the run's answer.
  * - **Process exit 0 is authoritative.** The event loop can race the terminal
  *   event and omit it after a successful run, so the adapter settles on exit and
  *   treats a zero exit as success.
@@ -63,7 +72,13 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
    * ends. Declared `turn`, not `incremental`, and this is the adapter that makes
    * the declaration meaningful.
    */
-  readonly capabilities = { streaming: 'turn', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'turn',
+    supportsInterrupt: true,
+    // `opencode run` has no system-prompt flag; it reads `AGENTS.md` from the
+    // working directory, so the contract is delivered the same way as `agy`.
+    standingInstructions: 'working-directory',
+  } as const;
   readonly #options: OpenCodeAdapterOptions;
   #sessionCounter = 0;
 
@@ -75,11 +90,19 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     // Sandboxed launch cannot traverse a symlink chain, so the real path is
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
+    // `opencode run` has no system-prompt flag; it reads `AGENTS.md` from the
+    // working directory, so the contract is delivered there. Confirmed live:
+    // an `AGENTS.md` with a distinctive instruction changed the run's answer.
+    const delivery = deliverContractToWorkingDirectory({
+      workingDirectory: request.workingDirectory,
+      ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+    });
     return new OpenCodeSession({
       binaryPath,
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
+      ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
       ...(request.resumeSessionKey !== undefined
         ? { resumeSessionId: request.resumeSessionKey }
         : {}),
@@ -94,6 +117,8 @@ interface OpenCodeSessionOptions {
   readonly sessionId: string;
   /** A stored engine session id to continue (`--session`). */
   readonly resumeSessionId?: string;
+  /** How the project contract reached this run's working directory, if at all. */
+  readonly contractDelivery?: ContractDelivery;
 }
 
 /**
@@ -111,12 +136,15 @@ export class OpenCodeSession implements EngineSession {
   #current: { kill(): void } | undefined;
   #settle: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
+  /** How the assembled contract reached this run's working directory. */
+  readonly contractDelivery: ContractDelivery | undefined;
 
   constructor(options: OpenCodeSessionOptions) {
     this.#binaryPath = options.binaryPath;
     this.#workingDirectory = options.workingDirectory;
     this.#options = options.options;
     this.sessionId = options.sessionId;
+    this.contractDelivery = options.contractDelivery;
     // A stored id from a previous run is offered through `--session`. If it is
     // stale the engine fails the turn hard (#19), which is why the core only
     // offers keys it can trust and records what the run actually used.
@@ -243,6 +271,12 @@ export class OpenCodeSession implements EngineSession {
       // The daemon is headless and the agent's home is operator-owned, so tools
       // must be permitted for a run to be able to do anything.
       '--auto',
+      // `--dir` pins the run to the working directory Sprout resolved. Without it
+      // the process inherits the *worker's* cwd, so a project `AGENTS.md` written
+      // there is never read — found live: a contract delivered to the run's
+      // directory had no effect until the directory was passed explicitly.
+      '--dir',
+      this.#workingDirectory,
       ...session,
       ...(this.#options.args ?? []),
     ];

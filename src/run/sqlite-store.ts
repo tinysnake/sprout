@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { AgentRun, AgentRunStatus } from './model.ts';
+import type { AgentRun, AgentRunStatus, RunHandOff } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { RunStore } from './store.ts';
 import {
@@ -43,6 +43,7 @@ interface RunRow {
   readonly result: string | null;
   readonly created_at: number;
   readonly completed_at: number | null;
+  readonly hand_off: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -74,12 +75,14 @@ export class SqliteRunStore implements RunStore {
         failure TEXT,
         result TEXT,
         created_at INTEGER NOT NULL,
-        completed_at INTEGER
+        completed_at INTEGER,
+        hand_off TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
-    // has its runs, they simply have no recorded project.
+    // has its runs, they simply carry no recorded hand-off.
     this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
   }
 
   #addColumnIfMissing(table: string, column: string, type: string): void {
@@ -95,15 +98,16 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, status, events, lease_id, failure, result, created_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
            lease_id = excluded.lease_id,
            failure = excluded.failure,
            result = excluded.result,
-           completed_at = excluded.completed_at`,
+           completed_at = excluded.completed_at,
+           hand_off = excluded.hand_off`,
       )
       .run(
         run.id,
@@ -118,6 +122,7 @@ export class SqliteRunStore implements RunStore {
         run.result ? JSON.stringify(run.result) : null,
         run.createdAt,
         run.completedAt ?? null,
+        run.handOff ? JSON.stringify(run.handOff) : null,
       );
   }
 
@@ -414,6 +419,8 @@ function toLease(row: LeaseRow): EnvironmentLease {
 
 function toRun(row: RunRow): AgentRun {
   const result = row.result !== null ? (JSON.parse(row.result) as AgentRun['result']) : undefined;
+  const handOff =
+    row.hand_off !== null ? (JSON.parse(row.hand_off) as RunHandOff) : undefined;
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -422,6 +429,7 @@ function toRun(row: RunRow): AgentRun {
     ...(row.project_id !== null ? { projectId: row.project_id } : {}),
     status: row.status as AgentRunStatus,
     events: JSON.parse(row.events) as AgentRunEvent[],
+    ...(handOff !== undefined ? { handOff } : {}),
     ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),
     ...(row.failure !== null ? { failure: row.failure } : {}),
     ...(result !== undefined ? { result } : {}),

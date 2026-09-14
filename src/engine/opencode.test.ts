@@ -127,6 +127,25 @@ test('a turn reports text as one block per hop and completes from process exit',
   assert.ok(!args.includes('run echo'), 'the prompt is not in argv');
 });
 
+test('the run is pinned to the resolved working directory with --dir', async () => {
+  // Without `--dir` the subprocess inherits the worker's cwd, so opencode never
+  // reads a project `AGENTS.md` Sprout delivered to the run's own directory.
+  // Found live: the contract had no effect until the directory was passed.
+  const { adapter, argv } = adapterFor((process) => {
+    process.line({ type: 'text', sessionID: 'ses_1', part: { type: 'text', text: 'ok' } });
+    process.settle(0);
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/srv/run-directory',
+  });
+  await collect(session.run('go').events);
+
+  const args = argv[0] ?? [];
+  assert.equal(args[args.indexOf('--dir') + 1], '/srv/run-directory');
+});
+
 test('the engine-assigned session id is captured and reused on the next turn', async () => {
   const { adapter, argv } = adapterFor((process) => {
     process.line({ type: 'text', sessionID: 'ses_abc', part: { type: 'text', text: 'ok' } });

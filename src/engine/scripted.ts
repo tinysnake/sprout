@@ -56,7 +56,13 @@ export interface ScriptedAdapterOptions {
 
 export class ScriptedEngineAdapter implements EngineAdapter {
   readonly id = 'scripted';
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    // The scripted fake is engine-agnostic; tests that exercise the contract
+    // channel set this to the channel under test.
+    standingInstructions: 'out-of-band',
+  } as const;
   readonly requests: StartSessionRequest[] = [];
   readonly sessions: ScriptedEngineSession[] = [];
   readonly #options: ScriptedAdapterOptions;
@@ -120,6 +126,8 @@ export class ScriptedEngineAdapter implements EngineAdapter {
 export class ScriptedEngineSession implements EngineSession {
   readonly sessionId: string;
   readonly engineSessionKey: string;
+  /** Every prompt this session was run with, so tests can assert the input. */
+  readonly prompts: string[] = [];
   readonly #turn: ScriptedTurn;
   readonly #onInterrupt: (() => void) | undefined;
   #settled = false;
@@ -138,7 +146,8 @@ export class ScriptedEngineSession implements EngineSession {
     this.#onInterrupt = onInterrupt;
   }
 
-  run(_prompt: string): EngineTurn {
+  run(prompt: string): EngineTurn {
+    this.prompts.push(prompt);
     const self = this;
     const completion = new Promise<EngineTurnResult>((resolve) => {
       self.#resolveCompletion = resolve;

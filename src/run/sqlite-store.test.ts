@@ -90,9 +90,37 @@ test('a run records the environment instance and project it used, and they survi
   assert.equal(restored?.projectId, 'project-sprout');
 });
 
-test('a run written before the project column existed still reads back', async () => {
-  // The column was added after runs shipped; a database from before it must keep
-  // its runs rather than fail, and they simply carry no recorded project.
+test('a run records the hand-off it was given, so "was a hand-off attached" is durable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-handoff-'));
+  const dbPath = join(dir, 'sprout.db');
+  const handOff = {
+    previousEnvironmentInstanceId: 'mac-mini-1',
+    text: '- Completed in mac-mini-1: earlier work',
+    sourceRunIds: ['run-0'],
+  } as const;
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ environmentInstanceId: 'container-1', handOff }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.deepEqual(restored?.handOff, handOff);
+});
+
+test('a run with no hand-off round-trips without inventing one', async () => {
+  const store = new SqliteRunStore({ filename: ':memory:' });
+  await store.save(sampleRun());
+  const restored = await store.get('run-1');
+  store.close();
+  assert.equal('handOff' in (restored ?? {}), false);
+});
+
+test('a run written before the project and hand-off columns existed still reads back', async () => {
+  // The columns were added after runs shipped; a database from before them must
+  // keep its runs rather than fail, and they simply carry no recorded project or
+  // hand-off.
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE agent_runs (
@@ -117,6 +145,11 @@ test('a run written before the project column existed still reads back', async (
   const restored = await store.get('legacy-1');
   assert.equal(restored?.environmentInstanceId, 'mac-mini-1');
   assert.equal('projectId' in (restored ?? {}), false);
+  assert.equal('handOff' in (restored ?? {}), false);
+
+  // And a new run can still be written through the migrated schema.
+  await store.save(sampleRun({ id: 'after-migration' }));
+  assert.equal((await store.get('after-migration'))?.status, 'completed');
   store.close();
 });
 

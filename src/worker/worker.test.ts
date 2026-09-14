@@ -163,6 +163,7 @@ test('the core identifies a worker and learns which engines it hosts', async (t)
   assert.deepEqual(worker.adapters.get('scripted')?.capabilities, {
     streaming: 'incremental',
     supportsInterrupt: true,
+    standingInstructions: 'out-of-band',
   });
 });
 
@@ -345,7 +346,14 @@ test('a worker refuses an engine it does not host', () => {
             output: new PassThrough(),
           }),
           environmentInstanceId: 'mac-mini-1',
-          engines: [{ id: 'codex', streaming: 'incremental', supportsInterrupt: true }],
+          engines: [
+            {
+              id: 'codex',
+              streaming: 'incremental',
+              supportsInterrupt: true,
+              standingInstructions: 'out-of-band',
+            },
+          ],
         },
         'nope',
       ),

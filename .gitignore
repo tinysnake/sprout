@@ -16,6 +16,9 @@ codexhome/
 *.db
 *.db-journal
 sprout.db
+# The project contract a working-directory engine (agy, opencode) reads. Sprout
+# writes it at run time when the directory's AGENTS.md is not already ours.
+SPROUT-PROJECT-CONTRACT.md
 
 # Editor and OS noise
 .DS_Store

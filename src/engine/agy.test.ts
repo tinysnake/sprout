@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { AgyEngineAdapter, AgySession } from './agy.ts';
+import { CONTRACT_FILE_MARKER } from './contract-file.ts';
 import type { AgentRunEvent } from './port.ts';
 
 /**
@@ -196,15 +200,16 @@ test('skipPermissions is opt-in and comes before --print', async () => {
   assert.ok(args.indexOf('--dangerously-skip-permissions') < args.indexOf('--print=go'));
 });
 
-test('agy has no system-prompt flag, so instructions are not passed as a flag', async () => {
+test('agy has no system-prompt flag, so the contract is delivered to the working directory', async () => {
   // `agy 1.2.2` has no system-prompt surface at all: `--append-system-prompt`
-  // does not exist. Prepending the project contract to the prompt would make it
-  // per-turn and visible to the model as user content, so the adapter deliberately
-  // does neither and the gap is recorded on the map instead.
+  // does not exist. The adapter therefore delivers the assembled project contract
+  // as a Sprout-owned file in the run's working directory, never on argv and
+  // never prepended to the prompt as per-turn user content.
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-agy-contract-'));
   const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'ok'));
   const session = await adapter.startSession({
     agentId: 'scout',
-    workingDirectory: '/tmp',
+    workingDirectory: dir,
     instructions: 'You are Scout.',
   });
   await collect(session.run('go').events);
@@ -215,6 +220,13 @@ test('agy has no system-prompt flag, so instructions are not passed as a flag', 
     'agy does not define --append-system-prompt',
   );
   assert.ok(!args.includes('You are Scout.'), 'instructions are not injected into argv');
+
+  // The contract reached agy's only channel: a Sprout-owned file in the working
+  // directory it executes in.
+  const written = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+  assert.ok(written.startsWith(CONTRACT_FILE_MARKER), 'the file is Sprout-owned');
+  assert.match(written, /You are Scout\./);
+  assert.equal(session.contractDelivery?.mechanism, 'agents.md');
 });
 
 test('the conversation id from the init frame is reused on the next turn', async () => {

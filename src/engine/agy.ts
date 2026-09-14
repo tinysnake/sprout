@@ -10,6 +10,7 @@ import type {
 } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapAgyEvent, newAgyTurnState } from './agy-protocol.ts';
+import { deliverContractToWorkingDirectory, type ContractDelivery } from './contract-file.ts';
 
 /**
  * `agy` (Antigravity) engine adapter.
@@ -28,12 +29,22 @@ import { mapAgyEvent, newAgyTurnState } from './agy-protocol.ts';
  *   choosing it. This is the opposite of Pi and is worth knowing when assembling
  *   context.
  * - **There is no flag for standing instructions.** Unlike Pi's
- *   `--append-system-prompt`, `agy` has no system-prompt surface at all, so an
- *   agent's instructions reach it only through `AGENTS.md` in the working
- *   directory. That is a real gap for the project contract, not a detail: it is
- *   recorded as fog on the map rather than papered over by prepending the
- *   instructions to the prompt, which would make them per-turn and visible to the
- *   model as user content.
+ *   `--append-system-prompt`, `agy` has no system-prompt surface at all, so the
+ *   project contract is delivered as a Sprout-owned file in the working
+ *   directory (`contract-file.ts`) rather than injected into argv or the prompt.
+ *   That is the `working-directory` standing-instructions channel (#14, #15,
+ *   #19); the adapter declares it and performs the write, so "delivery" is an
+ *   explicit, testable act rather than an assumption about what `agy` read.
+ *   **Probed limitation:** in this build `agy 1.2.2`, headless (`--print`) runs
+ *   loaded only worktree rules under `~/.gemini`; a project `AGENTS.md` and
+ *   `.agents/rules/*.md` in the working directory did **not** change the run even
+ *   in a workspace already present in `trustedWorkspaces`, and a 6,000-word
+ *   `AGENTS.md` did not move the reported input-token count. The file is written
+ *   to the channel #19/`agy` documents (`AGENTS.md`), the write is verified by
+ *   test, and whether this build *honors* it is an engine fact recorded here
+ *   rather than asserted. That is a real gap, not a Sprout one, and it is
+ *   reported in the #21 work record as evidence rather than silently assumed
+ *   away.
  * - **Headless mode auto-denies tools it cannot prompt for**, so a run that needs
  *   a tool either gets an allow rule from settings or runs with
  *   `--dangerously-skip-permissions`. Sprout passes the latter only when the
@@ -71,7 +82,13 @@ export interface AgyAdapterOptions {
 
 export class AgyEngineAdapter implements EngineAdapter {
   readonly id = 'agy';
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    // `agy` has no system-prompt surface, so the contract reaches it only
+    // through a Sprout-owned file in the working directory (see AgySession).
+    standingInstructions: 'working-directory',
+  } as const;
   readonly #options: AgyAdapterOptions;
   #sessionCounter = 0;
 
@@ -83,11 +100,20 @@ export class AgyEngineAdapter implements EngineAdapter {
     // Sandboxed launch cannot traverse a symlink chain, so the real path is
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
+    // `agy` has no system-prompt surface, so the contract is delivered into the
+    // working directory the run executes in. Doing it here, per session, keeps
+    // the contract fresh for the environment the run actually resolved to (#18)
+    // and lets the delivery mechanism be reported per run.
+    const delivery = deliverContractToWorkingDirectory({
+      workingDirectory: request.workingDirectory,
+      ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+    });
     const session = new AgySession({
       binaryPath,
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `agy-${++this.#sessionCounter}-${Date.now().toString(36)}`,
+      ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
     });
     // A stored key from a previous run resumes `agy`'s conversation. `agy`
     // assigns conversation ids, so this is a *hint*: if it is stale the engine
@@ -104,6 +130,8 @@ interface AgySessionOptions {
   readonly workingDirectory: string;
   readonly options: AgyAdapterOptions;
   readonly sessionId: string;
+  /** How the project contract reached this run's working directory, if at all. */
+  readonly contractDelivery?: ContractDelivery;
 }
 
 /**
@@ -125,12 +153,21 @@ export class AgySession implements EngineSession {
   #current: { kill(): void } | undefined;
   #settle: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
+  /**
+   * How the assembled contract reached this run's working directory.
+   *
+   * Read by tests to verify that a run in a project receives the contract
+   * through `agy`'s only channel, and by the worker to log a delivery it could
+   * not make (e.g. a user-owned `AGENTS.md` it refused to replace).
+   */
+  readonly contractDelivery: ContractDelivery | undefined;
 
   constructor(options: AgySessionOptions) {
     this.#binaryPath = options.binaryPath;
     this.#workingDirectory = options.workingDirectory;
     this.#options = options.options;
     this.sessionId = options.sessionId;
+    this.contractDelivery = options.contractDelivery;
   }
 
   /** The id `agy` assigned, once a turn has started. */
@@ -261,8 +298,10 @@ export class AgySession implements EngineSession {
       ...(this.#options.skipPermissions ? ['--dangerously-skip-permissions'] : []),
       ...conversation,
       ...(this.#options.args ?? []),
-      // No system-prompt flag exists, so standing instructions are deliberately
-      // NOT passed here; see the class comment.
+      // Standing instructions are delivered to the working directory before this
+      // turn starts (`contract-file.ts`), never injected into argv: `agy` has no
+      // system-prompt flag and prepending the contract to the prompt would make
+      // it per-turn user content.
       //
       // Under shell:true (Windows .cmd shim) node joins argv into one command
       // line that cmd.exe re-parses, so the joined form needs Windows quoting

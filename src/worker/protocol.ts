@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult, StreamingGranularity } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
 
 /**
  * The core-to-worker protocol.
@@ -52,6 +52,14 @@ export interface WorkerEngineDescription {
   readonly id: string;
   readonly streaming: StreamingGranularity;
   readonly supportsInterrupt: boolean;
+  /**
+   * How this engine's adapter delivers standing instructions.
+   *
+   * Carried across the worker boundary so the core can state per run how the
+   * assembled project contract reached the engine, without learning any engine
+   * detail (ADR-0003): the channel is a neutral fact, not a Codex or `agy` one.
+   */
+  readonly standingInstructions: StandingInstructionsChannel;
 }
 
 export interface WorkerInfo {

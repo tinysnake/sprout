@@ -221,6 +221,14 @@ export interface RunView {
   readonly prompt: string;
   readonly status: string;
   readonly events: readonly { readonly type: string; readonly [key: string]: unknown }[];
+  /**
+   * Whether a cross-environment hand-off was attached to this run's input.
+   *
+   * A boolean rather than the text: the fact is useful to the client (so it can
+   * see that context was re-presented after a move), while the summary itself and
+   * the environment identity stay server-side like the other run internals.
+   */
+  readonly handOffAttached: boolean;
   readonly failure?: string;
   readonly result?: unknown;
   readonly createdAt: number;
@@ -234,6 +242,7 @@ function toView(run: AgentRun): RunView {
     prompt: run.prompt,
     status: run.status,
     events: run.events,
+    handOffAttached: run.handOff !== undefined,
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
     createdAt: run.createdAt,

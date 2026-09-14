@@ -247,8 +247,16 @@ test('the agent identity and its environment are Sprout-owned', async () => {
   await orchestrator.waitFor(id);
 
   assert.equal(adapter.requests[0]?.agentId, 'agent-scout');
-  assert.equal(adapter.requests[0]?.instructions, 'You are Scout.');
   assert.equal(adapter.requests[0]?.workingDirectory, '/tmp');
+  // Standing instructions are no longer the agent's own string passed through:
+  // they are the assembled project contract (O5), which includes the agent's
+  // configuration as well as the project's goal, rules, and responsibilities.
+  const instructions = adapter.requests[0]?.instructions ?? '';
+  assert.match(instructions, /Project contract: project-sprout/);
+  assert.match(instructions, /Goal: Ship Sprout/);
+  assert.match(instructions, /Report what you observed/);
+  assert.match(instructions, /Investigate/);
+  assert.match(instructions, /You are Scout\./);
 });
 
 test('a finished run is persisted so it survives a restart', async () => {
@@ -337,7 +345,7 @@ test('a run left running by a dead process is reconciled instead of shown as liv
   const store = new InMemoryRunStore();
   const stubEngine = {
     id: 'scripted',
-    capabilities: { streaming: 'incremental', supportsInterrupt: true } as const,
+    capabilities: { streaming: 'incremental', supportsInterrupt: true, standingInstructions: 'out-of-band' } as const,
     startSession: () => {
       throw new Error('a recovered run must never be restarted automatically');
     },

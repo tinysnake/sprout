@@ -3,8 +3,10 @@ import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
+import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import { resolveEnvironmentInstance } from '../project/resolve.ts';
+import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
@@ -53,6 +55,14 @@ export interface RunOrchestratorOptions {
    * continuation) leaves every run on its fresh-session path.
    */
   readonly sessionKeys?: SessionKeyStore;
+  /**
+   * Every persisted run, used to build a cross-environment hand-off.
+   *
+   * Defaults to the run store, so production reads the same durable history the
+   * run is recorded in. Exposed so a test can supply an explicit history without
+   * seeding a store.
+   */
+  readonly runs?: () => Promise<readonly AgentRun[]>;
   readonly leaseTtlMs?: number;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
@@ -96,6 +106,8 @@ export class RunOrchestrator {
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
   readonly #sessionKeys: SessionKeyStore | undefined;
+  /** Reads the durable run history a hand-off is derived from. */
+  readonly #runHistory: () => Promise<readonly AgentRun[]>;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
 
@@ -112,6 +124,7 @@ export class RunOrchestrator {
     this.#pool = options.pool;
     this.#store = options.store;
     this.#sessionKeys = options.sessionKeys;
+    this.#runHistory = options.runs ?? (() => options.store.list());
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
@@ -327,7 +340,6 @@ export class RunOrchestrator {
         message: `no engine adapter registered for: ${agent.engine}`,
       });
     }
-
     const acquired = this.#pool.acquireLease({
       instanceId: initial.environmentInstanceId,
       capability: agent.capability,
@@ -352,6 +364,15 @@ export class RunOrchestrator {
 
     const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
 
+    // Assemble what this run is presented with, before the session starts: the
+    // project contract (standing instructions, on every run) and, when the run
+    // moved to a different environment instance than the agent's previous run, a
+    // fact-form hand-off. Both are deterministic functions of persisted facts.
+    const assembled = await this.#assembleInput(initial, agent, running.id);
+    const presented = await this.#advance(running, {
+      ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
+    });
+
     // The continuation slot is `(agent, engine, environment instance, working
     // directory)`. All four must match for a stored key to be reusable: the key
     // belongs to one engine, lives in one environment's engine store, and (for
@@ -365,7 +386,14 @@ export class RunOrchestrator {
     const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
 
     try {
-      let attempt = await this.#runSession(adapter, agent, initial.prompt, running, stored?.key);
+      let attempt = await this.#runSession(
+        adapter,
+        agent,
+        assembled.prompt,
+        presented,
+        stored?.key,
+        assembled.instructions,
+      );
 
       // A stored key the engine refuses must not fail the run. Pi and `agy`
       // soft-fall-back themselves (#19), but Codex and `opencode` hard-fail on a
@@ -379,7 +407,14 @@ export class RunOrchestrator {
       // good, so it is reported instead.
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
-        attempt = await this.#runSession(adapter, agent, initial.prompt, running, undefined);
+        attempt = await this.#runSession(
+          adapter,
+          agent,
+          assembled.prompt,
+          presented,
+          undefined,
+          assembled.instructions,
+        );
       }
 
       if (!attempt.ok) {
@@ -422,6 +457,7 @@ export class RunOrchestrator {
     prompt: string,
     running: AgentRun,
     resumeKey: string | undefined,
+    instructions: string | undefined,
   ): Promise<SessionAttempt> {
     const initial = running;
     let session: EngineSession;
@@ -429,7 +465,10 @@ export class RunOrchestrator {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
-        ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
+        // The assembled project contract is re-sent on every run, because it is
+        // the standing agreement the agent works under and must not depend on a
+        // prior session having carried it (O5).
+        ...(instructions !== undefined ? { instructions } : {}),
         ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
     } catch (error) {
@@ -498,6 +537,62 @@ export class RunOrchestrator {
       this.#sessions.delete(running.id);
       await session.close();
     }
+  }
+
+  /**
+   * Assemble what one run is presented with: the project contract and, on an
+   * environment change, a fact-form hand-off.
+   *
+   * Both halves are deterministic and read only persisted facts. The contract is
+   * assembled from the project the run resolved into, plus the agent's own
+   * configuration. The hand-off is derived from the agent's own prior runs and is
+   * attached only when this run's environment instance differs from the previous
+   * run's. When the instance matches, the run is the continued-session case
+   * (ADR-0004), so no hand-off is added and the prompt is the user's alone.
+   */
+  async #assembleInput(
+    run: AgentRun,
+    agent: AgentDefinition,
+    currentRunId: string,
+  ): Promise<{ prompt: string; instructions: string | undefined; handOff: AgentRun['handOff'] }> {
+    const project = run.projectId !== undefined ? this.#projects?.get(run.projectId) : undefined;
+    const contract =
+      project !== undefined
+        ? renderProjectContract(
+            assembleProjectContract({
+              project,
+              agentId: agent.id,
+              ...(agent.instructions !== undefined
+                ? { agentInstructions: agent.instructions }
+                : {}),
+            }),
+          )
+        : // No project means the run could not have resolved an environment, so
+          // this is unreachable in practice; falling back to the agent's own
+          // instructions keeps the agent's standing configuration intact.
+          agent.instructions;
+
+    const handOff = buildHandOffContext(await this.#runHistory(), {
+      agentId: agent.id,
+      currentRunId,
+      currentCreatedAt: run.createdAt,
+    });
+    // ADR-0004: a session key is scoped to one (agent, engine, instance,
+    // directory), so a stored key only exists for the same environment instance.
+    // An environment change therefore means the run is on its fresh-session path,
+    // and a hand-off is exactly what closes the resulting gap.
+    const attach =
+      handOff !== undefined &&
+      shouldAttachHandOff({
+        previousEnvironmentInstanceId: handOff.previousEnvironmentInstanceId,
+        currentEnvironmentInstanceId: run.environmentInstanceId,
+      });
+
+    return {
+      prompt: attach ? renderHandOffPrompt(handOff, run.prompt) : run.prompt,
+      instructions: contract,
+      handOff: attach ? handOff : undefined,
+    };
   }
 
   async #settleWithResult(run: AgentRun, result: EngineTurnResult): Promise<AgentRun> {

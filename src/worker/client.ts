@@ -5,6 +5,7 @@ import type {
   EngineTurn,
   EngineTurnResult,
   StartSessionRequest,
+  StandingInstructionsChannel,
   StreamingGranularity,
 } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
@@ -38,6 +39,7 @@ export interface WorkerEngineDeclaration {
   readonly id: string;
   readonly streaming: StreamingGranularity;
   readonly supportsInterrupt: boolean;
+  readonly standingInstructions: StandingInstructionsChannel;
 }
 
 export interface WorkerClientOptions {
@@ -69,6 +71,7 @@ export class WorkerClient implements EngineAdapter {
     this.capabilities = {
       streaming: engine.streaming,
       supportsInterrupt: engine.supportsInterrupt,
+      standingInstructions: engine.standingInstructions,
     };
     this.#transport = options.transport;
   }

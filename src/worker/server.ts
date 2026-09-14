@@ -134,6 +134,7 @@ export class EnvironmentWorker {
         id: engine.id,
         streaming: engine.capabilities.streaming,
         supportsInterrupt: engine.capabilities.supportsInterrupt,
+        standingInstructions: engine.capabilities.standingInstructions,
       })),
     };
   }
@@ -154,6 +155,15 @@ export class EnvironmentWorker {
     });
 
     const sessionId = `session-${++this.#counter}`;
+    // A working-directory contract the adapter could not deliver is reported, so
+    // a user-owned `AGENTS.md` Sprout refused to replace is never silent.
+    const delivery = session.contractDelivery;
+    if (delivery !== undefined && delivery.mechanism === 'skipped-user-owned') {
+      this.#options.onLog?.(
+        `project contract for agent ${params.agentId} was not delivered: ` +
+          `a user-owned AGENTS.md in ${params.workingDirectory} was left intact`,
+      );
+    }
     this.#sessions.set(sessionId, {
       engine: params.engine,
       session,

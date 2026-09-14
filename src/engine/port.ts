@@ -9,14 +9,61 @@
  * granularity is a declared capability (ADR-0001), never an assumed guarantee.
  */
 
+/**
+ * How an adapter delivered standing instructions into a working directory, or
+ * why it did not.
+ *
+ * Declared by `working-directory` adapters so the fact that a run's contract did
+ * not reach the engine — because the directory's `AGENTS.md` is a user's file
+ * Sprout refused to replace — is reportable rather than silent.
+ */
+export type ContractDeliveryMechanism =
+  | 'agents.md'
+  | 'sprout-contract-file'
+  | 'skipped-user-owned';
+
+export interface ContractDelivery {
+  readonly mechanism: ContractDeliveryMechanism;
+  readonly path?: string;
+  readonly agentsMdSkipped?: 'user-owned';
+}
+
 /** How much detail an adapter can deliver while a run is still in progress. */
 export type StreamingGranularity = 'incremental' | 'turn' | 'none';
+
+/**
+ * How an adapter can deliver standing instructions to its engine.
+ *
+ * The channels are not interchangeable and are a measured per-engine fact
+ * (#14, #15, #19):
+ *
+ * - `out-of-band` — the engine has a system-prompt surface, so instructions are
+ *   handed to it separately from the prompt. Codex (`baseInstructions`) and Pi
+ *   (`--append-system-prompt`) do.
+ * - `working-directory` — the engine has no system-prompt surface and reads
+ *   instructions from a file in the working directory instead. `agy` reads the
+ *   Sprout-owned contract file the adapter writes; nothing is injected into argv.
+ * - `none` — the adapter knows of no standing-instructions surface for this
+ *   engine, so the contract cannot be delivered without changing the engine or
+ *   injecting it into every prompt. Declaring `none` is honest; the core then
+ *   knows the contract reaches that engine through a different mechanism (or not
+ *   at all) rather than assuming every engine takes instructions the same way.
+ */
+export type StandingInstructionsChannel = 'out-of-band' | 'working-directory' | 'none';
 
 export interface EngineCapabilities {
   /** What the adapter promises to emit before the run finishes. */
   readonly streaming: StreamingGranularity;
   /** Whether the adapter can interrupt a run that is already in progress. */
   readonly supportsInterrupt: boolean;
+  /**
+   * How this adapter delivers the standing instructions a run is handed.
+   *
+   * Declared rather than assumed: the core assembles one project contract and
+   * passes it as `instructions` on every run, and each adapter delivers it
+   * through the surface its engine actually has.
+   */
+  readonly standingInstructions: StandingInstructionsChannel;
 }
 
 /**
@@ -34,7 +81,14 @@ export interface StartSessionRequest {
   readonly agentId: string;
   /** The working directory inside the environment the run executes in. */
   readonly workingDirectory: string;
-  /** Standing instructions assembled by the core, if the adapter accepts them. */
+  /**
+   * Standing instructions assembled by the core, if the adapter accepts them.
+   *
+   * This is the project contract. An `out-of-band` adapter passes it to the
+   * engine's own system-prompt surface; a `working-directory` adapter writes it
+   * to the Sprout-owned contract file so the engine discovers it from the
+   * directory the run executes in.
+   */
   readonly instructions?: string;
   /**
    * A previously persisted engine session key to resume, when the core has one
@@ -70,6 +124,15 @@ export interface EngineSession {
   interrupt(): Promise<boolean>;
   /** Terminate the session and any process it supervises. */
   close(): Promise<void>;
+  /**
+   * How standing instructions reached this run's working directory, when the
+   * adapter's channel is `working-directory`.
+   *
+   * Absent for an `out-of-band` adapter (delivery is the engine call itself) and
+   * for a run handed no instructions. Present so a skipped or fallback delivery
+   * is visible above the worker boundary.
+   */
+  readonly contractDelivery?: ContractDelivery | undefined;
 }
 
 export interface EngineTurn {

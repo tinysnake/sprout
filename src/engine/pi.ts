@@ -52,7 +52,12 @@ export class PiEngineAdapter implements EngineAdapter {
    * Pi streams incrementally: text arrives as `text_delta` and tool calls become
    * visible when they execute. Declared rather than assumed, per ADR-0001.
    */
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    // Pi takes standing instructions out-of-band through `--append-system-prompt`.
+    standingInstructions: 'out-of-band',
+  } as const;
   readonly #options: PiAdapterOptions;
   #sessionCounter = 0;
 

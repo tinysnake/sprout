@@ -70,7 +70,14 @@ export interface CodexProcess {
 
 export class CodexEngineAdapter implements EngineAdapter {
   readonly id = 'codex';
-  readonly capabilities = { streaming: 'incremental', supportsInterrupt: true } as const;
+  readonly capabilities = {
+    streaming: 'incremental',
+    supportsInterrupt: true,
+    // Codex takes standing instructions out-of-band: `baseInstructions` is
+    // passed on `thread/start` and `thread/resume`, so the project contract is
+    // never injected into a prompt.
+    standingInstructions: 'out-of-band',
+  } as const;
   readonly #options: CodexAdapterOptions;
 
   constructor(options: CodexAdapterOptions) {
