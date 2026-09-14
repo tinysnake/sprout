@@ -447,6 +447,55 @@ test('a duplicate message delivery over the API is idempotent', async () => {
   }
 });
 
+test('the message API rejects invalid channel and recipient shapes', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const invalidChannel = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'project-sprout',
+        channel: 'unknown',
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        deliveryKey: 'api-invalid-channel-1',
+      }),
+    });
+    assert.equal(invalidChannel.status, 400);
+
+    const missingDirectRecipient = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'project-sprout',
+        channel: 'direct',
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        deliveryKey: 'api-missing-recipient-1',
+      }),
+    });
+    assert.equal(missingDirectRecipient.status, 400);
+
+    const projectRecipient = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'project-sprout',
+        channel: 'project',
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        recipients: ['agent-scout'],
+        deliveryKey: 'api-project-recipient-1',
+      }),
+    });
+    assert.equal(projectRecipient.status, 400);
+  } finally {
+    await context.api.close();
+  }
+});
+
 test('an unaddressed message and its wake observations are readable over the API', async () => {
   const adapter = new ScriptedEngineAdapter({ turns: [] });
   const registry = new AgentRegistry([

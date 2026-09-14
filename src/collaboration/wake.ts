@@ -8,8 +8,8 @@
  * The governing rule is **prefer an observable extra wake over silently losing
  * addressed work**. Consequences that follow from it:
  *
- * - An addressed Message (direct recipient, exact `@id` mention, or `@all`
- *   broadcast) never reaches the wake model at all. Determinism is what prevents
+ * - An addressed Message (direct recipient, exact `@id` mention, unknown `@id`,
+ *   or `@all` broadcast) never reaches the wake model at all. Determinism is what prevents
  *   the one silent failure mode: an addressed agent that was never woken leaves
  *   no reply and no run record.
  * - The wake model only ever decides *whether* an unaddressed project Message
@@ -43,14 +43,26 @@ const ALL_MENTION = /(?<![\w@])@all(?![\w-])/i;
  * reply coordination. The member set is the authority on which ids are real, so
  * a mention of a non-member is reported rather than guessed at.
  */
-export function parseAgentMentions(body: string, memberIds: readonly string[]): readonly string[] {
-  const found = new Set<string>();
-  for (const id of memberIds) {
-    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const token = new RegExp(`(?<![\\w@])@${escaped}(?![\\w-])`);
-    if (token.test(body)) found.add(id);
+export function parseMentions(
+  body: string,
+  memberIds: readonly string[],
+): { readonly members: readonly string[]; readonly unknown: readonly string[] } {
+  const members = new Set(memberIds);
+  const mentionedMembers = new Set<string>();
+  const unknownMentions = new Set<string>();
+  const tokens = /(?<![\w@])@([a-zA-Z0-9_-]+)(?![\w-])/g;
+
+  for (const match of body.matchAll(tokens)) {
+    const agentId = match[1]!;
+    if (members.has(agentId)) mentionedMembers.add(agentId);
+    else unknownMentions.add(agentId);
   }
-  return [...found];
+  return { members: [...mentionedMembers], unknown: [...unknownMentions] };
+}
+
+/** @deprecated Use `parseMentions` when unknown addressed targets matter. */
+export function parseAgentMentions(body: string, memberIds: readonly string[]): readonly string[] {
+  return parseMentions(body, memberIds).members;
 }
 
 export interface WakeContractOptions {
@@ -113,9 +125,14 @@ export async function planWake(
     };
   }
 
-  const mentioned = parseAgentMentions(message.body, memberIds);
-  if (mentioned.length > 0) {
-    const { decisions, observations } = resolveTargets(message, memberIds, mentioned, 'agent-mention');
+  const mentioned = parseMentions(message.body, memberIds);
+  if (mentioned.members.length > 0 || mentioned.unknown.length > 0) {
+    const { decisions, observations } = resolveTargets(
+      message,
+      memberIds,
+      [...mentioned.members, ...mentioned.unknown],
+      'agent-mention',
+    );
     return { messageId: message.id, decisions, observations };
   }
 
@@ -186,36 +203,26 @@ async function planUnaddressed(
 ): Promise<WakePlan> {
   const candidates = others(message, memberIds);
   if (wakeModel === undefined) {
-    return {
-      messageId: message.id,
-      decisions: candidates.map((agentId) => ({ agentId, reason: 'wake-model-fail-open' })),
-      observations: [
-        {
-          agentId: '*',
-          status: 'failed',
-          reason: 'wake-model-fail-open',
-          detail: 'no wake model is configured; failing open to one extra wake per member',
-        },
-      ],
-    };
+    return failOpen(
+      message,
+      candidates,
+      'no wake model is configured; failing open to one extra wake per member',
+    );
   }
 
-  let verdict;
+  let verdict: { readonly engage: boolean; readonly detail?: string } | undefined;
   try {
-    verdict = await wakeModel.decide({ message, memberIds });
+    verdict = parseWakeModelVerdict(await wakeModel.decide({ message, memberIds }));
   } catch (error) {
-    return {
-      messageId: message.id,
-      decisions: candidates.map((agentId) => ({ agentId, reason: 'wake-model-fail-open' })),
-      observations: [
-        {
-          agentId: '*',
-          status: 'failed',
-          reason: 'wake-model-fail-open',
-          detail: `wake model failed: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      ],
-    };
+    return failOpen(
+      message,
+      candidates,
+      `wake model failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (verdict === undefined) {
+    return failOpen(message, candidates, 'invalid-verdict: wake model must return an object with boolean engage');
   }
 
   if (verdict.engage) {
@@ -237,6 +244,38 @@ async function planUnaddressed(
         status: 'suppressed',
         reason: 'wake-model',
         detail: verdict.detail ?? 'wake model judged the room need not engage',
+      },
+    ],
+  };
+}
+
+/** Extract the only two wake-model fields the contract is allowed to trust. */
+function parseWakeModelVerdict(
+  value: unknown,
+): { readonly engage: boolean; readonly detail?: string } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const candidate = value as { readonly engage?: unknown; readonly detail?: unknown };
+  const engage = candidate.engage;
+  if (typeof engage !== 'boolean') return undefined;
+  const detail = candidate.detail;
+  return typeof detail === 'string' ? { engage, detail } : { engage };
+}
+
+/** Record a model failure and prefer one observable extra wake per member. */
+function failOpen(
+  message: Message,
+  candidates: readonly string[],
+  detail: string,
+): WakePlan {
+  return {
+    messageId: message.id,
+    decisions: candidates.map((agentId) => ({ agentId, reason: 'wake-model-fail-open' })),
+    observations: [
+      {
+        agentId: '*',
+        status: 'failed',
+        reason: 'wake-model-fail-open',
+        detail,
       },
     ],
   };

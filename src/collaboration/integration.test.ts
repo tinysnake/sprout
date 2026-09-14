@@ -187,6 +187,39 @@ test('an exact @id mention wakes only the mentioned member and never the wake mo
   assert.equal(replies[0]?.author.id, 'forge');
 });
 
+test('an unknown @id records a durable failure and bypasses the wake model', async (t) => {
+  let modelCalls = 0;
+  const harness = build({
+    turns: [],
+    wakeModel: {
+      decide: async () => {
+        modelCalls += 1;
+        return { engage: true };
+      },
+    },
+  });
+  t.after(harness.close);
+
+  const delivered = await harness.coordinator.deliver({
+    projectId: 'project-sprout',
+    channel: 'project',
+    author: { id: 'human-lead', kind: 'human' },
+    body: '@ghost can you take this?',
+    deliveryKey: 'unknown-mention-1',
+  });
+
+  assert.deepEqual(delivered.wakes, []);
+  assert.deepEqual(harness.sqlite.collaboration.observations(delivered.message.id), [
+    {
+      agentId: 'ghost',
+      status: 'failed',
+      reason: 'agent-mention',
+      detail: 'addressed agent is not a member of project project-sprout',
+    },
+  ]);
+  assert.equal(modelCalls, 0, 'an addressed unknown target never reaches the wake model');
+});
+
 test('an @all broadcast wakes every other member and bypasses the wake model', async (t) => {
   const harness = build({
     turns: [
@@ -279,6 +312,34 @@ test('a wake model failure fails open to every member and is durably recorded', 
   assert.equal(observations.length, 1);
   assert.equal(observations[0]?.status, 'failed');
   assert.match(observations[0]?.detail ?? '', /model unavailable/);
+});
+
+test('an invalid wake-model verdict fails open and is durably recorded', async (t) => {
+  const harness = build({
+    turns: [scriptedTurn('Scout: engaged.'), scriptedTurn('Forge: engaged.'), scriptedTurn('Scribe: engaged.')],
+    wakeModel: { decide: async () => undefined } as unknown as WakeModel,
+  });
+  t.after(harness.close);
+
+  const delivered = await harness.coordinator.deliver({
+    projectId: 'project-sprout',
+    channel: 'project',
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'anyone around?',
+    deliveryKey: 'invalid-verdict-1',
+  });
+
+  assert.equal(delivered.wakes.length, 3, 'an invalid result wakes every other member');
+  assert.ok(delivered.wakes.every((wake) => wake.reason === 'wake-model-fail-open'));
+  const observations = harness.sqlite.collaboration.observations(delivered.message.id);
+  assert.deepEqual(observations, [
+    {
+      agentId: '*',
+      status: 'failed',
+      reason: 'wake-model-fail-open',
+      detail: 'invalid-verdict: wake model must return an object with boolean engage',
+    },
+  ]);
 });
 
 test('a completed run with private events projects only its final text', async (t) => {

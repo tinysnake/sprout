@@ -63,20 +63,35 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
       const body = await readJson(request);
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
-      const channel = body.channel === 'direct' ? 'direct' : 'project';
+      const channel = body.channel;
       const authorId = typeof body.authorId === 'string' ? body.authorId : '';
       const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
-      if (projectId === '' || authorId === '' || text === '' || deliveryKey === '') {
+      if (
+        projectId === '' ||
+        authorId === '' ||
+        text === '' ||
+        deliveryKey === '' ||
+        (channel !== 'direct' && channel !== 'project')
+      ) {
         sendJson(response, 400, {
-          error: 'projectId, authorId, body, and deliveryKey are required',
+          error: 'projectId, channel, authorId, body, and deliveryKey are required',
         });
         return;
       }
-      const recipients = Array.isArray(body.recipients)
-        ? body.recipients.filter((value): value is string => typeof value === 'string')
-        : undefined;
+      if (
+        (body.recipients !== undefined &&
+          (!Array.isArray(body.recipients) || !body.recipients.every((value) => typeof value === 'string'))) ||
+        (channel === 'direct' && (!Array.isArray(body.recipients) || body.recipients.length === 0)) ||
+        (channel === 'project' && Array.isArray(body.recipients) && body.recipients.length > 0)
+      ) {
+        sendJson(response, 400, {
+          error: 'direct messages require string recipients; project messages cannot have recipients',
+        });
+        return;
+      }
+      const recipients = body.recipients as readonly string[] | undefined;
       const delivered = await collaboration.deliver({
         projectId,
         channel,
