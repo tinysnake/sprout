@@ -132,16 +132,21 @@ One human request can travel through Sprout to one Agent and one environment, wi
 
 ### O4 — Durable and recoverable work
 
-**Status**: Unproven  
+**Status**: Evidenced  
 **Depends on**: O3
 
 Messages, runs, tasks, leases, and work results survive process interruption without silently losing or reassigning unfinished work.
 
+**Implementation evidence**: SQLite-backed persistence behind `RunStore` and `LeaseStore` (ADR-0002, `src/run/sqlite-store.ts`) provides restart-safe durability for runs and environment leases (#16). When a core process is terminated mid-flight (exercised by real SIGKILL process-kill and restart tests in `src/run/recovery.test.ts`), restarting Sprout restores all historical runs and events intact, reconciles orphaned mid-flight runs into explicit `failed` states with interruption details, transitions active capacity leases into the `recovering` state, and enforces mutual exclusion against reassignment until recovery is resolved. The Web client and HTTP API expose restored runs and lease recovery states.
+
 **Outcome checks**:
 
 - Restarting Sprout restores the observable project and run state.
+  - Evidenced (#16): `SqliteStore` restores runs, their progress events, and environment lease states across process restarts. The Web client and API inspect restored runs via `/api/runs` and leases via `/api/leases`.
 - Agent or environment interruption produces an explicit recoverable or failed state.
+  - Evidenced (#16): Mid-flight runs interrupted by process restart are reconciled into an explicit `failed` state (`interrupted by a Sprout restart before this run finished`) with all emitted events intact, verified across real process restarts.
 - A lease containing uncommitted work enters recovery instead of immediate reassignment.
+  - Evidenced (#16): Leases are durable in SQLite (`environment_leases` table). When a run holding an active lease dies, the lease enters `recovering` state. Attempting to lease the same instance/capability conflicts and surfaces the recovery state to callers; capacity cannot be reassigned until recovery is resolved via `releaseLease` / `resolveRecovery`.
 
 ### O5 — Portable project context
 
@@ -185,11 +190,13 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 - The human operator can understand and control the complete workflow from the Web client.
 - Every M1 success check above links to acceptance evidence.
 
-## Frontier after O1 and O2
+## Frontier after O1, O2, and O4
 
 O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers. O2's environment targets (macOS, container, and Windows) are all implemented and verified live (#5, #10, #13).
 
-The active frontier is **O4 — Durable and recoverable work** (anchored by #16). Work, leases, and run states must survive process interruption rather than silently losing or reassigning unfinished work.
+O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation marks orphaned mid-flight runs failed with events intact, and active leases enter `recovering` state to protect capacity from immediate reassignment (#16).
+
+The active frontier advances to **O5 — Portable project context**. Project contracts and agent context must remain coherent when an agent works across runs and environments.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 

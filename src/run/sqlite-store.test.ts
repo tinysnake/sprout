@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AgentRun } from './model.ts';
-import { SqliteRunStore } from './sqlite-store.ts';
+import { SqliteRunStore, SqliteLeaseStore, SqliteStore } from './sqlite-store.ts';
+import type { EnvironmentLease } from '../environment/pool.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -89,5 +90,79 @@ test('listing runs returns them newest first', async () => {
 test('an unknown run is undefined rather than an error', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   assert.equal(await store.get('nope'), undefined);
+  store.close();
+});
+
+test('a lease survives being written to disk and read back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-lease-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteLeaseStore({ filename: dbPath });
+
+  const lease: EnvironmentLease = {
+    id: 'lease-100',
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-scout',
+    runId: 'run-1',
+    acquiredAt: 1_000,
+    expiresAt: 60_000,
+    state: 'active',
+  };
+  writer.save(lease);
+  writer.close();
+
+  const reader = new SqliteLeaseStore({ filename: dbPath });
+  const restored = reader.get('lease-100');
+  reader.close();
+
+  assert.deepEqual(restored, lease);
+});
+
+test('saving the same lease again updates state and expiry', () => {
+  const store = new SqliteLeaseStore({ filename: ':memory:' });
+  const initial: EnvironmentLease = {
+    id: 'lease-1',
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-scout',
+    acquiredAt: 1_000,
+    expiresAt: 60_000,
+    state: 'active',
+  };
+  store.save(initial);
+
+  store.save({ ...initial, state: 'recovering', expiresAt: 120_000 });
+  const updated = store.get('lease-1');
+  assert.equal(updated?.state, 'recovering');
+  assert.equal(updated?.expiresAt, 120_000);
+
+  const all = store.list();
+  assert.equal(all.length, 1);
+  store.close();
+});
+
+test('SqliteStore manages both runs and leases over one SQLite connection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-unified-'));
+  const store = new SqliteStore({ filename: join(dir, 'sprout.db') });
+
+  await store.runs.save(sampleRun({ id: 'run-unified' }));
+  store.leases.save({
+    id: 'lease-unified',
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-scout',
+    runId: 'run-unified',
+    acquiredAt: 1_000,
+    expiresAt: 60_000,
+    state: 'active',
+  });
+
+  const restoredRun = await store.runs.get('run-unified');
+  const restoredLease = store.leases.get('lease-unified');
+
+  assert.equal(restoredRun?.id, 'run-unified');
+  assert.equal(restoredLease?.id, 'lease-unified');
+  assert.equal(restoredLease?.runId, 'run-unified');
+
   store.close();
 });

@@ -120,15 +120,16 @@ export class RunOrchestrator {
   }
 
   /**
-   * Mark runs left mid-flight by a previous process as failed.
+   * Mark runs left mid-flight by a previous process as failed and transition
+   * their active leases into recovery.
    *
    * A run recorded as `running` belongs to a process that no longer exists: its
-   * engine session and its lease died with it, so nothing will ever settle it.
-   * Leaving it as `running` would show the user a run that can never progress
-   * and would block its environment forever. This is the minimal honest
-   * reconciliation for M1; detecting and capturing dirty work is O4's job.
+   * engine session died with it, so nothing will ever settle it. Its capacity
+   * lease transitions to `recovering` (O4) so the environment is protected from
+   * unsafe reassignment until uncommitted work is captured or discarded.
    */
   async reconcileOrphanedRuns(): Promise<readonly AgentRun[]> {
+    await this.#pool.load();
     const recovered: AgentRun[] = [];
     for (const stored of await this.#store.list()) {
       if (this.#runs.has(stored.id)) continue;
@@ -147,6 +148,9 @@ export class RunOrchestrator {
         : stored;
       this.#runs.set(next.id, next);
       if (orphaned) {
+        if (stored.leaseId) {
+          this.#pool.markRecovering(stored.leaseId);
+        }
         await this.#store.save(next);
         recovered.push(next);
       }
@@ -157,6 +161,16 @@ export class RunOrchestrator {
   /** The active lease on an environment instance, for observability. */
   activeLease(instanceId: string): ReturnType<EnvironmentPool['activeLease']> {
     return this.#pool.activeLease(instanceId);
+  }
+
+  /** Every lease known to the pool, for observability. */
+  leases(): ReturnType<EnvironmentPool['leases']> {
+    return this.#pool.leases();
+  }
+
+  /** Release a lease (e.g. to resolve recovery), making the environment available again. */
+  releaseLease(leaseId: string): ReturnType<EnvironmentPool['releaseLease']> {
+    return this.#pool.releaseLease(leaseId);
   }
 
   /** Recover a run recorded by a previous process. */
@@ -224,14 +238,19 @@ export class RunOrchestrator {
       instanceId: agent.environmentInstanceId,
       capability: agent.capability,
       holderId: agent.id,
+      runId: initial.id,
       ttlMs: this.#leaseTtlMs,
     });
     if (!acquired.ok) {
+      const busyMessage =
+        acquired.state === 'recovering'
+          ? `environment busy: ${agent.environmentInstanceId} is in recovery (held by ${acquired.heldBy ?? 'another run'})`
+          : `environment busy: ${agent.environmentInstanceId} is leased by ${acquired.heldBy ?? 'another run'}`;
       return this.#finish(initial, 'failed', {
         status: 'failed',
         message:
           acquired.reason === 'conflict'
-            ? `environment busy: ${agent.environmentInstanceId} is leased by ${acquired.heldBy ?? 'another run'}`
+            ? busyMessage
             : `environment unavailable: ${acquired.reason}`,
       });
     }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { EnvironmentDefinition, EnvironmentInstance } from './model.ts';
-import { EnvironmentPool } from './pool.ts';
+import { EnvironmentPool, InMemoryLeaseStore } from './pool.ts';
 
 const macDefinition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -178,4 +178,140 @@ test('leases are recorded for observability', () => {
   const all = pool.leases();
   assert.equal(all.length, 1);
   assert.equal(all[0]?.holderId, 'agent-a');
+});
+
+test('a recovering lease blocks acquisition and callers see the recovery state', () => {
+  const { pool } = poolAt(1_000);
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-a',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+
+  const recovering = pool.markRecovering(acquired.lease.id);
+  assert.equal(recovering?.state, 'recovering');
+
+  const conflict = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-b',
+    ttlMs: 60_000,
+  });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.ok === false && conflict.reason, 'conflict');
+  assert.equal(conflict.ok === false && conflict.state, 'recovering');
+  assert.equal(conflict.ok === false && conflict.heldBy, 'agent-a');
+});
+
+test('resolving recovery makes the instance acquirable again', () => {
+  const { pool } = poolAt(1_000);
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-a',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+
+  pool.markRecovering(acquired.lease.id);
+  const resolved = pool.resolveRecovery(acquired.lease.id);
+  assert.equal(resolved?.state, 'released');
+
+  const second = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-b',
+    ttlMs: 60_000,
+  });
+  assert.equal(second.ok, true);
+});
+
+test('a recovering lease does not expire with time and cannot be extended', () => {
+  const { pool, advance } = poolAt(1_000);
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-a',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+
+  pool.markRecovering(acquired.lease.id);
+  assert.equal(pool.extendLease(acquired.lease.id, 60_000), undefined);
+
+  advance(100_000);
+
+  const conflict = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-b',
+    ttlMs: 60_000,
+  });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.ok === false && conflict.state, 'recovering');
+});
+
+test('lease changes persist to a LeaseStore', () => {
+  const store = new InMemoryLeaseStore();
+  let now = 1_000;
+  const pool = new EnvironmentPool({
+    definitions: [macDefinition],
+    instances: [macInstance],
+    store,
+    clock: { now: () => now },
+  });
+
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-a',
+    runId: 'run-1',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+
+  assert.equal(store.get(acquired.lease.id)?.state, 'active');
+  assert.equal(store.get(acquired.lease.id)?.runId, 'run-1');
+
+  pool.markRecovering(acquired.lease.id);
+  assert.equal(store.get(acquired.lease.id)?.state, 'recovering');
+
+  pool.releaseLease(acquired.lease.id);
+  assert.equal(store.get(acquired.lease.id)?.state, 'released');
+});
+
+test('leases in the store are reloaded on pool initialization', () => {
+  const store = new InMemoryLeaseStore();
+  store.save({
+    id: 'lease-prior',
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-prior',
+    acquiredAt: 1_000,
+    expiresAt: 100_000,
+    state: 'active',
+  });
+
+  const pool = new EnvironmentPool({
+    definitions: [macDefinition],
+    instances: [macInstance],
+    store,
+    clock: { now: () => 2_000 },
+  });
+
+  assert.equal(pool.activeLease('mac-mini-1')?.id, 'lease-prior');
+  const conflict = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-new',
+    ttlMs: 60_000,
+  });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.ok === false && conflict.heldBy, 'agent-prior');
 });

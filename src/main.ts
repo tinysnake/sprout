@@ -8,7 +8,7 @@ import type { EnvironmentDefinition, EnvironmentInstance } from './environment/m
 import { EnvironmentPool } from './environment/pool.ts';
 import { DockerRuntime, containerEnvironmentDefinition } from './environment/container.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
-import { SqliteRunStore } from './run/sqlite-store.ts';
+import { SqliteStore } from './run/sqlite-store.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
@@ -189,17 +189,19 @@ const agents: readonly AgentDefinition[] = [
 ];
 
 const registry = new AgentRegistry(agents);
-const store = new SqliteRunStore({ filename: databasePath });
+const store = new SqliteStore({ filename: databasePath });
+const pool = new EnvironmentPool({
+  definitions: environmentDefinitions,
+  instances: environmentInstances,
+  store: store.leases,
+});
 const orchestrator = new RunOrchestrator({
   // Resolved per run, so a worker that died is replaced before the next run
   // instead of failing it against a dead channel (ADR-0003).
   engines: () => supervisor.adapters(),
   agents: registry,
-  pool: new EnvironmentPool({
-    definitions: environmentDefinitions,
-    instances: environmentInstances,
-  }),
-  store,
+  pool,
+  store: store.runs,
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 
@@ -232,6 +234,14 @@ if (orphaned.length > 0) {
   process.stdout.write(
     `  recovered:  ${orphaned.length} run(s) marked failed after restart: ` +
       `${orphaned.map((run) => run.id).join(', ')}\n`,
+  );
+}
+
+const recovering = pool.leases().filter((l) => l.state === 'recovering');
+if (recovering.length > 0) {
+  process.stdout.write(
+    `  recovering: ${recovering.length} lease(s) held in recovery: ` +
+      `${recovering.map((l) => `${l.id} (${l.instanceId})`).join(', ')}\n`,
   );
 }
 

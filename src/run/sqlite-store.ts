@@ -3,13 +3,14 @@ import { DatabaseSync } from 'node:sqlite';
 import type { AgentRun, AgentRunStatus } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { RunStore } from './store.ts';
+import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
 
 /**
- * SQLite-backed run storage (ADR-0002).
+ * SQLite-backed storage for runs and leases (ADR-0002).
  *
- * This is the only module that knows SQL. The orchestrator depends on the
- * `RunStore` interface, so swapping this for the in-memory store, or for a
- * server database later, does not touch run orchestration.
+ * This is the only module that knows SQL. The orchestrator and environment pool
+ * depend on the `RunStore` and `LeaseStore` interfaces, so swapping this for
+ * an in-memory store or server database does not touch domain orchestration.
  *
  * Events are stored as one JSON document per run rather than a child table: the
  * run's progress record is always read as a whole, and a run is small enough
@@ -37,9 +38,20 @@ interface RunRow {
 
 export class SqliteRunStore implements RunStore {
   readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
 
-  constructor(options: SqliteRunStoreOptions) {
-    this.#db = new DatabaseSync(options.filename);
+  constructor(options: SqliteRunStoreOptions | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+    }
+    this.#init();
+  }
+
+  #init(): void {
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
@@ -101,8 +113,133 @@ export class SqliteRunStore implements RunStore {
   }
 
   close(): void {
-    this.#db.close();
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
   }
+}
+
+interface LeaseRow {
+  readonly id: string;
+  readonly instance_id: string;
+  readonly capability: string;
+  readonly holder_id: string;
+  readonly run_id: string | null;
+  readonly acquired_at: number;
+  readonly expires_at: number;
+  readonly state: string;
+}
+
+export class SqliteLeaseStore implements LeaseStore {
+  readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
+
+  constructor(options: { filename: string } | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+    }
+    this.#init();
+  }
+
+  #init(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS environment_leases (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        holder_id TEXT NOT NULL,
+        run_id TEXT,
+        acquired_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        state TEXT NOT NULL
+      );
+    `);
+  }
+
+  save(lease: EnvironmentLease): void {
+    this.#db
+      .prepare(
+        `INSERT INTO environment_leases
+           (id, instance_id, capability, holder_id, run_id, acquired_at, expires_at, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           expires_at = excluded.expires_at,
+           state = excluded.state,
+           run_id = excluded.run_id`,
+      )
+      .run(
+        lease.id,
+        lease.instanceId,
+        lease.capability,
+        lease.holderId,
+        lease.runId ?? null,
+        lease.acquiredAt,
+        lease.expiresAt,
+        lease.state,
+      );
+  }
+
+  get(leaseId: string): EnvironmentLease | undefined {
+    const row = this.#db
+      .prepare('SELECT * FROM environment_leases WHERE id = ?')
+      .get(leaseId) as unknown | undefined;
+    return row ? toLease(row as LeaseRow) : undefined;
+  }
+
+  list(): readonly EnvironmentLease[] {
+    const rows = this.#db
+      .prepare('SELECT * FROM environment_leases ORDER BY acquired_at DESC')
+      .all() as unknown as LeaseRow[];
+    return rows.map(toLease);
+  }
+
+  close(): void {
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
+  }
+}
+
+export interface SqliteStoreOptions {
+  /** A file path, or `:memory:` for tests. */
+  readonly filename: string;
+}
+
+/**
+ * Unified SQLite storage for Sprout, managing both runs and leases
+ * through a single database handle (ADR-0002).
+ */
+export class SqliteStore {
+  readonly db: DatabaseSync;
+  readonly runs: SqliteRunStore;
+  readonly leases: SqliteLeaseStore;
+
+  constructor(options: SqliteStoreOptions) {
+    this.db = new DatabaseSync(options.filename);
+    this.runs = new SqliteRunStore({ db: this.db });
+    this.leases = new SqliteLeaseStore({ db: this.db });
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}
+
+function toLease(row: LeaseRow): EnvironmentLease {
+  return {
+    id: row.id,
+    instanceId: row.instance_id,
+    capability: row.capability,
+    holderId: row.holder_id,
+    ...(row.run_id !== null ? { runId: row.run_id } : {}),
+    acquiredAt: row.acquired_at,
+    expiresAt: row.expires_at,
+    state: row.state as LeaseState,
+  };
 }
 
 function toRun(row: RunRow): AgentRun {

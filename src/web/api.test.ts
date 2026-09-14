@@ -246,3 +246,52 @@ test('runs persisted by a previous process are listed after a restart', async ()
   assert.equal(listed.runs[0]?.id, id);
   assert.equal(listed.runs[0]?.status, 'completed');
 });
+
+test('the API lists leases and allows releasing a lease', async () => {
+  const definition: EnvironmentDefinition = {
+    id: 'macos-workstation',
+    platform: 'macos',
+    capabilities: [{ name: 'agent-run', requiresLease: true }],
+  };
+  const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-scout',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+
+  pool.markRecovering(acquired.lease.id);
+
+  const orchestrator = new RunOrchestrator({
+    engines: new Map(),
+    agents: new AgentRegistry([]),
+    pool,
+    store: new InMemoryRunStore(),
+  });
+
+  const api = createRunApi({ orchestrator, agents: new AgentRegistry([]) });
+  const { port } = await api.listen(0);
+
+  // GET /api/leases
+  const listResponse = await fetch(`http://127.0.0.1:${port}/api/leases`);
+  assert.equal(listResponse.status, 200);
+  const { leases } = (await listResponse.json()) as { leases: { id: string; state: string }[] };
+  assert.equal(leases.length, 1);
+  assert.equal(leases[0]?.id, acquired.lease.id);
+  assert.equal(leases[0]?.state, 'recovering');
+
+  // POST /api/leases/:id/release
+  const releaseResponse = await fetch(`http://127.0.0.1:${port}/api/leases/${acquired.lease.id}/release`, {
+    method: 'POST',
+  });
+  assert.equal(releaseResponse.status, 200);
+  const released = (await releaseResponse.json()) as { id: string; state: string };
+  assert.equal(released.state, 'released');
+
+  assert.equal(pool.activeLease('mac-mini-1'), undefined);
+  await api.close();
+});

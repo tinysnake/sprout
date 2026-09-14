@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
-import { EnvironmentPool } from '../environment/pool.ts';
+import { EnvironmentPool, InMemoryLeaseStore } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import { AgentRegistry } from '../agent/registry.ts';
@@ -370,4 +370,88 @@ test('a completed run is not disturbed by restart reconciliation', async () => {
   assert.equal(recovered.length, 0);
   const listed = await orchestrator.list();
   assert.equal(listed[0]?.status, 'completed');
+});
+
+test('an orphaned run has its lease transitioned to recovering on restart, blocking subsequent runs until resolved', async () => {
+  const store = new InMemoryRunStore();
+  const leaseStore = new InMemoryLeaseStore();
+
+  const poolOptions = {
+    definitions: [definition],
+    instances: [instance],
+    store: leaseStore,
+  };
+
+  // Seed an orphaned run and its active lease.
+  leaseStore.save({
+    id: 'lease-orphaned',
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'agent-scout',
+    runId: 'orphan-1',
+    acquiredAt: 1_000,
+    expiresAt: 600_000,
+    state: 'active',
+  });
+
+  await store.save({
+    id: 'orphan-1',
+    agentId: 'agent-scout',
+    prompt: 'interrupted turn',
+    environmentInstanceId: 'mac-mini-1',
+    status: 'running',
+    events: [{ type: 'notice', text: 'in-flight event' }],
+    leaseId: 'lease-orphaned',
+    createdAt: 1_000,
+  });
+
+  const adapter = new ScriptedEngineAdapter({
+    turns: [{ events: [{ type: 'message', text: 'ok', final: true }], result: { status: 'completed', text: 'ok' } }],
+  });
+  const registry = new AgentRegistry([
+    {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      environmentInstanceId: 'mac-mini-1',
+      capability: 'agent-run',
+      workingDirectory: '/tmp',
+      instructions: 'You are Scout.',
+    },
+  ]);
+
+  // Second process starts up with the persisted pool and store.
+  const pool = new EnvironmentPool(poolOptions);
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: registry,
+    pool,
+    store,
+    clock: { now: () => 5_000 },
+  });
+
+  const recovered = await orchestrator.reconcileOrphanedRuns();
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0]?.status, 'failed');
+  assert.deepEqual(recovered[0]?.events, [{ type: 'notice', text: 'in-flight event' }]);
+
+  // The lease must now be in recovery, not forgotten or active.
+  const lease = pool.getLease('lease-orphaned');
+  assert.equal(lease?.state, 'recovering');
+  assert.equal(leaseStore.get('lease-orphaned')?.state, 'recovering');
+
+  // Acquiring that environment for a new run must conflict with recovery message.
+  const nextSubmit = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'try again' });
+  const settled = await orchestrator.waitFor(nextSubmit.id);
+  assert.equal(settled.status, 'failed');
+  assert.match(settled.failure ?? '', /in recovery/i);
+
+  // Resolving/releasing the recovering lease frees the environment.
+  const released = orchestrator.releaseLease('lease-orphaned');
+  assert.equal(released?.state, 'released');
+
+  // A new run now succeeds.
+  const retrySubmit = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'now it works' });
+  const retrySettled = await orchestrator.waitFor(retrySubmit.id);
+  assert.equal(retrySettled.status, 'completed');
 });

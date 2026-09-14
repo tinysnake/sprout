@@ -108,6 +108,29 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // GET /api/leases — list leases for observability.
+    if (request.method === 'GET' && url.pathname === '/api/leases') {
+      sendJson(response, 200, { leases: orchestrator.leases() });
+      return;
+    }
+
+    // POST /api/leases/:id/release — release a lease (resolving recovery).
+    if (
+      request.method === 'POST' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'leases' &&
+      segments[3] === 'release'
+    ) {
+      const released = orchestrator.releaseLease(segments[2] ?? '');
+      if (!released) {
+        sendJson(response, 404, { error: `unknown or inactive lease: ${segments[2]}` });
+        return;
+      }
+      sendJson(response, 200, released);
+      return;
+    }
+
     // GET /api/events — every run's progress, pushed as it changes.
     if (request.method === 'GET' && url.pathname === '/api/events') {
       openEventStream(request, response);

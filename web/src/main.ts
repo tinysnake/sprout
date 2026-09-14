@@ -31,6 +31,14 @@ interface AgentView {
   readonly name: string;
 }
 
+interface LeaseView {
+  readonly id: string;
+  readonly instanceId: string;
+  readonly capability: string;
+  readonly holderId: string;
+  readonly state: string;
+}
+
 const form = document.querySelector<HTMLFormElement>('#request-form');
 const agentSelect = document.querySelector<HTMLSelectElement>('#agent');
 const promptInput = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -47,6 +55,9 @@ for (const agent of agents) {
   option.textContent = agent.name;
   agentSelect.append(option);
 }
+
+const initialLeases = await loadLeases();
+renderLeases(initialLeases);
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -73,7 +84,58 @@ const stream = new EventSource('/api/events');
 stream.addEventListener('run', (event) => {
   const run = JSON.parse((event as MessageEvent<string>).data) as RunView;
   render(run);
+  void loadLeases().then(renderLeases);
 });
+
+async function loadLeases(): Promise<readonly LeaseView[]> {
+  try {
+    const response = await fetch('/api/leases');
+    const body = (await response.json()) as { leases?: LeaseView[] };
+    return body.leases ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function renderLeases(leases: readonly LeaseView[]): void {
+  const leaseList = document.querySelector<HTMLUListElement>('#lease-list');
+  if (!leaseList) return;
+  const activeOrRecovering = leases.filter((l) => l.state === 'active' || l.state === 'recovering');
+  if (activeOrRecovering.length === 0) {
+    leaseList.replaceChildren();
+    const empty = document.createElement('li');
+    empty.textContent = 'No active or recovering leases.';
+    leaseList.append(empty);
+    return;
+  }
+  leaseList.replaceChildren(...activeOrRecovering.map(renderLeaseItem));
+}
+
+function renderLeaseItem(lease: LeaseView): HTMLLIElement {
+  const item = document.createElement('li');
+  item.className = `lease lease-${lease.state}`;
+  const label = document.createElement('span');
+  label.textContent = `${lease.instanceId} (${lease.capability}) — ${lease.holderId} [${lease.state}]`;
+  item.append(label);
+
+  if (lease.state === 'recovering') {
+    const releaseBtn = document.createElement('button');
+    releaseBtn.type = 'button';
+    releaseBtn.textContent = 'Release Recovery';
+    releaseBtn.addEventListener('click', async () => {
+      releaseBtn.disabled = true;
+      try {
+        await fetch(`/api/leases/${lease.id}/release`, { method: 'POST' });
+        const updated = await loadLeases();
+        renderLeases(updated);
+      } finally {
+        releaseBtn.disabled = false;
+      }
+    });
+    item.append(releaseBtn);
+  }
+  return item;
+}
 
 async function loadAgents(): Promise<readonly AgentView[]> {
   try {
