@@ -11,6 +11,7 @@ import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
+import { CollaborationCoordinator } from './collaboration/coordinator.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
@@ -257,10 +258,35 @@ const orchestrator = new RunOrchestrator({
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 
+/**
+ * The collaboration coordinator: durable Messages, the M1 wake contract, and
+ * automatic final-result projection (#26).
+ *
+ * It shares the process's one SQLite database and the run orchestrator, so a
+ * reply is projected from the same run record the core persisted. No wake model
+ * is configured at M1, which the contract handles explicitly: an unaddressed
+ * project-channel Message fails open to one wake per other member (see
+ * `src/collaboration/wake.ts`) rather than being silently dropped.
+ */
+const collaboration = new CollaborationCoordinator({
+  projects,
+  store: store.collaboration,
+  runs: orchestrator,
+  onObservation: ({ messageId, observation }) => {
+    process.stderr.write(
+      `[collaboration] ${observation.status} (${observation.agentId}) ` +
+        `on message ${messageId}: ${observation.detail}\n`,
+    );
+  },
+});
+
 const staticRoot = join(projectRoot, 'web', 'dist');
 const api = createRunApi({
   orchestrator,
   agents: registry,
+  // The project channel is served over the same core: delivery, wake dispatch,
+  // and projected replies all go through the one coordinator above.
+  collaboration,
   staticRoot,
   readFile: async (path) => {
     if (!existsSync(path)) return undefined;
@@ -272,6 +298,16 @@ const { port: boundPort } = await api.listen(port);
 
 /** Reconcile runs left mid-flight by a previous process before serving. */
 const orphaned = await orchestrator.reconcileOrphanedRuns();
+
+/**
+ * Reconcile the collaboration write path after a restart (#26).
+ *
+ * Runs are reconciled first so an orphaned run is already settled as failed and
+ * can never have a reply fabricated for it. This pass then re-admits pending
+ * wakes and re-projects replies for completed runs whose projection was lost; it
+ * is idempotent, so a clean restart changes nothing.
+ */
+const reconciled = await collaboration.reconcile();
 
 process.stdout.write(
   `Sprout listening on http://127.0.0.1:${boundPort}\n` +
@@ -286,6 +322,13 @@ if (orphaned.length > 0) {
   process.stdout.write(
     `  recovered:  ${orphaned.length} run(s) marked failed after restart: ` +
       `${orphaned.map((run) => run.id).join(', ')}\n`,
+  );
+}
+
+if (reconciled.admittedRunIds.length > 0 || reconciled.projectedMessageIds.length > 0) {
+  process.stdout.write(
+    `  collab:     reconciled ${reconciled.admittedRunIds.length} pending wake(s), ` +
+      `projected ${reconciled.projectedMessageIds.length} reply(ies)\n`,
   );
 }
 

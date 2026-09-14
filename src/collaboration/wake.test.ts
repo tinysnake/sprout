@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
-import type { CollaborationMessage, WakeModel } from './model.ts';
-import { parseAgentMentions, planWake } from './wake.ts';
+import type { Message, WakeModel } from './model.ts';
+import { parseAgentMentions, parseMentions, planWake } from './wake.ts';
 
 const project: Project = {
   id: 'project-sprout',
@@ -22,7 +22,7 @@ function registry(): ProjectRegistry {
   return new ProjectRegistry([project]);
 }
 
-function message(overrides: Partial<CollaborationMessage> = {}): CollaborationMessage {
+function message(overrides: Partial<Message> = {}): Message {
   return {
     id: 'msg-1',
     projectId: 'project-sprout',
@@ -74,6 +74,37 @@ test('a mention is matched as a whole token, so @forge does not match @forge-two
 
   const plan = await planWake(message({ body: '@forge-two take this' }), { projects: withTwo });
   assert.deepEqual(plan.decisions, [{ agentId: 'forge-two', reason: 'agent-mention' }]);
+});
+
+test('mention parsing preserves unknown addressed targets', () => {
+  assert.deepEqual(parseMentions('@forge and @ghost, please review', ['forge']), {
+    members: ['forge'],
+    unknown: ['ghost'],
+  });
+});
+
+test('an unknown @id is a failed addressed target and never reaches the model', async () => {
+  let calls = 0;
+  const plan = await planWake(message({ body: '@ghost please review' }), {
+    projects: registry(),
+    wakeModel: {
+      decide: async () => {
+        calls += 1;
+        return { engage: true };
+      },
+    },
+  });
+
+  assert.deepEqual(plan.decisions, []);
+  assert.deepEqual(plan.observations, [
+    {
+      agentId: 'ghost',
+      status: 'failed',
+      reason: 'agent-mention',
+      detail: 'addressed agent is not a member of project project-sprout',
+    },
+  ]);
+  assert.equal(calls, 0, 'an addressed unknown target never reaches the wake model');
 });
 
 test('@all is a broadcast that wakes every other member and bypasses the model', async () => {
@@ -162,6 +193,29 @@ test('a wake model that throws fails open to one extra wake per member', async (
   assert.ok(plan.decisions.every((decision) => decision.reason === 'wake-model-fail-open'));
   assert.equal(plan.observations[0]?.status, 'failed');
 });
+
+for (const [name, result] of [
+  ['undefined', undefined],
+  ['null', null],
+  ['a non-object', 'engage'],
+  ['a non-boolean engage value', { engage: 'yes' }],
+  ['a missing engage value', {}],
+] as const) {
+  test(`a wake model returning ${name} fails open with a durable failure plan`, async () => {
+    const plan = await planWake(message({ body: 'anyone?' }), {
+      projects: registry(),
+      wakeModel: { decide: async () => result } as unknown as WakeModel,
+    });
+
+    assert.deepEqual(
+      plan.decisions.map((decision) => decision.agentId).sort(),
+      ['forge', 'scout', 'scribe'],
+    );
+    assert.ok(plan.decisions.every((decision) => decision.reason === 'wake-model-fail-open'));
+    assert.equal(plan.observations[0]?.status, 'failed');
+    assert.match(plan.observations[0]?.detail ?? '', /invalid-verdict/);
+  });
+}
 
 test('with no wake model configured, an unaddressed message fails open', async () => {
   const plan = await planWake(message({ body: 'anyone?' }), { projects: registry() });

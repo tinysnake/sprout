@@ -164,12 +164,13 @@ Wake-contract evidence is in `src/collaboration/wake.test.ts`; coordinator
 behaviour (no reply for failed/interrupted runs, prompt content, observation
 surfacing) is in `src/collaboration/coordinator.test.ts`.
 
-**Residual gap (honest)**: the probe projects the reply inside `deliver`, after
-awaiting the run. If the core process died *after* a run completed but *before* it
-projected the reply, the reply would be missing until a reconciliation pass
-re-projects it from the persisted run result. The write path supports this
-(re-projection is idempotent by wake key), but no reconciliation pass is wired in
-the prototype. This is recorded under New fog in the work record.
+**Residual gap (closed by #26)**: the #25 probe projected the reply inside
+`deliver`, after awaiting the run. If the core process died *after* a run
+completed but *before* it projected the reply, the reply would be missing until a
+reconciliation pass re-projected it from the persisted run result. Ticket #26
+implemented that pass (`CollaborationCoordinator.reconcile`) and wired it into
+core startup; the gap is recorded here as the prototype's honest limit and in the
+#26 work record as closed.
 
 ---
 

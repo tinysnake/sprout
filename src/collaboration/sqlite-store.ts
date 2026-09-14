@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type {
-  CollaborationMessage,
+  Message,
   MessageChannel,
   MessageAuthor,
   WakeObservation,
@@ -18,10 +18,12 @@ import {
 } from './store.ts';
 
 /**
- * SQLite-backed collaboration storage (prototype #25, ADR-0002).
+ * SQLite-backed collaboration storage (ticket #26, ADR-0002).
  *
- * The only module that knows the collaboration SQL. It enforces both
- * idempotency identities with primary keys rather than caller checks:
+ * The only module that knows the collaboration SQL. It is mounted on Sprout's
+ * primary `SqliteStore` so collaboration rows share the one database the run
+ * lifecycle, leases, and projects already use. It enforces both idempotency
+ * identities with primary keys rather than caller checks:
  *
  * - `collaboration_messages.delivery_key` is unique, so a repeated delivery
  *   produces one Message (and its `INSERT OR IGNORE` reports that nothing was
@@ -89,7 +91,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
   }
 
   async postMessage(input: {
-    readonly message: CollaborationMessage;
+    readonly message: Message;
     readonly plan: WakePlan;
     readonly now: number;
   }): Promise<PostMessageResult> {
@@ -186,21 +188,21 @@ export class SqliteCollaborationStore implements CollaborationStore {
       .run(messageId, observation.agentId, observation.status, observation.reason, observation.detail, now);
   }
 
-  async getMessage(messageId: string): Promise<CollaborationMessage | undefined> {
+  async getMessage(messageId: string): Promise<Message | undefined> {
     const row = this.#db
       .prepare('SELECT * FROM collaboration_messages WHERE id = ?')
       .get(messageId) as MessageRow | undefined;
     return row ? toMessage(row) : undefined;
   }
 
-  async getMessageByDeliveryKey(deliveryKey: string): Promise<CollaborationMessage | undefined> {
+  async getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined> {
     const row = this.#db
       .prepare('SELECT * FROM collaboration_messages WHERE delivery_key = ?')
       .get(deliveryKey) as MessageRow | undefined;
     return row ? toMessage(row) : undefined;
   }
 
-  async listMessages(): Promise<readonly CollaborationMessage[]> {
+  async listMessages(): Promise<readonly Message[]> {
     const rows = this.#db
       .prepare('SELECT * FROM collaboration_messages ORDER BY created_at ASC')
       .all() as unknown as MessageRow[];
@@ -251,6 +253,10 @@ export class SqliteCollaborationStore implements CollaborationStore {
     readonly now: number;
   }): Promise<void> {
     this.#insertObservation(input.messageId, input.observation, input.now);
+  }
+
+  async listObservations(messageId: string): Promise<readonly WakeObservation[]> {
+    return this.observations(messageId);
   }
 
   /** Observations recorded for one Message, for observability and tests. */
@@ -304,7 +310,7 @@ interface ObservationRow {
   readonly detail: string;
 }
 
-function toMessage(row: MessageRow): CollaborationMessage {
+function toMessage(row: MessageRow): Message {
   const author: MessageAuthor = { id: row.author_id, kind: row.author_kind as MessageAuthor['kind'] };
   return {
     id: row.id,

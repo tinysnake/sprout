@@ -14,9 +14,9 @@ import { join } from 'node:path';
 
 import { SqliteCollaborationStore } from './sqlite-store.ts';
 import { wakeIdempotencyKey } from './store.ts';
-import type { CollaborationMessage, WakePlan } from './model.ts';
+import type { Message, WakePlan } from './model.ts';
 
-function message(overrides: Partial<CollaborationMessage> = {}): CollaborationMessage {
+function message(overrides: Partial<Message> = {}): Message {
   return {
     id: 'msg-1',
     projectId: 'project-sprout',

@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { AgentRun } from '../run/model.ts';
+import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
+import type { Message } from '../collaboration/model.ts';
 
 /**
  * The Web seam for M1.
@@ -10,13 +12,23 @@ import type { AgentRun } from '../run/model.ts';
  * Deliberately plain: the HTTP framework, UI library, and progress transport are
  * deferred decisions (ADR-0002), so this module uses `node:http` and
  * server-sent events and keeps no domain logic. Every route delegates to the
- * orchestrator, which is why the client needs no knowledge of leases or engines.
+ * orchestrator or the collaboration coordinator, which is why the client needs
+ * no knowledge of leases, engines, wakes, or the wake contract.
  */
 
 export interface RunApiOptions {
   readonly orchestrator: RunOrchestrator;
   /** The agents a user can address; exposed read-only for the client. */
   readonly agents: AgentRegistry;
+  /**
+   * The collaboration plane, when this build serves a project channel (#26).
+   *
+   * Optional so a build with no collaboration configured (and the run-only tests)
+   * stays unchanged. When present, the message routes below are enabled; the
+   * routes keep no wake logic of their own, delegating every decision to the
+   * coordinator so the wake contract has exactly one implementation.
+   */
+  readonly collaboration?: CollaborationCoordinator;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
@@ -31,7 +43,7 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents } = options;
+  const { orchestrator, agents, collaboration } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const server = createServer((request, response) => {
@@ -45,6 +57,101 @@ export function createRunApi(options: RunApiOptions): RunApi {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
+
+    // POST /api/messages — deliver one Message to a project channel and wake
+    // whoever the M1 wake contract addresses.
+    if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
+      const body = await readJson(request);
+      const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+      const channel = body.channel;
+      const authorId = typeof body.authorId === 'string' ? body.authorId : '';
+      const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
+      const text = typeof body.body === 'string' ? body.body : '';
+      const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
+      if (
+        projectId === '' ||
+        authorId === '' ||
+        text === '' ||
+        deliveryKey === '' ||
+        (channel !== 'direct' && channel !== 'project')
+      ) {
+        sendJson(response, 400, {
+          error: 'projectId, channel, authorId, body, and deliveryKey are required',
+        });
+        return;
+      }
+      if (
+        (body.recipients !== undefined &&
+          (!Array.isArray(body.recipients) || !body.recipients.every((value) => typeof value === 'string'))) ||
+        (channel === 'direct' && (!Array.isArray(body.recipients) || body.recipients.length === 0)) ||
+        (channel === 'project' && Array.isArray(body.recipients) && body.recipients.length > 0)
+      ) {
+        sendJson(response, 400, {
+          error: 'direct messages require string recipients; project messages cannot have recipients',
+        });
+        return;
+      }
+      const recipients = body.recipients as readonly string[] | undefined;
+      const delivered = await collaboration.deliver({
+        projectId,
+        channel,
+        author: { id: authorId, kind: authorKind },
+        body: text,
+        ...(recipients !== undefined ? { recipients } : {}),
+        deliveryKey,
+      });
+      sendJson(response, delivered.duplicate ? 200 : 202, {
+        message: toMessageView(delivered.message),
+        duplicate: delivered.duplicate,
+        wakes: delivered.wakes.map((wake) => ({
+          agentId: wake.agentId,
+          reason: wake.reason,
+          status: wake.status,
+          ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+        })),
+        admittedRunIds: delivered.admittedRunIds,
+      });
+      return;
+    }
+
+    // GET /api/messages — the durable conversation, newest last.
+    if (request.method === 'GET' && url.pathname === '/api/messages' && collaboration) {
+      sendJson(response, 200, {
+        messages: (await collaboration.listMessages()).map(toMessageView),
+      });
+      return;
+    }
+
+    // GET /api/messages/:id/observations — why a Message woke nobody (if it did not).
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'messages' &&
+      segments[3] === 'observations' &&
+      collaboration
+    ) {
+      const messageId = segments[2] ?? '';
+      const message = await collaboration.listMessages().then((messages) =>
+        messages.find((candidate) => candidate.id === messageId),
+      );
+      if (!message) {
+        sendJson(response, 404, { error: `unknown message: ${messageId}` });
+        return;
+      }
+      sendJson(response, 200, {
+        observations: await collaboration.listObservations(messageId),
+        wakes: (await collaboration.listWakeRequests())
+          .filter((wake) => wake.messageId === messageId)
+          .map((wake) => ({
+            agentId: wake.agentId,
+            reason: wake.reason,
+            status: wake.status,
+            ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+          })),
+      });
+      return;
+    }
 
     // POST /api/runs — submit a request to an agent.
     if (request.method === 'POST' && url.pathname === '/api/runs') {
@@ -247,6 +354,40 @@ function toView(run: AgentRun): RunView {
     ...(run.result !== undefined ? { result: run.result } : {}),
     createdAt: run.createdAt,
     ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one Message.
+ *
+ * The conversation unit only: author, body, reply link, and ordering. A reply's
+ * body is already the run's final assistant text, so tool calls, tool output, and
+ * raw reasoning have no path into this view — they were never stored as a
+ * Message in the first place.
+ */
+export interface MessageView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly channel: string;
+  readonly authorId: string;
+  readonly authorKind: string;
+  readonly body: string;
+  readonly recipients: readonly string[];
+  readonly inReplyTo?: string;
+  readonly createdAt: number;
+}
+
+function toMessageView(message: Message): MessageView {
+  return {
+    id: message.id,
+    projectId: message.projectId,
+    channel: message.channel,
+    authorId: message.author.id,
+    authorKind: message.author.kind,
+    body: message.body,
+    recipients: message.recipients,
+    ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+    createdAt: message.createdAt,
   };
 }
 

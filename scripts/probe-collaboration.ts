@@ -29,7 +29,6 @@ import { RunOrchestrator } from '../src/run/orchestrator.ts';
 import { SqliteStore } from '../src/run/sqlite-store.ts';
 import { EndpointCarrier } from '../src/worker/carrier.ts';
 import { CollaborationCoordinator } from '../src/collaboration/coordinator.ts';
-import { SqliteCollaborationStore } from '../src/collaboration/sqlite-store.ts';
 
 function workerScript(): string {
   const workerServer = new URL('../src/worker/server.ts', import.meta.url).pathname;
@@ -85,7 +84,7 @@ const connection = await EndpointCarrier.start({
   readyTimeoutMs: 20_000,
 });
 const sqlite = new SqliteStore({ filename: dbPath });
-const store = new SqliteCollaborationStore({ db: sqlite.db });
+const store = sqlite.collaboration;
 const projects = new ProjectRegistry([project]);
 const orchestrator = new RunOrchestrator({
   engines: async () => connection.adapters,

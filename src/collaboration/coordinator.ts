@@ -1,5 +1,5 @@
 /**
- * The collaboration coordinator (prototype #25): the core write path.
+ * The collaboration coordinator (ticket #26): the core write path.
  *
  * ## The selected write path
  *
@@ -36,6 +36,17 @@
  *   and its wake requests without adding anything, and `admitWake` is a compare-
  *   and-set, so a repeated delivery key produces at most one run admission.
  *
+ * ## Restart reconciliation
+ *
+ * `deliver` projects a reply inline after awaiting the admitted run, which is
+ * deterministic while the process lives. A process that dies after a run
+ * completed but before the reply was projected would otherwise leave the
+ * conversation silent forever. `reconcile()` closes that gap: on startup it
+ * re-admits any wake that was persisted but never admitted, then re-projects a
+ * reply for every admitted wake whose run completed without one. Both halves are
+ * idempotent by construction (the wake CAS and the reply delivery key), so a
+ * restart can never duplicate a run or a reply.
+ *
  * ## What is deliberately excluded
  *
  * A reply's body is the run's final assistant text only. The run's `events`
@@ -49,7 +60,7 @@ import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import {
-  type CollaborationMessage,
+  type Message,
   type WakeObservation,
   type WakeRequest,
 } from './model.ts';
@@ -61,6 +72,15 @@ import { wakeIdempotencyKey } from './store.ts';
 export interface RunAdmitter {
   submit(request: { readonly agentId: string; readonly prompt: string }): Promise<{ id: string }>;
   waitFor(runId: string): Promise<AgentRun>;
+  /**
+   * Look up a run without requiring it to exist.
+   *
+   * Used by reconciliation, where a wake may name a run whose record is no longer
+   * present. An unknown run is then simply "no reply to project", not a startup
+   * crash. Optional so a minimal admitter (tests, the probe) need not provide it;
+   * when absent, `waitFor` is used and an unknown run propagates.
+   */
+  load?(runId: string): Promise<AgentRun | undefined>;
 }
 
 export interface CollaborationCoordinatorOptions {
@@ -80,8 +100,8 @@ export interface CollaborationCoordinatorOptions {
 /** A request to post one durable Message and wake whoever it addresses. */
 export interface DeliverInput {
   readonly projectId: string;
-  readonly channel: CollaborationMessage['channel'];
-  readonly author: CollaborationMessage['author'];
+  readonly channel: Message['channel'];
+  readonly author: Message['author'];
   readonly body: string;
   /** Required for a direct Message; ignored on the project channel. */
   readonly recipients?: readonly string[];
@@ -90,13 +110,25 @@ export interface DeliverInput {
 }
 
 export interface DeliverResult {
-  readonly message: CollaborationMessage;
+  readonly message: Message;
   /** Every wake request the Message produced, admitted or not. */
   readonly wakes: readonly WakeRequest[];
   /** True when the delivery key had already been seen; nothing new was stored. */
   readonly duplicate: boolean;
   /** Run ids admitted by this delivery, in wake order. */
   readonly admittedRunIds: readonly string[];
+}
+
+/** What one restart reconciliation pass recovered. */
+export interface ReconcileResult {
+  /** Pending wakes re-admitted by this pass, in wake order. */
+  readonly admittedRunIds: readonly string[];
+  /**
+   * Input Message ids whose reply this pass (re)projected. A wake whose reply
+   * was already durable is not listed: reconciliation reports work done, not
+   * work inspected.
+   */
+  readonly projectedMessageIds: readonly string[];
 }
 
 export class CollaborationCoordinator {
@@ -129,19 +161,24 @@ export class CollaborationCoordinator {
   async deliver(input: DeliverInput): Promise<DeliverResult> {
     const existing = await this.#store.getMessageByDeliveryKey(input.deliveryKey);
     if (existing) {
-      // A retry. Nothing is written and nothing is admitted: the durable input
-      // and its wake requests already exist, and their admission state decides
-      // whether a run ever ran.
+      // A retry. No new Message is written, but any wake of this input that is
+      // still pending is admitted now: idempotency must not leave addressed work
+      // unwoken just because an earlier process died between persist and admit.
+      // Admission is a compare-and-set, so this cannot double-admit a wake.
+      const admittedRunIds = await this.#admitAll(
+        (await this.#store.listWakeRequests()).filter((wake) => wake.messageId === existing.id),
+        existing,
+      );
       return {
         message: existing,
         wakes: (await this.#store.listWakeRequests()).filter((w) => w.messageId === existing.id),
         duplicate: true,
-        admittedRunIds: [],
+        admittedRunIds,
       };
     }
 
     const now = this.#clock.now();
-    const message: CollaborationMessage = {
+    const message: Message = {
       id: this.#ids.message(),
       projectId: input.projectId,
       channel: input.channel,
@@ -165,11 +202,7 @@ export class CollaborationCoordinator {
       this.#onObservation?.({ messageId: message.id, observation });
     }
 
-    const admittedRunIds: string[] = [];
-    for (const wake of stored.wakes) {
-      const runId = await this.#admit(wake, message);
-      if (runId !== undefined) admittedRunIds.push(runId);
-    }
+    const admittedRunIds = await this.#admitAll(stored.wakes, message);
     // Re-read the wake records after admission so the returned result reports
     // the durable state (status + run id) rather than the pre-admission snapshot.
     const finalWakes = (await this.#store.listWakeRequests()).filter(
@@ -179,12 +212,34 @@ export class CollaborationCoordinator {
   }
 
   /**
+   * Admit every pending wake in a list, in order, and report the runs started.
+   *
+   * Shared by `deliver` and its duplicate path: admission is idempotent, so
+   * running it on wakes that are already settled is a no-op.
+   */
+  async #admitAll(
+    wakes: readonly WakeRequest[],
+    input: Message,
+  ): Promise<readonly string[]> {
+    const admittedRunIds: string[] = [];
+    for (const wake of wakes) {
+      const outcome = await this.#admit(wake, input);
+      if (outcome !== undefined) admittedRunIds.push(outcome.runId);
+    }
+    return admittedRunIds;
+  }
+
+  /**
    * Admit one run for a wake request, then project its reply once it settles.
    *
-   * Returns the run id when this call won the admission, or `undefined` when the
-   * wake was already admitted (a repeated delivery) or is not pending.
+   * Returns the run id and whether a reply was projected when this call won the
+   * admission, or `undefined` when the wake was already admitted (a repeated
+   * delivery or reconciliation pass) or is not pending.
    */
-  async #admit(wake: WakeRequest, input: CollaborationMessage): Promise<string | undefined> {
+  async #admit(
+    wake: WakeRequest,
+    input: Message,
+  ): Promise<{ readonly runId: string; readonly projected: boolean } | undefined> {
     if (wake.status !== 'pending') return undefined;
 
     // Submit the run, then admit the wake with a compare-and-set. The order
@@ -211,8 +266,8 @@ export class CollaborationCoordinator {
     // Projection is awaited rather than fire-and-forget so delivery has a
     // deterministic, observable effect: when `deliver` returns, the reply for an
     // admitted wake is durable (or the run settled without producing one).
-    await this.#projectReply(admitted.wake, input);
-    return submission.id;
+    const projected = await this.#projectReply(admitted.wake, input);
+    return { runId: submission.id, projected };
   }
 
   /**
@@ -222,41 +277,110 @@ export class CollaborationCoordinator {
    * reply: an answer that was never produced must not be fabricated. The reply's
    * delivery key is derived from the wake idempotency key, so re-running this
    * projection (for example after a restart) can never post two replies for one
-   * wake.
+   * wake. Returns whether this call actually created the reply (false when the
+   * run produced no reply, or when a durable reply already existed).
    */
-  async #projectReply(wake: WakeRequest, input: CollaborationMessage): Promise<void> {
+  async #projectReply(
+    wake: WakeRequest,
+    input: Message,
+    options: { readonly awaitSettlement: boolean } = { awaitSettlement: true },
+  ): Promise<boolean> {
     const runId = wake.runId;
-    if (runId === undefined) return;
-    const run = await this.#runs.waitFor(runId);
-    if (run.status !== 'completed') return;
+    if (runId === undefined) return false;
+    // The deliver/admit path awaits the run's terminal state, because a reply must
+    // not be projected from a half-finished run. Reconciliation instead reads the
+    // current durable record: the restart has already settled orphaned runs as
+    // failed, so a run is either terminal or genuinely absent — and an absent
+    // record must mean "no reply", never an aborted startup.
+    const run = options.awaitSettlement
+      ? await this.#runs.waitFor(runId)
+      : this.#runs.load
+        ? await this.#runs.load(runId)
+        : await this.#runs.waitFor(runId);
+    if (run === undefined || run.status !== 'completed') return false;
     const text = run.result?.status === 'completed' ? run.result.text.trim() : '';
-    if (text === '') return;
+    if (text === '') return false;
 
-    await this.#store.postMessage({
+    const stored = await this.#store.postMessage({
       message: {
-        id: `reply-${wake.idempotencyKey}`,
+        id: replyMessageId(wake),
         projectId: input.projectId,
         channel: input.channel,
         author: { id: wake.agentId, kind: 'agent' },
         body: text,
         recipients: [],
-        deliveryKey: `reply:${wake.idempotencyKey}`,
+        deliveryKey: replyDeliveryKey(wake),
         inReplyTo: input.id,
         createdAt: this.#clock.now(),
       },
       plan: { messageId: input.id, decisions: [], observations: [] },
       now: this.#clock.now(),
     });
+    return !stored.duplicate;
+  }
+
+  /**
+   * Recover the collaboration write path after a restart.
+   *
+   * Two recoverable gaps can exist after an abrupt stop, and both are closed
+   * here rather than left for a human to notice:
+   *
+   * 1. **A wake that was persisted but never admitted.** Persistence-before-wake
+   *    is what makes this safe to redo; the pending wake is admitted now, exactly
+   *    as `deliver` would have.
+   * 2. **A completed run whose reply was never projected.** The run result is
+   *    durable, so the reply is reconstructed from it. The projection is keyed by
+   *    the wake idempotency key, so it cannot double-post.
+   *
+   * A run that a restart settled as `failed` or `interrupted` produces no reply:
+   * this method never fabricates an answer. The whole pass is idempotent, so
+   * running it twice — or on a healthy process — changes nothing.
+   */
+  async reconcile(): Promise<ReconcileResult> {
+    const admittedRunIds: string[] = [];
+    // A set: several wakes (for example an `@all` broadcast) can answer the same
+    // input, and reconciliation reports each input once, not once per reply.
+    const projectedMessageIds = new Set<string>();
+    for (const wake of await this.#store.listWakeRequests()) {
+      const input = await this.#store.getMessage(wake.messageId);
+      // A wake whose input is missing cannot be reconstructed; it is left alone
+      // rather than guessed at, and remains visible in the durable wake list.
+      if (input === undefined) continue;
+
+      if (wake.status === 'pending') {
+        const outcome = await this.#admit(wake, input);
+        if (outcome !== undefined) {
+          admittedRunIds.push(outcome.runId);
+          if (outcome.projected) projectedMessageIds.add(input.id);
+        }
+        continue;
+      }
+      if (wake.status !== 'admitted') continue;
+
+      const projected = await this.#projectReply(wake, input, { awaitSettlement: false });
+      if (projected) projectedMessageIds.add(input.id);
+    }
+    return { admittedRunIds, projectedMessageIds: [...projectedMessageIds] };
   }
 
   /** Durable state for observability: every Message on record. */
-  listMessages(): Promise<readonly CollaborationMessage[]> {
+  listMessages(): Promise<readonly Message[]> {
     return this.#store.listMessages();
   }
 
   /** Durable state for observability: every wake request on record. */
   listWakeRequests(): Promise<readonly WakeRequest[]> {
     return this.#store.listWakeRequests();
+  }
+
+  /**
+   * Durable non-wake outcomes for one Message, for observability.
+   *
+   * This is what lets a human answer "why did this Message wake nobody?": a
+   * suppression and a failure are both visible here, never silent.
+   */
+  listObservations(messageId: string): Promise<readonly WakeObservation[]> {
+    return this.#store.listObservations(messageId);
   }
 }
 
@@ -268,7 +392,7 @@ export class CollaborationCoordinator {
  * belongs. This is the only thing projected into the run; the core does not
  * pre-summarize or reinterpret the Message.
  */
-export function renderWakePrompt(message: CollaborationMessage, agentId: string): string {
+export function renderWakePrompt(message: Message, agentId: string): string {
   const where = message.channel === 'direct' ? 'a direct message' : `the project channel`;
   return [
     `You were woken by ${where} in project ${message.projectId}.`,
@@ -282,3 +406,19 @@ export function renderWakePrompt(message: CollaborationMessage, agentId: string)
 }
 
 export { wakeIdempotencyKey };
+
+/**
+ * The reply's stable identity: derived from the wake it answers.
+ *
+ * Deriving both the id and the delivery key from the wake idempotency key is
+ * what makes reply projection idempotent: a restart, a retry, or two concurrent
+ * projectors all address the same reply row, so there is at most one reply per
+ * wake.
+ */
+function replyDeliveryKey(wake: WakeRequest): string {
+  return `reply:${wake.idempotencyKey}`;
+}
+
+function replyMessageId(wake: WakeRequest): string {
+  return `reply-${wake.idempotencyKey}`;
+}
