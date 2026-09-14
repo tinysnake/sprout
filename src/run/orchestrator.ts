@@ -359,8 +359,8 @@ export class RunOrchestrator {
     const identity: SessionKeyIdentity = {
       agentId: agent.id,
       engine: agent.engine,
-      environmentInstanceId: agent.environmentInstanceId,
-      workingDirectory: agent.workingDirectory,
+      environmentInstanceId: initial.environmentInstanceId,
+      workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
     };
     const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
 
@@ -423,6 +423,7 @@ export class RunOrchestrator {
     running: AgentRun,
     resumeKey: string | undefined,
   ): Promise<SessionAttempt> {
+    const initial = running;
     let session: EngineSession;
     try {
       session = await adapter.startSession({
