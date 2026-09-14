@@ -19,6 +19,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { InMemoryTaskStore } from '../task/store.ts';
 import { TaskService } from '../task/service.ts';
+import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 import { createRunApi, type RunApi } from './api.ts';
 
 const definition: EnvironmentDefinition = {
@@ -51,7 +52,7 @@ function completed(text: string): ScriptedTurn {
   };
 }
 
-function build(options: { readonly turns?: readonly ScriptedTurn[] } = {}) {
+function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {}) {
   const adapter = new ScriptedEngineAdapter({
     turns: options.turns ?? [completed('First step done.'), completed('Second step done.')],
   });
@@ -59,25 +60,31 @@ function build(options: { readonly turns?: readonly ScriptedTurn[] } = {}) {
     { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run' },
   ]);
   const taskStore = new InMemoryTaskStore();
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   let service: TaskService;
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
     projects,
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    pool,
     store: new InMemoryRunStore(),
     tasks: { prompt: (input) => service.prompt(input), link: (input) => service.link(input) },
     onTaskRunSettled: (input) => service.onRunSettled(input),
     leaseTtlMs: 60_000,
   });
-  service = new TaskService({ store: taskStore, runs: orchestrator });
+  const lifecycle = new TaskEnvironmentLifecycle({
+    store: taskStore, pool, agents: registry, projects, runs: orchestrator,
+  });
+  // The retained test needs the same pool as the orchestrator. Its compact
+  // factory below supplies that directly instead of exposing a production field.
+  service = new TaskService({ store: taskStore, runs: orchestrator, lifecycle });
   const api: RunApi = createRunApi({ orchestrator, agents: registry, projects, tasks: service });
   return { api, service };
 }
 
 async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
-  options: { readonly turns?: readonly ScriptedTurn[] } = {},
+  options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {},
 ): Promise<void> {
   const context = build(options);
   const { port } = await context.api.listen(0);
@@ -113,6 +120,10 @@ async function waitForRun(base: string, id: string): Promise<Record<string, unkn
   throw new Error('run did not settle');
 }
 
+async function beginTask(base: string, taskId: string): Promise<void> {
+  assert.equal((await fetch(`${base}/api/tasks/${taskId}/begin`, { method: 'POST' })).status, 200);
+}
+
 test('a Task can be created and listed through the API', async () => {
   await withServer(async (base) => {
     const created = await createTask(base);
@@ -139,6 +150,31 @@ test('a Task can be created with an environment preference', async () => {
   });
 });
 
+test('begin, retained nested advance, end, and recovery routes use precise 404/409 classes', async () => {
+  await withServer(async (base) => {
+    assert.equal((await fetch(`${base}/api/tasks/nope/begin`, { method: 'POST' })).status, 404);
+    const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    const begin = await fetch(`${base}/api/tasks/${task.id}/begin`, { method: 'POST' });
+    assert.equal(begin.status, 200);
+    const begun = (await begin.json()) as { task: Record<string, unknown> };
+    assert.equal(begun.task.environmentLifecycleState, 'idle');
+
+    const advance = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
+    assert.equal(advance.status, 202);
+    const activeEnd = await fetch(`${base}/api/tasks/${task.id}/end`, { method: 'POST' });
+    assert.equal(activeEnd.status, 409);
+    const { runId } = (await advance.json()) as { runId: string };
+    assert.equal((await waitForRun(base, runId)).status, 'completed');
+    const validation = await fetch(`${base}/api/tasks/${task.id}/validation`, { method: 'POST' });
+    assert.equal(validation.status, 200);
+    assert.equal(((await validation.json()) as { task: Record<string, unknown> }).task.environmentLifecycleState, 'awaiting-validation');
+    const ended = await fetch(`${base}/api/tasks/${task.id}/end`, { method: 'POST' });
+    assert.equal(ended.status, 200);
+    const endedBody = (await ended.json()) as { task: Record<string, unknown> };
+    assert.equal(endedBody.task.environmentLifecycleState, 'ended');
+  }, { retainedLease: true, turns: [{ ...completed('Retained step done.'), settleAfterMs: 100 }] });
+});
+
 test('a malformed Task creation is rejected with a reason', async () => {
   await withServer(async (base) => {
     assert.equal((await createTask(base, { title: '' })).status, 400);
@@ -154,6 +190,7 @@ test('a malformed Task creation is rejected with a reason', async () => {
 test('advancing a Task starts a run and records it in the run links', async () => {
   await withServer(async (base) => {
     const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    await beginTask(base, task.id);
     const advance = await fetch(`${base}/api/tasks/${task.id}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -184,6 +221,7 @@ test('advancing a Task starts a run and records it in the run links', async () =
 test('a Task can be advanced more than once', async () => {
   await withServer(async (base) => {
     const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    await beginTask(base, task.id);
     const first = (await (
       await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' })
     ).json()) as { runId: string };
@@ -207,6 +245,7 @@ test('advancing a Task with a live prior run returns 409', async () => {
   await withServer(
     async (base) => {
       const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+      await beginTask(base, task.id);
       const first = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
       assert.equal(first.status, 202);
       const { runId } = (await first.json()) as { runId: string };

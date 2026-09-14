@@ -44,6 +44,18 @@ export const TASK_STATUSES: readonly TaskStatus[] = [
   'cancelled',
 ];
 
+/** The outer Task-held-environment lifecycle (#32), separate from Task progress. */
+export type TaskEnvironmentLifecycleState =
+  | 'beginning'
+  | 'idle'
+  | 'running'
+  | 'blocked'
+  | 'awaiting-validation'
+  | 'ending'
+  | 'recovery'
+  | 'ended'
+  | 'discarded';
+
 /**
  * A durable unit of multi-run work.
  *
@@ -71,6 +83,15 @@ export interface Task {
   readonly environmentPreference?: EnvironmentPreference;
   /** Why the Task is `blocked`, when it is. */
   readonly blockerReason?: string;
+  /** Fixed only by Task begin; absent for an unbegun Task. */
+  readonly environmentInstanceId?: string;
+  /** The Task-held lease, never a nested run-held lease. */
+  readonly environmentLeaseId?: string;
+  readonly environmentLifecycleState?: TaskEnvironmentLifecycleState;
+  /** The state interrupted by recovery, used only for an explicit retry. */
+  readonly recoveryState?: TaskEnvironmentLifecycleState;
+  /** The one admitted nested run, when there is one. */
+  readonly activeRunId?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly completedAt?: number;

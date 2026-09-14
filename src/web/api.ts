@@ -262,6 +262,51 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // POST /api/tasks/:id/begin — select and retain a Task-held environment.
+    if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
+      const taskId = segments[2] ?? '';
+      if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      const body = await readJson(request);
+      const selection = parseEnvironmentPreference(body.selection);
+      if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
+      try {
+        sendJson(response, 200, { task: toTaskView(await tasks.begin(taskId, {
+          ...(typeof body.agentId === 'string' ? { agentId: body.agentId } : {}),
+          ...(selection !== undefined ? { selection } : {}),
+        })) });
+      } catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+
+    // POST /api/tasks/:id/end — cleanup then release the retained lease.
+    if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'end' && tasks) {
+      const taskId = segments[2] ?? '';
+      if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      try { sendJson(response, 200, { task: toTaskView(await tasks.end(taskId)) }); }
+      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+
+    // POST /api/tasks/:id/recovery — only the Task owner can resume or discard.
+    if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'recovery' && tasks) {
+      const taskId = segments[2] ?? '';
+      if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      const body = await readJson(request);
+      if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
+      try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
+      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+
+    // POST /api/tasks/:id/validation — retain the binding while a human checks work.
+    if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'validation' && tasks) {
+      const taskId = segments[2] ?? '';
+      if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      try { sendJson(response, 200, { task: toTaskView(await tasks.awaitHumanValidation(taskId)) }); }
+      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      return;
+    }
+
     // GET /api/tasks/:id — one Task with its ordered run links.
     if (
       request.method === 'GET' &&
@@ -311,6 +356,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         });
         return;
       }
+      try {
       const updated = await tasks.update(taskId, {
         ...(typeof body.title === 'string' ? { title: body.title } : {}),
         ...(typeof body.goal === 'string' ? { goal: body.goal } : {}),
@@ -333,6 +379,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
             : {}),
       });
       sendJson(response, 200, { task: toTaskView(updated) });
+      } catch (error) {
+        sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
 
@@ -648,6 +697,11 @@ export interface TaskView {
   readonly assignedAgentId?: string;
   readonly environmentPreference?: { readonly kind: string; readonly id: string };
   readonly blockerReason?: string;
+  readonly environmentInstanceId?: string;
+  readonly environmentLeaseId?: string;
+  readonly environmentLifecycleState?: string;
+  readonly recoveryState?: string;
+  readonly activeRunId?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly completedAt?: number;
@@ -666,6 +720,11 @@ function toTaskView(task: Task): TaskView {
       ? { environmentPreference: task.environmentPreference }
       : {}),
     ...(task.blockerReason !== undefined ? { blockerReason: task.blockerReason } : {}),
+    ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
+    ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
+    ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
+    ...(task.recoveryState !== undefined ? { recoveryState: task.recoveryState } : {}),
+    ...(task.activeRunId !== undefined ? { activeRunId: task.activeRunId } : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     ...(task.completedAt !== undefined ? { completedAt: task.completedAt } : {}),

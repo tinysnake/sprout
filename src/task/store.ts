@@ -24,6 +24,7 @@ import type {
   TaskStatus,
   TaskWithRuns,
 } from './model.ts';
+import type { EnvironmentLease } from '../environment/pool.ts';
 
 /** Filters for listing Tasks. Both are optional and combine with AND. */
 export interface TaskFilter {
@@ -46,6 +47,25 @@ export interface TaskStore {
    * stay deterministic and testable.
    */
   save(task: Task): Promise<void>;
+
+  /**
+   * Compare-and-set the lifecycle admission fields.  This is the durable
+   * single-active-run guard: a stale reader must not overwrite another
+   * caller's admitted run.
+   */
+  saveIfUnchanged(
+    task: Task,
+    expected: {
+      readonly environmentLifecycleState: Task['environmentLifecycleState'];
+      readonly activeRunId: Task['activeRunId'];
+    },
+  ): Promise<boolean>;
+
+  /** Commit a Task's beginning intent and its Task lease together. */
+  saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void>;
+
+  /** Commit a terminal Task state and release its Task lease together. */
+  saveTerminalWithLease(task: Task, leaseId: string): Promise<void>;
 
   /**
    * Link a run to a Task, assigning the next sequence number.
@@ -107,6 +127,24 @@ export class InMemoryTaskStore implements TaskStore {
   }
 
   async save(task: Task): Promise<void> {
+    this.#tasks.set(task.id, task);
+  }
+
+  async saveIfUnchanged(task: Task, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+  }): Promise<boolean> {
+    const current = this.#tasks.get(task.id);
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId) return false;
+    this.#tasks.set(task.id, task);
+    return true;
+  }
+
+  async saveBeginningWithLease(task: Task, _lease: EnvironmentLease): Promise<void> {
+    this.#tasks.set(task.id, task);
+  }
+
+  async saveTerminalWithLease(task: Task, _leaseId: string): Promise<void> {
     this.#tasks.set(task.id, task);
   }
 

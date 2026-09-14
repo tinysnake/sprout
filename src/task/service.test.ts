@@ -23,6 +23,7 @@ import { SqliteStore } from '../run/sqlite-store.ts';
 import { InMemoryTaskStore } from './store.ts';
 import { SqliteTaskStore } from './sqlite-store.ts';
 import { TaskService } from './service.ts';
+import { TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
 import type { TaskStore } from './store.ts';
 
 const macDefinition: EnvironmentDefinition = {
@@ -86,20 +87,25 @@ function build(options: ScenarioOptions = {}) {
   // production `main.ts` wires the same way: the orchestrator receives only the
   // two small run-seam contracts, never the Task service itself.
   let service: TaskService;
+  const projectRegistry = options.projects ?? projects;
+  const pool = new EnvironmentPool({
+    definitions: [macDefinition, containerDefinition],
+    instances: [macInstance, containerInstance],
+  });
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
-    projects: options.projects ?? projects,
-    pool: new EnvironmentPool({
-      definitions: [macDefinition, containerDefinition],
-      instances: [macInstance, containerInstance],
-    }),
+    projects: projectRegistry,
+    pool,
     store: runStore,
     tasks: { prompt: (input) => service.prompt(input), link: (input) => service.link(input) },
     onTaskRunSettled: (input) => service.onRunSettled(input),
     leaseTtlMs: 60_000,
   });
-  service = new TaskService({ store: taskStore, runs: orchestrator });
+  const lifecycle = new TaskEnvironmentLifecycle({
+    store: taskStore, pool, agents: registry, projects: projectRegistry, runs: orchestrator,
+  });
+  service = new TaskService({ store: taskStore, runs: orchestrator, lifecycle });
   return { orchestrator, service, adapter, runStore, taskStore };
 }
 
@@ -108,6 +114,7 @@ async function advanceAndSettle(
   taskId: string,
   options: { readonly prompt?: string } = {},
 ) {
+  await scenario.service.begin(taskId);
   const { runId } = await scenario.service.advance(taskId, options);
   return scenario.orchestrator.waitFor(runId);
 }
@@ -265,10 +272,7 @@ test('a Task refuses an agent that is not a member of its project', async () => 
     assignedAgentId: 'agent-scout',
   });
 
-  const { runId } = await scenario.service.advance(task.id);
-  const run = await scenario.orchestrator.waitFor(runId);
-  assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /not a member of project project-b/);
+  await assert.rejects(scenario.service.begin(task.id), /not a member of project project-b/);
   assert.equal(scenario.adapter.requests.length, 0);
 });
 
@@ -373,6 +377,7 @@ test('concurrent Task advances reject the second request while the first run is 
     goal: 'Avoid concurrent environment leases.',
     assignedAgentId: 'agent-scout',
   });
+  await scenario.service.begin(task.id);
 
   const [first, second] = await Promise.allSettled([
     scenario.service.advance(task.id),
@@ -405,7 +410,8 @@ test('a Task with no assigned agent is refused until one is named', async () => 
     title: 'Unassigned',
     goal: 'Have no owner yet.',
   });
-  await assert.rejects(scenario.service.advance(task.id), /no assigned agent/);
+  await assert.rejects(scenario.service.begin(task.id), /no assigned agent/);
+  await scenario.service.begin(task.id, { agentId: 'agent-scout' });
   const { runId } = await scenario.service.advance(task.id, { agentId: 'agent-scout' });
   assert.equal((await scenario.orchestrator.waitFor(runId)).status, 'completed');
   assert.equal((await scenario.service.get(task.id))?.assignedAgentId, 'agent-scout');
@@ -438,7 +444,7 @@ test('a direct Task run without a project scope is refused', async () => {
   });
   const run = await scenario.orchestrator.waitFor(id);
   assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /missing its project scope/);
+  assert.match(run.failure ?? '', /requires lifecycle lease and environment bindings/);
   assert.equal(scenario.adapter.requests.length, 0);
 });
 

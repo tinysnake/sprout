@@ -29,7 +29,6 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun } from '../run/model.ts';
 import { buildTaskContext, renderTaskPrompt } from './context.ts';
 import {
-  canAdvanceTask,
   isTerminalTaskStatus,
   type Task,
   type TaskRunSummary,
@@ -37,6 +36,7 @@ import {
   type TaskWithRuns,
 } from './model.ts';
 import type { TaskFilter, TaskStore } from './store.ts';
+import type { TaskEnvironmentLifecycle, TaskRecoveryAction } from './environment-lifecycle.ts';
 
 /** The slice of the run orchestrator the Task service uses. */
 export interface TaskRunner {
@@ -89,21 +89,21 @@ export interface TaskServiceOptions {
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
+  /** Production lifecycle owner selected by #31; omitted only by #28 legacy tests. */
+  readonly lifecycle?: TaskEnvironmentLifecycle;
 }
 
 export class TaskService {
   readonly #store: TaskStore;
-  readonly #runs: TaskRunner;
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
-  /** Task ids currently submitting a run, preventing a same-process race. */
-  readonly #advancing = new Set<string>();
+  readonly #lifecycle: TaskEnvironmentLifecycle | undefined;
 
   constructor(options: TaskServiceOptions) {
     this.#store = options.store;
-    this.#runs = options.runs;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
+    this.#lifecycle = options.lifecycle;
   }
 
   /** Create a durable Task. A second create with the same id is a no-op retry. */
@@ -152,6 +152,9 @@ export class TaskService {
    */
   async update(taskId: string, patch: UpdateTaskInput): Promise<Task> {
     const task = await this.#require(taskId);
+    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isTerminalTaskStatus(patch.status)) {
+      throw new Error(`task ${taskId} must end through the Task environment lifecycle`);
+    }
     if (patch.title !== undefined) assertRequired(patch.title, 'title');
     if (patch.goal !== undefined) assertRequired(patch.goal, 'goal');
 
@@ -188,47 +191,37 @@ export class TaskService {
     taskId: string,
     options: AdvanceTaskOptions = {},
   ): Promise<{ readonly task: Task; readonly runId: string }> {
-    // Set this before the first await. Two HTTP requests can otherwise both read
-    // an advanceable Task before either one records its linked run.
-    if (this.#advancing.has(taskId)) {
-      throw new Error(`task ${taskId} already has an active run`);
-    }
-    this.#advancing.add(taskId);
-    try {
-      let task = await this.#require(taskId);
-      if (!canAdvanceTask(task.status)) {
-        throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
-      }
-      // A missing summary is deliberately treated as active. A terminal run can
-      // be persisted just before its Task summary; restart reconciliation repairs
-      // that window rather than letting the following run discard its context.
-      if ((await this.#store.listRuns(taskId)).some((link) => link.summary === undefined)) {
-        throw new Error(`task ${taskId} already has an active run`);
-      }
+    if (this.#lifecycle !== undefined) {
+      const task = await this.#require(taskId);
       const agentId = options.agentId ?? task.assignedAgentId;
-      if (agentId === undefined) {
-        throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to advance it`);
-      }
-
-      if (task.status !== 'in-progress') {
-        await this.#store.save({ ...task, status: 'in-progress', updatedAt: this.#clock.now() });
-        task = await this.#require(taskId);
-      }
-
-      const prompt = options.prompt ?? defaultAdvancePrompt(task);
-      const { id: runId } = await this.#runs.submit({
-        agentId,
-        prompt,
-        taskId,
-        projectId: task.projectId,
-        ...(task.environmentPreference !== undefined
-          ? { environmentPreference: task.environmentPreference }
-          : {}),
-      });
-      return { task: (await this.#store.get(taskId)) ?? task, runId };
-    } finally {
-      this.#advancing.delete(taskId);
+      if (!agentId) throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to advance it`);
+      return this.#lifecycle.advanceRun(taskId, agentId, options.prompt ?? defaultAdvancePrompt(task));
     }
+    throw new Error('Task environment lifecycle is not configured');
+  }
+
+  begin(taskId: string, options: { readonly agentId?: string; readonly selection?: EnvironmentPreference } = {}): Promise<Task> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    return this.#lifecycle.begin(taskId, options);
+  }
+
+  end(taskId: string): Promise<Task> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    return this.#lifecycle.end(taskId);
+  }
+
+  awaitHumanValidation(taskId: string): Promise<Task> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    return this.#lifecycle.awaitHumanValidation(taskId);
+  }
+
+  recover(taskId: string, action: TaskRecoveryAction): Promise<Task> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    return this.#lifecycle.recover(taskId, action);
+  }
+
+  reconcileEnvironmentLifecycle(): Promise<void> {
+    return this.#lifecycle?.reconcile() ?? Promise.resolve();
   }
 
   /**
@@ -289,6 +282,14 @@ export class TaskService {
         recordedAt: this.#clock.now(),
       };
       await this.#store.recordRunSummary(summary);
+    }
+
+    // The lifecycle owns all state changes for lifecycle-created Task runs.
+    // In particular a Worker channel loss must enter retained-lease recovery,
+    // not first be flattened into an ordinary blocked Task.
+    if (this.#lifecycle !== undefined) {
+      await this.#lifecycle.settleRun(taskId, run);
+      return;
     }
 
     const task = await this.#store.get(taskId);

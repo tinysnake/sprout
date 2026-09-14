@@ -8,6 +8,7 @@ import type {
   TaskWithRuns,
 } from './model.ts';
 import type { TaskFilter, TaskStore } from './store.ts';
+import type { EnvironmentLease } from '../environment/pool.ts';
 
 /**
  * SQLite-backed Task storage (ticket #28, ADR-0002).
@@ -53,6 +54,11 @@ export class SqliteTaskStore implements TaskStore {
         assigned_agent_id TEXT,
         environment_preference TEXT,
         blocker_reason TEXT,
+        environment_instance_id TEXT,
+        environment_lease_id TEXT,
+        environment_lifecycle_state TEXT,
+        recovery_state TEXT,
+        active_run_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER
@@ -72,6 +78,16 @@ export class SqliteTaskStore implements TaskStore {
       CREATE INDEX IF NOT EXISTS task_run_links_by_task
         ON task_run_links (task_id, sequence);
     `);
+    this.#addColumnIfMissing('tasks', 'environment_instance_id', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'environment_lease_id', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'environment_lifecycle_state', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'recovery_state', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'active_run_id', 'TEXT');
+  }
+
+  #addColumnIfMissing(table: string, column: string, type: string): void {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
+    if (!columns.some((existing) => existing.name === column)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   async create(task: Task): Promise<Task> {
@@ -79,8 +95,8 @@ export class SqliteTaskStore implements TaskStore {
       .prepare(
         `INSERT OR IGNORE INTO tasks
            (id, project_id, title, goal, constraints, status, assigned_agent_id,
-            environment_preference, blocker_reason, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -92,6 +108,11 @@ export class SqliteTaskStore implements TaskStore {
         task.assignedAgentId ?? null,
         task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
         task.blockerReason ?? null,
+        task.environmentInstanceId ?? null,
+        task.environmentLeaseId ?? null,
+        task.environmentLifecycleState ?? null,
+        task.recoveryState ?? null,
+        task.activeRunId ?? null,
         task.createdAt,
         task.updatedAt,
         task.completedAt ?? null,
@@ -127,25 +148,85 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   async save(task: Task): Promise<void> {
-    this.#db
-      .prepare(
-        `UPDATE tasks
-            SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-                environment_preference = ?, blocker_reason = ?, updated_at = ?, completed_at = ?
-          WHERE id = ?`,
-      )
-      .run(
-        task.title,
-        task.goal,
-        JSON.stringify(task.constraints),
-        task.status,
-        task.assignedAgentId ?? null,
-        task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
-        task.blockerReason ?? null,
-        task.updatedAt,
-        task.completedAt ?? null,
-        task.id,
-      );
+    this.#saveTask(task);
+  }
+
+  async saveIfUnchanged(task: Task, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+  }): Promise<boolean> {
+    const changed = this.#db.prepare(
+      `UPDATE tasks
+          SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
+              environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ?
+        WHERE id = ?
+          AND environment_lifecycle_state IS ?
+          AND active_run_id IS ?`,
+    ).run(...this.#taskValues(task), task.id, expected.environmentLifecycleState ?? null, expected.activeRunId ?? null);
+    return changed.changes === 1;
+  }
+
+  async saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void> {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const conflict = this.#db.prepare(
+        `SELECT id FROM environment_leases
+          WHERE instance_id = ? AND state IN ('active', 'recovering') LIMIT 1`,
+      ).get(lease.instanceId);
+      if (conflict) throw new Error(`environment ${lease.instanceId} is unavailable`);
+      this.#saveLease(lease);
+      this.#saveTask(task);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async saveTerminalWithLease(task: Task, leaseId: string): Promise<void> {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      // An already-released lease is an idempotent retry after a crash.  A
+      // different or missing lease is never silently treated as Task cleanup.
+      const lease = this.#db.prepare(
+        `SELECT holder_kind, task_id FROM environment_leases WHERE id = ?`,
+      ).get(leaseId) as { holder_kind: string | null; task_id: string | null } | undefined;
+      if (!lease || lease.holder_kind !== 'task' || lease.task_id !== task.id) {
+        throw new Error(`task ${task.id} lease could not be released after cleanup`);
+      }
+      this.#db.prepare(`UPDATE environment_leases SET state = 'released' WHERE id = ?`).run(leaseId);
+      this.#saveTask(task);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #taskValues(task: Task): (string | number | null)[] {
+    return [
+      task.title, task.goal, JSON.stringify(task.constraints), task.status,
+      task.assignedAgentId ?? null, task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
+      task.blockerReason ?? null, task.environmentInstanceId ?? null, task.environmentLeaseId ?? null,
+      task.environmentLifecycleState ?? null, task.recoveryState ?? null, task.activeRunId ?? null,
+      task.updatedAt, task.completedAt ?? null,
+    ];
+  }
+
+  #saveTask(task: Task): void {
+    this.#db.prepare(
+      `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
+       environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+    ).run(...this.#taskValues(task), task.id);
+  }
+
+  #saveLease(lease: EnvironmentLease): void {
+    this.#db.prepare(
+      `INSERT INTO environment_leases
+       (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(lease.id, lease.instanceId, lease.capability, lease.holderId, 'task', lease.runId ?? null,
+      lease.taskId ?? null, lease.acquiredAt, lease.expiresAt, lease.state);
   }
 
   async linkRun(input: {
@@ -235,6 +316,11 @@ interface TaskRow {
   readonly assigned_agent_id: string | null;
   readonly environment_preference: string | null;
   readonly blocker_reason: string | null;
+  readonly environment_instance_id: string | null;
+  readonly environment_lease_id: string | null;
+  readonly environment_lifecycle_state: string | null;
+  readonly recovery_state: string | null;
+  readonly active_run_id: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -269,6 +355,11 @@ function toTask(row: TaskRow): Task {
         }
       : {}),
     ...(row.blocker_reason !== null ? { blockerReason: row.blocker_reason } : {}),
+    ...(row.environment_instance_id !== null ? { environmentInstanceId: row.environment_instance_id } : {}),
+    ...(row.environment_lease_id !== null ? { environmentLeaseId: row.environment_lease_id } : {}),
+    ...(row.environment_lifecycle_state !== null ? { environmentLifecycleState: row.environment_lifecycle_state as NonNullable<Task['environmentLifecycleState']> } : {}),
+    ...(row.recovery_state !== null ? { recoveryState: row.recovery_state as NonNullable<Task['recoveryState']> } : {}),
+    ...(row.active_run_id !== null ? { activeRunId: row.active_run_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
