@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "start": "node src/main.ts",
     "smoke": "node scripts/live-smoke.ts",
+    "probe:collaboration": "node scripts/probe-collaboration.ts",
     "web:build": "vite build",
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",
