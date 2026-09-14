@@ -1,5 +1,6 @@
 import type { EngineAdapter } from '../engine/port.ts';
 import type { WorkerConnection } from './carrier.ts';
+import type { WorkerContextClient } from './client.ts';
 
 /**
  * Keeps an environment's worker alive across its death.
@@ -157,6 +158,19 @@ export class EnvironmentWorkerRegistry {
       );
     }
     return connection.adapters;
+  }
+
+  /** Worker context seam for one resolved environment instance. */
+  async contexts(instanceId: string): Promise<WorkerContextClient> {
+    if (this.#closed) throw new Error('environment worker registry is closed');
+    const supervisor = this.#supervisor(instanceId);
+    const connection = await supervisor.connection();
+    if (connection.info.environmentInstanceId !== instanceId) {
+      await supervisor.close();
+      this.#supervisors.delete(instanceId);
+      throw new Error(`environment instance mismatch: Task resolved ${instanceId} but its worker serves ${connection.info.environmentInstanceId}`);
+    }
+    return connection.contexts;
   }
 
   /** How many workers were started across all instances, so restarts stay observable. */

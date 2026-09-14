@@ -120,6 +120,10 @@ export interface SubmitRunRequest {
   /** Fixed Task binding, supplied only by TaskEnvironmentLifecycle. */
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
+  /** Portable Worker workspace reference supplied by the Task lifecycle. */
+  readonly projectWorkspaceId?: string;
+  /** Worker-produced relative-file bootstrap for this Task Agent run. */
+  readonly taskBootstrapInstructions?: string;
 }
 
 /**
@@ -337,7 +341,11 @@ export class RunOrchestrator {
       }
     }
 
-    const settled = this.#execute(recorded, agent).then((run) => this.settleTaskRun(run));
+    const workspace = {
+      ...(request.projectWorkspaceId !== undefined ? { projectWorkspaceId: request.projectWorkspaceId } : {}),
+      ...(request.taskBootstrapInstructions !== undefined ? { taskBootstrapInstructions: request.taskBootstrapInstructions } : {}),
+    };
+    const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
   }
@@ -502,7 +510,11 @@ export class RunOrchestrator {
     return (await this.waitFor(runId)) ?? run;
   }
 
-  async #execute(initial: AgentRun, agent: AgentDefinition): Promise<AgentRun> {
+  async #execute(
+    initial: AgentRun,
+    agent: AgentDefinition,
+    workspace: { readonly projectWorkspaceId?: string; readonly taskBootstrapInstructions?: string } = {},
+  ): Promise<AgentRun> {
     // Adapters are resolved *for the instance this run resolved and will lease*,
     // never from a global pool: a run that leases container-1 must execute on
     // container-1's worker, or the run record would name a machine it never used.
@@ -566,11 +578,9 @@ export class RunOrchestrator {
       // fact-form hand-off. Both are deterministic functions of persisted facts.
       // Keep all setup inside the lease guard so a rejected assembly is persisted
       // as a terminal failure and cannot leave the acquired lease active.
-      const workingDirectory = resolveWorkingDirectory(
-        this.#pool,
-        initial.environmentInstanceId,
-        agent,
-      );
+      const workingDirectory = workspace.projectWorkspaceId === undefined
+        ? resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent)
+        : `project-workspace:${workspace.projectWorkspaceId}`;
       const assembled = await this.#assembleInput(initial, agent, running.id);
       prepared = await this.#advance(running, {
         ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
@@ -596,8 +606,9 @@ export class RunOrchestrator {
         assembled.prompt,
         prepared,
         stored?.key,
-        assembled.instructions,
+        appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
         workingDirectory,
+        workspace.projectWorkspaceId,
       );
 
       // A stored key the engine refuses must not fail the run. Pi and `agy`
@@ -618,8 +629,9 @@ export class RunOrchestrator {
           assembled.prompt,
           prepared,
           undefined,
-          assembled.instructions,
+          appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
           workingDirectory,
+          workspace.projectWorkspaceId,
         );
       }
 
@@ -670,6 +682,7 @@ export class RunOrchestrator {
     resumeKey: string | undefined,
     instructions: string | undefined,
     workingDirectory: string,
+    projectWorkspaceId: string | undefined,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
@@ -680,6 +693,7 @@ export class RunOrchestrator {
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).
         ...(instructions !== undefined ? { instructions } : {}),
+        ...(projectWorkspaceId !== undefined ? { projectWorkspaceId } : {}),
         ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
     } catch (error) {
@@ -859,4 +873,12 @@ function resolveWorkingDirectory(
   throw new Error(
     `no working directory for environment instance ${instanceId} and agent ${agent.id}`,
   );
+}
+
+/** Task bootstrap is deterministic Worker-owned-file guidance, not prompt text. */
+function appendBootstrap(instructions: string | undefined, bootstrap: string | undefined): string | undefined {
+  if (bootstrap === undefined || bootstrap === '') return instructions;
+  return instructions === undefined || instructions === ''
+    ? bootstrap
+    : `${instructions}\n\n${bootstrap}`;
 }

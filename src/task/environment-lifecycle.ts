@@ -17,6 +17,8 @@ import type { AgentRun } from '../run/model.ts';
 import type { Task } from './model.ts';
 import { isTerminalTaskStatus } from './model.ts';
 import type { TaskStore } from './store.ts';
+import { buildTaskContext } from './context.ts';
+import type { TaskContextMaterialization } from '../worker/protocol.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
 
@@ -25,13 +27,13 @@ export class DurableWriteCrash extends Error {}
 
 /** #33 replaces this contract implementation with the Worker protocol. */
 export interface TaskContextWorker {
-  prepare(input: { readonly taskId: string; readonly projectId: string; readonly environmentInstanceId: string }): Promise<void>;
-  recycle(input: { readonly taskId: string; readonly projectId: string; readonly environmentInstanceId: string }): Promise<void>;
+  prepare(input: TaskContextMaterialization): Promise<{ readonly bootstrapInstructions: string }>;
+  recycle(input: { readonly taskId: string; readonly projectId: string; readonly environmentInstanceId: string; readonly environmentLeaseId: string }): Promise<void>;
 }
 
 /** Deliberate production stub: no core filesystem operation is permitted by ADR-0003. */
 export const noOpTaskContextWorker: TaskContextWorker = {
-  async prepare() {},
+  async prepare() { return { bootstrapInstructions: '' }; },
   async recycle() {},
 };
 
@@ -44,6 +46,8 @@ export interface TaskEnvironmentRunner {
     readonly projectId: string;
     readonly environmentInstanceId: string;
     readonly environmentLeaseId: string;
+    readonly projectWorkspaceId?: string;
+    readonly taskBootstrapInstructions?: string;
   }): Promise<{ readonly id: string }>;
 }
 
@@ -143,7 +147,7 @@ export class TaskEnvironmentLifecycle {
       this.#pool.adoptLease(acquired.lease);
     }
     try {
-      await this.#worker.prepare({ taskId: task.id, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId! });
+      await this.#prepare(task, task.assignedAgentId!);
     } catch (error) {
       await this.#toRecovery(task, 'beginning');
       throw error;
@@ -173,7 +177,17 @@ export class TaskEnvironmentLifecycle {
       activeRunId: task.activeRunId,
     });
     if (!admitted) throw new Error(`task ${taskId} already has an active run`);
-    await this.#runs.submit({ runId, taskId, agentId, prompt: input, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId });
+    let prepared: { readonly bootstrapInstructions: string };
+    try {
+      // The active-run admission is durable before this refresh.  A Worker
+      // failure must therefore durably retain the Task lease in recovery rather
+      // than leaving a running Task with no submitted run.
+      prepared = await this.#prepare(running, agentId);
+    } catch (error) {
+      await this.#toRecovery(running, 'running');
+      throw error;
+    }
+    await this.#runs.submit({ runId, taskId, agentId, prompt: input, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId, projectWorkspaceId: task.projectId, taskBootstrapInstructions: prepared.bootstrapInstructions });
     return { task: running, runId };
   }
 
@@ -218,7 +232,7 @@ export class TaskEnvironmentLifecycle {
     if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new Error(`task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
-        await this.#worker.prepare({ taskId: task.id, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId! });
+        await this.#prepare(task, task.assignedAgentId!);
       } catch (error) { await this.#toRecovery(task, 'beginning'); throw error; }
       const resumed = omit({ ...task, status: 'in-progress' as const, environmentLifecycleState: 'idle' as const, updatedAt: this.#clock.now() }, 'recoveryState');
       await this.#store.save(resumed); return resumed;
@@ -257,7 +271,7 @@ export class TaskEnvironmentLifecycle {
 
   async #recycleThenRelease(task: Task, terminal: 'ended' | 'discarded'): Promise<Task> {
     try {
-      await this.#worker.recycle({ taskId: task.id, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId! });
+      await this.#worker.recycle({ taskId: task.id, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId!, environmentLeaseId: task.environmentLeaseId! });
     } catch (error) { await this.#toRecovery(task, 'ending'); throw error; }
     const ended = omit(omit({ ...task, status: terminal === 'ended' ? 'done' as const : 'cancelled' as const, completedAt: this.#clock.now(), environmentLifecycleState: terminal, updatedAt: this.#clock.now() }, 'recoveryState'), 'activeRunId');
     if (!task.environmentLeaseId) {
@@ -283,6 +297,31 @@ export class TaskEnvironmentLifecycle {
     if (task.environmentLeaseId) this.#pool.markRecovering(task.environmentLeaseId);
     const recovering: Task = { ...task, environmentLifecycleState: 'recovery', recoveryState: prior, updatedAt: this.#clock.now() };
     await this.#store.save(recovering);
+  }
+
+  /** Render portable durable facts; only the Worker turns them into files. */
+  async #prepare(task: Task, agentId: string): Promise<{ readonly bootstrapInstructions: string }> {
+    if (!task.environmentInstanceId || !task.environmentLeaseId) throw new Error(`task ${task.id} has no environment lease`);
+    const project = this.#projects.get(task.projectId);
+    const membership = project?.memberships.find((candidate) => candidate.agentId === agentId);
+    if (!project || !membership) throw new Error(`agent ${agentId} is not a member of project ${task.projectId}`);
+    const priorRunSummaries = buildTaskContext(task, await this.#store.listRuns(task.id)).text;
+    return this.#worker.prepare({
+      projectId: project.id,
+      projectGoal: project.goal,
+      projectRules: project.rules,
+      taskId: task.id,
+      taskTitle: task.title,
+      taskGoal: task.goal,
+      taskConstraints: task.constraints,
+      taskStatus: task.status,
+      priorRunSummaries,
+      agentId,
+      responsibilities: membership.responsibilities,
+      collaborationInstructions: membership.collaborationInstructions,
+      environmentInstanceId: task.environmentInstanceId,
+      environmentLeaseId: task.environmentLeaseId,
+    });
   }
 
   async #require(taskId: string): Promise<Task> {
