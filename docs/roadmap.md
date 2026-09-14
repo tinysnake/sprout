@@ -177,7 +177,7 @@ Project contracts and Agent context remain coherent when the same Agent works ac
 
 All four engines can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
 
-**Map #24 status**: the deliberately narrowed macOS/Pi/Codex collaboration scenario is functionally evidenced by accepted tickets #25–#35. Its closing privacy check is **not** evidenced: the integration-range metadata audit found six commits with non-generic personal author/committer metadata. No history rewrite is made or claimed here. Therefore #24 cannot honestly close until that privacy exception is resolved and accepted, and O6 remains **In progress**.
+**Map #24 status**: the deliberately narrowed macOS/Pi/Codex collaboration scenario is functionally evidenced by accepted tickets #25–#35. The closing privacy exception (six commits with non-generic personal author/committer metadata from the map's earlier orchestration) was remediated through a deterministic history rewrite with identical trees and messages, and the remediation passed independent review. O6 remains **In progress** pending this map's formal close.
 
 The evidenced slice is one Task owning one macOS Environment lease from explicit Task begin through explicit Task end. Independent Pi- and Codex-backed Agents work sequentially inside that retained Environment, reuse its persistent Project workspace, and receive bounded durable Task facts in a temporary Task context. Their runs are nested activities: completion, stop, failure, interruption, and idle gaps never release the Task lease; recovery continues to protect the Environment from reassignment.
 
@@ -220,7 +220,7 @@ The evidenced slice is one Task owning one macOS Environment lease from explicit
 6. Worker-owned creation and safe recycle of temporary Task context while Project/repository/IDE/cache state persists — [#33](https://github.com/tinysnake/sprout/issues/33#issuecomment-5669367158) and [#35](https://github.com/tinysnake/sprout/issues/35#issuecomment-5670561136).
 7. Web distinction between Task-active/Agent-idle and Agent-running, with begin, Agent selection, stop/correction, recovery, and explicit end — [#34](https://github.com/tinysnake/sprout/issues/34#issuecomment-5669818493).
 8. The two required live macOS rounds through real Workers and adapters — [#35](https://github.com/tinysnake/sprout/issues/35#issuecomment-5670561136) and the sanitized [live record](evidence/live-macos-pi-codex-task.md).
-9. This narrowed slice and its deferred breadth are recorded here. The separate #36 closing privacy acceptance is **not evidenced**: a `git log` audit of `beb3524..c69d895` found six commits with non-generic personal author/committer metadata. This must be remediated and independently accepted before closing #24; it is not hidden by the functional evidence above.
+9. This narrowed slice and its deferred breadth are recorded here. The #36 closing privacy audit's exception (six commits with non-generic personal author/committer metadata in the earlier integration range) was remediated by rewriting those commits to the repository's generic agent identity with identical trees and messages; the integration range now audits clean.
 
 **Future map required for O6 breadth (not claimed by #24)**: `agy`/`opencode` collaboration, container/Windows collaboration, and cross-environment Task movement. O1 independently proves all four adapters, O2 independently proves all three environment targets, and O5 independently proves cross-environment context hand-off; none of those independent capabilities proves them in this Task collaboration scenario. Live validation here is macOS-only with Pi and Codex.
 
@@ -249,7 +249,7 @@ O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation m
 
 O5 is **Evidenced**: durable project membership resolves an Agent's environment without binding its identity to one; native session keys continue only in their full environment slot; and deterministic project contracts plus privacy-preserving hand-off carry the relevant context across environments ([#18](https://github.com/tinysnake/sprout/issues/18), [#20](https://github.com/tinysnake/sprout/issues/20), [#21](https://github.com/tinysnake/sprout/issues/21)).
 
-The active frontier is **O6 — Multi-agent collaboration**. Map [#24](https://github.com/tinysnake/sprout/issues/24) functionally evidenced its narrowed Task-held-lease macOS/Pi/Codex scenario through #25–#35, but its closing privacy acceptance remains unmet and the broader O6 engine/platform/cross-environment breadth requires a future map. O6 therefore stays **In progress** and is not claimed as Evidenced.
+The active frontier is **O6 — Multi-agent collaboration**. Map [#24](https://github.com/tinysnake/sprout/issues/24) functionally evidenced its narrowed Task-held-lease macOS/Pi/Codex scenario through #25–#35, and the closing privacy exception was remediated and independently reviewed. The broader O6 engine/platform/cross-environment breadth requires a future map, so O6 stays **In progress** until that map is planned and is not claimed as Evidenced.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
