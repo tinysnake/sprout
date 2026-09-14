@@ -8,6 +8,8 @@ import { AgentRegistry } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
+import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
+import { InMemoryCollaborationStore } from '../collaboration/store.ts';
 import { createRunApi } from './api.ts';
 
 const definition: EnvironmentDefinition = {
@@ -309,4 +311,197 @@ test('the API lists leases and allows releasing a lease', async () => {
 
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
   await api.close();
+});
+
+/**
+ * Collaboration routes (#26).
+ *
+ * These use the real coordinator over an in-memory store and the real
+ * orchestrator over the scripted engine: exactly the wiring `main.ts` uses, with
+ * only the engine faked. They prove the project channel is reachable from the
+ * core's existing HTTP seam, and that the routes hold no wake logic of their own.
+ */
+function buildWithCollaboration(options: { body?: string } = {}) {
+  const adapter = new ScriptedEngineAdapter({
+    turns: [
+      {
+        events: [
+          { type: 'tool-output', text: 'TOOL_OUTPUT_MUST_NOT_LEAK' },
+          { type: 'message', text: options.body ?? 'Scout: replied.', final: true },
+        ],
+        result: { status: 'completed', text: options.body ?? 'Scout: replied.' },
+      },
+    ],
+  });
+  const registry = new AgentRegistry([
+    {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      capability: 'agent-run',
+      workingDirectory: '/tmp',
+    },
+  ]);
+  const store = new InMemoryRunStore();
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: registry,
+    projects,
+    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    store,
+    leaseTtlMs: 60_000,
+  });
+  const collaboration = new CollaborationCoordinator({
+    projects,
+    store: new InMemoryCollaborationStore(),
+    runs: orchestrator,
+  });
+  const api = createRunApi({ orchestrator, agents: registry, collaboration });
+  return { api, orchestrator, collaboration };
+}
+
+test('a message delivered over the API wakes its recipient and a reply is projected', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const delivered = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'project-sprout',
+        channel: 'direct',
+        authorId: 'human-lead',
+        authorKind: 'human',
+        body: 'Please investigate.',
+        recipients: ['agent-scout'],
+        deliveryKey: 'api-delivery-1',
+      }),
+    });
+    assert.equal(delivered.status, 202);
+    const result = (await delivered.json()) as {
+      message: { id: string };
+      duplicate: boolean;
+      admittedRunIds: string[];
+      wakes: { agentId: string; reason: string; status: string }[];
+    };
+    assert.equal(result.duplicate, false);
+    assert.equal(result.admittedRunIds.length, 1);
+    assert.equal(result.wakes[0]?.agentId, 'agent-scout');
+    assert.equal(result.wakes[0]?.reason, 'direct-recipient');
+    assert.equal(result.wakes[0]?.status, 'admitted');
+
+    const listed = (await (await fetch(`${base}/api/messages`)).json()) as {
+      messages: { authorKind: string; body: string; inReplyTo?: string }[];
+    };
+    const reply = listed.messages.find((message) => message.authorKind === 'agent');
+    assert.ok(reply);
+    assert.equal(reply.body, 'Scout: replied.');
+    assert.equal(reply.inReplyTo, result.message.id, 'the reply answers the delivered input');
+
+    // The projected reply carries only final text, never private run events.
+    assert.ok(!listed.messages.some((message) => message.body.includes('TOOL_OUTPUT_MUST_NOT_LEAK')));
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('a duplicate message delivery over the API is idempotent', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const request = {
+    projectId: 'project-sprout',
+    channel: 'direct',
+    authorId: 'human-lead',
+    authorKind: 'human',
+    body: 'Once.',
+    recipients: ['agent-scout'],
+    deliveryKey: 'api-dup-1',
+  };
+  try {
+    const first = (await (
+      await fetch(`${base}/api/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+      })
+    ).json()) as { duplicate: boolean; message: { id: string } };
+    const secondResponse = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    assert.equal(secondResponse.status, 200);
+    const second = (await secondResponse.json()) as { duplicate: boolean; message: { id: string } };
+    assert.equal(first.duplicate, false);
+    assert.equal(second.duplicate, true);
+    assert.equal(second.message.id, first.message.id);
+
+    const listed = (await (await fetch(`${base}/api/messages`)).json()) as {
+      messages: unknown[];
+    };
+    assert.equal(listed.messages.length, 2, 'one input and one reply');
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('an unaddressed message and its wake observations are readable over the API', async () => {
+  const adapter = new ScriptedEngineAdapter({ turns: [] });
+  const registry = new AgentRegistry([
+    { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+  ]);
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: registry,
+    projects,
+    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    store: new InMemoryRunStore(),
+  });
+  const collaboration = new CollaborationCoordinator({
+    projects,
+    store: new InMemoryCollaborationStore(),
+    runs: orchestrator,
+    wakeModel: { decide: async () => ({ engage: false, detail: 'nothing to do' }) },
+  });
+  const api = createRunApi({ orchestrator, agents: registry, collaboration });
+  const { port } = await api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const delivered = (await (
+      await fetch(`${base}/api/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          projectId: 'project-sprout',
+          channel: 'project',
+          authorId: 'human-lead',
+          body: 'just an fyi',
+          deliveryKey: 'api-suppress-1',
+        }),
+      })
+    ).json()) as { message: { id: string }; admittedRunIds: string[] };
+    assert.equal(delivered.admittedRunIds.length, 0);
+
+    const observations = (await (
+      await fetch(`${base}/api/messages/${delivered.message.id}/observations`)
+    ).json()) as { observations: { status: string; detail: string }[]; wakes: unknown[] };
+    assert.equal(observations.wakes.length, 0);
+    assert.equal(observations.observations.length, 1);
+    assert.equal(observations.observations[0]?.status, 'suppressed');
+    assert.equal(observations.observations[0]?.detail, 'nothing to do');
+
+    const missing = await fetch(`${base}/api/messages/does-not-exist/observations`);
+    assert.equal(missing.status, 404);
+  } finally {
+    await api.close();
+  }
+});
+
+test('a message endpoint is absent when no collaboration plane is configured', async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/messages`);
+    assert.equal(response.status, 404);
+  });
 });

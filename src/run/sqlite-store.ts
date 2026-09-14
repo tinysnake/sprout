@@ -12,6 +12,7 @@ import {
 import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
 import type { Project } from '../project/model.ts';
 import type { ProjectStore } from '../project/store.ts';
+import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 
 /**
  * SQLite-backed storage for runs and leases (ADR-0002).
@@ -381,8 +382,13 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
 }
 
 /**
- * Unified SQLite storage for Sprout, managing runs, leases, projects, and
- * session keys through a single database handle (ADR-0002).
+ * Unified SQLite storage for Sprout, managing runs, leases, projects, session
+ * keys, and collaboration Messages/wake requests through a single database
+ * handle (ADR-0002).
+ *
+ * Collaboration rows live in the primary database rather than a separate file,
+ * so a Message, its wake requests, and the run they admitted commit against the
+ * same durable state a restart reconciles.
  */
 export class SqliteStore {
   readonly db: DatabaseSync;
@@ -390,6 +396,7 @@ export class SqliteStore {
   readonly leases: SqliteLeaseStore;
   readonly projects: SqliteProjectStore;
   readonly sessionKeys: SqliteSessionKeyStore;
+  readonly collaboration: SqliteCollaborationStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
@@ -397,6 +404,7 @@ export class SqliteStore {
     this.leases = new SqliteLeaseStore({ db: this.db });
     this.projects = new SqliteProjectStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
+    this.collaboration = new SqliteCollaborationStore({ db: this.db });
   }
 
   close(): void {

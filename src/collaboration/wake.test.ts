@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
-import type { CollaborationMessage, WakeModel } from './model.ts';
+import type { Message, WakeModel } from './model.ts';
 import { parseAgentMentions, planWake } from './wake.ts';
 
 const project: Project = {
@@ -22,7 +22,7 @@ function registry(): ProjectRegistry {
   return new ProjectRegistry([project]);
 }
 
-function message(overrides: Partial<CollaborationMessage> = {}): CollaborationMessage {
+function message(overrides: Partial<Message> = {}): Message {
   return {
     id: 'msg-1',
     projectId: 'project-sprout',

@@ -16,7 +16,8 @@
  *   the turn, and settles the run.
  * - **Real SQLite persistence.** Messages, wake requests, observations, runs,
  *   and leases all go through `SqliteCollaborationStore` / `SqliteStore` on a
- *   real database file, not the in-memory store.
+ *   real database file, not the in-memory store. Collaboration rows are mounted
+ *   on the same primary database the runs and leases use.
  * - **Real collaboration coordinator.** The selected write path — automatic
  *   final-result projection — is exercised unmodified.
  *
@@ -41,7 +42,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { SqliteStore } from '../run/sqlite-store.ts';
 import { EndpointCarrier, type WorkerConnection } from '../worker/carrier.ts';
 import { CollaborationCoordinator } from './coordinator.ts';
-import { SqliteCollaborationStore } from './sqlite-store.ts';
+import type { SqliteCollaborationStore } from './sqlite-store.ts';
 
 /**
  * A worker process definition hosting the scripted engine.
@@ -121,7 +122,7 @@ async function startProbe(): Promise<Probe> {
   });
 
   const sqlite = new SqliteStore({ filename: dbPath });
-  const store = new SqliteCollaborationStore({ db: sqlite.db });
+  const store = sqlite.collaboration;
   const pool = new EnvironmentPool({
     definitions: [definition],
     instances: [instance],

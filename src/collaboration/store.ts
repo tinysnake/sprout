@@ -1,8 +1,10 @@
 /**
- * Durable storage for collaboration Messages and wake requests (prototype #25).
+ * Durable storage for collaboration Messages and wake requests (ticket #26).
  *
  * A seam, not a detail of SQLite (ADR-0002): the collaboration coordinator never
- * issues a query, and the in-memory implementation is enough for the probe.
+ * issues a query, and the in-memory implementation is enough for unit tests.
+ * The production backend is `SqliteCollaborationStore`, mounted on the primary
+ * `SqliteStore` so collaboration rows share Sprout's one database (ADR-0002).
  *
  * The store's job is to make two invariants durable *before* any wake is
  * attempted:
@@ -18,7 +20,7 @@
  */
 
 import type {
-  CollaborationMessage,
+  Message,
   WakeObservation,
   WakePlan,
   WakeRequest,
@@ -36,14 +38,14 @@ export interface CollaborationStore {
    * rests on.
    */
   postMessage(input: {
-    readonly message: CollaborationMessage;
+    readonly message: Message;
     readonly plan: WakePlan;
     readonly now: number;
   }): Promise<PostMessageResult>;
 
-  getMessage(messageId: string): Promise<CollaborationMessage | undefined>;
-  getMessageByDeliveryKey(deliveryKey: string): Promise<CollaborationMessage | undefined>;
-  listMessages(): Promise<readonly CollaborationMessage[]>;
+  getMessage(messageId: string): Promise<Message | undefined>;
+  getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined>;
+  listMessages(): Promise<readonly Message[]>;
 
   getWakeRequest(idempotencyKey: string): Promise<WakeRequest | undefined>;
   listWakeRequests(): Promise<readonly WakeRequest[]>;
@@ -69,10 +71,19 @@ export interface CollaborationStore {
     readonly observation: WakeObservation;
     readonly now: number;
   }): Promise<void>;
+
+  /**
+   * The durable non-wake outcomes recorded for one Message.
+   *
+   * Suppression and failure are only meaningful if a human can see them, so the
+   * contract that records them also exposes them; "nothing happened" must never
+   * be the only available answer to "why did this Message wake nobody?".
+   */
+  listObservations(messageId: string): Promise<readonly WakeObservation[]>;
 }
 
 export interface PostMessageResult {
-  readonly message: CollaborationMessage;
+  readonly message: Message;
   readonly wakes: readonly WakeRequest[];
   /** True when the delivery key had already been stored; nothing was added. */
   readonly duplicate: boolean;
@@ -117,15 +128,14 @@ export function wakeFromDecision(input: {
  * here is a statement about the contract rather than about one backend.
  */
 export class InMemoryCollaborationStore implements CollaborationStore {
-  readonly #messages = new Map<string, CollaborationMessage>();
+  readonly #messages = new Map<string, Message>();
   readonly #byDeliveryKey = new Map<string, string>();
   readonly #wakes = new Map<string, WakeRequest>();
-  /** Every observation recorded, for assertions in tests and the probe. */
-  readonly observations: { readonly messageId: string; readonly observation: WakeObservation }[] =
-    [];
+  /** Every observation recorded, keyed by the Message it describes. */
+  readonly #observations = new Map<string, WakeObservation[]>();
 
   async postMessage(input: {
-    readonly message: CollaborationMessage;
+    readonly message: Message;
     readonly plan: WakePlan;
     readonly now: number;
   }): Promise<PostMessageResult> {
@@ -159,16 +169,16 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     return { message: input.message, wakes: this.#wakesFor(input.message.id), duplicate: false };
   }
 
-  async getMessage(messageId: string): Promise<CollaborationMessage | undefined> {
+  async getMessage(messageId: string): Promise<Message | undefined> {
     return this.#messages.get(messageId);
   }
 
-  async getMessageByDeliveryKey(deliveryKey: string): Promise<CollaborationMessage | undefined> {
+  async getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined> {
     const id = this.#byDeliveryKey.get(deliveryKey);
     return id === undefined ? undefined : this.#messages.get(id);
   }
 
-  async listMessages(): Promise<readonly CollaborationMessage[]> {
+  async listMessages(): Promise<readonly Message[]> {
     return [...this.#messages.values()].sort((a, b) => a.createdAt - b.createdAt);
   }
 
@@ -198,7 +208,13 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     readonly observation: WakeObservation;
     readonly now: number;
   }): Promise<void> {
-    this.observations.push({ messageId: input.messageId, observation: input.observation });
+    const existing = this.#observations.get(input.messageId) ?? [];
+    existing.push(input.observation);
+    this.#observations.set(input.messageId, existing);
+  }
+
+  async listObservations(messageId: string): Promise<readonly WakeObservation[]> {
+    return this.#observations.get(messageId) ?? [];
   }
 
   #wakesFor(messageId: string): readonly WakeRequest[] {

@@ -1,5 +1,5 @@
 /**
- * The M1 wake contract (prototype for ticket #25).
+ * The M1 wake contract (ticket #26, settled by the #25 prototype).
  *
  * Given one durable Message and the project's members, decide who is woken and
  * why. The decision is pure and deterministic except for the single
@@ -24,7 +24,7 @@
  */
 
 import type {
-  CollaborationMessage,
+  Message,
   WakeDecision,
   WakeModel,
   WakeObservation,
@@ -71,7 +71,7 @@ export interface WakeContractOptions {
  * is never woken by its own Message, and every other member is a candidate.
  */
 export async function planWake(
-  message: CollaborationMessage,
+  message: Message,
   options: WakeContractOptions,
 ): Promise<WakePlan> {
   const project = options.projects.get(message.projectId);
@@ -125,7 +125,7 @@ export async function planWake(
 
 /** A direct Message wakes exactly its declared recipients. */
 function resolveDirect(
-  message: CollaborationMessage,
+  message: Message,
   memberIds: readonly string[],
 ): { decisions: readonly WakeDecision[]; observations: readonly WakeObservation[] } {
   return resolveTargets(message, memberIds, message.recipients, 'direct-recipient');
@@ -138,7 +138,7 @@ function resolveDirect(
  * the loss observable instead of pretending the Message had no addressee.
  */
 function resolveTargets(
-  message: CollaborationMessage,
+  message: Message,
   memberIds: readonly string[],
   targets: readonly string[],
   reason: WakeDecision['reason'],
@@ -164,7 +164,7 @@ function resolveTargets(
 }
 
 /** Every project member except the author. */
-function others(message: CollaborationMessage, memberIds: readonly string[]): readonly string[] {
+function others(message: Message, memberIds: readonly string[]): readonly string[] {
   return memberIds.filter((agentId) => agentId !== message.author.id);
 }
 
@@ -180,7 +180,7 @@ function others(message: CollaborationMessage, memberIds: readonly string[]): re
  * one extra wake per member.
  */
 async function planUnaddressed(
-  message: CollaborationMessage,
+  message: Message,
   memberIds: readonly string[],
   wakeModel: WakeModel | undefined,
 ): Promise<WakePlan> {

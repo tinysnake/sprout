@@ -1,13 +1,10 @@
 /**
- * Prototype vocabulary for the O6 collaboration write path (ticket #25).
+ * The M1 collaboration vocabulary (ticket #26, from the #25 prototype).
  *
- * This module is **prototype-only**. It exists to make the M1 collaboration
- * write path and wake contract concrete enough to probe; it is not the
- * production Message, channel, or Task subsystem, and nothing here may be
- * depended on by the engine port or the environment-worker protocol
- * (ADR-0003).
- *
- * The vocabulary mirrors `docs/goal.md` and `CONTEXT.md`:
+ * This is the production Message and wake vocabulary. It mirrors `docs/goal.md`
+ * and `CONTEXT.md`, and lives entirely in the core: nothing here is depended on
+ * by the engine port or the environment-worker protocol (ADR-0003). Persistence
+ * is behind `CollaborationStore` (ADR-0002), with SQLite as the M1 backend.
  *
  * - A **Message** is conversation on a channel. It is deliberately not a Task:
  *   a Task is durable multi-run work with state, while a Message is a single
@@ -42,7 +39,7 @@ export interface MessageAuthor {
  * Deliberately absent: the agent run's events, tool output, and raw reasoning.
  * Those stay in the run record (`AgentRun.events`) and never enter conversation.
  */
-export interface CollaborationMessage {
+export interface Message {
   readonly id: string;
   readonly projectId: string;
   readonly channel: MessageChannel;
@@ -154,7 +151,7 @@ export interface WakeModelVerdict {
  */
 export interface WakeModel {
   decide(input: {
-    readonly message: CollaborationMessage;
+    readonly message: Message;
     readonly memberIds: readonly string[];
   }): Promise<WakeModelVerdict>;
 }
