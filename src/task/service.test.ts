@@ -69,6 +69,7 @@ interface ScenarioOptions {
   readonly turns?: readonly ScriptedTurn[];
   readonly taskStore?: TaskStore;
   readonly runStore?: InMemoryRunStore;
+  readonly projects?: ProjectRegistry;
 }
 
 function build(options: ScenarioOptions = {}) {
@@ -88,7 +89,7 @@ function build(options: ScenarioOptions = {}) {
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
-    projects,
+    projects: options.projects ?? projects,
     pool: new EnvironmentPool({
       definitions: [macDefinition, containerDefinition],
       instances: [macInstance, containerInstance],
@@ -198,6 +199,79 @@ test('a definition environment preference selects the first granted matching ins
   assert.equal(run.environmentInstanceId, 'container-1');
 });
 
+test('a Task run resolves and assembles its contract strictly inside the Task project', async () => {
+  const multiProject = new ProjectRegistry([
+    {
+      id: 'project-a',
+      goal: 'Do not use this project.',
+      rules: ['A-only rule'],
+      availableEnvironmentInstanceIds: ['mac-mini-1'],
+      memberships: [
+        { agentId: 'agent-scout', responsibilities: ['A work'], collaborationInstructions: 'A only' },
+      ],
+    },
+    {
+      id: 'project-b',
+      goal: 'Use only project B.',
+      rules: ['B-only rule'],
+      availableEnvironmentInstanceIds: ['container-1'],
+      memberships: [
+        { agentId: 'agent-scout', responsibilities: ['B work'], collaborationInstructions: 'B only' },
+      ],
+    },
+  ]);
+  const scenario = build({ projects: multiProject });
+  const task = await scenario.service.create({
+    projectId: 'project-b',
+    title: 'Scoped Task',
+    goal: 'Stay inside project B.',
+    assignedAgentId: 'agent-scout',
+  });
+
+  const run = await advanceAndSettle(scenario, task.id);
+  assert.equal(run.projectId, 'project-b');
+  assert.equal(run.environmentInstanceId, 'container-1');
+  const contract = scenario.adapter.requests[0]?.instructions ?? '';
+  assert.match(contract, /Project contract: project-b/);
+  assert.match(contract, /Use only project B\./);
+  assert.equal(contract.includes('Do not use this project.'), false);
+});
+
+test('a Task refuses an agent that is not a member of its project', async () => {
+  const scenario = build({
+    projects: new ProjectRegistry([
+      {
+        id: 'project-a',
+        goal: 'Scout is here.',
+        rules: [],
+        availableEnvironmentInstanceIds: ['mac-mini-1'],
+        memberships: [
+          { agentId: 'agent-scout', responsibilities: [], collaborationInstructions: '' },
+        ],
+      },
+      {
+        id: 'project-b',
+        goal: 'Scout is not here.',
+        rules: [],
+        availableEnvironmentInstanceIds: ['container-1'],
+        memberships: [],
+      },
+    ]),
+  });
+  const task = await scenario.service.create({
+    projectId: 'project-b',
+    title: 'Membership check',
+    goal: 'Refuse cross-project execution.',
+    assignedAgentId: 'agent-scout',
+  });
+
+  const { runId } = await scenario.service.advance(task.id);
+  const run = await scenario.orchestrator.waitFor(runId);
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /not a member of project project-b/);
+  assert.equal(scenario.adapter.requests.length, 0);
+});
+
 test('an unmatched environment preference falls back to project matching', async () => {
   const scenario = build();
   const task = await scenario.service.create({
@@ -289,6 +363,29 @@ test('a blocked Task can be advanced again, moving back to in-progress', async (
   assert.equal((await scenario.service.get(task.id))?.status, 'in-progress');
 });
 
+test('concurrent Task advances reject the second request while the first run is active', async () => {
+  const scenario = build({
+    turns: [{ ...completed('Eventually done.'), settleAfterMs: 100 }],
+  });
+  const task = await scenario.service.create({
+    projectId: 'project-sprout',
+    title: 'One run at a time',
+    goal: 'Avoid concurrent environment leases.',
+    assignedAgentId: 'agent-scout',
+  });
+
+  const [first, second] = await Promise.allSettled([
+    scenario.service.advance(task.id),
+    scenario.service.advance(task.id),
+  ]);
+  assert.equal(first.status, 'fulfilled');
+  assert.equal(second.status, 'rejected');
+  assert.match(second.status === 'rejected' ? String(second.reason) : '', /already has an active run/);
+  if (first.status === 'fulfilled') await scenario.orchestrator.waitFor(first.value.runId);
+  assert.equal(scenario.adapter.requests.length, 1);
+  assert.equal((await scenario.service.getWithRuns(task.id))?.runs.length, 1);
+});
+
 test('advancing a terminal Task is refused', async () => {
   const scenario = build();
   const task = await scenario.service.create({
@@ -324,6 +421,25 @@ test('a run submitted with an unknown Task id fails explicitly, not silently', a
   const run = await scenario.orchestrator.waitFor(id);
   assert.equal(run.status, 'failed');
   assert.match(run.failure ?? '', /unknown task: task-nobody/);
+});
+
+test('a direct Task run without a project scope is refused', async () => {
+  const scenario = build();
+  const task = await scenario.service.create({
+    projectId: 'project-sprout',
+    title: 'Scoped only',
+    goal: 'Never resolve through another project.',
+    assignedAgentId: 'agent-scout',
+  });
+  const { id } = await scenario.orchestrator.submit({
+    agentId: 'agent-scout',
+    prompt: 'go',
+    taskId: task.id,
+  });
+  const run = await scenario.orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /missing its project scope/);
+  assert.equal(scenario.adapter.requests.length, 0);
 });
 
 test('updating a Task into a terminal status stamps completion and reopening clears it', async () => {
@@ -459,6 +575,71 @@ test('an orphaned Task run is reconciled to blocked after a restart', async () =
     const task = await second.tasks.get('task-1');
     assert.equal(task?.status, 'blocked');
     assert.match(task?.blockerReason ?? '', /interrupted by a Sprout restart/);
+    second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a terminal Task run missing its summary is reconciled after a restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-terminal-reconcile-'));
+  const path = join(directory, 'sprout.db');
+  try {
+    const first = new SqliteStore({ filename: path });
+    await first.tasks.create({
+      id: 'task-1',
+      projectId: 'project-sprout',
+      title: 'Persist terminal result',
+      goal: 'Keep this result for the next run.',
+      constraints: [],
+      status: 'in-progress',
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await first.tasks.linkRun({ taskId: 'task-1', runId: 'run-1', agentId: 'agent-scout', now: 2 });
+    // Simulate a process death after #finish persisted the terminal run but
+    // before TaskService.onRunSettled could record its summary.
+    await first.runs.save({
+      id: 'run-1',
+      agentId: 'agent-scout',
+      prompt: 'go',
+      environmentInstanceId: 'mac-mini-1',
+      taskId: 'task-1',
+      status: 'completed',
+      events: [],
+      result: { status: 'completed', text: 'The durable result.' },
+      createdAt: 2,
+      completedAt: 3,
+    });
+    first.close();
+
+    const second = new SqliteStore({ filename: path });
+    let now = 100;
+    const service = new TaskService({
+      store: second.tasks,
+      runs: { submit: async () => ({ id: 'noop' }) },
+      clock: { now: () => now },
+    });
+    const orchestrator = new RunOrchestrator({
+      engines: new Map(),
+      agents: new AgentRegistry([]),
+      projects,
+      pool: new EnvironmentPool({
+        definitions: [macDefinition, containerDefinition],
+        instances: [macInstance, containerInstance],
+      }),
+      store: second.runs,
+      tasks: { prompt: (input) => service.prompt(input), link: (input) => service.link(input) },
+      onTaskRunSettled: (input) => service.onRunSettled(input),
+    });
+    assert.equal((await orchestrator.reconcileOrphanedRuns()).length, 0);
+    // A second reconciliation is harmless and does not duplicate the link.
+    now = 200;
+    await orchestrator.reconcileOrphanedRuns();
+    const links = await second.tasks.listRuns('task-1');
+    assert.equal(links.length, 1);
+    assert.equal(links[0]?.summary?.summary, 'The durable result.');
+    assert.equal(links[0]?.summary?.recordedAt, 100);
     second.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });

@@ -94,6 +94,13 @@ export interface SubmitRunRequest {
   readonly agentId: string;
   readonly prompt: string;
   /**
+   * Resolve strictly within this Project when supplied.
+   *
+   * TaskService always supplies its Task's `projectId`. One-round callers may
+   * omit it to retain the established "first granted project" behaviour.
+   */
+  readonly projectId?: string;
+  /**
    * The durable Task this run advances (#28).
    *
    * When set, the run is a Task run: its prompt is assembled from the Task's
@@ -230,13 +237,40 @@ export class RunOrchestrator {
     }
     const taskRun: AgentRun = { ...run, prompt };
 
+    // Do not permit a Task caller to fall back to the agent's other projects.
+    // TaskService always provides this field from the durable Task; rejecting a
+    // malformed direct call is safer than silently executing its Task elsewhere.
+    if (request.taskId !== undefined && request.projectId === undefined) {
+      await this.settleTaskRun(
+        await this.#finish(taskRun, 'failed', {
+          status: 'failed',
+          message: `task run ${request.taskId} is missing its project scope`,
+        }),
+      );
+      return { id: taskRun.id };
+    }
+
     // Resolve the environment before recording the run, so the persisted run
     // names the instance it actually used rather than an agent's fixed device.
     // An explicit environment preference — normally the Task's own — is honoured
     // first, with project matching as the fallback (M1 scope item 8).
+    const agentProjects = this.#projects?.forAgent(agent.id) ?? [];
+    const scopedProjects =
+      request.projectId === undefined
+        ? agentProjects
+        : agentProjects.filter((project) => project.id === request.projectId);
+    if (request.projectId !== undefined && scopedProjects.length === 0) {
+      await this.settleTaskRun(
+        await this.#finish(taskRun, 'failed', {
+          status: 'failed',
+          message: `agent ${agent.id} is not a member of project ${request.projectId}`,
+        }),
+      );
+      return { id: taskRun.id };
+    }
     const resolution = resolveEnvironmentInstance(
       {
-        projects: this.#projects?.forAgent(agent.id) ?? [],
+        projects: scopedProjects,
         capability: agent.capability,
         ...(request.environmentPreference !== undefined
           ? { environmentPreference: request.environmentPreference }
@@ -372,6 +406,12 @@ export class RunOrchestrator {
         }
         await this.#store.save(next);
         recovered.push(await this.settleTaskRun(next));
+      } else if (next.taskId !== undefined) {
+        // A terminal run can be durable before its Task observer receives the
+        // settlement callback. Re-deliver every terminal Task run on restart:
+        // TaskService's link and summary writes are idempotent, so this both
+        // repairs a missing summary and leaves an already-settled run unchanged.
+        await this.settleTaskRun(next);
       }
     }
     return recovered;

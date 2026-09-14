@@ -51,9 +51,9 @@ function completed(text: string): ScriptedTurn {
   };
 }
 
-function build() {
+function build(options: { readonly turns?: readonly ScriptedTurn[] } = {}) {
   const adapter = new ScriptedEngineAdapter({
-    turns: [completed('First step done.'), completed('Second step done.')],
+    turns: options.turns ?? [completed('First step done.'), completed('Second step done.')],
   });
   const registry = new AgentRegistry([
     { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run' },
@@ -75,8 +75,11 @@ function build() {
   return { api, service };
 }
 
-async function withServer(fn: (base: string, context: ReturnType<typeof build>) => Promise<void>): Promise<void> {
-  const context = build();
+async function withServer(
+  fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
+  options: { readonly turns?: readonly ScriptedTurn[] } = {},
+): Promise<void> {
+  const context = build(options);
   const { port } = await context.api.listen(0);
   try {
     await fn(`http://127.0.0.1:${port}`, context);
@@ -198,6 +201,24 @@ test('a Task can be advanced more than once', async () => {
       [1, 2],
     );
   });
+});
+
+test('advancing a Task with a live prior run returns 409', async () => {
+  await withServer(
+    async (base) => {
+      const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+      const first = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
+      assert.equal(first.status, 202);
+      const { runId } = (await first.json()) as { runId: string };
+
+      const concurrent = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
+      assert.equal(concurrent.status, 409);
+      const body = (await concurrent.json()) as { error: string };
+      assert.match(body.error, /already has an active run/);
+      assert.equal((await waitForRun(base, runId)).status, 'completed');
+    },
+    { turns: [{ ...completed('Eventually done.'), settleAfterMs: 100 }] },
+  );
 });
 
 test('Tasks are filterable by project and status', async () => {

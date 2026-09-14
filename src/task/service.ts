@@ -44,6 +44,8 @@ export interface TaskRunner {
     readonly agentId: string;
     readonly prompt: string;
     readonly taskId?: string;
+    /** The Task project that exclusively scopes this Task run's resolution. */
+    readonly projectId: string;
     readonly environmentPreference?: EnvironmentPreference;
   }): Promise<{ readonly id: string }>;
 }
@@ -94,6 +96,8 @@ export class TaskService {
   readonly #runs: TaskRunner;
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
+  /** Task ids currently submitting a run, preventing a same-process race. */
+  readonly #advancing = new Set<string>();
 
   constructor(options: TaskServiceOptions) {
     this.#store = options.store;
@@ -184,30 +188,47 @@ export class TaskService {
     taskId: string,
     options: AdvanceTaskOptions = {},
   ): Promise<{ readonly task: Task; readonly runId: string }> {
-    let task = await this.#require(taskId);
-    if (!canAdvanceTask(task.status)) {
-      throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
+    // Set this before the first await. Two HTTP requests can otherwise both read
+    // an advanceable Task before either one records its linked run.
+    if (this.#advancing.has(taskId)) {
+      throw new Error(`task ${taskId} already has an active run`);
     }
-    const agentId = options.agentId ?? task.assignedAgentId;
-    if (agentId === undefined) {
-      throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to advance it`);
-    }
+    this.#advancing.add(taskId);
+    try {
+      let task = await this.#require(taskId);
+      if (!canAdvanceTask(task.status)) {
+        throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
+      }
+      // A missing summary is deliberately treated as active. A terminal run can
+      // be persisted just before its Task summary; restart reconciliation repairs
+      // that window rather than letting the following run discard its context.
+      if ((await this.#store.listRuns(taskId)).some((link) => link.summary === undefined)) {
+        throw new Error(`task ${taskId} already has an active run`);
+      }
+      const agentId = options.agentId ?? task.assignedAgentId;
+      if (agentId === undefined) {
+        throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to advance it`);
+      }
 
-    if (task.status !== 'in-progress') {
-      await this.#store.save({ ...task, status: 'in-progress', updatedAt: this.#clock.now() });
-      task = await this.#require(taskId);
-    }
+      if (task.status !== 'in-progress') {
+        await this.#store.save({ ...task, status: 'in-progress', updatedAt: this.#clock.now() });
+        task = await this.#require(taskId);
+      }
 
-    const prompt = options.prompt ?? defaultAdvancePrompt(task);
-    const { id: runId } = await this.#runs.submit({
-      agentId,
-      prompt,
-      taskId,
-      ...(task.environmentPreference !== undefined
-        ? { environmentPreference: task.environmentPreference }
-        : {}),
-    });
-    return { task: (await this.#store.get(taskId)) ?? task, runId };
+      const prompt = options.prompt ?? defaultAdvancePrompt(task);
+      const { id: runId } = await this.#runs.submit({
+        agentId,
+        prompt,
+        taskId,
+        projectId: task.projectId,
+        ...(task.environmentPreference !== undefined
+          ? { environmentPreference: task.environmentPreference }
+          : {}),
+      });
+      return { task: (await this.#store.get(taskId)) ?? task, runId };
+    } finally {
+      this.#advancing.delete(taskId);
+    }
   }
 
   /**
@@ -253,15 +274,22 @@ export class TaskService {
     await this.link({ taskId, runId: run.id, agentId: run.agentId });
     if (run.status === 'queued' || run.status === 'running') return;
 
-    const summary: TaskRunSummary & { readonly taskId: string } = {
-      taskId,
-      runId: run.id,
-      agentId: run.agentId,
-      status: run.status,
-      summary: summarizeRun(run),
-      recordedAt: this.#clock.now(),
-    };
-    await this.#store.recordRunSummary(summary);
+    // Restart reconciliation intentionally re-delivers terminal runs. Keep the
+    // first durable summary intact while still applying the Task state below: a
+    // crash can occur either before the summary write or after it but before the
+    // blocked-state write.
+    const existing = (await this.#store.listRuns(taskId)).find((link) => link.runId === run.id);
+    if (existing?.summary === undefined) {
+      const summary: TaskRunSummary & { readonly taskId: string } = {
+        taskId,
+        runId: run.id,
+        agentId: run.agentId,
+        status: run.status,
+        summary: summarizeRun(run),
+        recordedAt: this.#clock.now(),
+      };
+      await this.#store.recordRunSummary(summary);
+    }
 
     const task = await this.#store.get(taskId);
     if (!task) return;
