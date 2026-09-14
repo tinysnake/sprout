@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter } from '../engine/codex.ts';
@@ -34,6 +35,7 @@ const port = Number(process.env.SPROUT_WORKER_PORT ?? 0);
  * ADR-0003: the protocol is identical either way and only the carrier differs.
  */
 const transportMode = process.env.SPROUT_WORKER_TRANSPORT ?? 'endpoint';
+const workspaceRoot = process.env.SPROUT_WORKSPACE_ROOT ?? join(process.cwd(), '.sprout-workspaces');
 
 /** Codex must be launched through its real path; a PATH symlink fails sandboxed. */
 function resolveCodexBinary(): string | undefined {
@@ -173,6 +175,7 @@ if (transportMode === 'stdio') {
     input: process.stdin,
     output: process.stdout,
     onLog: log,
+    workspaceRoot,
   });
   process.stdin.on('error', () => undefined);
   process.stdin.on('close', () => {
@@ -191,6 +194,7 @@ if (transportMode === 'stdio') {
         input: socket,
         output: socket,
         onLog: log,
+        workspaceRoot,
       });
       socket.on('error', () => undefined);
       socket.on('close', () => {

@@ -20,8 +20,12 @@ import {
   type RunResult,
   type StartSessionParams,
   type StartSessionResult,
+  type PrepareTaskContextResult,
+  type RecycleTaskContextParams,
+  type TaskContextMaterialization,
   type WorkerInfo,
 } from './protocol.ts';
+import { WorkerWorkspace } from './workspace.ts';
 
 /**
  * The worker: the part of Sprout that runs *inside* an environment.
@@ -44,6 +48,8 @@ export interface EnvironmentWorkerOptions {
   readonly input: Readable;
   readonly output: Writable;
   readonly onLog?: (line: string) => void;
+  /** Root owned by this Worker for persistent Project workspaces. */
+  readonly workspaceRoot?: string;
 }
 
 interface LiveSession {
@@ -63,11 +69,13 @@ export class EnvironmentWorker {
   readonly #options: EnvironmentWorkerOptions;
   readonly #transport: JsonRpcTransport;
   readonly #sessions = new Map<string, LiveSession>();
+  readonly #workspace: WorkerWorkspace | undefined;
   #counter = 0;
   #closed = false;
 
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
+    this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
     this.#transport = new LineJsonRpcTransport({
       input: options.input,
       output: options.output,
@@ -106,6 +114,12 @@ export class EnvironmentWorker {
           return;
         case WORKER_METHODS.close:
           this.#transport.respond(id, await this.#closeSession(params as CloseParams));
+          return;
+        case WORKER_METHODS.prepareTaskContext:
+          this.#transport.respond(id, await this.#prepareTaskContext(params as TaskContextMaterialization));
+          return;
+        case WORKER_METHODS.recycleTaskContext:
+          this.#transport.respond(id, await this.#recycleTaskContext(params as RecycleTaskContextParams));
           return;
         default:
           this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
@@ -148,7 +162,9 @@ export class EnvironmentWorker {
 
     const session = await adapter.startSession({
       agentId: params.agentId,
-      workingDirectory: params.workingDirectory,
+      workingDirectory: params.projectWorkspaceId === undefined
+        ? params.workingDirectory
+        : this.#requireWorkspace().projectWorkingDirectory(params.projectWorkspaceId),
       ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
       ...(params.resumeSessionKey !== undefined
         ? { resumeSessionKey: params.resumeSessionKey }
@@ -192,6 +208,19 @@ export class EnvironmentWorker {
         ? { engineSessionKey: session.engineSessionKey }
         : {}),
     };
+  }
+
+  #prepareTaskContext(params: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
+    return this.#requireWorkspace().prepare(params);
+  }
+
+  #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
+    return this.#requireWorkspace().recycle(params);
+  }
+
+  #requireWorkspace(): WorkerWorkspace {
+    if (!this.#workspace) throw new Error('worker has no configured workspace root');
+    return this.#workspace;
   }
 
   /**

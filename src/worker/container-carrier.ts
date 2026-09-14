@@ -4,7 +4,7 @@ import type { ChildProcess } from 'node:child_process';
 
 import type { ContainerRuntime } from '../environment/container.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
-import { WorkerClient } from './client.ts';
+import { WorkerClient, WorkerContextClient } from './client.ts';
 import type { WorkerInfo } from './protocol.ts';
 import type { WorkerConnection } from './carrier.ts';
 
@@ -74,6 +74,9 @@ export class ContainerCarrier {
           // Tells the worker it *is* the isolation boundary, so the engine must
           // not try to build a second sandbox inside it.
           SPROUT_ENV_PLATFORM: 'container',
+          // A Worker-owned root inside the mounted environment.  This is a
+          // Worker configuration fact, not a Project identity or core path.
+          SPROUT_WORKSPACE_ROOT: join(this.#options.workingDirectory, '.sprout-workspaces'),
           ...this.#options.environment,
         },
       },
@@ -119,6 +122,7 @@ export class ContainerCarrier {
     return {
       info: connection.info as WorkerInfo,
       adapters: connection.adapters,
+      contexts: new WorkerContextClient(transport),
       get alive() {
         return alive;
       },

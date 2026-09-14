@@ -102,7 +102,7 @@ function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void 
 
 test('begin binds a Task-owned non-expiring lease; nested settlement retains it and end releases after recycle', async () => {
   const calls: string[] = [];
-  const context: TaskContextWorker = { prepare: async () => { calls.push('prepare'); }, recycle: async () => { calls.push('recycle'); } };
+  const context: TaskContextWorker = { prepare: async () => { calls.push('prepare'); return { bootstrapInstructions: '' }; }, recycle: async () => { calls.push('recycle'); } };
   const scenario = build({ worker: context });
   await scenario.store.create(task());
 
@@ -119,7 +119,7 @@ test('begin binds a Task-owned non-expiring lease; nested settlement retains it 
   const ended = await scenario.lifecycle.end('task-1');
   assert.equal(ended.environmentLifecycleState, 'ended');
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
-  assert.deepEqual(calls, ['prepare', 'recycle']);
+  assert.deepEqual(calls, ['prepare', 'prepare', 'recycle']);
 });
 
 test('interrupted nested work and restart retain exclusion until the owning Task resumes or discards', async () => {

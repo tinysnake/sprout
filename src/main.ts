@@ -288,6 +288,10 @@ taskLifecycle = new TaskEnvironmentLifecycle({
   agents: registry,
   projects,
   runs: orchestrator,
+  worker: {
+    prepare: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).prepare(input),
+    recycle: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).recycle(input),
+  },
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 tasks = new TaskService({ store: store.tasks, runs: orchestrator, lifecycle: taskLifecycle });
