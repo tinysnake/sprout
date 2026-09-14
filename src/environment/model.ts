@@ -38,6 +38,21 @@ export interface Environment {
   readonly instance: EnvironmentInstance;
 }
 
+/**
+ * An explicit environment selection for a run.
+ *
+ * A durable Task may name the environment its work wants instead of leaving the
+ * choice entirely to project matching. `instance` names one concrete system;
+ * `definition` names a kind of environment, and the first available instance of
+ * that kind wins. A preference is a **priority, not a guarantee**: when the named
+ * environment is not granted by a project the agent belongs to, or cannot serve
+ * the capability, resolution falls back to standard project matching.
+ */
+export interface EnvironmentPreference {
+  readonly kind: 'definition' | 'instance';
+  readonly id: string;
+}
+
 export function findCapability(
   definition: EnvironmentDefinition,
   capability: string,
