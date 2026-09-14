@@ -352,19 +352,21 @@ export class RunOrchestrator {
 
     const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
 
-    // The continuation slot is `(agent, engine, environment instance, working
-    // directory)`. All four must match for a stored key to be reusable: the key
-    // belongs to one engine, lives in one environment's engine store, and (for
-    // Pi and opencode, #19) is coupled to the directory it was created in.
-    const identity: SessionKeyIdentity = {
-      agentId: agent.id,
-      engine: agent.engine,
-      environmentInstanceId: initial.environmentInstanceId,
-      workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
-    };
-    const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
-
     try {
+      // The continuation slot is `(agent, engine, environment instance, working
+      // directory)`. All four must match for a stored key to be reusable: the key
+      // belongs to one engine, lives in one environment's engine store, and (for
+      // Pi and opencode, #19) is coupled to the directory it was created in.
+      // Resolve it inside the lease guard: an absent instance directory and agent
+      // fallback is an explicit failed run, not a rejected promise that leaks a lease.
+      const identity: SessionKeyIdentity = {
+        agentId: agent.id,
+        engine: agent.engine,
+        environmentInstanceId: initial.environmentInstanceId,
+        workingDirectory: resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent),
+      };
+      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+
       let attempt = await this.#runSession(adapter, agent, initial.prompt, running, stored?.key);
 
       // A stored key the engine refuses must not fail the run. Pi and `agy`
@@ -399,6 +401,11 @@ export class RunOrchestrator {
         }
       }
       return await this.#settleWithResult(attempt.run, attempt.result);
+    } catch (error) {
+      return this.#finish(running, 'failed', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       this.#pool.releaseLease(acquired.lease.id);
     }

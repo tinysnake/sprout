@@ -5,7 +5,7 @@ import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/
 import { EnvironmentPool, InMemoryLeaseStore } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { AgentRunEvent, EngineAdapter } from '../engine/port.ts';
-import { AgentRegistry } from '../agent/registry.ts';
+import { AgentRegistry, type AgentDefinition } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import type { WorkerConnection } from '../worker/carrier.ts';
@@ -70,6 +70,7 @@ function build(options: {
   failStart?: string;
   onInterrupt?: () => void;
   projects?: readonly Project[];
+  agent?: AgentDefinition;
 }) {
   const pool = new EnvironmentPool({
     definitions: [definition],
@@ -82,7 +83,7 @@ function build(options: {
     ...(options.onInterrupt !== undefined ? { onInterrupt: options.onInterrupt } : {}),
   });
   const registry = new AgentRegistry([
-    {
+    options.agent ?? {
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
@@ -236,6 +237,29 @@ test('a failure to start the engine becomes an explicit failed state', async () 
   assert.equal(run.status, 'failed');
   assert.match(run.result?.status === 'failed' ? run.result.message : '', /codex binary missing/);
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
+});
+
+test('a missing working directory becomes a persisted failed state and releases the lease', async () => {
+  const { orchestrator, pool, store, adapter } = build({
+    turns: [],
+    agent: {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      capability: 'agent-run',
+    },
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'where am I?' });
+  const run = await orchestrator.waitFor(id);
+  const persisted = await store.get(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.result?.status === 'failed' ? run.result.message : '', /no working directory/i);
+  assert.equal(persisted?.status, 'failed', 'the failed terminal state is persisted');
+  assert.equal(persisted?.result?.status, 'failed');
+  assert.equal(pool.activeLease('mac-mini-1'), undefined, 'the acquired lease is released');
+  assert.equal(adapter.requests.length, 0, 'the engine never starts without a directory');
 });
 
 test('the agent identity and its environment are Sprout-owned', async () => {
