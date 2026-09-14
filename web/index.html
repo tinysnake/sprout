@@ -51,6 +51,40 @@
         <ul id="message-stream" aria-live="polite"></ul>
       </section>
 
+      <section id="tasks" aria-labelledby="tasks-heading">
+        <h2 id="tasks-heading">Tasks</h2>
+        <p class="hint">Tasks retain their selected environment from explicit begin until explicit end.</p>
+
+        <form id="task-form">
+          <div class="composer-row">
+            <div class="field">
+              <label for="task-project">Project</label>
+              <select id="task-project" name="task-project"></select>
+            </div>
+            <div class="field">
+              <label for="task-agent">Default Agent</label>
+              <select id="task-agent" name="task-agent"></select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="task-title">Title</label>
+            <input id="task-title" name="task-title" required placeholder="Short Task name" />
+          </div>
+          <div class="field">
+            <label for="task-goal">Goal</label>
+            <textarea id="task-goal" name="task-goal" rows="2" required placeholder="What this Task must achieve."></textarea>
+          </div>
+          <div class="field">
+            <label for="task-constraints">Constraints</label>
+            <textarea id="task-constraints" name="task-constraints" rows="2" placeholder="One constraint per line."></textarea>
+          </div>
+          <p class="form-error" id="task-error" role="alert" hidden></p>
+          <button type="submit">Create Task</button>
+        </form>
+
+        <div id="task-list" aria-live="polite"></div>
+      </section>
+
       <form id="request-form">
         <label for="agent">Agent</label>
         <select id="agent" name="agent"></select>

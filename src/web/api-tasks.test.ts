@@ -130,6 +130,7 @@ test('a Task can be created and listed through the API', async () => {
     assert.equal(created.status, 201);
     const { task } = (await created.json()) as { task: Record<string, unknown> };
     assert.equal(task.status, 'todo');
+    assert.equal(task.taskContextState, 'not-created');
     assert.equal(task.title, 'Durable Task entity');
     assert.deepEqual(task.constraints, ['No personal data']);
 
@@ -137,6 +138,20 @@ test('a Task can be created and listed through the API', async () => {
     assert.equal(list.status, 200);
     const body = (await list.json()) as { tasks: Record<string, unknown>[] };
     assert.equal(body.tasks.length, 1);
+  });
+});
+
+test('a competing Task begin reports the owning Task and retained lease state', async () => {
+  await withServer(async (base) => {
+    const first = (await (await createTask(base, { title: 'First holder' })).json()) as { task: { id: string } };
+    const second = (await (await createTask(base, { title: 'Second holder' })).json()) as { task: { id: string } };
+    await beginTask(base, first.task.id);
+
+    const conflict = await fetch(`${base}/api/tasks/${second.task.id}/begin`, { method: 'POST' });
+    assert.equal(conflict.status, 409);
+    const body = (await conflict.json()) as { error: string };
+    assert.match(body.error, new RegExp(first.task.id));
+    assert.match(body.error, /active/);
   });
 });
 

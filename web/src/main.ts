@@ -1,4 +1,5 @@
 import { refreshRecipientsOnProjectChange } from './recipient-refresh';
+import { eligibleTaskAgents, taskActivity, taskContextState, taskFailureMessage } from './task-controls';
 
 /**
  * The M1 Web client.
@@ -52,6 +53,35 @@ interface ProjectView {
   readonly memberIds: readonly string[];
 }
 
+interface TaskView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly status: string;
+  readonly assignedAgentId?: string;
+  readonly environmentInstanceId?: string;
+  readonly environmentLeaseId?: string;
+  readonly environmentLifecycleState?: string;
+  readonly taskContextState: string;
+  readonly recoveryState?: string;
+  readonly activeRunId?: string;
+  readonly blockerReason?: string;
+}
+
+interface TaskRunLinkView {
+  readonly runId: string;
+  readonly agentId: string;
+  readonly sequence: number;
+  readonly summary?: { readonly status: string; readonly summary: string };
+}
+
+interface TaskWithRunsView {
+  readonly task: TaskView;
+  readonly runs: readonly TaskRunLinkView[];
+}
+
 interface MessageView {
   readonly id: string;
   readonly projectId: string;
@@ -98,6 +128,14 @@ const recipientsRoot = document.querySelector<HTMLElement>('#recipients');
 const messageBody = document.querySelector<HTMLTextAreaElement>('#message-body');
 const messageError = document.querySelector<HTMLElement>('#message-error');
 const messageStream = document.querySelector<HTMLUListElement>('#message-stream');
+const taskForm = document.querySelector<HTMLFormElement>('#task-form');
+const taskProjectSelect = document.querySelector<HTMLSelectElement>('#task-project');
+const taskAgentSelect = document.querySelector<HTMLSelectElement>('#task-agent');
+const taskTitle = document.querySelector<HTMLInputElement>('#task-title');
+const taskGoal = document.querySelector<HTMLTextAreaElement>('#task-goal');
+const taskConstraints = document.querySelector<HTMLTextAreaElement>('#task-constraints');
+const taskError = document.querySelector<HTMLElement>('#task-error');
+const taskList = document.querySelector<HTMLElement>('#task-list');
 
 if (
   !form ||
@@ -111,7 +149,15 @@ if (
   !recipientsRoot ||
   !messageBody ||
   !messageError ||
-  !messageStream
+  !messageStream ||
+  !taskForm ||
+  !taskProjectSelect ||
+  !taskAgentSelect ||
+  !taskTitle ||
+  !taskGoal ||
+  !taskConstraints ||
+  !taskError ||
+  !taskList
 ) {
   throw new Error('the Sprout client markup is incomplete');
 }
@@ -126,6 +172,14 @@ const recipientsRootEl: HTMLElement = recipientsRoot;
 const messageBodyEl: HTMLTextAreaElement = messageBody;
 const messageErrorEl: HTMLElement = messageError;
 const messageStreamEl: HTMLUListElement = messageStream;
+const taskFormEl: HTMLFormElement = taskForm;
+const taskProjectSelectEl: HTMLSelectElement = taskProjectSelect;
+const taskAgentSelectEl: HTMLSelectElement = taskAgentSelect;
+const taskTitleEl: HTMLInputElement = taskTitle;
+const taskGoalEl: HTMLTextAreaElement = taskGoal;
+const taskConstraintsEl: HTMLTextAreaElement = taskConstraints;
+const taskErrorEl: HTMLElement = taskError;
+const taskListEl: HTMLElement = taskList;
 
 const agents = await loadAgents();
 for (const agent of agents) {
@@ -170,11 +224,48 @@ for (const project of projects) {
   option.value = project.id;
   option.textContent = project.id;
   projectSelectEl.append(option);
+  const taskOption = document.createElement('option');
+  taskOption.value = project.id;
+  taskOption.textContent = project.id;
+  taskProjectSelectEl.append(taskOption);
 }
 renderRecipients();
+renderTaskAgentOptions();
 
 channelSelectEl.addEventListener('change', renderRecipients);
 refreshRecipientsOnProjectChange(projectSelectEl, renderRecipients);
+taskProjectSelectEl.addEventListener('change', renderTaskAgentOptions);
+
+taskFormEl.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const title = taskTitleEl.value.trim();
+  const goal = taskGoalEl.value.trim();
+  if (title === '' || goal === '' || taskProjectSelectEl.value === '') {
+    showTaskError('Choose a Project, title, and goal.');
+    return;
+  }
+  const constraints = taskConstraintsEl.value
+    .split('\n')
+    .map((value) => value.trim())
+    .filter((value) => value !== '');
+  await submitTaskCommand(null, taskFormEl.querySelector('button'), async () => {
+    const response = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: taskProjectSelectEl.value,
+        title,
+        goal,
+        constraints,
+        ...(taskAgentSelectEl.value !== '' ? { assignedAgentId: taskAgentSelectEl.value } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    taskTitleEl.value = '';
+    taskGoalEl.value = '';
+    taskConstraintsEl.value = '';
+  });
+});
 
 messageFormEl.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -226,6 +317,7 @@ messageFormEl.addEventListener('submit', async (event) => {
 });
 
 await refreshMessages();
+await refreshTasks();
 
 // One event stream carries every run's progress, so the client never polls and
 // never has to guess when a run changed.
@@ -234,6 +326,7 @@ stream.addEventListener('run', (event) => {
   const run = JSON.parse((event as MessageEvent<string>).data) as RunView;
   render(run);
   void loadLeases().then(renderLeases);
+  void refreshTasks();
   // A collaboration wake admits a run, and its reply is projected once that run
   // settles; reloading the stream on progress is what surfaces the reply.
   scheduleMessageRefresh();
@@ -284,6 +377,252 @@ function renderRecipients(): void {
       return label;
     }),
   );
+}
+
+/** Populate the Task owner/next-Agent choices from the selected Project only. */
+function renderTaskAgentOptions(): void {
+  const project = projects.find((candidate) => candidate.id === taskProjectSelectEl.value);
+  const eligible = eligibleTaskAgents(project, agents);
+  taskAgentSelectEl.replaceChildren();
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = 'No default Agent';
+  taskAgentSelectEl.append(none);
+  for (const agent of eligible) {
+    const option = document.createElement('option');
+    option.value = agent.id;
+    option.textContent = agent.name ?? agent.id;
+    taskAgentSelectEl.append(option);
+  }
+}
+
+async function refreshTasks(): Promise<void> {
+  const tasks = await loadTasks();
+  const details = await Promise.all(tasks.map((task) => loadTask(task.id)));
+  const complete = details.filter((detail): detail is TaskWithRunsView => detail !== undefined);
+  renderTasks(complete);
+}
+
+async function loadTasks(): Promise<readonly TaskView[]> {
+  try {
+    const response = await fetch('/api/tasks');
+    if (!response.ok) return [];
+    const body = (await response.json()) as { tasks?: TaskView[] };
+    return body.tasks ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadTask(taskId: string): Promise<TaskWithRunsView | undefined> {
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    return response.ok ? (await response.json()) as TaskWithRunsView : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Render Tasks under their Project boundary, never mixed into Message controls. */
+function renderTasks(tasks: readonly TaskWithRunsView[]): void {
+  const byProject = new Map<string, TaskWithRunsView[]>();
+  for (const task of tasks) {
+    const group = byProject.get(task.task.projectId) ?? [];
+    group.push(task);
+    byProject.set(task.task.projectId, group);
+  }
+  const projectIds = new Set([...projects.map((project) => project.id), ...byProject.keys()]);
+  taskListEl.replaceChildren(
+    ...[...projectIds].map((projectId) => {
+      const section = document.createElement('section');
+      section.className = 'task-project';
+      const heading = document.createElement('h3');
+      heading.textContent = projectId;
+      section.append(heading);
+      const entries = byProject.get(projectId) ?? [];
+      if (entries.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'hint';
+        empty.textContent = 'No Tasks yet.';
+        section.append(empty);
+      } else {
+        section.append(...entries.map(renderTaskCard));
+      }
+      return section;
+    }),
+  );
+}
+
+function renderTaskCard(detail: TaskWithRunsView): HTMLElement {
+  const { task, runs } = detail;
+  const card = document.createElement('article');
+  card.className = 'task-card';
+  card.dataset.task = task.id;
+
+  const header = document.createElement('header');
+  const title = document.createElement('h4');
+  title.textContent = task.title;
+  const status = document.createElement('span');
+  status.className = 'status';
+  status.dataset.status = task.status;
+  status.textContent = task.status;
+  header.append(title, status);
+
+  const goal = document.createElement('p');
+  goal.className = 'prompt';
+  goal.textContent = task.goal;
+  const facts = document.createElement('ul');
+  facts.className = 'task-facts';
+  const lifecycle = task.environmentLifecycleState;
+  const lease = task.environmentLeaseId === undefined
+    ? 'Not held (Task has not begun)'
+    : lifecycle === 'ended' || lifecycle === 'discarded'
+      ? `Released after context cleanup (${lifecycle})`
+      : `${task.environmentInstanceId ?? 'selected environment'} retained by Task (${lifecycle ?? 'unknown'})`;
+  appendFact(facts, 'Activity', taskActivity(task));
+  appendFact(facts, 'Default Agent', task.assignedAgentId ?? 'Unassigned');
+  appendFact(facts, 'Environment', task.environmentInstanceId ?? 'Not selected');
+  appendFact(facts, 'Task lease', lease);
+  appendFact(facts, 'Task context', taskContextState(task));
+  if (task.constraints.length > 0) appendFact(facts, 'Constraints', task.constraints.join(' · '));
+  if (task.blockerReason !== undefined) appendFact(facts, 'Blocker', task.blockerReason);
+
+  const runList = document.createElement('ol');
+  runList.className = 'task-runs';
+  if (runs.length === 0) {
+    const empty = document.createElement('li');
+    empty.textContent = lifecycle === undefined ? 'No Agent run: begin this Task explicitly.' : 'No Agent run: Task is active and Agent idle.';
+    runList.append(empty);
+  } else {
+    for (const run of runs) {
+      const item = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = `#run-${run.runId}`;
+      link.textContent = `${run.sequence}. ${run.agentId}`;
+      item.append(link, document.createTextNode(run.summary ? ` — ${run.summary.status}: ${run.summary.summary}` : ' — current run'));
+      if (task.activeRunId === run.runId) item.className = 'task-run-current';
+      runList.append(item);
+    }
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'task-actions';
+  if (lifecycle === undefined) {
+    const begin = actionButton('Begin Task', () => taskCommand(task.id, begin, 'Beginning Task and preparing its context…', 'begin'));
+    actions.append(begin);
+  } else if (lifecycle === 'recovery') {
+    const resume = actionButton('Resume Task', () => taskCommand(task.id, resume, 'Resuming the owning Task lease…', 'recovery', { action: 'resume' }));
+    const discard = actionButton('Preserve/discard and end', () => taskCommand(task.id, discard, 'Cleaning up preserved Task context before release…', 'recovery', { action: 'discard' }));
+    actions.append(resume, discard);
+  } else if (!['ended', 'discarded', 'ending'].includes(lifecycle ?? '')) {
+    if (task.activeRunId === undefined) {
+      const agentField = document.createElement('label');
+      agentField.className = 'field';
+      agentField.textContent = 'Next Agent';
+      const agent = document.createElement('select');
+      agent.className = 'task-next-agent';
+      const project = projects.find((candidate) => candidate.id === task.projectId);
+      for (const candidate of eligibleTaskAgents(project, agents)) {
+        const option = document.createElement('option');
+        option.value = candidate.id;
+        const name = candidate.name ?? candidate.id;
+        option.textContent = candidate.id === task.assignedAgentId ? `${name} (default)` : name;
+        agent.append(option);
+      }
+      agentField.append(agent);
+      const advance = actionButton('Advance Task', () => taskCommand(task.id, advance, 'Starting nested Agent run; Task lease remains retained…', 'runs', { agentId: agent.value }));
+      const validate = actionButton('Await human validation', () => taskCommand(task.id, validate, 'Retaining environment while awaiting validation…', 'validation'));
+      actions.append(agentField, advance, validate);
+    }
+    const end = actionButton('End Task', () => taskCommand(task.id, end, 'Cleaning up Task context before releasing lease…', 'end'));
+    end.disabled = task.activeRunId !== undefined;
+    actions.append(end);
+  }
+
+  const actionStatus = document.createElement('p');
+  actionStatus.className = 'task-action-status';
+  actionStatus.hidden = true;
+  card.append(header, goal, facts, runList, actions, actionStatus);
+  return card;
+}
+
+function appendFact(list: HTMLUListElement, label: string, value: string): void {
+  const item = document.createElement('li');
+  const strong = document.createElement('strong');
+  strong.textContent = `${label}: `;
+  item.append(strong, document.createTextNode(value));
+  list.append(item);
+}
+
+function actionButton(label: string, action: () => void): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', action);
+  return button;
+}
+
+async function taskCommand(
+  taskId: string,
+  button: HTMLButtonElement,
+  progress: string,
+  command: 'begin' | 'runs' | 'end' | 'recovery' | 'validation',
+  body: Record<string, string> = {},
+): Promise<void> {
+  const card = button.closest<HTMLElement>('[data-task]');
+  const status = card?.querySelector<HTMLElement>('.task-action-status');
+  await submitTaskCommand(status ?? null, button, async () => {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${command}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+  }, progress);
+}
+
+async function submitTaskCommand(
+  status: HTMLElement | null,
+  button: HTMLButtonElement | null,
+  command: () => Promise<void>,
+  progress = '',
+): Promise<void> {
+  if (button) button.disabled = true;
+  if (status && progress !== '') {
+    status.textContent = progress;
+    status.hidden = false;
+    status.classList.remove('task-action-error');
+  }
+  hideTaskError();
+  try {
+    await command();
+    await refreshTasks();
+  } catch (error) {
+    const message = taskFailureMessage(error instanceof Error ? error.message : String(error));
+    if (status) {
+      status.textContent = message;
+      status.hidden = false;
+      status.classList.add('task-action-error');
+    }
+    showTaskError(message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function responseError(response: Response): Promise<string> {
+  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  return body.error ?? `Task command was rejected (${response.status})`;
+}
+
+function showTaskError(message: string): void {
+  taskErrorEl.textContent = message;
+  taskErrorEl.hidden = false;
+}
+
+function hideTaskError(): void {
+  taskErrorEl.textContent = '';
+  taskErrorEl.hidden = true;
 }
 
 /**

@@ -700,6 +700,8 @@ export interface TaskView {
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
+  /** A safe, operator-facing projection of the Worker-owned Task context. */
+  readonly taskContextState: string;
   readonly recoveryState?: string;
   readonly activeRunId?: string;
   readonly createdAt: number;
@@ -723,12 +725,33 @@ function toTaskView(task: Task): TaskView {
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
+    taskContextState: toTaskContextState(task),
     ...(task.recoveryState !== undefined ? { recoveryState: task.recoveryState } : {}),
     ...(task.activeRunId !== undefined ? { activeRunId: task.activeRunId } : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     ...(task.completedAt !== undefined ? { completedAt: task.completedAt } : {}),
   };
+}
+
+/**
+ * The Worker owns the filesystem facts; this is only the lifecycle projection
+ * a human needs to decide whether cleanup is pending, retryable, or complete.
+ */
+function toTaskContextState(task: Task): string {
+  switch (task.environmentLifecycleState) {
+    case undefined: return 'not-created';
+    case 'beginning': return 'preparing';
+    case 'idle':
+    case 'running':
+    case 'blocked':
+    case 'awaiting-validation': return 'ready';
+    case 'ending': return 'cleanup-in-progress';
+    case 'recovery': return task.recoveryState === 'ending' ? 'cleanup-needs-recovery' : 'recovery-retained';
+    case 'ended':
+    case 'discarded': return 'recycled';
+    default: return 'unknown';
+  }
 }
 
 /** One Task plus its ordered run links, for `GET /api/tasks/:id`. */
