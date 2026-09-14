@@ -70,7 +70,20 @@ import { wakeIdempotencyKey } from './store.ts';
 
 /** The slice of the run orchestrator the coordinator uses. */
 export interface RunAdmitter {
-  submit(request: { readonly agentId: string; readonly prompt: string }): Promise<{ id: string }>;
+  submit(request: {
+    readonly agentId: string;
+    readonly prompt: string;
+    /**
+     * The causal Message's Project, so the run resolves only against it.
+     *
+     * Every admitted wake names its input Message's `projectId`. Without it a
+     * target Agent that belongs to several Projects could resolve through the
+     * wrong one (whichever the registry lists first), silently using another
+     * Project's environment and contract. The orchestrator verifies membership
+     * in this Project and refuses explicitly rather than falling back.
+     */
+    readonly projectId: string;
+  }): Promise<{ id: string }>;
   waitFor(runId: string): Promise<AgentRun>;
   /**
    * Look up a run without requiring it to exist.
@@ -246,9 +259,15 @@ export class CollaborationCoordinator {
     // matters: a run submitted but not admitted is the *extra wake* the contract
     // explicitly prefers over a lost one, while an admitted wake always names a
     // run that really exists. The run id is the orchestrator's, never guessed.
+    //
+    // The causal Message's `projectId` is submitted with every wake, so the run
+    // can only ever resolve against the Project that owns the Message. A target
+    // Agent that also belongs to another Project never executes there by
+    // accident; the orchestrator refuses a non-member explicitly.
     const submission = await this.#runs.submit({
       agentId: wake.agentId,
       prompt: renderWakePrompt(input, wake.agentId),
+      projectId: input.projectId,
     });
 
     const admitted = await this.#store.admitWake({
