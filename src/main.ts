@@ -19,6 +19,7 @@ import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
+import { parseRuntimeConfiguration } from './runtime-config.ts';
 
 /**
  * The M1 runtime entry point.
@@ -44,6 +45,7 @@ const workingDirectory = process.env.SPROUT_WORKDIR ?? projectRoot;
 const port = Number(process.env.SPROUT_PORT ?? 5174);
 const instanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
 const engineId = process.env.SPROUT_ENGINE ?? 'codex';
+const runtimeConfiguration = parseRuntimeConfiguration(process.env.SPROUT_RUNTIME_CONFIG);
 /** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
 const environmentKind = process.env.SPROUT_ENV_KIND ?? 'local';
 /** For a container environment: the instance's container name. */
@@ -201,7 +203,7 @@ const environmentInstances: readonly EnvironmentInstance[] = [
   },
 ];
 
-const agents: readonly AgentDefinition[] = [
+const defaultAgents: readonly AgentDefinition[] = [
   {
     id: 'scout',
     name: 'Scout',
@@ -212,6 +214,7 @@ const agents: readonly AgentDefinition[] = [
       'Answer the request directly and report what you observed.',
   },
 ];
+const agents: readonly AgentDefinition[] = runtimeConfiguration.agents ?? defaultAgents;
 
 /**
  * The default project.
@@ -219,7 +222,7 @@ const agents: readonly AgentDefinition[] = [
  * Its environment set is what a run's environment is resolved from, so adding an
  * instance here is what makes it usable — the agent no longer names a device.
  */
-const defaultProject: Project = {
+const sampleProject: Project = {
   id: process.env.SPROUT_PROJECT ?? 'sprout',
   goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
   rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
@@ -232,6 +235,7 @@ const defaultProject: Project = {
     },
   ],
 };
+const defaultProject: Project = runtimeConfiguration.project ?? sampleProject;
 
 const registry = new AgentRegistry(agents);
 const store = new SqliteStore({ filename: databasePath });

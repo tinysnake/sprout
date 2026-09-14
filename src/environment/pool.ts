@@ -2,6 +2,7 @@ import type {
   EnvironmentDefinition,
   EnvironmentInstance,
 } from './model.ts';
+import { randomUUID } from 'node:crypto';
 import { findCapability } from './model.ts';
 
 /**
@@ -103,7 +104,6 @@ export class EnvironmentPool {
   readonly #store: LeaseStore | undefined;
   readonly #clock: Clock;
   readonly #idFactory: () => string;
-  #counter = 0;
 
   constructor(options: EnvironmentPoolOptions) {
     for (const definition of options.definitions) {
@@ -113,7 +113,10 @@ export class EnvironmentPool {
       this.#instances.set(instance.id, instance);
     }
     this.#clock = options.clock ?? systemClock;
-    this.#idFactory = options.idFactory ?? (() => `lease-${++this.#counter}`);
+    // A lease is persisted, so a per-process counter would collide with a
+    // released historical lease after Sprout restarts.  The default is durable
+    // identity, while deterministic tests continue to inject `idFactory`.
+    this.#idFactory = options.idFactory ?? (() => `lease-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`);
     this.#store = options.store;
 
     if (options.leases) {
