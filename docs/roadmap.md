@@ -88,7 +88,7 @@ Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing ru
 - Their provider-specific behaviour is hidden behind the same conceptual run interface.
   - Implemented: four adapters behind `src/engine/port.ts`, each declaring its own streaming granularity and none leaking engine concepts upward. Genuinely shared: start, stop, result, resume-by-key. Genuinely different: streaming guarantee, session storage location, and lifecycle — Codex `app-server` needs a supervised daemon while Pi, `agy`, and `opencode` are one process per turn. **How a session key is obtained now differs by engine:** Sprout *chooses* it for Pi and *captures* it for `agy` and `opencode`, and each is verified by test.
 - Agent identity and project configuration are not owned by either CLI installation.
-  - Partly proven. Sprout owns the agent definition and does not derive it from any installation. **Carrying context across runs is still unproven** and is O5's portable-context work: the run seam has no way to hand a previous session id forward yet, a gap the Pi and `agy` adapters are what surfaced. **Standing instructions have no uniform channel** — Codex and Pi both accept out-of-band instructions, while `agy` has no system-prompt surface at all, so the project contract reaches it only through `AGENTS.md` in the working directory.
+  - **Evidenced by O5.** Sprout owns the Agent definition, project membership, durable session-key records, and contract assembly; no CLI installation owns those facts. Standing-instruction channels remain engine-specific: Codex and Pi receive them out of band, headless `agy` receives them through Sprout's env-gated global-config hook, and `opencode` uses working-directory instructions or an engine-config-registered fallback. O5 records the channel limits and acceptance evidence below.
 
 ### O2 — Schedulable environment pool
 
@@ -150,16 +150,25 @@ Messages, runs, tasks, leases, and work results survive process interruption wit
 
 ### O5 — Portable project context
 
-**Status**: Unproven  
+**Status**: Evidenced
 **Depends on**: O3
 
 Project contracts and Agent context remain coherent when the same Agent works across runs and environments.
 
+**Acceptance evidence**: [#18](https://github.com/tinysnake/sprout/issues/18) accepted durable `Project`/`ProjectMembership`, project-based environment resolution, instance-selected workers, and persisted run project/instance facts. [#19](https://github.com/tinysnake/sprout/issues/19) established the version-scoped native session-key semantics. [#20](https://github.com/tinysnake/sprout/issues/20) accepted durable same-environment continuation and refusal safety, including the post-merge correction. [#21](https://github.com/tinysnake/sprout/issues/21) accepted deterministic contract delivery and cross-environment hand-off. Final integration review at `61d01c6` passed `npm test` (264/264), `npm run typecheck`, and `git diff --check`.
+
 **Outcome checks**:
 
-- A project defines its goal, participants, responsibilities, rules, and available environments before work starts.
-- The same Agent retains its identity and relevant context when moving between at least two environments.
-- Project facts and hand-off results can be shared without exposing another Agent's private raw reasoning.
+- A durable project defines its goal, participants, responsibilities, rules, and available environments before work starts. — evidenced by #18's in-memory and SQLite round-trips.
+- Agent identity is independent of a fixed environment: project membership resolves the environment, then selects the matching environment worker and lease; the run persists the project and instance actually used. — evidenced by #18.
+- In one environment and working directory, native continuation uses a durable key scoped to `(agent, engine, environment instance, working directory)`. Keys survive SQLite restart; a tuple change starts fresh; only an explicit key refusal retries once fresh, while unrelated failures preserve the key and fail visibly. — evidenced by #19, #20, and ADR-0004.
+- On an environment change, every run receives the assembled project contract through its supported engine channel and a deterministic, bounded hand-off assembled from persisted prior results; same-environment continuation adds no duplicate hand-off. — evidenced by #21.
+- Hand-off output is fact-form only: it excludes verbatim events, transcripts, and private raw reasoning. — evidenced by #21.
+- Contract assembly, channel selection, hand-off ordering/bounds, privacy, persistence, continuation, refusal, and platform handling are deterministic and unit-tested. — evidenced by #18, #20, and #21.
+
+**Current engine-channel semantics and accepted limits**: Headless `agy` receives the contract through a Sprout-installed global-config hook that is inert unless Sprout supplies its environment-gated payload. The installer selects a POSIX `.sh` artifact or Windows `.cmd` artifact from the environment platform; unsupported platforms report delivery as unavailable. The hook ABI is confirmed only for the measured `agy` 1.2.2 version, and #21 unit-tests and documents the Windows command/artifact but does not claim live Windows execution. `opencode` reads its normal working-directory instruction files; when a user-owned `AGENTS.md` requires `SPROUT-PROJECT-CONTRACT.md`, Sprout registers that path through `opencode` configuration. A bare fallback file is not claimed to be discovered automatically.
+
+**Follow-ups / fog**: Re-probe the version-specific `agy` hook ABI and execute its Windows `.cmd` path on a real Windows environment. Decide the global-hook installation/teardown policy and the scope/size policy for `opencode` configuration instructions. Multi-instance carrier selection remains outside this outcome; #18 provides the instance-keyed worker seam and refuses unsupported routing rather than silently choosing another carrier.
 
 ### O6 — Multi-agent collaboration
 
@@ -190,13 +199,15 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 - The human operator can understand and control the complete workflow from the Web client.
 - Every M1 success check above links to acceptance evidence.
 
-## Frontier after O1, O2, and O4
+## Frontier after O1, O2, O4, and O5
 
 O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers. O2's environment targets (macOS, container, and Windows) are all implemented and verified live (#5, #10, #13).
 
 O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation marks orphaned mid-flight runs failed with events intact, and active leases enter `recovering` state to protect capacity from immediate reassignment (#16).
 
-The active frontier advances to **O5 — Portable project context**. Project contracts and agent context must remain coherent when an agent works across runs and environments.
+O5 is **Evidenced**: durable project membership resolves an Agent's environment without binding its identity to one; native session keys continue only in their full environment slot; and deterministic project contracts plus privacy-preserving hand-off carry the relevant context across environments ([#18](https://github.com/tinysnake/sprout/issues/18), [#20](https://github.com/tinysnake/sprout/issues/20), [#21](https://github.com/tinysnake/sprout/issues/21)).
+
+The active frontier advances to **O6 — Multi-agent collaboration**. No O6 implementation or acceptance evidence is asserted here.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
