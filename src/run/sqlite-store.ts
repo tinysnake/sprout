@@ -13,6 +13,7 @@ import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/po
 import type { Project } from '../project/model.ts';
 import type { ProjectStore } from '../project/store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
+import { SqliteTaskStore } from '../task/sqlite-store.ts';
 
 /**
  * SQLite-backed storage for runs and leases (ADR-0002).
@@ -37,6 +38,7 @@ interface RunRow {
   readonly prompt: string;
   readonly environment_instance_id: string;
   readonly project_id: string | null;
+  readonly task_id: string | null;
   readonly status: string;
   readonly events: string;
   readonly lease_id: string | null;
@@ -77,13 +79,15 @@ export class SqliteRunStore implements RunStore {
         result TEXT,
         created_at INTEGER NOT NULL,
         completed_at INTEGER,
-        hand_off TEXT
+        hand_off TEXT,
+        task_id TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
     // has its runs, they simply carry no recorded hand-off.
     this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
   }
 
   #addColumnIfMissing(table: string, column: string, type: string): void {
@@ -99,8 +103,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -108,7 +112,8 @@ export class SqliteRunStore implements RunStore {
            failure = excluded.failure,
            result = excluded.result,
            completed_at = excluded.completed_at,
-           hand_off = excluded.hand_off`,
+           hand_off = excluded.hand_off,
+           task_id = excluded.task_id`,
       )
       .run(
         run.id,
@@ -116,6 +121,7 @@ export class SqliteRunStore implements RunStore {
         run.prompt,
         run.environmentInstanceId,
         run.projectId ?? null,
+        run.taskId ?? null,
         run.status,
         JSON.stringify(run.events),
         run.leaseId ?? null,
@@ -383,12 +389,12 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
 
 /**
  * Unified SQLite storage for Sprout, managing runs, leases, projects, session
- * keys, and collaboration Messages/wake requests through a single database
- * handle (ADR-0002).
+ * keys, collaboration Messages/wake requests, and durable Tasks through a single
+ * database handle (ADR-0002).
  *
- * Collaboration rows live in the primary database rather than a separate file,
- * so a Message, its wake requests, and the run they admitted commit against the
- * same durable state a restart reconciles.
+ * Collaboration and Task rows live in the primary database rather than a separate
+ * file, so a Message, its wake requests, the run they admitted, and the Task that
+ * run advances all commit against the same durable state a restart reconciles.
  */
 export class SqliteStore {
   readonly db: DatabaseSync;
@@ -397,6 +403,7 @@ export class SqliteStore {
   readonly projects: SqliteProjectStore;
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
+  readonly tasks: SqliteTaskStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
@@ -405,6 +412,7 @@ export class SqliteStore {
     this.projects = new SqliteProjectStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
+    this.tasks = new SqliteTaskStore({ db: this.db });
   }
 
   close(): void {
@@ -435,6 +443,7 @@ function toRun(row: RunRow): AgentRun {
     prompt: row.prompt,
     environmentInstanceId: row.environment_instance_id,
     ...(row.project_id !== null ? { projectId: row.project_id } : {}),
+    ...(row.task_id !== null ? { taskId: row.task_id } : {}),
     status: row.status as AgentRunStatus,
     events: JSON.parse(row.events) as AgentRunEvent[],
     ...(handOff !== undefined ? { handOff } : {}),

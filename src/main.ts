@@ -12,6 +12,7 @@ import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
 import { CollaborationCoordinator } from './collaboration/coordinator.ts';
+import { TaskService } from './task/service.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
@@ -243,6 +244,20 @@ const projects = new ProjectRegistry([defaultProject]);
 // definitions. Additional projects can hydrate from the durable store, which is
 // the same store the runs and leases use (ADR-0002); in-memory entries win.
 await projects.load(store.projects);
+
+/**
+ * The durable Task service (#28).
+ *
+ * It shares the orchestrator (to submit Task runs) and the primary SQLite store
+ * (so Task rows and their run links survive a restart). The orchestrator is wired
+ * to it through the two small run-seam contracts rather than importing the Task
+ * service, so the Task and Message lifecycles stay independent.
+ *
+ * The service is declared first as a forward reference so the orchestrator's
+ * `onTaskRunSettled` option can close over the same instance it is given below.
+ */
+let tasks: TaskService;
+
 const orchestrator = new RunOrchestrator({
   // Resolved per run *for the resolved instance*, so a worker that died is
   // replaced before the next run instead of failing it against a dead channel
@@ -255,8 +270,17 @@ const orchestrator = new RunOrchestrator({
   // Durable engine session keys, so the same agent on the same environment and
   // working directory continues its prior conversation across runs (O5, #20).
   sessionKeys: store.sessionKeys,
+  // Durable multi-run Tasks (#28): the run seam assembles a Task run's context
+  // and reports its settlement back, without knowing the Task domain model.
+  tasks: {
+    prompt: (input) => tasks.prompt(input),
+    link: (input) => tasks.link(input),
+  },
+  onTaskRunSettled: (input) => tasks.onRunSettled(input),
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
+
+tasks = new TaskService({ store: store.tasks, runs: orchestrator });
 
 /**
  * The collaboration coordinator: durable Messages, the M1 wake contract, and
@@ -289,6 +313,8 @@ const api = createRunApi({
   collaboration,
   // Members the Web composer may address (#27); read-only from the registry.
   projects,
+  // Durable multi-run Tasks (#28): create, list, inspect, and advance.
+  tasks,
   staticRoot,
   readFile: async (path) => {
     if (!existsSync(path)) return undefined;

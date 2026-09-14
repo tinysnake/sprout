@@ -5,11 +5,13 @@ import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
+import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance } from '../project/resolve.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
+import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
@@ -63,6 +65,25 @@ export interface RunOrchestratorOptions {
    * seeding a store.
    */
   readonly runs?: () => Promise<readonly AgentRun[]>;
+  /**
+   * How a run that advances a durable Task is assembled and observed (#28).
+   *
+   * When present, a submission naming a `taskId` is a Task run: its prompt is the
+   * Task's assembled context, its environment resolution honours the Task's
+   * `environmentPreference` first, and its settlement is reported back so the
+   * Task's state and run summaries stay current. Absent means this orchestrator
+   * serves one-round runs only; a `taskId` submission then fails explicitly
+   * rather than silently running without Task context.
+   */
+  readonly tasks?: TaskContextProvider;
+  /**
+   * Told when a Task-linked run settles, so the Task can advance its state.
+   *
+   * Optional; without it a Task run still assembles and links, but the Task's own
+   * status is only advanced by the caller. Exposed as a function so the run seam
+   * stays ignorant of the Task service's shape.
+   */
+  readonly onTaskRunSettled?: TaskRunObserver;
   readonly leaseTtlMs?: number;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
@@ -72,6 +93,21 @@ export interface RunOrchestratorOptions {
 export interface SubmitRunRequest {
   readonly agentId: string;
   readonly prompt: string;
+  /**
+   * The durable Task this run advances (#28).
+   *
+   * When set, the run is a Task run: its prompt is assembled from the Task's
+   * goal, constraints, and prior run summaries, and this run is linked into the
+   * Task's run sequence. Absent means a one-round run.
+   */
+  readonly taskId?: string;
+  /**
+   * An explicit environment selection, taking priority over project matching.
+   *
+   * For a Task run this is normally the Task's own `environmentPreference`,
+   * supplied by the advancement service; a direct caller may pass one too.
+   */
+  readonly environmentPreference?: EnvironmentPreference;
 }
 
 /**
@@ -108,6 +144,10 @@ export class RunOrchestrator {
   readonly #sessionKeys: SessionKeyStore | undefined;
   /** Reads the durable run history a hand-off is derived from. */
   readonly #runHistory: () => Promise<readonly AgentRun[]>;
+  /** Assembles and links durable Task runs; absent for a one-round-only build. */
+  readonly #tasks: TaskContextProvider | undefined;
+  /** Told when a Task-linked run settles, so the Task can advance its state. */
+  readonly #onTaskRunSettled: TaskRunObserver | undefined;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
 
@@ -125,6 +165,8 @@ export class RunOrchestrator {
     this.#store = options.store;
     this.#sessionKeys = options.sessionKeys;
     this.#runHistory = options.runs ?? (() => options.store.list());
+    this.#tasks = options.tasks;
+    this.#onTaskRunSettled = options.onTaskRunSettled;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
@@ -145,41 +187,126 @@ export class RunOrchestrator {
       environmentInstanceId: '',
       status: 'queued',
       events: [],
+      ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
       createdAt: this.#clock.now(),
     };
 
     const agent = this.#agents.get(request.agentId);
     if (!agent) {
-      await this.#finish(run, 'failed', { status: 'failed', message: `unknown agent: ${request.agentId}` });
+      await this.settleTaskRun(
+        await this.#finish(run, 'failed', {
+          status: 'failed',
+          message: `unknown agent: ${request.agentId}`,
+        }),
+      );
       return { id: run.id };
     }
+
+    // A Task run's prompt is assembled from the Task's goal, constraints, and
+    // prior run summaries (#28). A submission that names a Task this process
+    // cannot assemble context for is refused explicitly, never run context-free.
+    let prompt = request.prompt;
+    if (request.taskId !== undefined) {
+      if (this.#tasks === undefined) {
+        await this.settleTaskRun(
+          await this.#finish(run, 'failed', {
+            status: 'failed',
+            message: `task runs are not configured on this orchestrator: ${request.taskId}`,
+          }),
+        );
+        return { id: run.id };
+      }
+      try {
+        prompt = await this.#tasks.prompt({ taskId: request.taskId, prompt: request.prompt });
+      } catch (error) {
+        await this.settleTaskRun(
+          await this.#finish(run, 'failed', {
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        return { id: run.id };
+      }
+    }
+    const taskRun: AgentRun = { ...run, prompt };
 
     // Resolve the environment before recording the run, so the persisted run
     // names the instance it actually used rather than an agent's fixed device.
+    // An explicit environment preference — normally the Task's own — is honoured
+    // first, with project matching as the fallback (M1 scope item 8).
     const resolution = resolveEnvironmentInstance(
-      this.#projects?.forAgent(agent.id) ?? [],
-      agent.capability,
+      {
+        projects: this.#projects?.forAgent(agent.id) ?? [],
+        capability: agent.capability,
+        ...(request.environmentPreference !== undefined
+          ? { environmentPreference: request.environmentPreference }
+          : {}),
+      },
       this.#pool,
     );
     if (!resolution.ok) {
-      await this.#finish(run, 'failed', {
-        status: 'failed',
-        message: this.#resolutionFailure(agent, resolution.reason),
-      });
-      return { id: run.id };
+      await this.settleTaskRun(
+        await this.#finish(taskRun, 'failed', {
+          status: 'failed',
+          message: this.#resolutionFailure(agent, resolution.reason),
+        }),
+      );
+      return { id: taskRun.id };
     }
 
     const recorded: AgentRun = {
-      ...run,
+      ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
     };
     this.#runs.set(recorded.id, recorded);
     await this.#store.save(recorded);
 
-    const settled = this.#execute(recorded, agent);
+    // Link the run into the Task's sequence before it executes, so even a run
+    // that fails to start is part of the Task's durable history. A link failure
+    // is a run failure: a Task run that is not linked would be invisible to
+    // later advancement and accumulate no summary.
+    if (recorded.taskId !== undefined && this.#tasks !== undefined) {
+      try {
+        await this.#tasks.link({
+          taskId: recorded.taskId,
+          runId: recorded.id,
+          agentId: recorded.agentId,
+        });
+      } catch (error) {
+        await this.settleTaskRun(
+          await this.#finish(recorded, 'failed', {
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        return { id: recorded.id };
+      }
+    }
+
+    const settled = this.#execute(recorded, agent).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
+  }
+
+  /**
+   * Report a settled Task run back so the Task can record a summary and advance.
+   *
+   * A bookkeeping failure must never change the run's own terminal state, so it is
+   * isolated here and reported rather than allowed to reject the run's settled
+   * promise. A one-round run is returned untouched.
+   */
+  async settleTaskRun(run: AgentRun): Promise<AgentRun> {
+    if (run.taskId === undefined || this.#onTaskRunSettled === undefined) return run;
+    try {
+      await this.#onTaskRunSettled({ taskId: run.taskId, run });
+    } catch (error) {
+      process.stderr.write(
+        `[task] failed to advance task ${run.taskId} after run ${run.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+    return run;
   }
 
   #resolutionFailure(agent: AgentDefinition, reason: 'no-project' | 'no-available-environment'): string {
@@ -244,7 +371,7 @@ export class RunOrchestrator {
           this.#pool.markRecovering(stored.leaseId);
         }
         await this.#store.save(next);
-        recovered.push(next);
+        recovered.push(await this.settleTaskRun(next));
       }
     }
     return recovered;
