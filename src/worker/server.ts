@@ -164,7 +164,7 @@ export class EnvironmentWorker {
       agentId: params.agentId,
       workingDirectory: params.projectWorkspaceId === undefined
         ? params.workingDirectory
-        : this.#requireWorkspace().projectWorkingDirectory(params.projectWorkspaceId),
+        : await this.#requireWorkspace().projectWorkingDirectory(params.projectWorkspaceId),
       ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
       ...(params.resumeSessionKey !== undefined
         ? { resumeSessionKey: params.resumeSessionKey }

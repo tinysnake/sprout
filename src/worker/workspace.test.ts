@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +79,56 @@ test('cleanup can retry through a replacement Worker after a transient failure',
   assert.equal(existsSync(join(workspace, '.sprout', 'workspace-sentinel.json')), true);
 });
 
+test('a planted Project symlink cannot escape the Worker root during prepare, cwd resolution, or recycle', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-symlink-root-'));
+  const outside = mkdtempSync(join(tmpdir(), 'sprout-worker-symlink-outside-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  const project = join(root, 'projects', hash('project-1'));
+  mkdirSync(join(root, 'projects'), { recursive: true });
+  symlinkSync(outside, project, 'dir');
+  const connection = await worker(root);
+  t.after(() => connection.close());
+
+  await assert.rejects(connection.contexts.prepare(materialization()), /outside Worker root/);
+  const adapter = connection.adapters.get('scripted');
+  assert.ok(adapter);
+  await assert.rejects(
+    adapter.startSession({ agentId: 'pi', workingDirectory: 'ignored', projectWorkspaceId: 'project-1' }),
+    /outside Worker root/,
+  );
+  await assert.rejects(connection.contexts.recycle(recycle()), /outside Worker root/);
+  assert.equal(existsSync(join(outside, '.sprout')), false, 'the Worker never writes or deletes through the planted symlink');
+});
+
+test('cleanup authenticates its Sprout manifest and verifies the Project sentinel before deletion', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-cleanup-auth-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const connection = await worker(root);
+  t.after(() => connection.close());
+  await connection.contexts.prepare(materialization());
+  const workspace = onlyWorkspace(root);
+  const context = onlyContext(workspace);
+  const manifest = recycle();
+
+  // Matching binding fields alone are not ownership: the exact version marker
+  // is required before cleanup can remove anything.
+  writeFileSync(join(context, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
+  await assert.rejects(connection.contexts.recycle(recycle()), /ownership marker/);
+  assert.equal(existsSync(context), true, 'a forged manifest never authorizes deletion');
+
+  writeFileSync(join(context, 'manifest.json'), `${JSON.stringify({ sprout: 'sprout-task-context-v1', ...manifest })}\n`);
+  await connection.contexts.prepare(materialization());
+  rmSync(join(workspace, '.sprout', 'workspace-sentinel.json'));
+  await assert.rejects(connection.contexts.recycle(recycle()), /sentinel/);
+  assert.equal(existsSync(context), true, 'a missing Project sentinel preserves retryable Task context');
+  await connection.contexts.prepare(materialization());
+  await connection.contexts.recycle(recycle());
+  assert.equal(existsSync(context), false, 'refresh restores the sentinel and permits a safe retry');
+});
+
 test('a durable cleanup failure retains the Task lease until restart retries through the Worker', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-worker-durable-cleanup-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
@@ -133,6 +184,10 @@ function onlyWorkspace(root: string): string {
 function onlyContext(workspace: string): string {
   const tasks = join(workspace, '.sprout', 'tasks');
   return join(tasks, readdirSync(tasks)[0]!);
+}
+
+function hash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 24);
 }
 
 async function worker(root: string) {

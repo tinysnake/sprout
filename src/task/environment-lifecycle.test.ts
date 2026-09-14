@@ -36,7 +36,12 @@ function build(options: { worker?: TaskContextWorker; store?: InMemoryTaskStore;
   return { store, pool, lifecycle, submitted };
 }
 
-function sqliteLifecycle(store: SqliteStore, options: { leaseId?: string; runId?: () => string } = {}) {
+function sqliteLifecycle(store: SqliteStore, options: {
+  leaseId?: string;
+  runId?: () => string;
+  worker?: TaskContextWorker;
+  onSubmit?: () => void;
+} = {}) {
   const pool = new EnvironmentPool({
     definitions: [definition],
     instances: [instance],
@@ -54,7 +59,8 @@ function sqliteLifecycle(store: SqliteStore, options: { leaseId?: string; runId?
       lease: () => options.leaseId ?? 'lease-1',
       run: options.runId ?? (() => 'run-1'),
     },
-    runs: { submit: async (request) => ({ id: request.runId }) },
+    ...(options.worker !== undefined ? { worker: options.worker } : {}),
+    runs: { submit: async (request) => { options.onSubmit?.(); return { id: request.runId }; } },
   });
   return { lifecycle, pool };
 }
@@ -210,6 +216,42 @@ test('SQLite restart recovers an interrupted nested run, retains exclusion, and 
     assert.equal(attempts.filter((attempt) => attempt.status === 'fulfilled').length, 1);
     assert.equal(attempts.filter((attempt) => attempt.status === 'rejected').length, 1);
     assert.equal((await restarted.tasks.get('task-1'))?.environmentLifecycleState, 'running');
+    restarted.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a failed Worker refresh after nested-run admission durably enters retryable recovery after SQLite restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-refresh-recovery-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    let prepareCalls = 0;
+    let submitted = 0;
+    const failingWorker: TaskContextWorker = {
+      prepare: async () => {
+        prepareCalls += 1;
+        if (prepareCalls === 2) throw new Error('Worker refresh failed');
+        return { bootstrapInstructions: '' };
+      },
+      recycle: async () => {},
+    };
+    const initial = sqliteLifecycle(first, { worker: failingWorker, onSubmit: () => { submitted += 1; } });
+    await first.tasks.create(task());
+    const begun = await initial.lifecycle.begin('task-1');
+    await assert.rejects(initial.lifecycle.advanceRun('task-1', 'pi', 'go'), /Worker refresh failed/);
+    assert.equal(submitted, 0, 'a failed refresh does not submit a nested run');
+    assert.equal((await first.tasks.get('task-1'))?.environmentLifecycleState, 'recovery');
+    assert.equal(initial.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+    first.close();
+
+    const restarted = new SqliteStore({ filename });
+    const recovered = sqliteLifecycle(restarted);
+    const durable = await restarted.tasks.get('task-1');
+    assert.equal(durable?.environmentLifecycleState, 'recovery');
+    assert.equal(durable?.recoveryState, 'running');
+    assert.equal(recovered.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+    assert.equal((await recovered.lifecycle.recover('task-1', 'resume')).environmentLifecycleState, 'blocked');
+    assert.equal(recovered.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
     restarted.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

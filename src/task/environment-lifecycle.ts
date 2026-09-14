@@ -177,7 +177,16 @@ export class TaskEnvironmentLifecycle {
       activeRunId: task.activeRunId,
     });
     if (!admitted) throw new Error(`task ${taskId} already has an active run`);
-    const prepared = await this.#prepare(task, agentId);
+    let prepared: { readonly bootstrapInstructions: string };
+    try {
+      // The active-run admission is durable before this refresh.  A Worker
+      // failure must therefore durably retain the Task lease in recovery rather
+      // than leaving a running Task with no submitted run.
+      prepared = await this.#prepare(running, agentId);
+    } catch (error) {
+      await this.#toRecovery(running, 'running');
+      throw error;
+    }
     await this.#runs.submit({ runId, taskId, agentId, prompt: input, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId, projectWorkspaceId: task.projectId, taskBootstrapInstructions: prepared.bootstrapInstructions });
     return { task: running, runId };
   }

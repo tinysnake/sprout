@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 
@@ -22,9 +22,12 @@ export class WorkerWorkspace {
   }
 
   async prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
-    const workspace = this.#workspace(input.projectId);
-    const context = this.#context(input.projectId, input.taskId);
-    await mkdir(context, { recursive: true });
+    const root = await this.#rootPath();
+    const workspace = await this.#workspace(root, input.projectId, true);
+    const sprout = await this.#directory(root, join(workspace, '.sprout'), true);
+    const tasks = await this.#directory(root, join(sprout, 'tasks'), true);
+    const context = await this.#directory(root, join(tasks, token(input.taskId)), true);
+    const agents = await this.#directory(root, join(context, 'agents'), true);
 
     const manifest = {
       sprout: 'sprout-task-context-v1',
@@ -33,11 +36,11 @@ export class WorkerWorkspace {
       environmentInstanceId: input.environmentInstanceId,
       environmentLeaseId: input.environmentLeaseId,
     };
-    await writeOwned(join(workspace, '.sprout', 'PROJECT.md'), renderProject(input));
-    await writeJsonOwned(join(workspace, '.sprout', 'workspace-sentinel.json'), { sprout: 'sprout-project-workspace-v1', projectId: input.projectId });
-    await writeJsonOwned(join(context, 'manifest.json'), manifest);
-    await writeOwned(join(context, 'TASK.md'), renderTask(input));
-    await writeOwned(join(context, 'agents', `${token(input.agentId)}.md`), renderAgent(input));
+    await writeOwned(root, join(sprout, 'PROJECT.md'), renderProject(input));
+    await writeJsonOwned(root, join(sprout, 'workspace-sentinel.json'), { sprout: 'sprout-project-workspace-v1', projectId: input.projectId });
+    await writeManifest(root, join(context, 'manifest.json'), manifest);
+    await writeOwned(root, join(context, 'TASK.md'), renderTask(input));
+    await writeOwned(root, join(agents, `${token(input.agentId)}.md`), renderAgent(input));
 
     const relativeContext = join('.sprout', 'tasks', token(input.taskId));
     const bootstrapInstructions = [
@@ -47,19 +50,27 @@ export class WorkerWorkspace {
       '- Read .sprout/PROJECT.md for shared Project rules.',
       '- Work in this Project workspace. Do not edit or remove .sprout/task manifests.',
     ].join('\n');
-    await writeOwned(join(context, 'BOOTSTRAP.md'), `${bootstrapInstructions}\n`);
+    await writeOwned(root, join(context, 'BOOTSTRAP.md'), `${bootstrapInstructions}\n`);
     return { bootstrapInstructions };
   }
 
   async recycle(input: RecycleTaskContextParams): Promise<void> {
-    const workspace = this.#workspace(input.projectId);
-    const context = this.#context(input.projectId, input.taskId);
+    const root = await this.#rootPath();
+    const workspace = await this.#workspace(root, input.projectId, false);
+    const context = await this.#directory(root, join(workspace, '.sprout', 'tasks', token(input.taskId)), false);
+    // This is deliberately before all destructive cleanup.  A missing or
+    // replaced Project sentinel must leave the Task context retryable.
+    await assertProjectSentinel(root, workspace, input.projectId);
     const manifestPath = join(context, 'manifest.json');
     let manifest: Record<string, unknown>;
     try {
+      await regularFile(root, manifestPath);
       manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
     } catch {
       throw new Error('Task context manifest is missing or unreadable; refusing cleanup');
+    }
+    if (manifest.sprout !== 'sprout-task-context-v1') {
+      throw new Error('Task context manifest lacks the Sprout ownership marker; refusing cleanup');
     }
     for (const [key, value] of Object.entries({
       projectId: input.projectId,
@@ -77,27 +88,44 @@ export class WorkerWorkspace {
     }
     await rm(context, { recursive: true, force: false });
     // Prove the Project-level owned sentinel survived a narrowly scoped delete.
-    await stat(join(workspace, '.sprout', 'workspace-sentinel.json'));
+    await assertProjectSentinel(root, workspace, input.projectId);
   }
 
-  projectWorkingDirectory(projectId: string): string {
-    return this.#workspace(projectId);
+  async projectWorkingDirectory(projectId: string): Promise<string> {
+    const root = await this.#rootPath();
+    return this.#workspace(root, projectId, false);
   }
 
-  #workspace(projectId: string): string {
-    return this.#insideRoot(join(this.#root, 'projects', token(projectId)));
+  async #rootPath(): Promise<string> {
+    await mkdir(this.#root, { recursive: true });
+    return realpath(this.#root);
   }
 
-  #context(projectId: string, taskId: string): string {
-    return this.#insideRoot(join(this.#workspace(projectId), '.sprout', 'tasks', token(taskId)));
+  async #workspace(root: string, projectId: string, create: boolean): Promise<string> {
+    const projects = await this.#directory(root, join(root, 'projects'), create);
+    return this.#directory(root, join(projects, token(projectId)), create);
   }
 
-  #insideRoot(path: string): string {
+  #insideRoot(root: string, path: string): string {
     const resolved = resolve(path);
-    if (resolved !== this.#root && !resolved.startsWith(`${this.#root}${sep}`)) {
+    if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
       throw new Error('refusing workspace operation outside Worker root');
     }
     return resolved;
+  }
+
+  /**
+   * Create or resolve one path component, then compare its physical location
+   * with the Worker root.  Lexical containment alone would follow a planted
+   * symlink and let the Worker write or return a host-owned directory.
+   */
+  async #directory(root: string, path: string, create: boolean): Promise<string> {
+    const lexical = this.#insideRoot(root, path);
+    if (create) await mkdir(lexical, { recursive: true });
+    const physical = await realpath(lexical);
+    this.#insideRoot(root, physical);
+    if (!(await stat(physical)).isDirectory()) throw new Error('Worker workspace path is not a directory');
+    return physical;
   }
 }
 
@@ -107,8 +135,8 @@ function token(value: string): string {
 
 const OWNED_MARKER = '<!-- sprout:task-context -->\n';
 
-async function writeOwned(path: string, content: string): Promise<void> {
-  await mkdir(resolve(path, '..'), { recursive: true });
+async function writeOwned(root: string, path: string, content: string): Promise<void> {
+  await regularFile(root, path, true);
   try {
     const existing = await readFile(path, 'utf8');
     if (!existing.startsWith(OWNED_MARKER)) {
@@ -120,8 +148,8 @@ async function writeOwned(path: string, content: string): Promise<void> {
   await writeFile(path, `${OWNED_MARKER}${content}`, 'utf8');
 }
 
-async function writeJsonOwned(path: string, value: Record<string, unknown>): Promise<void> {
-  await mkdir(resolve(path, '..'), { recursive: true });
+async function writeJsonOwned(root: string, path: string, value: Record<string, unknown>): Promise<void> {
+  await regularFile(root, path, true);
   try {
     const existing = JSON.parse(await readFile(path, 'utf8')) as { sprout?: unknown };
     if (typeof existing.sprout !== 'string' || !existing.sprout.startsWith('sprout')) {
@@ -131,6 +159,56 @@ async function writeJsonOwned(path: string, value: Record<string, unknown>): Pro
     if (!isNotFound(error)) throw error;
   }
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function writeManifest(root: string, path: string, value: Record<string, unknown>): Promise<void> {
+  await regularFile(root, path, true);
+  try {
+    const existing = JSON.parse(await readFile(path, 'utf8')) as { sprout?: unknown };
+    if (existing.sprout !== 'sprout-task-context-v1') {
+      throw new Error('refusing to overwrite a foreign Task context manifest');
+    }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+/** Verify a file and its parent resolve under the physical Worker root. */
+async function regularFile(root: string, path: string, allowMissing = false): Promise<void> {
+  const parent = await realpath(resolve(path, '..'));
+  insideRoot(root, parent);
+  try {
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error('refusing unsafe non-file entry in Worker workspace');
+    }
+  } catch (error) {
+    if (allowMissing && isNotFound(error)) return;
+    throw error;
+  }
+}
+
+async function assertProjectSentinel(root: string, workspace: string, projectId: string): Promise<void> {
+  const sentinel = join(workspace, '.sprout', 'workspace-sentinel.json');
+  await regularFile(root, sentinel);
+  let value: { sprout?: unknown; projectId?: unknown };
+  try {
+    value = JSON.parse(await readFile(sentinel, 'utf8')) as { sprout?: unknown; projectId?: unknown };
+  } catch {
+    throw new Error('Project workspace sentinel is missing or unreadable; refusing cleanup');
+  }
+  if (value.sprout !== 'sprout-project-workspace-v1' || value.projectId !== projectId) {
+    throw new Error('Project workspace sentinel does not match; refusing cleanup');
+  }
+}
+
+function insideRoot(root: string, path: string): string {
+  const resolved = resolve(path);
+  if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+    throw new Error('refusing workspace operation outside Worker root');
+  }
+  return resolved;
 }
 
 async function filesBelow(directory: string): Promise<string[]> {
