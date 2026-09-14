@@ -9,7 +9,8 @@ import type {
   EngineTurnResult,
   StartSessionRequest,
 } from './port.ts';
-import { LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
+import { EngineResumeRefusedError } from './port.ts';
+import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
 
@@ -123,6 +124,21 @@ export class CodexEngineAdapter implements EngineAdapter {
     } catch (error) {
       transport.close();
       process.kill('SIGTERM');
+      // Only an app-server *answer* that refuses the supplied thread is a resume
+      // refusal. A transport failure (the daemon died before answering) is a
+      // `JsonRpcTransportError`, and any other error — including an
+      // authentication or authorization failure that happens to arrive on this
+      // request — is rethrown unchanged, so the core never discards the stored
+      // key over an unrelated problem.
+      if (
+        request.resumeSessionKey !== undefined &&
+        error instanceof JsonRpcError &&
+        !(error instanceof JsonRpcTransportError) &&
+        error.method === 'thread/resume' &&
+        isRefusedResume(error.message)
+      ) {
+        throw new EngineResumeRefusedError(request.resumeSessionKey, error.message);
+      }
       throw error;
     }
 
@@ -156,6 +172,19 @@ export class CodexEngineAdapter implements EngineAdapter {
       ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
     });
   }
+}
+
+/**
+ * Whether an app-server `thread/resume` error is a refused thread.
+ *
+ * Codex answered-but-refused shapes observed against `codex-cli 0.154.0`:
+ * `no rollout found for thread id <id>` for a well-formed id with no stored
+ * rollout, and `invalid session id: …` for an id Codex cannot parse. An
+ * authentication or provider failure that arrives on the same request does not
+ * match, so it stays an ordinary failure.
+ */
+function isRefusedResume(message: string): boolean {
+  return /no rollout found for thread id/i.test(message) || /invalid session id/i.test(message);
 }
 
 function spawnCodex(

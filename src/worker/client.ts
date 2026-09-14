@@ -7,9 +7,11 @@ import type {
   StartSessionRequest,
   StreamingGranularity,
 } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
-import type { JsonRpcTransport } from '../engine/jsonrpc.ts';
+import { JsonRpcError, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
+  WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
   type RunResult,
@@ -109,18 +111,33 @@ export class WorkerClient implements EngineAdapter {
   async startSession(request: StartSessionRequest): Promise<EngineSession> {
     if (this.#closed) throw new Error('environment worker channel is closed');
 
-    const started = await this.#transport.request<StartSessionResult>(
-      WORKER_METHODS.startSession,
-      {
-        engine: this.id,
-        agentId: request.agentId,
-        workingDirectory: request.workingDirectory,
-        ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
-        ...(request.resumeSessionKey !== undefined
-          ? { resumeSessionKey: request.resumeSessionKey }
-          : {}),
-      },
-    );
+    let started: StartSessionResult;
+    try {
+      started = await this.#transport.request<StartSessionResult>(
+        WORKER_METHODS.startSession,
+        {
+          engine: this.id,
+          agentId: request.agentId,
+          workingDirectory: request.workingDirectory,
+          ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+          ...(request.resumeSessionKey !== undefined
+            ? { resumeSessionKey: request.resumeSessionKey }
+            : {}),
+        },
+      );
+    } catch (error) {
+      // The worker marks an engine's rejected resume with a protocol code. Turn
+      // it back into the neutral port error so the core retries only for a real
+      // refusal; every other worker failure stays a plain error.
+      if (
+        error instanceof JsonRpcError &&
+        error.code === WORKER_ERROR_CODES.resumeRefused &&
+        request.resumeSessionKey !== undefined
+      ) {
+        throw new EngineResumeRefusedError(request.resumeSessionKey, error.message);
+      }
+      throw error;
+    }
 
     return new WorkerEngineSession(
       {

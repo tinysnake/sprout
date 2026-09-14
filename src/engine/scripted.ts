@@ -6,6 +6,7 @@ import type {
   EngineTurnResult,
   StartSessionRequest,
 } from './port.ts';
+import { EngineResumeRefusedError } from './port.ts';
 
 /**
  * A controlled engine adapter used by tests.
@@ -26,18 +27,28 @@ export interface ScriptedAdapterOptions {
   /** Records every request so tests can assert ordering against other seams. */
   readonly onStartSession?: (request: StartSessionRequest) => void;
   readonly onInterrupt?: () => void;
-  /** When set, `startSession` rejects with this message. */
+  /**
+   * When set, `startSession` rejects with this message as a plain failure.
+   *
+   * This models an engine that cannot start at all — a missing binary, a failed
+   * initialization, an authentication failure — as opposed to one that refused a
+   * supplied resume key. A plain start failure must never be retried fresh and
+   * must never delete a stored key.
+   */
   readonly failStart?: string;
+  /** When set, `startSession` rejects as an explicit resume refusal. */
+  readonly refuseStartKey?: string;
   /**
    * Engine session keys this fake accepts as resumable.
    *
    * Omit to accept any supplied `resumeSessionKey` (a healthy resume). When set,
    * a key outside this list is stale, and the fake behaves as
    * `staleResumeKey` says: start a fresh session (`'fresh'`, the default, which
-   * models Pi and `agy`'s documented soft fallback), reject the start
-   * (`'fail'`, which models Codex's `thread/resume` hard failure in #19), or
-   * fail the first turn without emitting events (`'fail-turn'`, which models
-   * `opencode` exiting 1 on a stale `--session` without ever settling the turn).
+   * models Pi and `agy`'s documented soft fallback), reject the start as a
+   * resume refusal (`'fail'`, which models Codex's `thread/resume` hard
+   * failure in #19), or fail the first turn as a resume refusal without
+   * emitting events (`'fail-turn'`, which models `opencode` exiting 1 on a
+   * stale `--session`).
    */
   readonly knownSessionKeys?: readonly string[];
   readonly staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
@@ -59,6 +70,12 @@ export class ScriptedEngineAdapter implements EngineAdapter {
   async startSession(request: StartSessionRequest): Promise<EngineSession> {
     this.#options.onStartSession?.(request);
     this.requests.push(request);
+    if (this.#options.refuseStartKey !== undefined) {
+      throw new EngineResumeRefusedError(
+        request.resumeSessionKey ?? this.#options.refuseStartKey,
+        `unknown session: ${this.#options.refuseStartKey}`,
+      );
+    }
     if (this.#options.failStart !== undefined) {
       throw new Error(this.#options.failStart);
     }
@@ -70,21 +87,28 @@ export class ScriptedEngineAdapter implements EngineAdapter {
     const known = this.#options.knownSessionKeys;
     const stale = requested !== undefined && known !== undefined && !known.includes(requested);
     if (stale && this.#options.staleResumeKey === 'fail') {
-      throw new Error(`unknown session: ${requested}`);
+      throw new EngineResumeRefusedError(requested, `unknown session: ${requested}`);
     }
     // A healthy resume reuses the supplied key; a stale key (or no key) starts
     // a fresh engine session with an engine-assigned key.
     const engineSessionKey =
       requested !== undefined && !stale ? requested : `scripted-key-${++this.#keyCounter}`;
     // `fail-turn` models opencode: the session starts, but the stale key makes
-    // the turn fail without the engine ever doing work.
+    // the turn fail as a resume refusal without the engine ever doing work.
     const failFirstTurn = stale && this.#options.staleResumeKey === 'fail-turn';
 
     const session = new ScriptedEngineSession(
       `scripted-session-${this.#next}`,
       engineSessionKey,
       failFirstTurn
-        ? { events: [], result: { status: 'failed', message: `unknown session: ${requested}` } }
+        ? {
+            events: [],
+            result: {
+              status: 'failed',
+              message: `unknown session: ${requested}`,
+              resumeRefused: true,
+            },
+          }
         : turn,
       this.#options.onInterrupt,
     );

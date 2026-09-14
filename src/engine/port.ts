@@ -81,7 +81,21 @@ export interface EngineTurn {
 export type EngineTurnResult =
   | { readonly status: 'completed'; readonly text: string }
   | { readonly status: 'interrupted' }
-  | { readonly status: 'failed'; readonly message: string };
+  | {
+      readonly status: 'failed';
+      readonly message: string;
+      /**
+       * The engine refused the supplied `resumeSessionKey` and did no work.
+       *
+       * Set only when the failure is a rejected resume — the conversation the
+       * core asked to continue does not exist in the engine — so the core can
+       * safely forget the key and retry once from a fresh session. A failure
+       * for any other reason (missing binary, authentication, a provider error
+       * on a *valid* resume) leaves this unset, so an unrelated failure is
+       * never mistaken for a stale key and never discards a usable key.
+       */
+      readonly resumeRefused?: boolean;
+    };
 
 export interface EngineAdapter {
   readonly id: string;
@@ -91,5 +105,27 @@ export interface EngineAdapter {
 }
 
 export class EngineStartError extends Error {
-  override readonly name = 'EngineStartError';
+  override readonly name: string = 'EngineStartError';
+}
+
+/**
+ * Raised by `startSession` when the engine explicitly refused the supplied
+ * `resumeSessionKey` and performed no work.
+ *
+ * This is the neutral classification of a resume refusal at the run seam.
+ * Adapters throw it for their engine's rejected-resume condition (Codex's
+ * `no rollout found for thread id …`, a malformed key), and the core retries
+ * from a fresh session only for this error. Every other start failure — a failed
+ * initialization, a missing binary, an authentication failure — is reported
+ * unchanged, so the core never mistakes it for a stale key.
+ */
+export class EngineResumeRefusedError extends EngineStartError {
+  override readonly name: string = 'EngineResumeRefusedError';
+  /** The key the engine refused. */
+  readonly sessionKey: string;
+
+  constructor(sessionKey: string, message: string) {
+    super(message);
+    this.sessionKey = sessionKey;
+  }
 }

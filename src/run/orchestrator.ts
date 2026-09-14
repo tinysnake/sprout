@@ -1,6 +1,7 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
@@ -51,9 +52,12 @@ export interface SubmitRunRequest {
 /**
  * The outcome of one attempt to run a session.
  *
- * A failure carries `didNoEngineWork` so the caller can tell an engine that
- * refused a resume key before doing any work (safe to retry fresh) from one that
- * failed mid-turn (retrying would repeat work, so it is reported as a failure).
+ * A failure carries `resumeRefused`: true only when the engine explicitly told
+ * us it would not resume the supplied key and did no work. That is the one
+ * failure the caller may retry from a fresh session. Everything else — an
+ * initialization failure, a missing binary, an authentication failure, a turn
+ * that failed after emitting events — is reported as a plain failure so the
+ * stored key is neither discarded nor reused unsafely.
  */
 type SessionAttempt =
   | {
@@ -66,7 +70,8 @@ type SessionAttempt =
       readonly ok: false;
       readonly run: AgentRun;
       readonly message: string;
-      readonly didNoEngineWork: boolean;
+      /** True only when the engine refused the supplied key and did no work. */
+      readonly resumeRefused: boolean;
     };
 
 export class RunOrchestrator {
@@ -307,11 +312,14 @@ export class RunOrchestrator {
       // A stored key the engine refuses must not fail the run. Pi and `agy`
       // soft-fall-back themselves (#19), but Codex and `opencode` hard-fail on a
       // stale key, so the orchestrator degrades for them: forget the refused key
-      // and retry once from a fresh session. The `didNoEngineWork` gate keeps the
-      // retry safe — no engine event was emitted, so nothing is repeated — and it
-      // covers both shapes of hard failure: a rejected session start (Codex) and
-      // a turn that fails before doing anything (`opencode` exits 1).
-      if (stored !== undefined && !attempt.ok && attempt.didNoEngineWork) {
+      // and retry once from a fresh session. The `resumeRefused` gate is the
+      // important part — it is set only when the engine *explicitly* refused the
+      // supplied key and did no work. An initialization failure, a missing
+      // binary, an authentication failure, or a valid resume whose first turn
+      // fails before emitting events is a plain failure: retrying it fresh would
+      // hide a real engine problem and would discard a key that may still be
+      // good, so it is reported instead.
+      if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(adapter, agent, initial.prompt, running, undefined);
       }
@@ -343,10 +351,12 @@ export class RunOrchestrator {
    *
    * Owns the session's lifetime and event streaming, but not the lease or the
    * run's terminal state: the caller decides whether to retry a resume-key
-   * refusal before settling the run. `didNoEngineWork` exists so that decision is
-   * based on whether the engine reported anything, not on parsing engine
-   * messages, and it is true both for a rejected session start and for a turn
-   * that fails before emitting a single event.
+   * refusal before settling the run. `resumeRefused` exists so that decision is
+   * based on the engine's own classification of the failure, not on parsing
+   * engine messages or on the bare fact that no event was emitted. It is true
+   * for a refused session start and for an engine that reports a refused resume
+   * through its turn result; a session that starts and then fails for any other
+   * reason is not a refusal.
    */
   async #runSession(
     adapter: EngineAdapter,
@@ -368,30 +378,51 @@ export class RunOrchestrator {
         ok: false,
         run: running,
         message: error instanceof Error ? error.message : String(error),
-        didNoEngineWork: true,
+        // Only the engine's explicit refusal of the supplied key is retryable.
+        // Any other start failure is a real failure and must not discard a key.
+        resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
       };
     }
 
     this.#sessions.set(running.id, session);
     let current = running;
-    let eventsEmitted = 0;
     try {
       const turn = session.run(prompt);
-      for await (const event of turn.events) {
-        eventsEmitted += 1;
-        current = await this.#advance(current, {
-          events: [...current.events, event],
-        });
+      // The events iterator throws when a turn fails, so the *authoritative*
+      // outcome is read from `completion` afterwards. Reading it there is what
+      // lets a turn-level refusal (opencode exits 1 on a stale `--session`) be
+      // told apart from any other turn failure.
+      let streamError: unknown;
+      try {
+        for await (const event of turn.events) {
+          current = await this.#advance(current, {
+            events: [...current.events, event],
+          });
+        }
+      } catch (error) {
+        streamError = error;
       }
       const result = await turn.completion;
       if (result.status === 'failed') {
-        // A turn-level failure is an attempt failure, not a completed run: the
-        // caller may still retry it when nothing was done.
+        // A turn-level failure is an attempt failure, not a completed run. It is
+        // retryable only when the engine classified it as a refused resume;
+        // every other failure (provider error, bad authentication, a crash) is
+        // reported as-is so the stored key survives untouched.
         return {
           ok: false,
           run: current,
           message: result.message,
-          didNoEngineWork: eventsEmitted === 0,
+          resumeRefused: result.resumeRefused === true,
+        };
+      }
+      if (streamError !== undefined) {
+        // The stream failed without the turn reporting failure. That is not a
+        // refusal, and it must not be retried fresh.
+        return {
+          ok: false,
+          run: current,
+          message: streamError instanceof Error ? streamError.message : String(streamError),
+          resumeRefused: false,
         };
       }
       return { ok: true, run: current, result, engineSessionKey: session.engineSessionKey };
@@ -400,7 +431,9 @@ export class RunOrchestrator {
         ok: false,
         run: current,
         message: error instanceof Error ? error.message : String(error),
-        didNoEngineWork: eventsEmitted === 0,
+        // A thrown error is never a resume refusal: the engine had a working
+        // session and failed while doing the work (or reading its result).
+        resumeRefused: false,
       };
     } finally {
       this.#sessions.delete(running.id);

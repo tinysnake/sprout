@@ -6,8 +6,10 @@ import type {
   EngineSession,
   EngineTurnResult,
 } from '../engine/port.ts';
+import { EngineResumeRefusedError } from '../engine/port.ts';
 import { LineJsonRpcTransport, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
+  WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
   type CloseParams,
@@ -108,6 +110,14 @@ export class EnvironmentWorker {
           this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
       }
     } catch (error) {
+      // An engine's rejected resume is a classifyable failure, not a generic
+      // worker error: it is carried as a neutral code so the core can distinguish
+      // "the engine refused this key" from "this worker failed". Everything else
+      // is reported as an ordinary worker error and is never retried.
+      if (error instanceof EngineResumeRefusedError) {
+        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, error.message);
+        return;
+      }
       this.#transport.respondError(
         id,
         -32_603,
@@ -185,8 +195,16 @@ export class EnvironmentWorker {
     void (async () => {
       try {
         const turn = live.session.run(params.prompt);
-        for await (const event of turn.events) {
-          live.events.event(turnId, event);
+        // The events iterator throws when a turn fails, so the authoritative
+        // outcome is `completion`. Reading it there preserves the engine's
+        // `resumeRefused` classification across the worker boundary instead of
+        // replacing it with the stream's generic error message.
+        try {
+          for await (const event of turn.events) {
+            live.events.event(turnId, event);
+          }
+        } catch {
+          // The completion below carries the real terminal result.
         }
         live.events.settled(turnId, await turn.completion, live.session.engineSessionKey);
       } catch (error) {

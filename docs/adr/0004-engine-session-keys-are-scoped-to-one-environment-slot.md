@@ -18,19 +18,30 @@ directory containing the delimiter cannot collide with another slot.
 settles — engines that assign their own key (`agy`, `opencode`) only reveal it on
 the stream. **A refused key degrades to a fresh session instead of failing the
 run.** Pi and `agy` fall back themselves (soft), while Codex and `opencode` fail
-hard; the core hides that difference by forgetting a refused key and retrying
-once, but only when the engine emitted no event, so a mid-turn failure is never
-retried and work with side effects is never repeated.
+hard. Retrying those is safe and is done only when the engine *explicitly
+refuses* the supplied key: a refused session start carries the neutral
+`EngineResumeRefusedError`, and a refused resume reported through a turn carries
+`resumeRefused` on the failed turn result. The core forgets the key and retries
+once, fresh, **only** for those. Any other failure with a stored key — a failed
+initialization, a missing binary, an authentication failure, a transport failure,
+or a valid resume whose first turn fails without a refusal — is reported as a real
+failure and leaves the stored key in place, so an unrelated problem can neither be
+hidden behind a silent retry nor discard a usable continuation key.
 
 Stored behind an explicit `SessionKeyStore` interface with an in-memory and a
 SQLite implementation (ADR-0002). The resume input crosses the engine port as one
 field, `resumeSessionKey`, and the engine-reported key returns as one field,
-`engineSessionKey`; no other part of the run seam changed.
+`engineSessionKey`; the refusal crosses as the neutral `EngineResumeRefusedError`
+(or a `resumeRefused` turn result). The worker protocol carries the same neutral
+classification as a protocol error code, so the retry decision survives the
+worker boundary without exposing which engine refused.
 
 **Rejected alternatives**: keying only by `(agent, engine)` would reuse a key
 across environments and directories where it is meaningless. Retrying a
 resume-key refusal unconditionally would repeat a run whose engine had already
-executed tools. Treating a stale key as a run failure would surface an
+executed tools. Retrying *any* failure that supplied a key (the first cut of this
+ticket) would discard a valid key and hide an unrelated engine failure behind a
+fresh-session retry. Treating a stale key as a run failure would surface an
 engine-storage detail to the user for a condition Sprout can recover from itself.
 Persisting the supplied key rather than the used key would keep re-offering a key
 the engine has already refused.

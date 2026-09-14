@@ -34,6 +34,20 @@ export const WORKER_NOTIFICATIONS = {
   settled: 'turn/settled',
 } as const;
 
+/**
+ * JSON-RPC error codes private to the worker protocol.
+ *
+ * `resumeRefused` is the neutral classification of an engine's rejected resume,
+ * carried across the worker boundary so the core can retry a fresh session only
+ * for that failure. It is a protocol fact, not a Codex or `opencode` fact: the
+ * core learns "the engine refused this key" without learning which engine said
+ * it or why.
+ */
+export const WORKER_ERROR_CODES = {
+  /** The engine explicitly refused the supplied resume key and did no work. */
+  resumeRefused: -32_610,
+} as const;
+
 export interface WorkerEngineDescription {
   readonly id: string;
   readonly streaming: StreamingGranularity;

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
+import { EngineResumeRefusedError } from './port.ts';
 import type { AgentRunEvent } from './port.ts';
 
 interface WireMessage {
@@ -181,6 +182,63 @@ test('a stale thread id is a hard failure at session start, not a silent fresh s
       resumeSessionKey: 'thread-gone',
     }),
     /no rollout found for thread id/,
+  );
+});
+
+test('a refused resume is classified so the core retries only for a real refusal', async () => {
+  // SK-001: the core's retry is gated on this neutral classification, not on
+  // "any start failure with a stored key". Codex's rejection of `thread/resume`
+  // is a refusal; a failed initialization is not.
+  const refusing = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/resume') self.reject(request.id, 'no rollout found for thread id gone');
+  });
+  await assert.rejects(
+    startAdapter(refusing).startSession({
+      agentId: 'agent-scout',
+      workingDirectory: '/tmp',
+      resumeSessionKey: 'gone',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof EngineResumeRefusedError);
+      assert.equal(error.sessionKey, 'gone');
+      return true;
+    },
+  );
+
+  // An initialization failure is not a resume refusal, even when a key was
+  // supplied: there was never a chance for the engine to refuse it.
+  const failingInit = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.reject(request.id, 'protocol mismatch');
+  });
+  await assert.rejects(
+    startAdapter(failingInit).startSession({
+      agentId: 'agent-scout',
+      workingDirectory: '/tmp',
+      resumeSessionKey: 'gone',
+    }),
+    (error: unknown) => {
+      assert.ok(!(error instanceof EngineResumeRefusedError));
+      return true;
+    },
+  );
+
+  // An authentication failure on the resume request is NOT a stale key: the
+  // thread may be perfectly good, so the key must survive for a later attempt.
+  const authFailure = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/resume') self.reject(request.id, '401 Unauthorized');
+  });
+  await assert.rejects(
+    startAdapter(authFailure).startSession({
+      agentId: 'agent-scout',
+      workingDirectory: '/tmp',
+      resumeSessionKey: 'thread-good',
+    }),
+    (error: unknown) => {
+      assert.ok(!(error instanceof EngineResumeRefusedError));
+      return true;
+    },
   );
 });
 

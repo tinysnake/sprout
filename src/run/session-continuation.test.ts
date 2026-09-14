@@ -31,8 +31,10 @@ const completed = { status: 'completed', text: 'done' } as const;
 
 function build(options: {
   agent?: Partial<AgentDefinition>;
+  turns?: ConstructorParameters<typeof ScriptedEngineAdapter>[0]['turns'];
   knownSessionKeys?: readonly string[];
   staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
+  failStart?: string;
   sessionKeys?: InMemorySessionKeyStore;
   store?: InMemoryRunStore;
 }) {
@@ -55,7 +57,8 @@ function build(options: {
     clock: { now: () => 1_000 },
   });
   const adapter = new ScriptedEngineAdapter({
-    turns: [{ events, result: completed }],
+    turns: options.turns ?? [{ events, result: completed }],
+    ...(options.failStart !== undefined ? { failStart: options.failStart } : {}),
     ...(options.knownSessionKeys !== undefined
       ? { knownSessionKeys: options.knownSessionKeys }
       : {}),
@@ -255,17 +258,11 @@ test('a stale key that fails the turn is also degraded to a fresh session', asyn
   assert.equal(adapter.requests[1]?.resumeSessionKey, undefined);
 });
 
-test('a mid-turn failure is not retried, because work was already done', async () => {
+test('a mid-turn failure with a valid key is not retried and does not delete the key', async () => {
   // Retrying a run that already emitted events would repeat work with side
-  // effects (tools already ran). Only a refusal that did nothing is retried.
-  const adapter = new ScriptedEngineAdapter({
-    turns: [
-      {
-        events: [{ type: 'tool-call', name: 'shell', detail: 'rm -rf /' }],
-        result: { status: 'failed', message: 'engine exploded mid-turn' },
-      },
-    ],
-  });
+  // effects (tools already ran). And a failure after a *successful* resume is not
+  // a refused key, so the stored key must survive — deleting it here would
+  // discard a perfectly good continuation key because of an unrelated failure.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
     agentId: 'agent-scout',
@@ -275,21 +272,16 @@ test('a mid-turn failure is not retried, because work was already done', async (
     key: 'a-key',
     updatedAt: 1_000,
   });
-  const orchestrator = new RunOrchestrator({
-    engines: new Map([['scripted', adapter]]),
-    agents: new AgentRegistry([
-      {
-        id: 'agent-scout',
-        name: 'Scout',
-        engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
-        capability: 'agent-run',
-        workingDirectory: '/srv/work',
-      },
-    ]),
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
-    store: new InMemoryRunStore(),
+  const { orchestrator, adapter } = build({
     sessionKeys,
+    // Any supplied key is a healthy resume: `knownSessionKeys` is omitted. The
+    // engine nonetheless fails mid-turn, which is not a refusal.
+    turns: [
+      {
+        events: [{ type: 'tool-call', name: 'shell', detail: 'rm -rf /' }],
+        result: { status: 'failed', message: 'engine exploded mid-turn' },
+      },
+    ],
   });
 
   const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
@@ -298,34 +290,101 @@ test('a mid-turn failure is not retried, because work was already done', async (
   assert.equal(run.status, 'failed');
   assert.match(run.failure ?? '', /engine exploded mid-turn/);
   assert.equal(adapter.requests.length, 1, 'the failed attempt was not repeated');
+  assert.equal(adapter.requests[0]?.resumeSessionKey, 'a-key', 'the stored key was offered');
   assert.ok(
     run.events.some((event) => event.type === 'tool-call'),
     'the events the engine already emitted are kept',
   );
+  // SK-001: the unrelated failure must not discard the key.
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+  });
+  assert.equal(stored?.key, 'a-key', 'a mid-turn failure does not delete a valid stored key');
+});
+
+test('an initialization failure with a stored key is not retried fresh and keeps the key', async () => {
+  // SK-001: a start failure that is *not* a refused resume — a missing binary,
+  // a failed initialization, an authentication failure — must be reported as-is.
+  // Retrying it fresh would hide the real problem, and deleting the key would
+  // throw away a continuation key the engine never refused.
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+    key: 'a-valid-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator, adapter } = build({ sessionKeys, failStart: 'codex binary missing' });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed', 'an unrelated start failure is a real failure');
+  assert.match(run.failure ?? '', /codex binary missing/);
+  assert.equal(adapter.requests.length, 1, 'the unrelated start failure was not retried');
+  assert.equal(adapter.requests[0]?.resumeSessionKey, 'a-valid-key');
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+  });
+  assert.equal(stored?.key, 'a-valid-key', 'the key survives an unrelated start failure');
+});
+
+test('an empty-turn failure with a stored key is not retried and keeps the key', async () => {
+  // SK-001: a valid resume whose first turn fails before emitting any event is
+  // *not* a refusal. The engine never said the key was bad, so the key must not
+  // be deleted and the run must not be silently retried fresh.
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+    key: 'a-valid-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator, adapter } = build({
+    sessionKeys,
+    // Any supplied key is accepted (healthy resume), but the turn fails with no
+    // events and no refusal classification.
+    turns: [
+      {
+        events: [],
+        result: { status: 'failed', message: 'provider authentication failed' },
+      },
+    ],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /provider authentication failed/);
+  assert.equal(adapter.requests.length, 1, 'an empty non-refusal turn is not retried fresh');
+  assert.equal(adapter.requests[0]?.resumeSessionKey, 'a-valid-key');
+  const stored = await sessionKeys.get({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/srv/work',
+  });
+  assert.equal(stored?.key, 'a-valid-key', 'the key survives an empty non-refusal failure');
 });
 
 test('a run without a stored key is not retried when the engine fails', async () => {
   // Nothing was refused, so a failure is a real failure and retrying would
   // double the work.
   const sessionKeys = new InMemorySessionKeyStore();
-  const adapter = new ScriptedEngineAdapter({
-    turns: [{ events: [], result: { status: 'failed', message: 'engine exploded' } }],
-  });
-  const orchestrator = new RunOrchestrator({
-    engines: new Map([['scripted', adapter]]),
-    agents: new AgentRegistry([
-      {
-        id: 'agent-scout',
-        name: 'Scout',
-        engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
-        capability: 'agent-run',
-        workingDirectory: '/srv/work',
-      },
-    ]),
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
-    store: new InMemoryRunStore(),
+  const { orchestrator, adapter } = build({
     sessionKeys,
+    turns: [{ events: [], result: { status: 'failed', message: 'engine exploded' } }],
   });
 
   const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' });
