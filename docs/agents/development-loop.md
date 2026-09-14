@@ -130,6 +130,7 @@ Recompute the outcome frontier in `docs/roadmap.md`, then find the nearest unpro
 - If behaviour or an interface must be experienced, create a disposable `prototype` ticket.
 - If a human decision blocks progress, create a `grilling` ticket.
 - If the outcome and acceptance are known, create a production `task` ticket.
+- Check `docs/references.md` for a mature equivalent design in a reference repository before planning implementation from scratch; when one exists, default to adopting it and note the reference in the ticket.
 
 Prefer the smallest work that either reduces decisive uncertainty or completes an end-to-end slice. Do not create speculative implementation tickets behind unresolved fog.
 
