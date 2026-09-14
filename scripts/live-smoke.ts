@@ -22,6 +22,7 @@ import type { AgentRunEvent } from '../src/engine/port.ts';
 import { MacOsEnvironment } from '../src/environment/macos.ts';
 import { EnvironmentPool } from '../src/environment/pool.ts';
 import { AgentRegistry } from '../src/agent/registry.ts';
+import { ProjectRegistry } from '../src/project/registry.ts';
 import { InMemoryRunStore } from '../src/run/store.ts';
 import { RunOrchestrator } from '../src/run/orchestrator.ts';
 import { EndpointCarrier } from '../src/worker/carrier.ts';
@@ -82,10 +83,20 @@ const orchestrator = new RunOrchestrator({
       id: 'scout',
       name: 'Scout',
       engine: 'codex',
-      environmentInstanceId: 'local-macos',
       capability: 'agent-run',
       workingDirectory: projectRoot,
       instructions: 'You are Scout. Answer directly and briefly.',
+    },
+  ]),
+  projects: new ProjectRegistry([
+    {
+      id: 'sprout-smoke',
+      goal: 'Verify the live Sprout run path.',
+      rules: [],
+      availableEnvironmentInstanceIds: ['local-macos'],
+      memberships: [
+        { agentId: 'scout', responsibilities: ['Answer directly'], collaborationInstructions: '' },
+      ],
     },
   ]),
   pool: new EnvironmentPool({

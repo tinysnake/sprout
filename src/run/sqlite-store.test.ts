@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from './model.ts';
 import { SqliteRunStore, SqliteLeaseStore, SqliteStore } from './sqlite-store.ts';
@@ -71,6 +72,51 @@ test('a run with no optional fields round-trips without inventing them', async (
   assert.deepEqual(restored, minimal);
   assert.equal('result' in (restored ?? {}), false);
   assert.equal('leaseId' in (restored ?? {}), false);
+  store.close();
+});
+
+test('a run records the environment instance and project it used, and they survive a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-project-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ environmentInstanceId: 'container-1', projectId: 'project-sprout' }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.equal(restored?.environmentInstanceId, 'container-1');
+  assert.equal(restored?.projectId, 'project-sprout');
+});
+
+test('a run written before the project column existed still reads back', async () => {
+  // The column was added after runs shipped; a database from before it must keep
+  // its runs rather than fail, and they simply carry no recorded project.
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      events TEXT NOT NULL,
+      lease_id TEXT,
+      failure TEXT,
+      result TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+  `);
+  db.exec(`INSERT INTO agent_runs
+    (id, agent_id, prompt, environment_instance_id, status, events, created_at)
+    VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  const store = new SqliteRunStore({ db });
+  const restored = await store.get('legacy-1');
+  assert.equal(restored?.environmentInstanceId, 'mac-mini-1');
+  assert.equal('projectId' in (restored ?? {}), false);
   store.close();
 });
 

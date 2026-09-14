@@ -6,6 +6,8 @@ import { EnvironmentPool, InMemoryLeaseStore } from '../environment/pool.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import { AgentRegistry } from '../agent/registry.ts';
+import { ProjectRegistry } from '../project/registry.ts';
+import type { Project } from '../project/model.ts';
 import { InMemoryRunStore } from './store.ts';
 import { RunOrchestrator } from './orchestrator.ts';
 
@@ -19,10 +21,29 @@ const definition: EnvironmentDefinition = {
 };
 const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
 
+/** The project that grants Scout its environment access, shared by the tests. */
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    id: 'project-sprout',
+    goal: 'Ship Sprout',
+    rules: ['Report what you observed'],
+    availableEnvironmentInstanceIds: ['mac-mini-1'],
+    memberships: [
+      {
+        agentId: 'agent-scout',
+        responsibilities: ['Investigate'],
+        collaborationInstructions: 'Keep it short',
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function build(options: {
   turns?: ConstructorParameters<typeof ScriptedEngineAdapter>[0]['turns'];
   failStart?: string;
   onInterrupt?: () => void;
+  projects?: readonly Project[];
 }) {
   const pool = new EnvironmentPool({
     definitions: [definition],
@@ -39,7 +60,6 @@ function build(options: {
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
-      environmentInstanceId: 'mac-mini-1',
       capability: 'agent-run',
       workingDirectory: '/tmp',
       instructions: 'You are Scout.',
@@ -49,6 +69,7 @@ function build(options: {
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
+    projects: new ProjectRegistry(options.projects ?? [project()]),
     pool,
     store,
     leaseTtlMs: 60_000,
@@ -241,11 +262,11 @@ test('a run whose agent has no engine adapter is refused', async () => {
         id: 'agent-scout',
         name: 'Scout',
         engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/tmp',
       },
     ]),
+    projects: new ProjectRegistry([project()]),
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store: new InMemoryRunStore(),
   });
@@ -300,7 +321,6 @@ test('a run left running by a dead process is reconciled instead of shown as liv
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
-      environmentInstanceId: 'mac-mini-1',
       capability: 'agent-run',
       workingDirectory: '/tmp',
     },
@@ -413,7 +433,6 @@ test('an orphaned run has its lease transitioned to recovering on restart, block
       id: 'agent-scout',
       name: 'Scout',
       engine: 'scripted',
-      environmentInstanceId: 'mac-mini-1',
       capability: 'agent-run',
       workingDirectory: '/tmp',
       instructions: 'You are Scout.',
@@ -425,6 +444,7 @@ test('an orphaned run has its lease transitioned to recovering on restart, block
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
+    projects: new ProjectRegistry([project()]),
     pool,
     store,
     clock: { now: () => 5_000 },
@@ -454,4 +474,158 @@ test('an orphaned run has its lease transitioned to recovering on restart, block
   const retrySubmit = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'now it works' });
   const retrySettled = await orchestrator.waitFor(retrySubmit.id);
   assert.equal(retrySettled.status, 'completed');
+});
+
+const secondDefinition: EnvironmentDefinition = {
+  id: 'container-linux',
+  platform: 'container',
+  capabilities: [{ name: 'agent-run', requiresLease: true }],
+};
+const secondInstance: EnvironmentInstance = { id: 'container-1', definitionId: 'container-linux' };
+
+test('an agent with no fixed environment runs on an instance resolved from its project', async () => {
+  const pool = new EnvironmentPool({
+    definitions: [definition, secondDefinition],
+    instances: [instance, secondInstance],
+    clock: { now: () => 1_000 },
+  });
+  const adapter = new ScriptedEngineAdapter({
+    turns: [{ events: successEvents, result: completed }],
+  });
+  const registry = new AgentRegistry([
+    {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      capability: 'agent-run',
+      workingDirectory: '/tmp',
+    },
+  ]);
+  // The project names the container, not the first pool instance, so the run can
+  // only land there if resolution actually consulted the project.
+  const projects = new ProjectRegistry([
+    project({ id: 'project-portable', availableEnvironmentInstanceIds: ['container-1'] }),
+  ]);
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: registry,
+    projects,
+    pool,
+    store: new InMemoryRunStore(),
+    leaseTtlMs: 60_000,
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'say hi' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  assert.equal(run.environmentInstanceId, 'container-1');
+  assert.equal(run.projectId, 'project-portable');
+  assert.equal(pool.leases()[0]?.instanceId, 'container-1');
+});
+
+test('a run records the environment instance it used, observably through the store', async () => {
+  const { orchestrator, store } = build({
+    turns: [{ events: successEvents, result: completed }],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'say hi' });
+  await orchestrator.waitFor(id);
+
+  const stored = await store.get(id);
+  assert.equal(stored?.environmentInstanceId, 'mac-mini-1');
+  assert.equal(stored?.projectId, 'project-sprout');
+  assert.equal(
+    store.writes.every((write) => write.environmentInstanceId === 'mac-mini-1'),
+    true,
+    'every persisted state names the instance actually used',
+  );
+});
+
+test('two agents whose project-resolved environments conflict are prevented from concurrent use', async () => {
+  const pool = new EnvironmentPool({
+    definitions: [definition],
+    instances: [instance],
+    clock: { now: () => 1_000 },
+  });
+  const adapter = new ScriptedEngineAdapter({
+    turns: [{ events: successEvents, result: completed, settleAfterMs: 200 }],
+  });
+  const registry = new AgentRegistry([
+    {
+      id: 'agent-scout',
+      name: 'Scout',
+      engine: 'scripted',
+      capability: 'agent-run',
+      workingDirectory: '/tmp',
+    },
+    {
+      id: 'agent-cartographer',
+      name: 'Cartographer',
+      engine: 'scripted',
+      capability: 'agent-run',
+      workingDirectory: '/tmp',
+    },
+  ]);
+  // Both agents are members of the same project, so both resolve to the same
+  // single available instance and their leases must conflict.
+  const projects = new ProjectRegistry([
+    project({
+      memberships: [
+        {
+          agentId: 'agent-scout',
+          responsibilities: ['Investigate'],
+          collaborationInstructions: 'Keep it short',
+        },
+        {
+          agentId: 'agent-cartographer',
+          responsibilities: ['Map'],
+          collaborationInstructions: 'Keep it short',
+        },
+      ],
+    }),
+  ]);
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: registry,
+    projects,
+    pool,
+    store: new InMemoryRunStore(),
+    leaseTtlMs: 60_000,
+  });
+
+  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'first' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const second = await orchestrator.submit({ agentId: 'agent-cartographer', prompt: 'second' });
+  const refused = await orchestrator.waitFor(second.id);
+
+  assert.equal(refused.status, 'failed');
+  assert.match(refused.failure ?? '', /mac-mini-1/);
+  assert.match(refused.failure ?? '', /leased|recovery/i);
+  assert.equal(adapter.requests.length, 1, 'the engine never started for the refused run');
+
+  await orchestrator.waitFor(first.id);
+});
+
+test('an agent that belongs to no project is refused rather than guessed at', async () => {
+  const { orchestrator } = build({ turns: [], projects: [] });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hello' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /no project/i);
+});
+
+test('an agent whose project offers no usable environment is refused explicitly', async () => {
+  const { orchestrator } = build({
+    turns: [],
+    projects: [project({ availableEnvironmentInstanceIds: ['some-other-machine'] })],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hello' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /no available environment/i);
 });

@@ -7,6 +7,8 @@ import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import { EnvironmentPool } from './environment/pool.ts';
 import { DockerRuntime, containerEnvironmentDefinition } from './environment/container.ts';
+import type { Project } from './project/model.ts';
+import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
 import { createRunApi } from './web/api.ts';
@@ -179,7 +181,6 @@ const agents: readonly AgentDefinition[] = [
     id: 'scout',
     name: 'Scout',
     engine: engineId,
-    environmentInstanceId: instanceId,
     capability: 'agent-run',
     workingDirectory: runWorkingDirectory,
     instructions:
@@ -188,6 +189,26 @@ const agents: readonly AgentDefinition[] = [
   },
 ];
 
+/**
+ * The default project.
+ *
+ * Its environment set is what a run's environment is resolved from, so adding an
+ * instance here is what makes it usable — the agent no longer names a device.
+ */
+const defaultProject: Project = {
+  id: process.env.SPROUT_PROJECT ?? 'sprout',
+  goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
+  rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
+  availableEnvironmentInstanceIds: [instanceId],
+  memberships: [
+    {
+      agentId: 'scout',
+      responsibilities: ['Answer direct requests from the project lead', 'Investigate the repository'],
+      collaborationInstructions: 'Collaborate through the project channel and keep results concise.',
+    },
+  ],
+};
+
 const registry = new AgentRegistry(agents);
 const store = new SqliteStore({ filename: databasePath });
 const pool = new EnvironmentPool({
@@ -195,11 +216,17 @@ const pool = new EnvironmentPool({
   instances: environmentInstances,
   store: store.leases,
 });
+const projects = new ProjectRegistry([defaultProject]);
+// The default project above is host-derived configuration, like the environment
+// definitions. Additional projects can hydrate from the durable store, which is
+// the same store the runs and leases use (ADR-0002); in-memory entries win.
+await projects.load(store.projects);
 const orchestrator = new RunOrchestrator({
   // Resolved per run, so a worker that died is replaced before the next run
   // instead of failing it against a dead channel (ADR-0003).
   engines: () => supervisor.adapters(),
   agents: registry,
+  projects,
   pool,
   store: store.runs,
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),

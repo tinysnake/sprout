@@ -96,7 +96,6 @@ export function createRunApi(options: RunApiOptions): RunApi {
           id: agent.id,
           name: agent.name,
           engine: agent.engine,
-          environmentInstanceId: agent.environmentInstanceId,
         })),
       });
       return;

@@ -179,6 +179,7 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
       import { EnvironmentPool } from './src/environment/pool.ts';
       import { RunOrchestrator } from './src/run/orchestrator.ts';
       import { AgentRegistry } from './src/agent/registry.ts';
+      import { ProjectRegistry } from './src/project/registry.ts';
       import { ScriptedEngineAdapter } from './src/engine/scripted.ts';
 
       const store = new SqliteStore({ filename: ${JSON.stringify(dbPath)} });
@@ -220,14 +221,22 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
         id: 'scout',
         name: 'Scout',
         engine: 'hanging-engine',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/tmp',
+      }]);
+
+      const projects = new ProjectRegistry([{
+        id: 'sprout',
+        goal: 'Ship Sprout',
+        rules: [],
+        availableEnvironmentInstanceIds: ['mac-mini-1'],
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }],
       }]);
 
       const orchestrator = new RunOrchestrator({
         engines: new Map([['hanging-engine', hangingAdapter]]),
         agents,
+        projects,
         pool,
         store: store.runs,
       });
@@ -275,6 +284,7 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
       import { EnvironmentPool } from './src/environment/pool.ts';
       import { RunOrchestrator } from './src/run/orchestrator.ts';
       import { AgentRegistry } from './src/agent/registry.ts';
+      import { ProjectRegistry } from './src/project/registry.ts';
 
       const store = new SqliteStore({ filename: ${JSON.stringify(dbPath)} });
       const pool = new EnvironmentPool({
@@ -291,14 +301,22 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
         id: 'scout',
         name: 'Scout',
         engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/tmp',
+      }]);
+
+      const projects = new ProjectRegistry([{
+        id: 'sprout',
+        goal: 'Ship Sprout',
+        rules: [],
+        availableEnvironmentInstanceIds: ['mac-mini-1'],
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }],
       }]);
 
       const orchestrator = new RunOrchestrator({
         engines: new Map(),
         agents,
+        projects,
         pool,
         store: store.runs,
       });

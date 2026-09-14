@@ -2,9 +2,12 @@
  * Agent identity and configuration.
  *
  * An agent is a persistent worker identity owned by Sprout. It names the engine
- * *kind* it runs on and the environment instance it is scheduled to, but it does
- * not own either: the engine installation and the environment are independent
- * facts (#7, M1 outcome 4). Nothing here reads from a CLI installation.
+ * *kind* it runs on and the capability its runs must hold, but it does not own
+ * either: the engine installation and the environment are independent facts
+ * (#7, M1 outcome 4). In particular an agent names **no environment instance** —
+ * its run's environment is resolved from the project it is a member of, which is
+ * what lets the same agent work across environments (`CONTEXT.md`, O5).
+ * Nothing here reads from a CLI installation.
  */
 
 export interface AgentDefinition {
@@ -12,10 +15,9 @@ export interface AgentDefinition {
   readonly name: string;
   /** The engine kind, resolved to an adapter at run time. */
   readonly engine: string;
-  readonly environmentInstanceId: string;
   /** The lease-requiring capability this agent's runs must hold. */
   readonly capability: string;
-  /** The working directory for runs inside that environment. */
+  /** The working directory for runs inside whichever environment is resolved. */
   readonly workingDirectory: string;
   /** Standing instructions assembled by the project contract. */
   readonly instructions?: string;

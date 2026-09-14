@@ -15,7 +15,13 @@ export interface AgentRun {
   readonly id: string;
   readonly agentId: string;
   readonly prompt: string;
+  /**
+   * The environment instance this run actually used, resolved from the agent's
+   * project at submission. Persisted so the choice survives a restart.
+   */
   readonly environmentInstanceId: string;
+  /** The project whose environment set produced `environmentInstanceId`. */
+  readonly projectId?: string;
   readonly status: AgentRunStatus;
   readonly events: readonly AgentRunEvent[];
   readonly leaseId?: string;

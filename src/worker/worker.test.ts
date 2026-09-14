@@ -8,6 +8,7 @@ import { ScriptedEngineAdapter, type ScriptedTurn } from '../engine/scripted.ts'
 import type { AgentRunEvent } from '../engine/port.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { AgentRegistry } from '../agent/registry.ts';
+import { ProjectRegistry } from '../project/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { WORKER_METHODS } from './protocol.ts';
@@ -116,10 +117,20 @@ function buildOrchestrator(adapters: ReadonlyMap<string, WorkerClient>) {
         id: 'agent-scout',
         name: 'Scout',
         engine: 'scripted',
-        environmentInstanceId: 'mac-mini-1',
         capability: 'agent-run',
         workingDirectory: '/tmp',
         instructions: 'You are Scout.',
+      },
+    ]),
+    projects: new ProjectRegistry([
+      {
+        id: 'project-sprout',
+        goal: 'Ship Sprout',
+        rules: [],
+        availableEnvironmentInstanceIds: ['mac-mini-1'],
+        memberships: [
+          { agentId: 'agent-scout', responsibilities: [], collaborationInstructions: '' },
+        ],
       },
     ]),
     pool,

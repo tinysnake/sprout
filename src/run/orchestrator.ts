@@ -2,6 +2,8 @@ import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
+import type { ProjectRegistry } from '../project/registry.ts';
+import { resolveEnvironmentInstance } from '../project/resolve.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
 
@@ -26,6 +28,12 @@ export interface RunOrchestratorOptions {
    */
   readonly engines: ReadonlyMap<string, EngineAdapter> | (() => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
+  /**
+   * Where an agent's project memberships come from. Optional so existing callers
+   * and tests that never resolve an environment need not supply one; a run by an
+   * agent with no project fails with an explicit message rather than a guess.
+   */
+  readonly projects?: ProjectRegistry;
   readonly pool: EnvironmentPool;
   readonly store: RunStore;
   readonly leaseTtlMs?: number;
@@ -42,6 +50,7 @@ export interface SubmitRunRequest {
 export class RunOrchestrator {
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
+  readonly #projects: ProjectRegistry | undefined;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
   readonly #leaseTtlMs: number;
@@ -56,6 +65,7 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#engines = options.engines;
     this.#agents = options.agents;
+    this.#projects = options.projects;
     this.#pool = options.pool;
     this.#store = options.store;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
@@ -87,13 +97,38 @@ export class RunOrchestrator {
       return { id: run.id };
     }
 
-    const recorded: AgentRun = { ...run, environmentInstanceId: agent.environmentInstanceId };
+    // Resolve the environment before recording the run, so the persisted run
+    // names the instance it actually used rather than an agent's fixed device.
+    const resolution = resolveEnvironmentInstance(
+      this.#projects?.forAgent(agent.id) ?? [],
+      agent.capability,
+      this.#pool,
+    );
+    if (!resolution.ok) {
+      await this.#finish(run, 'failed', {
+        status: 'failed',
+        message: this.#resolutionFailure(agent, resolution.reason),
+      });
+      return { id: run.id };
+    }
+
+    const recorded: AgentRun = {
+      ...run,
+      environmentInstanceId: resolution.instanceId,
+      projectId: resolution.projectId,
+    };
     this.#runs.set(recorded.id, recorded);
     await this.#store.save(recorded);
 
     const settled = this.#execute(recorded, agent);
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
+  }
+
+  #resolutionFailure(agent: AgentDefinition, reason: 'no-project' | 'no-available-environment'): string {
+    return reason === 'no-project'
+      ? `no project grants agent ${agent.id} access to an environment for capability: ${agent.capability}`
+      : `no available environment for capability: ${agent.capability}`;
   }
 
   /** The current observable state of a run. */
@@ -235,17 +270,18 @@ export class RunOrchestrator {
     }
 
     const acquired = this.#pool.acquireLease({
-      instanceId: agent.environmentInstanceId,
+      instanceId: initial.environmentInstanceId,
       capability: agent.capability,
       holderId: agent.id,
       runId: initial.id,
       ttlMs: this.#leaseTtlMs,
     });
     if (!acquired.ok) {
+      const instanceId = initial.environmentInstanceId;
       const busyMessage =
         acquired.state === 'recovering'
-          ? `environment busy: ${agent.environmentInstanceId} is in recovery (held by ${acquired.heldBy ?? 'another run'})`
-          : `environment busy: ${agent.environmentInstanceId} is leased by ${acquired.heldBy ?? 'another run'}`;
+          ? `environment busy: ${instanceId} is in recovery (held by ${acquired.heldBy ?? 'another run'})`
+          : `environment busy: ${instanceId} is leased by ${acquired.heldBy ?? 'another run'}`;
       return this.#finish(initial, 'failed', {
         status: 'failed',
         message:
