@@ -91,6 +91,8 @@ export interface RunOrchestratorOptions {
 }
 
 export interface SubmitRunRequest {
+  /** A lifecycle-reserved id for a Task nested run. */
+  readonly runId?: string;
   readonly agentId: string;
   readonly prompt: string;
   /**
@@ -115,6 +117,9 @@ export interface SubmitRunRequest {
    * supplied by the advancement service; a direct caller may pass one too.
    */
   readonly environmentPreference?: EnvironmentPreference;
+  /** Fixed Task binding, supplied only by TaskEnvironmentLifecycle. */
+  readonly environmentInstanceId?: string;
+  readonly environmentLeaseId?: string;
 }
 
 /**
@@ -188,7 +193,7 @@ export class RunOrchestrator {
    */
   async submit(request: SubmitRunRequest): Promise<{ id: string }> {
     const run: AgentRun = {
-      id: this.#ids.run(),
+      id: request.runId ?? this.#ids.run(),
       agentId: request.agentId,
       prompt: request.prompt,
       environmentInstanceId: '',
@@ -268,7 +273,9 @@ export class RunOrchestrator {
       );
       return { id: taskRun.id };
     }
-    const resolution = resolveEnvironmentInstance(
+    const resolution = request.taskId !== undefined && request.environmentInstanceId !== undefined
+      ? { ok: true as const, instanceId: request.environmentInstanceId, projectId: request.projectId!, preferred: true }
+      : resolveEnvironmentInstance(
       {
         projects: scopedProjects,
         capability: agent.capability,
@@ -292,6 +299,7 @@ export class RunOrchestrator {
       ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
+      ...(request.environmentLeaseId !== undefined ? { leaseId: request.environmentLeaseId } : {}),
     };
     this.#runs.set(recorded.id, recorded);
     await this.#store.save(recorded);
@@ -429,6 +437,7 @@ export class RunOrchestrator {
 
   /** Release a lease (e.g. to resolve recovery), making the environment available again. */
   releaseLease(leaseId: string): ReturnType<EnvironmentPool['releaseLease']> {
+    if (this.#pool.getLease(leaseId)?.holderKind === 'task') return undefined;
     return this.#pool.releaseLease(leaseId);
   }
 
@@ -507,14 +516,21 @@ export class RunOrchestrator {
         message: `no engine adapter registered for: ${agent.engine}`,
       });
     }
-    const acquired = this.#pool.acquireLease({
+    const nestedTaskLease = initial.taskId !== undefined && initial.leaseId !== undefined;
+    if (nestedTaskLease) {
+      const lease = this.#pool.getLease(initial.leaseId!);
+      if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== initial.taskId || lease.instanceId !== initial.environmentInstanceId) {
+        return this.#finish(initial, 'failed', { status: 'failed', message: `task lease is not active for run ${initial.id}` });
+      }
+    }
+    const acquired = nestedTaskLease ? undefined : this.#pool.acquireLease({
       instanceId: initial.environmentInstanceId,
       capability: agent.capability,
       holderId: agent.id,
       runId: initial.id,
       ttlMs: this.#leaseTtlMs,
     });
-    if (!acquired.ok) {
+    if (acquired !== undefined && !acquired.ok) {
       const instanceId = initial.environmentInstanceId;
       const busyMessage =
         acquired.state === 'recovering'
@@ -529,7 +545,7 @@ export class RunOrchestrator {
       });
     }
 
-    const running = await this.#advance(initial, { status: 'running', leaseId: acquired.lease.id });
+    const running = await this.#advance(initial, { status: 'running', ...(acquired !== undefined && acquired.ok ? { leaseId: acquired.lease.id } : {}) });
     let prepared = running;
 
     try {
@@ -619,7 +635,7 @@ export class RunOrchestrator {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      this.#pool.releaseLease(acquired.lease.id);
+      if (acquired !== undefined && acquired.ok) this.#pool.releaseLease(acquired.lease.id);
     }
   }
 

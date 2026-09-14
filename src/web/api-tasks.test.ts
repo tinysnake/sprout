@@ -19,6 +19,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { InMemoryTaskStore } from '../task/store.ts';
 import { TaskService } from '../task/service.ts';
+import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 import { createRunApi, type RunApi } from './api.ts';
 
 const definition: EnvironmentDefinition = {
@@ -51,7 +52,7 @@ function completed(text: string): ScriptedTurn {
   };
 }
 
-function build(options: { readonly turns?: readonly ScriptedTurn[] } = {}) {
+function build(options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {}) {
   const adapter = new ScriptedEngineAdapter({
     turns: options.turns ?? [completed('First step done.'), completed('Second step done.')],
   });
@@ -59,25 +60,37 @@ function build(options: { readonly turns?: readonly ScriptedTurn[] } = {}) {
     { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run' },
   ]);
   const taskStore = new InMemoryTaskStore();
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   let service: TaskService;
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
     projects,
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    pool,
     store: new InMemoryRunStore(),
     tasks: { prompt: (input) => service.prompt(input), link: (input) => service.link(input) },
     onTaskRunSettled: (input) => service.onRunSettled(input),
     leaseTtlMs: 60_000,
   });
-  service = new TaskService({ store: taskStore, runs: orchestrator });
+  const lifecycle = options.retainedLease
+    ? new TaskEnvironmentLifecycle({
+        store: taskStore,
+        pool,
+        agents: registry,
+        projects,
+        runs: orchestrator,
+      })
+    : undefined;
+  // The retained test needs the same pool as the orchestrator. Its compact
+  // factory below supplies that directly instead of exposing a production field.
+  service = new TaskService({ store: taskStore, runs: orchestrator, ...(lifecycle !== undefined ? { lifecycle } : {}) });
   const api: RunApi = createRunApi({ orchestrator, agents: registry, projects, tasks: service });
   return { api, service };
 }
 
 async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
-  options: { readonly turns?: readonly ScriptedTurn[] } = {},
+  options: { readonly turns?: readonly ScriptedTurn[]; readonly retainedLease?: boolean } = {},
 ): Promise<void> {
   const context = build(options);
   const { port } = await context.api.listen(0);
@@ -137,6 +150,28 @@ test('a Task can be created with an environment preference', async () => {
     const { task } = (await created.json()) as { task: Record<string, unknown> };
     assert.deepEqual(task.environmentPreference, { kind: 'definition', id: 'macos-workstation' });
   });
+});
+
+test('begin, retained nested advance, end, and recovery routes use precise 404/409 classes', async () => {
+  await withServer(async (base) => {
+    assert.equal((await fetch(`${base}/api/tasks/nope/begin`, { method: 'POST' })).status, 404);
+    const { task } = (await (await createTask(base)).json()) as { task: { id: string } };
+    const begin = await fetch(`${base}/api/tasks/${task.id}/begin`, { method: 'POST' });
+    assert.equal(begin.status, 200);
+    const begun = (await begin.json()) as { task: Record<string, unknown> };
+    assert.equal(begun.task.environmentLifecycleState, 'idle');
+
+    const advance = await fetch(`${base}/api/tasks/${task.id}/runs`, { method: 'POST' });
+    assert.equal(advance.status, 202);
+    const activeEnd = await fetch(`${base}/api/tasks/${task.id}/end`, { method: 'POST' });
+    assert.equal(activeEnd.status, 409);
+    const { runId } = (await advance.json()) as { runId: string };
+    assert.equal((await waitForRun(base, runId)).status, 'completed');
+    const ended = await fetch(`${base}/api/tasks/${task.id}/end`, { method: 'POST' });
+    assert.equal(ended.status, 200);
+    const endedBody = (await ended.json()) as { task: Record<string, unknown> };
+    assert.equal(endedBody.task.environmentLifecycleState, 'ended');
+  }, { retainedLease: true, turns: [{ ...completed('Retained step done.'), settleAfterMs: 100 }] });
 });
 
 test('a malformed Task creation is rejected with a reason', async () => {

@@ -13,6 +13,7 @@ import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
 import { CollaborationCoordinator } from './collaboration/coordinator.ts';
 import { TaskService } from './task/service.ts';
+import { TaskEnvironmentLifecycle } from './task/environment-lifecycle.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
@@ -257,6 +258,7 @@ await projects.load(store.projects);
  * `onTaskRunSettled` option can close over the same instance it is given below.
  */
 let tasks: TaskService;
+let taskLifecycle: TaskEnvironmentLifecycle;
 
 const orchestrator = new RunOrchestrator({
   // Resolved per run *for the resolved instance*, so a worker that died is
@@ -280,7 +282,15 @@ const orchestrator = new RunOrchestrator({
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
 });
 
-tasks = new TaskService({ store: store.tasks, runs: orchestrator });
+taskLifecycle = new TaskEnvironmentLifecycle({
+  store: store.tasks,
+  pool,
+  agents: registry,
+  projects,
+  runs: orchestrator,
+  leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
+});
+tasks = new TaskService({ store: store.tasks, runs: orchestrator, lifecycle: taskLifecycle });
 
 /**
  * The collaboration coordinator: durable Messages, the M1 wake contract, and
@@ -326,6 +336,7 @@ const { port: boundPort } = await api.listen(port);
 
 /** Reconcile runs left mid-flight by a previous process before serving. */
 const orphaned = await orchestrator.reconcileOrphanedRuns();
+await tasks.reconcileEnvironmentLifecycle();
 
 /**
  * Reconcile the collaboration write path after a restart (#26).

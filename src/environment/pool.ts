@@ -17,13 +17,17 @@ import { findCapability } from './model.ts';
  */
 
 export type LeaseState = 'active' | 'recovering' | 'expired' | 'released';
+export type LeaseHolderKind = 'run' | 'task';
 
 export interface EnvironmentLease {
   readonly id: string;
   readonly instanceId: string;
   readonly capability: string;
   readonly holderId: string;
+  /** Task-held vs run-held; absent only on a legacy persisted run lease (run). */
+  readonly holderKind?: LeaseHolderKind;
   readonly runId?: string;
+  readonly taskId?: string;
   readonly acquiredAt: number;
   readonly expiresAt: number;
   readonly state: LeaseState;
@@ -50,6 +54,7 @@ export interface AcquireLeaseRequest {
   readonly capability: string;
   readonly holderId: string;
   readonly runId?: string;
+  readonly taskId?: string;
   readonly ttlMs: number;
 }
 
@@ -191,7 +196,9 @@ export class EnvironmentPool {
       instanceId: request.instanceId,
       capability: request.capability,
       holderId: request.holderId,
+      holderKind: request.taskId !== undefined ? 'task' : 'run',
       ...(request.runId !== undefined ? { runId: request.runId } : {}),
+      ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
       acquiredAt: now,
       expiresAt: now + request.ttlMs,
       state: 'active',
@@ -243,6 +250,16 @@ export class EnvironmentPool {
     return this.releaseLease(leaseId);
   }
 
+  /** Resume a retained Task lease. Run leases must resolve recovery by release. */
+  resumeTaskLease(leaseId: string): EnvironmentLease | undefined {
+    const lease = this.#leases.get(leaseId);
+    if (!lease || lease.holderKind !== 'task' || lease.state !== 'recovering') return undefined;
+    const active: EnvironmentLease = { ...lease, state: 'active' };
+    this.#leases.set(active.id, active);
+    this.#store?.save(active);
+    return active;
+  }
+
   /** Look up any lease by id regardless of state. */
   getLease(leaseId: string): EnvironmentLease | undefined {
     return this.#leases.get(leaseId);
@@ -273,7 +290,7 @@ export class EnvironmentPool {
     if (lease.state === 'released') return undefined;
     if (lease.state === 'recovering') return lease;
     if (lease.state !== 'active') return undefined;
-    if (lease.expiresAt > this.#clock.now()) return lease;
+    if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
     const expired: EnvironmentLease = { ...lease, state: 'expired' };
     this.#leases.set(lease.id, expired);
     this.#store?.save(expired);
@@ -290,7 +307,7 @@ export class EnvironmentPool {
       if (lease.instanceId !== instanceId) continue;
       if (lease.state === 'recovering') return lease;
       if (lease.state !== 'active') continue;
-      if (lease.expiresAt > this.#clock.now()) return lease;
+      if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
       const expired: EnvironmentLease = { ...lease, state: 'expired' };
       this.#leases.set(lease.id, expired);
       this.#store?.save(expired);

@@ -53,6 +53,11 @@ export class SqliteTaskStore implements TaskStore {
         assigned_agent_id TEXT,
         environment_preference TEXT,
         blocker_reason TEXT,
+        environment_instance_id TEXT,
+        environment_lease_id TEXT,
+        environment_lifecycle_state TEXT,
+        recovery_state TEXT,
+        active_run_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER
@@ -72,6 +77,16 @@ export class SqliteTaskStore implements TaskStore {
       CREATE INDEX IF NOT EXISTS task_run_links_by_task
         ON task_run_links (task_id, sequence);
     `);
+    this.#addColumnIfMissing('tasks', 'environment_instance_id', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'environment_lease_id', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'environment_lifecycle_state', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'recovery_state', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'active_run_id', 'TEXT');
+  }
+
+  #addColumnIfMissing(table: string, column: string, type: string): void {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
+    if (!columns.some((existing) => existing.name === column)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   async create(task: Task): Promise<Task> {
@@ -79,8 +94,8 @@ export class SqliteTaskStore implements TaskStore {
       .prepare(
         `INSERT OR IGNORE INTO tasks
            (id, project_id, title, goal, constraints, status, assigned_agent_id,
-            environment_preference, blocker_reason, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -92,6 +107,11 @@ export class SqliteTaskStore implements TaskStore {
         task.assignedAgentId ?? null,
         task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
         task.blockerReason ?? null,
+        task.environmentInstanceId ?? null,
+        task.environmentLeaseId ?? null,
+        task.environmentLifecycleState ?? null,
+        task.recoveryState ?? null,
+        task.activeRunId ?? null,
         task.createdAt,
         task.updatedAt,
         task.completedAt ?? null,
@@ -131,7 +151,7 @@ export class SqliteTaskStore implements TaskStore {
       .prepare(
         `UPDATE tasks
             SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-                environment_preference = ?, blocker_reason = ?, updated_at = ?, completed_at = ?
+                environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ?
           WHERE id = ?`,
       )
       .run(
@@ -142,6 +162,11 @@ export class SqliteTaskStore implements TaskStore {
         task.assignedAgentId ?? null,
         task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
         task.blockerReason ?? null,
+        task.environmentInstanceId ?? null,
+        task.environmentLeaseId ?? null,
+        task.environmentLifecycleState ?? null,
+        task.recoveryState ?? null,
+        task.activeRunId ?? null,
         task.updatedAt,
         task.completedAt ?? null,
         task.id,
@@ -235,6 +260,11 @@ interface TaskRow {
   readonly assigned_agent_id: string | null;
   readonly environment_preference: string | null;
   readonly blocker_reason: string | null;
+  readonly environment_instance_id: string | null;
+  readonly environment_lease_id: string | null;
+  readonly environment_lifecycle_state: string | null;
+  readonly recovery_state: string | null;
+  readonly active_run_id: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -269,6 +299,11 @@ function toTask(row: TaskRow): Task {
         }
       : {}),
     ...(row.blocker_reason !== null ? { blockerReason: row.blocker_reason } : {}),
+    ...(row.environment_instance_id !== null ? { environmentInstanceId: row.environment_instance_id } : {}),
+    ...(row.environment_lease_id !== null ? { environmentLeaseId: row.environment_lease_id } : {}),
+    ...(row.environment_lifecycle_state !== null ? { environmentLifecycleState: row.environment_lifecycle_state as NonNullable<Task['environmentLifecycleState']> } : {}),
+    ...(row.recovery_state !== null ? { recoveryState: row.recovery_state as NonNullable<Task['recoveryState']> } : {}),
+    ...(row.active_run_id !== null ? { activeRunId: row.active_run_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
