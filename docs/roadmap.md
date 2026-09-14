@@ -92,12 +92,12 @@ Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing ru
 
 ### O2 — Schedulable environment pool
 
-**Status**: In progress  
+**Status**: Evidenced
 **Depends on**: None
 
 Container, macOS, and Windows environments can be treated as a shared capability pool with safe access and lease semantics.
 
-**Evidence so far**: the environment model is settled and all checks below hold for **container, macOS, and Windows** (#5, #10, #13).
+**Acceptance evidence**: #4 settled the capability, lease, capacity, provisioning, and recovery model. The three target platforms are implemented and live-verified through environment workers (#5, #10, #13), and #16 accepted durable lease recovery that prevents interrupted capacity from being reassigned until recovery is explicitly resolved.
 
 **Implementation evidence**: macOS is implemented end to end with a lease that is acquired before a run becomes active, refuses conflicting runs, and is released on completion or stop (#10). `src/environment/pool.ts` enforces exclusivity because the runtime does not. Since #12 every environment runs a long-lived worker that supervises engines, and the core spawns no engine process itself (ADR-0003); a local macOS machine is reached as a network endpoint like any other environment. Since #13 **container** environments are implemented too: a real container instance hosts a worker that executes real Codex runs over the runtime exec channel, with Sprout's lease registry — not Docker — enforcing exclusivity. Since #5 **Windows** is implemented and live-verified: a remote physical Windows host runs a Sprout worker daemon via an SSH-tunneled carrier with scheduled-task boot autostart, successfully running real Codex and Pi turns end to end.
 
@@ -110,7 +110,7 @@ Container, macOS, and Windows environments can be treated as a shared capability
   - Implemented for macOS (#10) and container (#13). Docker does **not** enforce mutual exclusion, so the lease registry does; verified live by refusing a second concurrent container run.
 - Fixed and cloneable environments can both be represented without leaking platform rules to callers. — evidenced: macOS is fixed (#10), a container is cloneable (#13), and the lease registry needs no platform-specific rule for either
 - Interrupted dirty work can be identified and kept from unsafe reassignment.
-  - Container evidenced: `stop`/`start` preserves work, `commit`/`export` captures it, `rm -f` is the only irrecoverable action. Fixed-host checkpointing remains fog for O4.
+  - Evidenced by #4 and #16: container `stop`/`start` preserves work, `commit`/`export` captures it, and `rm -f` is the only irrecoverable action. On every instance kind, an interrupted active lease is restored as `recovering` and blocks reassignment until the operator explicitly preserves or discards the work and resolves recovery. Automatic fixed-host snapshotting is not required by this check; it may be added later when a real workflow requires it.
 
 ### O3 — First end-to-end run
 
@@ -201,7 +201,9 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 
 ## Frontier after O1, O2, O4, and O5
 
-O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers. O2's environment targets (macOS, container, and Windows) are all implemented and verified live (#5, #10, #13).
+O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers.
+
+O2 is **Evidenced**: macOS, container, and Windows report capabilities and execute through the shared worker and lease model; fixed and cloneable instances are represented without platform rules leaking to callers; and durable recovery prevents interrupted capacity from unsafe reassignment (#4, #5, #10, #13, #16).
 
 O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation marks orphaned mid-flight runs failed with events intact, and active leases enter `recovering` state to protect capacity from immediate reassignment (#16).
 
