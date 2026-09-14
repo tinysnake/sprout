@@ -9,6 +9,7 @@ import { AgyEngineAdapter } from './agy.ts';
 import { AGY_CONTRACT_PAYLOAD_ENV } from './agy-contract-hook.ts';
 import { PiEngineAdapter } from './pi.ts';
 import { OpenCodeEngineAdapter } from './opencode.ts';
+import { OPENCODE_CONFIG_CONTENT_ENV } from './opencode-instructions.ts';
 import { renderProjectContract, assembleProjectContract } from '../project/contract.ts';
 import { CONTRACT_FILE_MARKER, CONTRACT_FILE_NAME } from './contract-file.ts';
 
@@ -144,15 +145,17 @@ test('opencode receives the assembled contract through the working directory', a
   assert.ok(written.includes(PROJECT_CONTRACT), 'the assembled contract is what was written');
 });
 
-test('a working-directory engine leaves a user AGENTS.md intact and reports the fallback', async () => {
+test('a working-directory engine leaves a user AGENTS.md intact and registers its fallback', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-oc-user-'));
   const userContent = '# Repo AGENTS.md\nUser-owned.\n';
   const { writeFileSync } = await import('node:fs');
   writeFileSync(join(dir, 'AGENTS.md'), userContent);
 
+  let spawnedEnv: NodeJS.ProcessEnv | undefined;
   const adapter = new OpenCodeEngineAdapter({
     binaryPath: '/usr/bin/true',
-    spawnProcess: () => {
+    spawnProcess: (_binary, _args, env) => {
+      spawnedEnv = env;
       const stdout = new PassThrough();
       const stderr = new PassThrough();
       queueMicrotask(() => {
@@ -178,14 +181,119 @@ test('a working-directory engine leaves a user AGENTS.md intact and reports the 
     workingDirectory: dir,
     instructions: PROJECT_CONTRACT,
   });
+  session.run('go');
   await session.close();
 
   assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), userContent, 'user file untouched');
-  assert.ok(existsSync(join(dir, CONTRACT_FILE_NAME)), 'the contract went to Sprout\'s own file');
+  const fallbackPath = join(dir, CONTRACT_FILE_NAME);
+  assert.ok(existsSync(fallbackPath), 'the contract went to Sprout\'s own file');
   // A fallback is a successful delivery, and it is reported as a distinct
   // mechanism so a user can tell the contract did not go to the primary file.
   assert.equal(session.contractDelivery?.mechanism, 'sprout-contract-file');
   assert.equal(session.contractDelivery?.agentsMdSkipped, 'user-owned');
+
+  // C21-004: writing the file is not a delivery unless the engine reads it.
+  // `opencode` discovers `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md` only, so the
+  // adapter must point the engine at Sprout's fallback through the engine's own
+  // config `instructions` list, which travels in the spawned process env.
+  const overlay = spawnedEnv?.[OPENCODE_CONFIG_CONTENT_ENV];
+  assert.ok(overlay, 'the run is spawned with the config overlay that registers the fallback');
+  const registered = (JSON.parse(overlay) as { instructions?: string[] }).instructions ?? [];
+  assert.ok(
+    registered.includes(fallbackPath),
+    `the fallback path is registered with the engine (${registered.join(', ')})`,
+  );
+});
+
+test('opencode delivery falls back to unavailable when the operator config cannot be merged', async () => {
+  // The engine cannot be pointed at Sprout's fallback file without rewriting the
+  // operator's config overlay, and Sprout refuses to rewrite what it cannot
+  // parse. The run must then report `unavailable` rather than a successful
+  // delivery the engine never receives.
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-oc-unmergeable-'));
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(dir, 'AGENTS.md'), '# user AGENTS.md\n');
+
+  const adapter = new OpenCodeEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    env: { [OPENCODE_CONFIG_CONTENT_ENV]: '{ not json' },
+    spawnProcess: () => {
+      const stdout = new PassThrough();
+      queueMicrotask(() => stdout.end());
+      return {
+        stdout,
+        stderr: new PassThrough(),
+        writeStdin: () => undefined,
+        endStdin: () => undefined,
+        kill: () => undefined,
+        onExit: (handler: (code: number | null) => void) => queueMicrotask(() => handler(0)),
+        onSpawnError: () => undefined,
+      };
+    },
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: dir,
+    instructions: PROJECT_CONTRACT,
+  });
+  await session.close();
+
+  assert.equal(session.contractDelivery?.mechanism, 'unavailable');
+  assert.match(session.contractDelivery?.reason ?? '', /registered with opencode/);
+  assert.equal(session.contractDelivery?.agentsMdSkipped, 'user-owned');
+});
+
+test('an operator shell config overlay is merged with, not replaced by, Sprout\'s registration', async () => {
+  // With no explicit adapter env the spawned process inherits `process.env`, so
+  // registration must read that too: otherwise an operator's shell-level
+  // `OPENCODE_CONFIG_CONTENT` would be silently discarded by Sprout's overlay.
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-oc-inherit-'));
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(dir, 'AGENTS.md'), '# user AGENTS.md\n');
+  const operatorPath = '/tmp/operator-rules.md';
+  const previous = process.env[OPENCODE_CONFIG_CONTENT_ENV];
+  process.env[OPENCODE_CONFIG_CONTENT_ENV] = JSON.stringify({ instructions: [operatorPath] });
+
+  let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  const adapter = new OpenCodeEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    spawnProcess: (_binary, _args, env) => {
+      spawnedEnv = env;
+      const stdout = new PassThrough();
+      queueMicrotask(() => stdout.end());
+      return {
+        stdout,
+        stderr: new PassThrough(),
+        writeStdin: () => undefined,
+        endStdin: () => undefined,
+        kill: () => undefined,
+        onExit: (handler: (code: number | null) => void) => queueMicrotask(() => handler(0)),
+        onSpawnError: () => undefined,
+      };
+    },
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: dir,
+    instructions: PROJECT_CONTRACT,
+  });
+  session.run('go');
+  // The overlay is applied when the process is spawned, which is the turn; the
+  // inherited variable can be restored once that has happened.
+  if (previous === undefined) delete process.env[OPENCODE_CONFIG_CONTENT_ENV];
+  else process.env[OPENCODE_CONFIG_CONTENT_ENV] = previous;
+  await session.close();
+
+  const registered =
+    (JSON.parse(spawnedEnv?.[OPENCODE_CONFIG_CONTENT_ENV] ?? '{}') as { instructions?: string[] })
+      .instructions ?? [];
+  assert.ok(registered.includes(operatorPath), 'the operator entry survives');
+  assert.ok(
+    registered.includes(join(dir, CONTRACT_FILE_NAME)),
+    'and Sprout\'s fallback is appended to it',
+  );
 });
 
 test('agy receives the same contract out-of-band through its config hook', async () => {

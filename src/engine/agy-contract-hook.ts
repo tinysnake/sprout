@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 
 import type { ContractDelivery } from './port.ts';
 
@@ -30,28 +30,70 @@ import type { ContractDelivery } from './port.ts';
  * codeword), while the same process without the env var answered normally. The
  * rule changed agy's answer, so the channel is real rather than declared.
  *
+ * **The hook command is platform-specific.** `agy`'s own embedded hook
+ * documentation states a `command` is "run via `sh -c` on Unix, `cmd /c` on
+ * Windows", so a hook that always invoked `sh` was Unix-only while `docs/roadmap.md`
+ * treats Windows as a supported target (O2, #5). This module therefore installs
+ * an entry native to the host platform — a POSIX shell script executed with `sh`
+ * on Unix, a batch file executed by `cmd` on Windows — and reports `unavailable`
+ * rather than installing a hook the platform's shell cannot run. Windows is
+ * selectable explicitly so the Windows contract is unit-tested on a POSIX host;
+ * production uses the running platform.
+ *
  * This module installs that hook **once, idempotently**, gated on an env var so
  * it is inert for every agy run Sprout did not start. The channel it reports is
  * `engine-hook`; a config root that cannot be written is reported `unavailable`
  * rather than silently claiming delivery.
+ *
+ * **The installed hook persists in the operator's configuration.** Sprout writes
+ * one stable entry (`sprout-project-contract`) into `hooks.json` and one script
+ * beside it; it overwrites neither other hooks nor a `hooks.json` it cannot
+ * parse, and the entry is a no-op unless the payload env var is set. That is a
+ * deliberate trade: `agy` reads customization only from this global root, so
+ * there is no project-scoped file Sprout could write instead, and removing the
+ * entry on session close would race any other concurrent run and could leave a
+ * plan-on-disk configuration Sprout owns half-installed. The gating is what
+ * makes the persistence safe — an operator running `agy` themselves is
+ * unaffected — and the worker reports every run's actual delivery, so the
+ * installation is visible rather than hidden.
+ *
+ * **Filesystem success is not proof the engine consumed the payload.** The
+ * `injectSteps`/`ephemeralMessage` result shape is `agy`'s own hook ABI, taken
+ * from the binary's embedded documentation and probing rather than a published
+ * interface; a later build could change it. Sprout reports `unavailable` when the
+ * root cannot be prepared, but it cannot detect a silently changed payload
+ * schema, so a future `agy` build could accept the file and inject nothing. The
+ * per-run report keeps that failure visible as a delivered-but-ineffective
+ * contract rather than a crash. Re-probing the ABI on a later build is recorded
+ * as follow-up work, not asserted here.
  */
 
 /** The hook name Sprout owns inside `hooks.json`; other names are preserved. */
 export const AGY_CONTRACT_HOOK_NAME = 'sprout-project-contract';
 
-/** The Sprout-owned hook script, relative to the agy customization root. */
-export const AGY_CONTRACT_HOOK_SCRIPT = join('hooks', 'sprout-project-contract.sh');
-
-/**
- * The environment variable that selects this run's contract payload.
- *
- * The hook is a no-op unless it is set, so an installed hook never affects an
- * agy run Sprout did not launch.
- */
+/** The environment variable that selects this run's contract payload. */
 export const AGY_CONTRACT_PAYLOAD_ENV = 'SPROUT_AGY_CONTRACT_PAYLOAD';
 
-/** The hook script's content. Kept literal so the write is auditable. */
-const HOOK_SCRIPT = `#!/bin/sh
+/** The platforms whose hook contract Sprout can satisfy. */
+export type HookPlatform = 'posix' | 'windows';
+
+/** The hook script's path relative to the agy customization root. */
+export function agyContractHookScriptPath(platform: HookPlatform): string {
+  return platform === 'windows'
+    ? win32.join('hooks', 'sprout-project-contract.cmd')
+    : join('hooks', 'sprout-project-contract.sh');
+}
+
+/**
+ * The installed hook script's path, as a constant for the running host.
+ *
+ * Exported for tests and for callers that need the file's location without
+ * recomputing the platform; the delimiter follows {@link currentHookPlatform}.
+ */
+export const AGY_CONTRACT_HOOK_SCRIPT = agyContractHookScriptPath(currentHookPlatform());
+
+/** The POSIX hook script: emit the selected payload, or `{}` when inert. */
+const POSIX_HOOK_SCRIPT = `#!/bin/sh
 # Managed by Sprout. Provides the project contract to agy as a system message.
 # Inert unless Sprout set ${AGY_CONTRACT_PAYLOAD_ENV} for this run.
 if [ -n "\${${AGY_CONTRACT_PAYLOAD_ENV}:-}" ] && [ -f "\${${AGY_CONTRACT_PAYLOAD_ENV}}" ]; then
@@ -61,12 +103,53 @@ else
 fi
 `;
 
+/**
+ * The Windows hook script.
+ *
+ * `agy` runs hook commands through `cmd /c`, so this is a batch file rather than
+ * a shell script. It is built line by line and joined with `\r\n` because a
+ * batch file is the one place the host's line endings matter; the quotes around
+ * `{}` keep `echo` literal.
+ */
+const WINDOWS_HOOK_SCRIPT = [
+  '@echo off',
+  'rem Managed by Sprout. Provides the project contract to agy as a system message.',
+  `rem Inert unless Sprout set ${AGY_CONTRACT_PAYLOAD_ENV} for this run.`,
+  `if "%${AGY_CONTRACT_PAYLOAD_ENV}%"=="" goto sprout_inert`,
+  `if not exist "%${AGY_CONTRACT_PAYLOAD_ENV}%" goto sprout_inert`,
+  `type "%${AGY_CONTRACT_PAYLOAD_ENV}%"`,
+  'goto :eof',
+  ':sprout_inert',
+  'echo {}',
+  '',
+].join('\r\n');
+
+/** The platform a hook is being installed for; defaults to the running host. */
+export function currentHookPlatform(): HookPlatform {
+  return process.platform === 'win32' ? 'windows' : 'posix';
+}
+
+/** Whether a hook can be installed at all for a named platform. */
+export function isHookPlatform(platform: string): platform is HookPlatform {
+  return platform === 'posix' || platform === 'windows';
+}
+
 export interface AgyContractDeliveryRequest {
   /** `agy`'s global customization root (the directory holding `hooks.json`). */
   readonly configDirectory: string;
   /** Where to write this run's payload; Sprout owns the file's lifetime. */
   readonly payloadPath: string;
   readonly instructions: string;
+  /**
+   * The platform whose hook contract to install.
+   *
+   * Defaults to the running host. Only `'posix'` and `'windows'` are installable;
+   * any other value is reported `unavailable` rather than installing a hook the
+   * platform's shell cannot run (C21-005). Named as a string rather than the
+   * union so an unrecognised platform fails closed instead of failing to compile
+   * or being silently coerced.
+   */
+  readonly platform?: string;
 }
 
 /**
@@ -91,8 +174,20 @@ export interface AgyContractDelivery {
 export function deliverContractThroughAgyHook(
   request: AgyContractDeliveryRequest,
 ): AgyContractDelivery {
+  const platform = request.platform ?? currentHookPlatform();
+  if (!isHookPlatform(platform)) {
+    return {
+      delivery: {
+        mechanism: 'unavailable',
+        reason: `agy contract hook is not available on this platform (${String(platform)})`,
+      },
+      env: {},
+    };
+  }
+
   const hooksPath = join(request.configDirectory, 'hooks.json');
-  const scriptPath = join(request.configDirectory, AGY_CONTRACT_HOOK_SCRIPT);
+  const scriptRelative = agyContractHookScriptPath(platform);
+  const scriptPath = join(request.configDirectory, scriptRelative);
 
   const existing = readHooks(hooksPath);
   if (existing.kind !== 'ok') {
@@ -110,7 +205,7 @@ export function deliverContractThroughAgyHook(
     SessionStart: [
       {
         type: 'command',
-        command: `sh "${scriptPath}"`,
+        command: hookCommand(platform, scriptPath),
         timeout: 10,
       },
     ],
@@ -120,7 +215,8 @@ export function deliverContractThroughAgyHook(
     [AGY_CONTRACT_HOOK_NAME]: hookEntry,
   };
 
-  if (!writeIfPossible(scriptPath, HOOK_SCRIPT, true)) {
+  const script = platform === 'windows' ? WINDOWS_HOOK_SCRIPT : POSIX_HOOK_SCRIPT;
+  if (!writeIfPossible(scriptPath, script, platform === 'posix')) {
     return {
       delivery: {
         mechanism: 'unavailable',
@@ -166,6 +262,24 @@ export function deliverContractThroughAgyHook(
     env: { [AGY_CONTRACT_PAYLOAD_ENV]: request.payloadPath },
     payloadPath: request.payloadPath,
   };
+}
+
+/**
+ * The `command` string `agy` runs for this platform's hook.
+ *
+ * POSIX: `sh "<path>"` — `sh` is present on the supported Unix targets and the
+ * quoting handles spaces in the customization root. Windows: `""<path>""` —
+ * `agy` invokes the command through `cmd /c`, which runs the batch file
+ * directly; the doubled outer quotes are the form `cmd /c` requires when the
+ * command names a quoted path, and they keep a path containing spaces intact.
+ */
+export function hookCommand(platform: HookPlatform, scriptPath: string): string {
+  if (platform === 'windows') {
+    // `cmd /c` strips the outermost quotes; wrapping the quoted path in a second
+    // pair is the standard way to hand `cmd` a quoted executable path.
+    return `""${scriptPath}""`;
+  }
+  return `sh "${scriptPath}"`;
 }
 
 /** Remove a payload file once the session that used it is closed. */

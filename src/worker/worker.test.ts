@@ -568,3 +568,83 @@ test('a skipped contract delivery is reported as not delivered', async (t) => {
   assert.match(reported, /was not delivered/);
   assert.match(reported, /could not be read/);
 });
+
+/**
+ * C21-002 — every delivery outcome a run can produce is observable.
+ *
+ * An earlier version left the two ordinary successes (`agents.md`,
+ * `engine-hook`) with no log line at all, so "delivered through the engine's own
+ * channel" and "no contract was ever assembled" looked identical in the log.
+ * These tests pin one reportable outcome per mechanism, including both silent
+ * successes.
+ */
+test('every contract delivery mechanism produces a distinct worker log line', async (t) => {
+  const cases: readonly { readonly mechanism: ContractDelivery; readonly expected: RegExp }[] = [
+    {
+      mechanism: { mechanism: 'agents.md', path: '/tmp/work/AGENTS.md' },
+      expected: /delivered to the engine's own AGENTS\.md/,
+    },
+    {
+      mechanism: {
+        mechanism: 'sprout-contract-file',
+        path: '/tmp/work/SPROUT-PROJECT-CONTRACT.md',
+        agentsMdSkipped: 'user-owned',
+      },
+      expected: /delivered to Sprout's own file/,
+    },
+    {
+      mechanism: { mechanism: 'engine-hook', path: '/cfg/hooks.json' },
+      expected: /delivered through the engine's config hook/,
+    },
+    {
+      mechanism: { mechanism: 'skipped-user-owned', path: '/tmp/work/AGENTS.md' },
+      expected: /not delivered/,
+    },
+    {
+      mechanism: { mechanism: 'skipped-unreadable', path: '/tmp/work/AGENTS.md' },
+      expected: /not delivered/,
+    },
+    {
+      mechanism: { mechanism: 'unavailable', reason: 'no writable location' },
+      expected: /not delivered/,
+    },
+  ];
+
+  const seen = new Set<string>();
+  for (const testCase of cases) {
+    const worker = await connectedWorker({
+      turns: [{ events: successEvents, result: { status: 'completed', text: 'done' } }],
+      contractDelivery: testCase.mechanism,
+    });
+    const { orchestrator } = buildOrchestrator(worker.adapters);
+    await orchestrator.waitFor(
+      (await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' })).id,
+    );
+    const reported = worker.logs.find((line) => line.includes('project contract'));
+    worker.killChannel();
+
+    assert.ok(reported, `${testCase.mechanism.mechanism} is reported, not silent`);
+    assert.match(reported, testCase.expected);
+    seen.add(testCase.mechanism.mechanism);
+  }
+  t.diagnostic(`reported mechanisms: ${[...seen].join(', ')}`);
+  assert.equal(seen.size, cases.length, 'each mechanism has its own report');
+});
+
+test('an out-of-band adapter that reports no delivery logs nothing', async (t) => {
+  // The only silent case is an adapter that hands instructions straight to the
+  // engine on its own invocation, where there is no delivery to report.
+  const worker = await connectedWorker({
+    turns: [{ events: successEvents, result: { status: 'completed', text: 'done' } }],
+  });
+  t.after(() => worker.killChannel());
+
+  const { orchestrator } = buildOrchestrator(worker.adapters);
+  await orchestrator.waitFor((await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' })).id);
+
+  assert.equal(
+    worker.logs.filter((line) => line.includes('project contract')).length,
+    0,
+    'no delivery means no delivery line, never a false report',
+  );
+});

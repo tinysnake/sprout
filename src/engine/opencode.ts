@@ -11,6 +11,7 @@ import type {
 import { EventQueue } from './event-queue.ts';
 import { mapOpenCodeEvent, newOpenCodeTurnState } from './opencode-protocol.ts';
 import { deliverContractToWorkingDirectory, type ContractDelivery } from './contract-file.ts';
+import { registerOpenCodeInstructionPath } from './opencode-instructions.ts';
 
 /**
  * `opencode` engine adapter — the deliberately **non-streaming** one.
@@ -39,6 +40,13 @@ import { deliverContractToWorkingDirectory, type ContractDelivery } from './cont
  *   `opencode run` has no system-prompt flag; it discovers `AGENTS.md`
  *   (and `CLAUDE.md`/`CONTEXT.md`) upward from the working directory. Verified
  *   live: a contract delivered there changed the run's answer.
+ * - **Discovery is by those three names only**, so Sprout's fallback
+ *   `SPROUT-PROJECT-CONTRACT.md` is invisible to it. When the primary file cannot
+ *   be used, the adapter registers the fallback path through `opencode`'s own
+ *   config `instructions` list (`OPENCODE_CONFIG_CONTENT`, merged over the loaded
+ *   config) instead of reporting a delivery the engine never receives. Verified
+ *   live: an unregistered fallback file changed nothing, and the same file
+ *   registered through the config list changed the answer.
  * - **Process exit 0 is authoritative.** The event loop can race the terminal
  *   event and omit it after a successful run, so the adapter settles on exit and
  *   treats a zero exit as success.
@@ -53,6 +61,7 @@ export interface OpenCodeAdapterOptions {
   readonly spawnProcess?: (
     binaryPath: string,
     args: readonly string[],
+    env: NodeJS.ProcessEnv | undefined,
   ) => {
     readonly stdout: NodeJS.ReadableStream;
     readonly stderr: NodeJS.ReadableStream;
@@ -93,20 +102,72 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     // `opencode run` has no system-prompt flag; it reads `AGENTS.md` from the
     // working directory, so the contract is delivered there. Confirmed live:
     // an `AGENTS.md` with a distinctive instruction changed the run's answer.
-    const delivery = deliverContractToWorkingDirectory({
+    const written = deliverContractToWorkingDirectory({
       workingDirectory: request.workingDirectory,
       ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
     });
+    // A fallback write is only a delivery if the engine can read the file, and
+    // `opencode` does not discover Sprout's fallback name. The path is
+    // registered through the engine's own config `instructions` list; if that
+    // cannot be done — an operator config Sprout refuses to rewrite, for
+    // example — the delivery is downgraded to `unavailable` rather than being
+    // reported as reaching the engine.
+    const { delivery, contractEnv } = this.#registerDelivery(written);
     return new OpenCodeSession({
       binaryPath,
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
       ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
+      ...(contractEnv !== undefined ? { contractEnv } : {}),
       ...(request.resumeSessionKey !== undefined
         ? { resumeSessionId: request.resumeSessionKey }
         : {}),
     });
+  }
+
+  /**
+   * Make a Sprout-written contract file readable by `opencode`.
+   *
+   * The primary `AGENTS.md` needs nothing: the engine discovers it. Sprout's
+   * fallback file does not, so its path is added to the config `instructions`
+   * list through the inline `OPENCODE_CONFIG_CONTENT` overlay. A failure to
+   * register downgrades the report to `unavailable`; a run must never report a
+   * successful delivery the engine did not receive (C21-004).
+   */
+  #registerDelivery(written: ContractDelivery | undefined): {
+    readonly delivery: ContractDelivery | undefined;
+    readonly contractEnv: Readonly<Record<string, string>> | undefined;
+  } {
+    if (written === undefined) return { delivery: undefined, contractEnv: undefined };
+    if (written.mechanism !== 'sprout-contract-file' || written.path === undefined) {
+      return { delivery: written, contractEnv: undefined };
+    }
+
+    const registration = registerOpenCodeInstructionPath({
+      // The spawned process inherits `process.env` when the adapter was given no
+      // explicit environment, so registration must read the *effective* source:
+      // an operator's shell-level `OPENCODE_CONFIG_CONTENT` would otherwise be
+      // replaced by a fresh overlay instead of merged.
+      env: this.#options.env ?? process.env,
+      path: written.path,
+    });
+    if (registration.env === undefined) {
+      return {
+        delivery: {
+          mechanism: 'unavailable',
+          path: written.path,
+          ...(written.agentsMdSkipped !== undefined
+            ? { agentsMdSkipped: written.agentsMdSkipped }
+            : {}),
+          reason:
+            `the contract was written to ${written.path} but could not be registered with ` +
+            `opencode's instruction list (${registration.reason ?? 'unknown reason'})`,
+        },
+        contractEnv: undefined,
+      };
+    }
+    return { delivery: written, contractEnv: registration.env };
   }
 }
 
@@ -119,6 +180,11 @@ interface OpenCodeSessionOptions {
   readonly resumeSessionId?: string;
   /** How the project contract reached this run's working directory, if at all. */
   readonly contractDelivery?: ContractDelivery;
+  /**
+   * The environment overlay that registers Sprout's contract file with the
+   * engine, when the primary `AGENTS.md` could not be used.
+   */
+  readonly contractEnv?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -138,6 +204,8 @@ export class OpenCodeSession implements EngineSession {
   #closed = false;
   /** How the assembled contract reached this run's working directory. */
   readonly contractDelivery: ContractDelivery | undefined;
+  /** The environment overlay that registers Sprout's contract file, if any. */
+  readonly #contractEnv: Readonly<Record<string, string>>;
 
   constructor(options: OpenCodeSessionOptions) {
     this.#binaryPath = options.binaryPath;
@@ -145,6 +213,7 @@ export class OpenCodeSession implements EngineSession {
     this.#options = options.options;
     this.sessionId = options.sessionId;
     this.contractDelivery = options.contractDelivery;
+    this.#contractEnv = options.contractEnv ?? {};
     // A stored id from a previous run is offered through `--session`. If it is
     // stale the engine fails the turn hard (#19), which is why the core only
     // offers keys it can trust and records what the run actually used.
@@ -182,9 +251,10 @@ export class OpenCodeSession implements EngineSession {
     this.#settle = finish;
 
     const args = this.#turnArgs();
+    const turnEnv = this.#turnEnv();
     const turnProcess = this.#options.spawnProcess
-      ? this.#options.spawnProcess(this.#binaryPath, args)
-      : spawnOpenCode(this.#binaryPath, args, this.#workingDirectory, this.#options.env);
+      ? this.#options.spawnProcess(this.#binaryPath, args, turnEnv)
+      : spawnOpenCode(this.#binaryPath, args, this.#workingDirectory, turnEnv);
     this.#current = turnProcess;
 
     // stderr is never session state (the protocol is stdout-only), but it is the
@@ -258,6 +328,19 @@ export class OpenCodeSession implements EngineSession {
     turnProcess.endStdin();
 
     return { events: queue, completion };
+  }
+
+  /**
+   * The environment for a turn.
+   *
+   * When the fallback contract file must be registered, the inline config
+   * overlay is merged over the adapter's configured environment. With no
+   * explicit environment the variable is added to the inherited one, so
+   * `opencode` still finds its own configuration and credentials.
+   */
+  #turnEnv(): NodeJS.ProcessEnv | undefined {
+    if (Object.keys(this.#contractEnv).length === 0) return this.#options.env;
+    return { ...(this.#options.env ?? process.env), ...this.#contractEnv };
   }
 
   #turnArgs(): string[] {

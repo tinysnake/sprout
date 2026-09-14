@@ -156,14 +156,15 @@ export class EnvironmentWorker {
     });
 
     const sessionId = `session-${++this.#counter}`;
-    // Every contract delivery is reported, not just a refusal. A fallback write
-    // succeeds but goes somewhere other than the engine's own `AGENTS.md`, so a
-    // user can always tell where the contract actually went; a skip or an
-    // unavailable channel says it did not reach the engine at all.
+    // Every contract delivery is reported, not just a refusal. An operator must
+    // be able to tell from the log whether the contract reached the engine and
+    // through which mechanism, for every mechanism — including the two ordinary
+    // successes, so a missing line can never be mistaken for either "delivered"
+    // or "not delivered" (C21-002).
     const delivery = session.contractDelivery;
     if (delivery !== undefined) {
       const line = describeDelivery(params.agentId, params.workingDirectory, delivery);
-      if (line !== undefined) this.#options.onLog?.(line);
+      this.#options.onLog?.(line);
     }
     this.#sessions.set(sessionId, {
       engine: params.engine,
@@ -266,28 +267,41 @@ export class EnvironmentWorker {
 }
 
 /**
- * The line to log for a contract delivery, or `undefined` for the ordinary case.
+ * The line to log for a contract delivery.
  *
- * `agents.md` and `engine-hook` are the silent successes — the contract reached
- * the engine through its own channel — so they produce no line. Everything else
- * is reported: a fallback write says the engine's primary file was passed over,
- * and a skip or an unavailable channel says the contract did not reach the engine
- * at all. This is what keeps delivery from being silent in either direction.
+ * **Every mechanism a run can report is logged.** A delivery outcome is not
+ * internal bookkeeping: it is how an operator confirms that the project contract
+ * did or did not reach the engine, and the two "obvious" successes are exactly
+ * the ones whose absence would be hardest to distinguish from a run that was
+ * never given a contract at all (C21-002). Reporting is deliberately uniform —
+ * one line per delivered contract, naming the mechanism and where it went — so
+ * there is no outcome that is observable only by its silence.
  */
 function describeDelivery(
   agentId: string,
   workingDirectory: string,
   delivery: ContractDelivery,
-): string | undefined {
+): string {
+  const where =
+    delivery.path !== undefined
+      ? ` (${delivery.path})`
+      : ` (${workingDirectory})`;
   switch (delivery.mechanism) {
     case 'agents.md':
-    case 'engine-hook':
-      return undefined;
+      return (
+        `project contract for agent ${agentId} was delivered to the engine's own ` +
+        `AGENTS.md${where}`
+      );
     case 'sprout-contract-file':
       return (
         `project contract for agent ${agentId} was delivered to Sprout's own ` +
-        `file (${delivery.path ?? 'SPROUT-PROJECT-CONTRACT.md'}), not the engine's ` +
-        `AGENTS.md in ${workingDirectory}`
+        `file${where}, registered with the engine's instruction list because the ` +
+        `engine does not discover that name`
+      );
+    case 'engine-hook':
+      return (
+        `project contract for agent ${agentId} was delivered through the engine's ` +
+        `config hook${where}`
       );
     case 'skipped-user-owned':
       return (

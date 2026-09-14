@@ -77,6 +77,15 @@ export interface AgyAdapterOptions {
   /** Where per-run contract payloads are written; defaults under the OS temp dir. */
   readonly payloadDirectory?: string;
   /**
+   * The platform whose hook command to install.
+   *
+   * Defaults to the running host. Set explicitly by a caller that knows the
+   * environment's platform, and by tests, so the Windows hook contract is
+   * exercised on any host (C21-005). An unsupported value is reported
+   * `unavailable` rather than installing a Unix-only hook on Windows.
+   */
+  readonly hookPlatform?: string;
+  /**
    * Auto-approve tools.
    *
    * Required for any run that uses a tool, since headless mode cannot prompt.
@@ -158,6 +167,9 @@ export class AgyEngineAdapter implements EngineAdapter {
         `contract-${Date.now().toString(36)}-${this.#sessionCounter}.json`,
       ),
       instructions: request.instructions,
+      ...(this.#options.hookPlatform !== undefined
+        ? { platform: this.#options.hookPlatform }
+        : {}),
     });
   }
 }

@@ -22,19 +22,39 @@ export type { ContractDelivery, ContractDeliveryMechanism };
  * `AGENTS.md`, for example — it is left untouched and the contract goes to a
  * separate `SPROUT-PROJECT-CONTRACT.md` instead.
  *
+ * **A fallback file is only a delivery if the engine actually reads it.**
+ * `opencode run` discovers standing instructions from `AGENTS.md`,
+ * `CLAUDE.md`, and `CONTEXT.md` only (verified against `opencode 1.18.30`), so a
+ * bare `SPROUT-PROJECT-CONTRACT.md` in the working directory is *not* a channel
+ * on its own — an earlier version of this module wrote one and reported
+ * success while the engine never received the contract. The fallback is made
+ * engine-readable the same way the primary file is: the caller registers its
+ * path with the engine (see `OpenCodeEngineAdapter`, which passes it through the
+ * engine's own config `instructions` list). This function therefore guarantees
+ * only *where* Sprout wrote; the caller is responsible for pointing the engine
+ * at that path, and must not claim an engine-readable delivery otherwise.
+ *
  * **Every outcome is reported, successful or not.** The returned
  * `ContractDelivery` distinguishes a primary write (`agents.md`), a fallback
  * write (`sprout-contract-file`), and each way delivery failed
  * (`skipped-user-owned`, `skipped-unreadable`, `unavailable`). A fallback is a
- * *success* — the contract went somewhere — but it is still reported distinctly,
- * so a caller can always tell where the contract actually went and whether the
- * engine's primary file was passed over.
+ * *success* — the contract went somewhere and, when the caller registers it, the
+ * engine can read it — but it is still reported distinctly, so a caller can
+ * always tell where the contract actually went and whether the engine's primary
+ * file was passed over.
  */
 
 /** The marker line that identifies a file as Sprout's to own and replace. */
 export const CONTRACT_FILE_MARKER = '<!-- sprout:project-contract -->';
 
-/** The Sprout-owned fallback path, used when `AGENTS.md` cannot be used. */
+/**
+ * The Sprout-owned fallback path, used when `AGENTS.md` cannot be used.
+ *
+ * `opencode` does not discover this name by itself, so writing it is only half a
+ * delivery: the adapter must also tell the engine to read it (the config
+ * `instructions` list). The name is exported so that registration and the report
+ * cannot drift apart.
+ */
 export const CONTRACT_FILE_NAME = 'SPROUT-PROJECT-CONTRACT.md';
 
 /** The file the engine reads standing rules from. */

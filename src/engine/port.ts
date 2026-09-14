@@ -19,14 +19,21 @@
  * - `agents.md` — written to the engine's own `AGENTS.md`, the primary
  *   working-directory channel.
  * - `sprout-contract-file` — the primary file was a user's (or unreadable), so
- *   the contract was written to Sprout's own sibling file instead.
+ *   the contract was written to Sprout's own sibling file instead and registered
+ *   through a channel the engine actually reads (`opencode`'s config
+ *   `instructions` list).
  * - `engine-hook` — delivered through the engine's own config hook (e.g. `agy`).
  * - `skipped-user-owned` — a user-owned file stood in the way and was left
  *   byte-identical; the contract was not delivered.
  * - `skipped-unreadable` — an existing file could not be read, so Sprout refused
  *   to replace it; the contract was not delivered.
- * - `unavailable` — no writable location was available; the contract was not
- *   delivered.
+ * - `unavailable` — no writable location, or no engine-readable channel, was
+ *   available; the contract was not delivered.
+ *
+ * An adapter that hands instructions straight to the engine (Codex, Pi) reports
+ * no delivery at all, because there is nothing to report: the instructions are
+ * on the engine's own invocation. That absence is the only silent case, and it
+ * means "delivered by construction", never "delivery failed".
  */
 export type ContractDeliveryMechanism =
   | 'agents.md'
@@ -149,10 +156,11 @@ export interface EngineSession {
    * performs a delivery of its own.
    *
    * Absent when there is nothing to report: an adapter that hands instructions
-   * straight to the engine (Codex, Pi), and any adapter given no instructions.
-   * Present so a fallback, a skip, an injected hook, or an unavailable channel is
-   * visible above the worker boundary rather than being silently reported as
-   * delivered.
+   * straight to the engine on its own invocation (Codex, Pi), and any adapter
+   * given no instructions. Absence therefore never means "delivery failed" —
+   * every attempted delivery, successful or not, sets this, so a fallback, a
+   * skip, an injected hook, or an unavailable channel is visible above the
+   * worker boundary rather than being silently reported as delivered.
    */
   readonly contractDelivery?: ContractDelivery | undefined;
 }

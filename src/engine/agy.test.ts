@@ -256,6 +256,36 @@ test('agy has no system-prompt flag, so the contract is injected through its con
   await session.close();
 });
 
+test('the agy adapter installs the hook command its platform actually runs', async () => {
+  // C21-005: `agy` runs hook commands through `sh -c` on Unix and `cmd /c` on
+  // Windows, and Windows is a supported environment target (O2, #5). The adapter
+  // must pass the platform through so a Windows environment gets a batch entry
+  // rather than a `sh` invocation that does not exist there.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
+    hookPlatform: 'windows',
+    spawnProcess: () => new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok')),
+  });
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    instructions: 'You are Scout.',
+  });
+
+  const hooks = JSON.parse(readFileSync(join(configDirectory, 'hooks.json'), 'utf8')) as Record<
+    string,
+    { SessionStart?: { command?: string }[] }
+  >;
+  const command = hooks[AGY_CONTRACT_HOOK_NAME]?.SessionStart?.[0]?.command ?? '';
+  assert.match(command, /sprout-project-contract\.cmd/, 'the Windows entry is a batch file');
+  assert.ok(!/^\s*sh\b/.test(command), 'the Windows entry never invokes sh');
+  assert.equal(session.contractDelivery?.mechanism, 'engine-hook');
+  await session.close();
+});
+
 test('the contract hook is inert without the payload env var', async () => {
   // The hook always runs for agy; it must do nothing unless Sprout set the env
   // var for this run, so installing it cannot affect agy runs Sprout did not

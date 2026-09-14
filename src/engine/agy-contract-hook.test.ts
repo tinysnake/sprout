@@ -9,7 +9,9 @@ import {
   AGY_CONTRACT_HOOK_NAME,
   AGY_CONTRACT_HOOK_SCRIPT,
   AGY_CONTRACT_PAYLOAD_ENV,
+  agyContractHookScriptPath,
   deliverContractThroughAgyHook,
+  hookCommand,
   removeAgyContractPayload,
 } from './agy-contract-hook.ts';
 
@@ -176,4 +178,70 @@ test('the installed hook script emits the payload when, and only when, selected'
     env: { ...process.env, [AGY_CONTRACT_PAYLOAD_ENV]: payloadPath },
   });
   assert.deepEqual(JSON.parse(gone), {});
+});
+
+/**
+ * C21-005 — the hook must be runnable on the platform `agy` runs on.
+ *
+ * `agy` executes a hook `command` through `sh -c` on Unix and `cmd /c` on
+ * Windows (its own embedded hook documentation), and `docs/roadmap.md` treats
+ * Windows as a supported target (O2, #5). A hook that always invoked `sh` was
+ * therefore silently Unix-only. These tests pin the platform-specific artifact
+ * and command without needing a Windows host.
+ */
+test('a Windows hook is a batch file invoked through cmd, not sh', () => {
+  const dir = configDir();
+  const result = deliverContractThroughAgyHook({
+    configDirectory: dir,
+    payloadPath: join(dir, 'p.json'),
+    instructions: 'CONTRACT_TEXT',
+    platform: 'windows',
+  });
+
+  assert.equal(result.delivery.mechanism, 'engine-hook');
+  const scriptRelative = agyContractHookScriptPath('windows');
+  assert.match(scriptRelative, /\.cmd$/, 'the Windows entry is a batch file');
+  assert.ok(existsSync(join(dir, scriptRelative)), 'the batch file is written');
+
+  const hooks = JSON.parse(readFileSync(join(dir, 'hooks.json'), 'utf8')) as Record<
+    string,
+    { SessionStart?: { command?: string }[] }
+  >;
+  const command = hooks[AGY_CONTRACT_HOOK_NAME]?.SessionStart?.[0]?.command ?? '';
+  assert.ok(!/^\s*sh\b/.test(command), `the Windows hook does not invoke sh (${command})`);
+  assert.match(command, /sprout-project-contract\.cmd/, 'it names the batch file');
+  assert.equal(hookCommand('windows', 'C:\\cfg\\hooks\\sprout-project-contract.cmd'),
+    '""C:\\cfg\\hooks\\sprout-project-contract.cmd""');
+});
+
+test('the Windows batch hook is inert without the payload and emits it when selected', () => {
+  // `cmd` is not available on this host, so the batch file's contract is checked
+  // as text: a payload-selecting branch that types the payload, and an inert
+  // branch that prints `{}`. The POSIX script's behaviour is executed above.
+  const dir = configDir();
+  deliverContractThroughAgyHook({
+    configDirectory: dir,
+    payloadPath: join(dir, 'p.json'),
+    instructions: 'CONTRACT_TEXT',
+    platform: 'windows',
+  });
+  const script = readFileSync(join(dir, agyContractHookScriptPath('windows')), 'utf8');
+  assert.match(script, /%SPROUT_AGY_CONTRACT_PAYLOAD%/, 'selects the run payload by env var');
+  assert.match(script, /type "%SPROUT_AGY_CONTRACT_PAYLOAD%"\r?\n/, 'emits the payload');
+  assert.match(script, /echo \{\}/, 'an inert run still answers with an empty JSON object');
+  assert.ok(script.includes('\r\n'), 'a batch file uses CRLF line endings');
+});
+
+test('a supported hook platform is required; an unknown one is reported unavailable', () => {
+  const dir = configDir();
+  const result = deliverContractThroughAgyHook({
+    configDirectory: dir,
+    payloadPath: join(dir, 'p.json'),
+    instructions: 'contract',
+    platform: 'plan9',
+  });
+  assert.equal(result.delivery.mechanism, 'unavailable');
+  assert.deepEqual(result.env, {});
+  assert.match(result.delivery.reason ?? '', /not available on this platform/);
+  assert.equal(existsSync(join(dir, 'hooks.json')), false, 'nothing was installed');
 });
