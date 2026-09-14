@@ -9,7 +9,47 @@
   <body>
     <main>
       <h1>Sprout</h1>
-      <p class="subtitle">Submit a request to an agent and watch its run progress.</p>
+      <p class="subtitle">Collaborate through the project channel and watch agent runs progress.</p>
+
+      <section id="collaboration" aria-labelledby="collaboration-heading">
+        <h2 id="collaboration-heading">Project Channel</h2>
+
+        <form id="message-form">
+          <div class="composer-row">
+            <div class="field">
+              <label for="project">Project</label>
+              <select id="project" name="project"></select>
+            </div>
+            <div class="field">
+              <label for="channel">Channel</label>
+              <select id="channel" name="channel">
+                <option value="project">Project channel</option>
+                <option value="direct">Direct message</option>
+              </select>
+            </div>
+          </div>
+
+          <fieldset id="recipients-field" class="field" hidden>
+            <legend>Recipients</legend>
+            <div id="recipients" class="recipients"></div>
+          </fieldset>
+
+          <div class="field">
+            <label for="message-body">Message</label>
+            <textarea id="message-body" name="message-body" rows="3" required
+              placeholder="Broadcast to the channel, mention @agent, or use @all."></textarea>
+            <p class="hint">
+              On the project channel, <code>@agent-id</code> wakes that member and
+              <code>@all</code> wakes every other member.
+            </p>
+          </div>
+
+          <p class="form-error" id="message-error" role="alert" hidden></p>
+          <button type="submit">Send</button>
+        </form>
+
+        <ul id="message-stream" aria-live="polite"></ul>
+      </section>
 
       <form id="request-form">
         <label for="agent">Agent</label>

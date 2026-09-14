@@ -148,6 +148,209 @@ button:disabled {
   border-radius: 0.5rem;
 }
 
+/* Collaboration surface (#27): the project channel and its composer. */
+#collaboration {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+#collaboration h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+#message-form {
+  margin-bottom: 1rem;
+}
+
+.composer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+#recipients-field {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.375rem;
+}
+
+#recipients-field legend {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0 0.25rem;
+}
+
+.recipients {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.recipient {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.form-error {
+  margin: 0.25rem 0;
+  color: #ef4444;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+#message-stream {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.message {
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+.message-agent {
+  border-left: 0.25rem solid #22c55e;
+}
+
+.message-human {
+  border-left: 0.25rem solid #3b82f6;
+}
+
+.message header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.author {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.author-agent {
+  color: #22c55e;
+}
+
+.author-human {
+  color: #3b82f6;
+}
+
+.message-meta {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.message-body {
+  margin: 0.5rem 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reply-link,
+.message-recipients {
+  margin: 0.25rem 0;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+
+.reply-link a {
+  color: inherit;
+}
+
+.reply-snippet {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.wakes {
+  margin-top: 0.5rem;
+  border-top: 1px dashed color-mix(in srgb, currentColor 20%, transparent);
+  padding-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.wake-list,
+.observation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.wake-none {
+  margin: 0;
+  opacity: 0.6;
+}
+
+.wake-target {
+  opacity: 0.85;
+}
+
+.wake-status {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.wake-admitted .wake-status {
+  color: #22c55e;
+}
+
+.wake-pending .wake-status {
+  color: #f59e0b;
+}
+
+.wake-suppressed .wake-status {
+  color: #f59e0b;
+}
+
+.wake-failed .wake-status {
+  color: #ef4444;
+}
+
+.wake-run {
+  color: inherit;
+}
+
+.observation {
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+}
+
+.observation-suppressed {
+  background: color-mix(in srgb, #f59e0b 20%, transparent);
+}
+
+.observation-failed {
+  background: color-mix(in srgb, #ef4444 20%, transparent);
+}
+
 #leases h2 {
   font-size: 1rem;
   margin: 0 0 0.5rem;

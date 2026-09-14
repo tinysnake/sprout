@@ -4,7 +4,8 @@ import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { AgentRun } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
-import type { Message } from '../collaboration/model.ts';
+import type { Message, WakeRequest } from '../collaboration/model.ts';
+import type { ProjectRegistry } from '../project/registry.ts';
 
 /**
  * The Web seam for M1.
@@ -29,6 +30,13 @@ export interface RunApiOptions {
    * coordinator so the wake contract has exactly one implementation.
    */
   readonly collaboration?: CollaborationCoordinator;
+  /**
+   * The projects the client may address (#27).
+   *
+   * Optional like `collaboration`: a run-only build serves no project list, and
+   * the message composer has nothing to address without a project channel.
+   */
+  readonly projects?: ProjectRegistry;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
@@ -43,7 +51,7 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents, collaboration } = options;
+  const { orchestrator, agents, collaboration, projects } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const server = createServer((request, response) => {
@@ -103,12 +111,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       sendJson(response, delivered.duplicate ? 200 : 202, {
         message: toMessageView(delivered.message),
         duplicate: delivered.duplicate,
-        wakes: delivered.wakes.map((wake) => ({
-          agentId: wake.agentId,
-          reason: wake.reason,
-          status: wake.status,
-          ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
-        })),
+        wakes: delivered.wakes.map(toWakeView),
         admittedRunIds: delivered.admittedRunIds,
       });
       return;
@@ -143,13 +146,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
         observations: await collaboration.listObservations(messageId),
         wakes: (await collaboration.listWakeRequests())
           .filter((wake) => wake.messageId === messageId)
-          .map((wake) => ({
-            agentId: wake.agentId,
-            reason: wake.reason,
-            status: wake.status,
-            ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
-          })),
+          .map(toWakeView),
       });
+      return;
+    }
+
+    // GET /api/projects — the projects and members the client may address (#27).
+    if (request.method === 'GET' && url.pathname === '/api/projects' && projects) {
+      sendJson(response, 200, { projects: projects.list().map(toProjectView) });
       return;
     }
 
@@ -388,6 +392,55 @@ function toMessageView(message: Message): MessageView {
     recipients: message.recipients,
     ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
     createdAt: message.createdAt,
+  };
+}
+
+/**
+ * The client-facing shape of one wake request (#27).
+ *
+ * Every field the operator needs to answer "did this Message start a run, and
+ * why?": the target Agent, the deterministic or modelled reason, the durable
+ * status, and the linked run when one was admitted. Run internals stay out, so
+ * the client still cannot depend on leases or engines.
+ */
+export interface WakeView {
+  readonly agentId: string;
+  readonly reason: string;
+  readonly status: string;
+  readonly runId?: string;
+}
+
+function toWakeView(wake: WakeRequest): WakeView {
+  return {
+    agentId: wake.agentId,
+    reason: wake.reason,
+    status: wake.status,
+    ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one project the composer may address (#27).
+ *
+ * The member ids are what the composer offers as `@agent` mentions and direct
+ * recipients; nothing else about the project (environment access, rules) is
+ * needed to write a Message.
+ */
+export interface ProjectView {
+  readonly id: string;
+  readonly goal: string;
+  readonly memberIds: readonly string[];
+}
+
+function toProjectView(project: {
+  readonly id: string;
+  readonly goal: string;
+  readonly memberships: readonly { readonly agentId: string }[];
+}): ProjectView {
+  return {
+    id: project.id,
+    goal: project.goal,
+    memberIds: project.memberships.map((membership) => membership.agentId),
   };
 }
 
