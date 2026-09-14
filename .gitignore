@@ -24,3 +24,6 @@ SPROUT-PROJECT-CONTRACT.md
 .DS_Store
 .idea/
 .vscode/
+
+# Local agent pipeline configuration
+.agents/dev-pipeline
