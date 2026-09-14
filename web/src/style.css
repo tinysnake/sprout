@@ -38,7 +38,8 @@ label {
 }
 
 select,
-textarea {
+textarea,
+input {
   font: inherit;
   padding: 0.5rem;
   border-radius: 0.375rem;
@@ -154,6 +155,93 @@ button:disabled {
   padding: 1rem;
   border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
   border-radius: 0.5rem;
+}
+
+#tasks {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+#tasks h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+#task-form {
+  margin: 0.75rem 0 1rem;
+}
+
+.task-project {
+  margin-top: 1rem;
+}
+
+.task-project:first-child {
+  margin-top: 0;
+}
+
+.task-project > h3 {
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+}
+
+.task-card {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.5rem;
+}
+
+.task-card header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.task-card h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.task-facts,
+.task-runs {
+  margin: 0.5rem 0;
+  padding-left: 1.15rem;
+  font-size: 0.85rem;
+}
+
+.task-facts li,
+.task-runs li {
+  margin: 0.2rem 0;
+}
+
+.task-run-current {
+  font-weight: 700;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.task-actions .field {
+  min-width: 10rem;
+}
+
+.task-action-status {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.task-action-error {
+  color: #ef4444;
 }
 
 #collaboration h2 {
