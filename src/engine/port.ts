@@ -10,22 +10,40 @@
  */
 
 /**
- * How an adapter delivered standing instructions into a working directory, or
- * why it did not.
+ * How an adapter attempted to deliver standing instructions, and what happened.
  *
- * Declared by `working-directory` adapters so the fact that a run's contract did
- * not reach the engine — because the directory's `AGENTS.md` is a user's file
- * Sprout refused to replace — is reportable rather than silent.
+ * Every delivery is reported, including a successful fallback, so a user can
+ * always tell where the contract actually went (or that it did not go anywhere).
+ * Nothing here is silent:
+ *
+ * - `agents.md` — written to the engine's own `AGENTS.md`, the primary
+ *   working-directory channel.
+ * - `sprout-contract-file` — the primary file was a user's (or unreadable), so
+ *   the contract was written to Sprout's own sibling file instead.
+ * - `engine-hook` — delivered through the engine's own config hook (e.g. `agy`).
+ * - `skipped-user-owned` — a user-owned file stood in the way and was left
+ *   byte-identical; the contract was not delivered.
+ * - `skipped-unreadable` — an existing file could not be read, so Sprout refused
+ *   to replace it; the contract was not delivered.
+ * - `unavailable` — no writable location was available; the contract was not
+ *   delivered.
  */
 export type ContractDeliveryMechanism =
   | 'agents.md'
   | 'sprout-contract-file'
-  | 'skipped-user-owned';
+  | 'engine-hook'
+  | 'skipped-user-owned'
+  | 'skipped-unreadable'
+  | 'unavailable';
 
 export interface ContractDelivery {
   readonly mechanism: ContractDeliveryMechanism;
+  /** Where the contract actually went, or the file that blocked delivery. */
   readonly path?: string;
-  readonly agentsMdSkipped?: 'user-owned';
+  /** Why the primary `AGENTS.md` was not used, when it was passed over. */
+  readonly agentsMdSkipped?: 'user-owned' | 'unreadable';
+  /** A human-readable explanation, set only for `unavailable`. */
+  readonly reason?: string;
 }
 
 /** How much detail an adapter can deliver while a run is still in progress. */
@@ -37,12 +55,14 @@ export type StreamingGranularity = 'incremental' | 'turn' | 'none';
  * The channels are not interchangeable and are a measured per-engine fact
  * (#14, #15, #19):
  *
- * - `out-of-band` — the engine has a system-prompt surface, so instructions are
- *   handed to it separately from the prompt. Codex (`baseInstructions`) and Pi
- *   (`--append-system-prompt`) do.
+ * - `out-of-band` — the engine has a way to receive instructions separately
+ *   from the prompt. Codex (`baseInstructions`) and Pi
+ *   (`--append-system-prompt`) pass them on argv; `agy` injects them as a system
+ *   message through a Sprout-written config hook (`SessionStart`), because it has
+ *   no system-prompt flag. Either way the contract is not part of user content.
  * - `working-directory` — the engine has no system-prompt surface and reads
- *   instructions from a file in the working directory instead. `agy` reads the
- *   Sprout-owned contract file the adapter writes; nothing is injected into argv.
+ *   instructions from a file in the working directory instead. `opencode` reads
+ *   `AGENTS.md` there; nothing is injected into argv.
  * - `none` — the adapter knows of no standing-instructions surface for this
  *   engine, so the contract cannot be delivered without changing the engine or
  *   injecting it into every prompt. Declaring `none` is honest; the core then
@@ -125,12 +145,14 @@ export interface EngineSession {
   /** Terminate the session and any process it supervises. */
   close(): Promise<void>;
   /**
-   * How standing instructions reached this run's working directory, when the
-   * adapter's channel is `working-directory`.
+   * How standing instructions were delivered for this run, when the adapter
+   * performs a delivery of its own.
    *
-   * Absent for an `out-of-band` adapter (delivery is the engine call itself) and
-   * for a run handed no instructions. Present so a skipped or fallback delivery
-   * is visible above the worker boundary.
+   * Absent when there is nothing to report: an adapter that hands instructions
+   * straight to the engine (Codex, Pi), and any adapter given no instructions.
+   * Present so a fallback, a skip, an injected hook, or an unavailable channel is
+   * visible above the worker boundary rather than being silently reported as
+   * delivered.
    */
   readonly contractDelivery?: ContractDelivery | undefined;
 }

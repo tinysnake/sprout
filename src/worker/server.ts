@@ -2,6 +2,7 @@ import type { Readable, Writable } from 'node:stream';
 
 import type {
   AgentRunEvent,
+  ContractDelivery,
   EngineAdapter,
   EngineSession,
   EngineTurnResult,
@@ -155,14 +156,14 @@ export class EnvironmentWorker {
     });
 
     const sessionId = `session-${++this.#counter}`;
-    // A working-directory contract the adapter could not deliver is reported, so
-    // a user-owned `AGENTS.md` Sprout refused to replace is never silent.
+    // Every contract delivery is reported, not just a refusal. A fallback write
+    // succeeds but goes somewhere other than the engine's own `AGENTS.md`, so a
+    // user can always tell where the contract actually went; a skip or an
+    // unavailable channel says it did not reach the engine at all.
     const delivery = session.contractDelivery;
-    if (delivery !== undefined && delivery.mechanism === 'skipped-user-owned') {
-      this.#options.onLog?.(
-        `project contract for agent ${params.agentId} was not delivered: ` +
-          `a user-owned AGENTS.md in ${params.workingDirectory} was left intact`,
-      );
+    if (delivery !== undefined) {
+      const line = describeDelivery(params.agentId, params.workingDirectory, delivery);
+      if (line !== undefined) this.#options.onLog?.(line);
     }
     this.#sessions.set(sessionId, {
       engine: params.engine,
@@ -261,5 +262,47 @@ export class EnvironmentWorker {
       this.#sessions.delete(sessionId);
       await live.session.close().catch(() => undefined);
     }
+  }
+}
+
+/**
+ * The line to log for a contract delivery, or `undefined` for the ordinary case.
+ *
+ * `agents.md` and `engine-hook` are the silent successes — the contract reached
+ * the engine through its own channel — so they produce no line. Everything else
+ * is reported: a fallback write says the engine's primary file was passed over,
+ * and a skip or an unavailable channel says the contract did not reach the engine
+ * at all. This is what keeps delivery from being silent in either direction.
+ */
+function describeDelivery(
+  agentId: string,
+  workingDirectory: string,
+  delivery: ContractDelivery,
+): string | undefined {
+  switch (delivery.mechanism) {
+    case 'agents.md':
+    case 'engine-hook':
+      return undefined;
+    case 'sprout-contract-file':
+      return (
+        `project contract for agent ${agentId} was delivered to Sprout's own ` +
+        `file (${delivery.path ?? 'SPROUT-PROJECT-CONTRACT.md'}), not the engine's ` +
+        `AGENTS.md in ${workingDirectory}`
+      );
+    case 'skipped-user-owned':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `a user-owned file in ${workingDirectory} was left intact`
+      );
+    case 'skipped-unreadable':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `an existing file in ${workingDirectory} could not be read and was left intact`
+      );
+    case 'unavailable':
+      return (
+        `project contract for agent ${agentId} was not delivered: ` +
+        `${delivery.reason ?? `no writable location in ${workingDirectory}`}`
+      );
   }
 }

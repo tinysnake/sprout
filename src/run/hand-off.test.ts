@@ -193,6 +193,23 @@ test('a prior run with no terminal result still reports the environment move', (
   assert.match(handOff.text, /Interrupted in mac-mini-1/);
 });
 
+test('the no-result notice still respects an unusually small character bound', () => {
+  // A prior run with no terminal result at all produces the notice rather than a
+  // fact line. It needs its own bound: an unusually small budget must be honoured
+  // rather than exceeded.
+  const { result: _result, ...withoutResult } = run({ id: 'prior', status: 'running' });
+  const history: readonly AgentRun[] = [withoutResult];
+
+  for (const limit of [1, 5, 20, 120]) {
+    const handOff = buildHandOffContext(history, identity, { maxCharacters: limit });
+    assert.ok(handOff);
+    assert.ok(
+      handOff.text.length <= limit,
+      `notice is bounded to ${String(limit)}, got ${String(handOff.text.length)}`,
+    );
+  }
+});
+
 test('no prior run produces no hand-off at all', () => {
   assert.equal(buildHandOffContext([], identity), undefined);
   // A run by another agent is not this agent's prior work.

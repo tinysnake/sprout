@@ -1,5 +1,6 @@
 import type {
   AgentRunEvent,
+  ContractDelivery,
   EngineAdapter,
   EngineSession,
   EngineTurn,
@@ -52,6 +53,12 @@ export interface ScriptedAdapterOptions {
    */
   readonly knownSessionKeys?: readonly string[];
   readonly staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
+  /**
+   * When set, sessions report this contract delivery, so the worker's reporting
+   * of a fallback, a skip, or an unavailable channel can be tested through the
+   * real worker path rather than by calling the formatter directly.
+   */
+  readonly contractDelivery?: ContractDelivery;
 }
 
 export class ScriptedEngineAdapter implements EngineAdapter {
@@ -117,6 +124,7 @@ export class ScriptedEngineAdapter implements EngineAdapter {
           }
         : turn,
       this.#options.onInterrupt,
+      this.#options.contractDelivery,
     );
     this.sessions.push(session);
     return session;
@@ -130,6 +138,13 @@ export class ScriptedEngineSession implements EngineSession {
   readonly prompts: string[] = [];
   readonly #turn: ScriptedTurn;
   readonly #onInterrupt: (() => void) | undefined;
+  /**
+   * A scripted contract delivery, when the test wants the worker to report one.
+   *
+   * Present only when configured, matching an `out-of-band` adapter that reports
+   * nothing: an absent value is itself the common case.
+   */
+  readonly contractDelivery: ContractDelivery | undefined;
   #settled = false;
   #interrupted = false;
   #resolveCompletion: ((result: EngineTurnResult) => void) | undefined;
@@ -139,11 +154,13 @@ export class ScriptedEngineSession implements EngineSession {
     engineSessionKey: string,
     turn: ScriptedTurn,
     onInterrupt?: () => void,
+    contractDelivery?: ContractDelivery,
   ) {
     this.sessionId = sessionId;
     this.engineSessionKey = engineSessionKey;
     this.#turn = turn;
     this.#onInterrupt = onInterrupt;
+    this.contractDelivery = contractDelivery;
   }
 
   run(prompt: string): EngineTurn {

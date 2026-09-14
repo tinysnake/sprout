@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type {
   EngineAdapter,
@@ -8,9 +10,15 @@ import type {
   EngineTurnResult,
   StartSessionRequest,
 } from './port.ts';
+import type { ContractDelivery } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapAgyEvent, newAgyTurnState } from './agy-protocol.ts';
-import { deliverContractToWorkingDirectory, type ContractDelivery } from './contract-file.ts';
+import {
+  AGY_CONTRACT_PAYLOAD_ENV,
+  deliverContractThroughAgyHook,
+  removeAgyContractPayload,
+  type AgyContractDelivery,
+} from './agy-contract-hook.ts';
 
 /**
  * `agy` (Antigravity) engine adapter.
@@ -28,23 +36,21 @@ import { deliverContractToWorkingDirectory, type ContractDelivery } from './cont
  *   `init` frame, so Sprout owns session identity by reading it rather than by
  *   choosing it. This is the opposite of Pi and is worth knowing when assembling
  *   context.
- * - **There is no flag for standing instructions.** Unlike Pi's
- *   `--append-system-prompt`, `agy` has no system-prompt surface at all, so the
- *   project contract is delivered as a Sprout-owned file in the working
- *   directory (`contract-file.ts`) rather than injected into argv or the prompt.
- *   That is the `working-directory` standing-instructions channel (#14, #15,
- *   #19); the adapter declares it and performs the write, so "delivery" is an
- *   explicit, testable act rather than an assumption about what `agy` read.
- *   **Probed limitation:** in this build `agy 1.2.2`, headless (`--print`) runs
- *   loaded only worktree rules under `~/.gemini`; a project `AGENTS.md` and
- *   `.agents/rules/*.md` in the working directory did **not** change the run even
- *   in a workspace already present in `trustedWorkspaces`, and a 6,000-word
- *   `AGENTS.md` did not move the reported input-token count. The file is written
- *   to the channel #19/`agy` documents (`AGENTS.md`), the write is verified by
- *   test, and whether this build *honors* it is an engine fact recorded here
- *   rather than asserted. That is a real gap, not a Sprout one, and it is
- *   reported in the #21 work record as evidence rather than silently assumed
- *   away.
+ * - **There is no system-prompt flag, and the working directory is not read.**
+ *   Unlike Pi's `--append-system-prompt`, `agy` has no system-prompt surface,
+ *   and its headless runs do **not** load a project `AGENTS.md` or
+ *   `.agents/rules/*.md` (probed on 1.2.2: a worktree rule changed nothing, in a
+ *   plain directory, a git repository, and a trusted workspace, and a
+ *   6,000-word `AGENTS.md` did not move the reported input-token count). The
+ *   project contract is therefore delivered through the channel `agy` *does* read
+ *   in headless mode: a `SessionStart` hook in its **global** customization root
+ *   (`~/.gemini/config/`), returning an injected ephemeral system message.
+ *   Sprout installs that hook once, idempotently, and gates it on an env var so
+ *   it is inert for agy runs Sprout did not start. The adapter declares the
+ *   `out-of-band` channel, because that is what it is: a system message injected
+ *   separately from the user prompt, not a file the engine discovers. The write
+ *   and the payload are both verified, and a customization root that cannot be
+ *   prepared is reported `unavailable` rather than claimed as delivered.
  * - **Headless mode auto-denies tools it cannot prompt for**, so a run that needs
  *   a tool either gets an allow rule from settings or runs with
  *   `--dangerously-skip-permissions`. Sprout passes the latter only when the
@@ -61,6 +67,16 @@ export interface AgyAdapterOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly args?: readonly string[];
   /**
+   * `agy`'s global customization root, where the contract hook is installed.
+   *
+   * Defaults to `~/.gemini/config`, the root `agy 1.2.2` reads in headless mode.
+   * Overridable so tests can use a scratch directory rather than the operator's
+   * real configuration.
+   */
+  readonly configDirectory?: string;
+  /** Where per-run contract payloads are written; defaults under the OS temp dir. */
+  readonly payloadDirectory?: string;
+  /**
    * Auto-approve tools.
    *
    * Required for any run that uses a tool, since headless mode cannot prompt.
@@ -71,6 +87,7 @@ export interface AgyAdapterOptions {
   readonly spawnProcess?: (
     binaryPath: string,
     args: readonly string[],
+    env: NodeJS.ProcessEnv | undefined,
   ) => {
     readonly stdout: NodeJS.ReadableStream;
     readonly stderr: NodeJS.ReadableStream;
@@ -85,9 +102,11 @@ export class AgyEngineAdapter implements EngineAdapter {
   readonly capabilities = {
     streaming: 'incremental',
     supportsInterrupt: true,
-    // `agy` has no system-prompt surface, so the contract reaches it only
-    // through a Sprout-owned file in the working directory (see AgySession).
-    standingInstructions: 'working-directory',
+    // `agy` has no system-prompt flag, but it does read a `SessionStart` hook
+    // from its global customization root, which injects a system message before
+    // the model runs. That is an out-of-band channel: the contract is delivered
+    // as engine-side instructions, never as part of the user prompt.
+    standingInstructions: 'out-of-band',
   } as const;
   readonly #options: AgyAdapterOptions;
   #sessionCounter = 0;
@@ -100,20 +119,20 @@ export class AgyEngineAdapter implements EngineAdapter {
     // Sandboxed launch cannot traverse a symlink chain, so the real path is
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
-    // `agy` has no system-prompt surface, so the contract is delivered into the
-    // working directory the run executes in. Doing it here, per session, keeps
-    // the contract fresh for the environment the run actually resolved to (#18)
-    // and lets the delivery mechanism be reported per run.
-    const delivery = deliverContractToWorkingDirectory({
-      workingDirectory: request.workingDirectory,
-      ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
-    });
+    // The contract is delivered through `agy`'s own config hook. Doing it here,
+    // per session, keeps the contract fresh for the environment the run actually
+    // resolved to (#18) and lets the delivery mechanism be reported per run.
+    const delivery = this.#deliverContract(request);
     const session = new AgySession({
       binaryPath,
       workingDirectory: request.workingDirectory,
       options: this.#options,
       sessionId: `agy-${++this.#sessionCounter}-${Date.now().toString(36)}`,
-      ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
+      ...(delivery !== undefined ? { contractDelivery: delivery.delivery } : {}),
+      ...(delivery !== undefined && delivery.env[AGY_CONTRACT_PAYLOAD_ENV] !== undefined
+        ? { contractEnv: delivery.env }
+        : {}),
+      ...(delivery?.payloadPath !== undefined ? { contractPayloadPath: delivery.payloadPath } : {}),
     });
     // A stored key from a previous run resumes `agy`'s conversation. `agy`
     // assigns conversation ids, so this is a *hint*: if it is stale the engine
@@ -123,6 +142,24 @@ export class AgyEngineAdapter implements EngineAdapter {
     }
     return session;
   }
+
+  #deliverContract(request: StartSessionRequest): AgyContractDelivery | undefined {
+    if (request.instructions === undefined || request.instructions === '') return undefined;
+    const configDirectory =
+      this.#options.configDirectory ?? join(homedir(), '.gemini', 'config');
+    // Payloads are per-run scratch, so they default to the OS temp directory
+    // rather than accumulating inside agy's configuration tree.
+    const payloadDirectory =
+      this.#options.payloadDirectory ?? join(tmpdir(), 'sprout-agy-contract-payloads');
+    return deliverContractThroughAgyHook({
+      configDirectory,
+      payloadPath: join(
+        payloadDirectory,
+        `contract-${Date.now().toString(36)}-${this.#sessionCounter}.json`,
+      ),
+      instructions: request.instructions,
+    });
+  }
 }
 
 interface AgySessionOptions {
@@ -130,8 +167,12 @@ interface AgySessionOptions {
   readonly workingDirectory: string;
   readonly options: AgyAdapterOptions;
   readonly sessionId: string;
-  /** How the project contract reached this run's working directory, if at all. */
+  /** How standing instructions were delivered for this run, if attempted. */
   readonly contractDelivery?: ContractDelivery;
+  /** The env addition that selects this run's contract payload. */
+  readonly contractEnv?: Readonly<Record<string, string>>;
+  /** The payload file to remove when the session closes. */
+  readonly contractPayloadPath?: string;
 }
 
 /**
@@ -154,13 +195,17 @@ export class AgySession implements EngineSession {
   #settle: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
   /**
-   * How the assembled contract reached this run's working directory.
+   * How standing instructions were delivered for this run.
    *
    * Read by tests to verify that a run in a project receives the contract
-   * through `agy`'s only channel, and by the worker to log a delivery it could
-   * not make (e.g. a user-owned `AGENTS.md` it refused to replace).
+   * through `agy`'s actual channel, and by the worker to report a delivery it
+   * could not make.
    */
   readonly contractDelivery: ContractDelivery | undefined;
+  /** The env addition that selects this run's contract payload. */
+  readonly #contractEnv: Readonly<Record<string, string>>;
+  /** The per-run payload file Sprout owns and cleans up. */
+  readonly #contractPayloadPath: string | undefined;
 
   constructor(options: AgySessionOptions) {
     this.#binaryPath = options.binaryPath;
@@ -168,6 +213,8 @@ export class AgySession implements EngineSession {
     this.#options = options.options;
     this.sessionId = options.sessionId;
     this.contractDelivery = options.contractDelivery;
+    this.#contractEnv = options.contractEnv ?? {};
+    this.#contractPayloadPath = options.contractPayloadPath;
   }
 
   /** The id `agy` assigned, once a turn has started. */
@@ -218,9 +265,10 @@ export class AgySession implements EngineSession {
     this.#settle = finish;
 
     const args = this.#turnArgs(prompt);
+    const turnEnv = this.#turnEnv();
     const turnProcess = this.#options.spawnProcess
-      ? this.#options.spawnProcess(this.#binaryPath, args)
-      : spawnAgy(this.#binaryPath, args, this.#workingDirectory, this.#options.env);
+      ? this.#options.spawnProcess(this.#binaryPath, args, turnEnv)
+      : spawnAgy(this.#binaryPath, args, this.#workingDirectory, turnEnv);
     this.#current = turnProcess;
 
     turnProcess.onExit((code) => {
@@ -296,12 +344,12 @@ export class AgySession implements EngineSession {
       '--output-format',
       'stream-json',
       ...(this.#options.skipPermissions ? ['--dangerously-skip-permissions'] : []),
-      ...conversation,
+      ...(conversation),
       ...(this.#options.args ?? []),
-      // Standing instructions are delivered to the working directory before this
-      // turn starts (`contract-file.ts`), never injected into argv: `agy` has no
-      // system-prompt flag and prepending the contract to the prompt would make
-      // it per-turn user content.
+      // Standing instructions are delivered through `agy`'s config hook before
+      // this turn starts (`agy-contract-hook.ts`), never injected into argv:
+      // `agy` has no system-prompt flag and prepending the contract to the prompt
+      // would make it per-turn user content.
       //
       // Under shell:true (Windows .cmd shim) node joins argv into one command
       // line that cmd.exe re-parses, so the joined form needs Windows quoting
@@ -334,6 +382,20 @@ export class AgySession implements EngineSession {
     this.#settle?.({ status: 'interrupted' });
     this.#current?.kill();
     this.#current = undefined;
+    removeAgyContractPayload(this.#contractPayloadPath);
+  }
+
+  /**
+   * The environment for a turn.
+   *
+   * The contract env var is merged over the adapter's configured environment so
+   * the hook selects this run's payload. When the adapter was given no explicit
+   * environment, the payload variable is added to the inherited environment
+   * rather than replacing it, so `agy` still finds its own configuration.
+   */
+  #turnEnv(): NodeJS.ProcessEnv | undefined {
+    if (Object.keys(this.#contractEnv).length === 0) return this.#options.env;
+    return { ...(this.#options.env ?? process.env), ...this.#contractEnv };
   }
 }
 

@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
 import { EnvironmentPool } from '../environment/pool.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from '../engine/scripted.ts';
-import type { AgentRunEvent } from '../engine/port.ts';
+import type { AgentRunEvent, ContractDelivery } from '../engine/port.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { AgentRegistry } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
@@ -37,6 +37,8 @@ interface ConnectedWorker {
   readonly worker: EnvironmentWorker;
   /** Requests the worker received, in order, as seen on the wire. */
   readonly requests: readonly string[];
+  /** Lines the worker reported through `onLog`. */
+  readonly logs: readonly string[];
   /** Simulates the carrier's channel dying. */
   killChannel(): void;
 }
@@ -54,10 +56,12 @@ async function connectedWorker(options: {
   refuseStartKey?: string;
   knownSessionKeys?: readonly string[];
   staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
+  contractDelivery?: ContractDelivery;
 }): Promise<ConnectedWorker> {
   const coreToWorker = new PassThrough();
   const workerToCore = new PassThrough();
   const requests: string[] = [];
+  const logs: string[] = [];
 
   const engine = new ScriptedEngineAdapter({
     turns: options.turns ?? [],
@@ -67,6 +71,9 @@ async function connectedWorker(options: {
       ? { knownSessionKeys: options.knownSessionKeys }
       : {}),
     ...(options.staleResumeKey !== undefined ? { staleResumeKey: options.staleResumeKey } : {}),
+    ...(options.contractDelivery !== undefined
+      ? { contractDelivery: options.contractDelivery }
+      : {}),
   });
 
   const worker = new EnvironmentWorker({
@@ -74,6 +81,7 @@ async function connectedWorker(options: {
     engines: new Map([['scripted', engine]]),
     input: coreToWorker,
     output: workerToCore,
+    onLog: (line) => logs.push(line),
   });
 
   let adapters = new Map<string, WorkerClient>();
@@ -106,6 +114,7 @@ async function connectedWorker(options: {
     engine,
     worker,
     requests,
+    logs,
     killChannel: () => {
       workerToCore.destroy();
       coreToWorker.destroy();
@@ -518,4 +527,44 @@ test('an empty non-refusal turn failure through the worker keeps the stored key'
     workingDirectory: '/tmp',
   });
   assert.equal(stored?.key, 'a-valid-key', 'the key survives an empty non-refusal failure');
+});
+
+test('a fallback contract delivery is reported, not silent', async (t) => {
+  // A working-directory engine that wrote the contract to Sprout's own file
+  // instead of the engine's `AGENTS.md` has still delivered it — but somewhere
+  // other than the primary channel. The worker must say so, so a user can tell
+  // where the contract actually went (the C21-002 fix).
+  const worker = await connectedWorker({
+    turns: [{ events: successEvents, result: { status: 'completed', text: 'done' } }],
+    contractDelivery: {
+      mechanism: 'sprout-contract-file',
+      path: '/tmp/work/SPROUT-PROJECT-CONTRACT.md',
+      agentsMdSkipped: 'user-owned',
+    },
+  });
+  t.after(() => worker.killChannel());
+
+  const { orchestrator } = buildOrchestrator(worker.adapters);
+  await orchestrator.waitFor((await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' })).id);
+
+  const reported = worker.logs.find((line) => line.includes('project contract'));
+  assert.ok(reported, 'the fallback delivery is reported');
+  assert.match(reported, /Sprout's own file/);
+  assert.match(reported, /SPROUT-PROJECT-CONTRACT\.md/);
+});
+
+test('a skipped contract delivery is reported as not delivered', async (t) => {
+  const worker = await connectedWorker({
+    turns: [{ events: successEvents, result: { status: 'completed', text: 'done' } }],
+    contractDelivery: { mechanism: 'skipped-unreadable', path: '/tmp/work/AGENTS.md' },
+  });
+  t.after(() => worker.killChannel());
+
+  const { orchestrator } = buildOrchestrator(worker.adapters);
+  await orchestrator.waitFor((await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' })).id);
+
+  const reported = worker.logs.find((line) => line.includes('project contract'));
+  assert.ok(reported, 'the skip is reported');
+  assert.match(reported, /was not delivered/);
+  assert.match(reported, /could not be read/);
 });

@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { AgyEngineAdapter, AgySession } from './agy.ts';
-import { CONTRACT_FILE_MARKER } from './contract-file.ts';
+import { AGY_CONTRACT_HOOK_NAME, AGY_CONTRACT_PAYLOAD_ENV } from './agy-contract-hook.ts';
 import type { AgentRunEvent } from './port.ts';
 
 /**
@@ -129,6 +129,9 @@ function adapterFor(onRun: (process: FakeAgyProcess) => void, options: Record<st
   const argv: string[][] = [];
   const adapter = new AgyEngineAdapter({
     binaryPath: '/usr/bin/true',
+    // Tests never touch the operator's real agy configuration.
+    configDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-config-')),
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
     ...(options.skipPermissions === true ? { skipPermissions: true } : {}),
     spawnProcess: (_binary, args) => {
       argv.push([...args]);
@@ -200,16 +203,29 @@ test('skipPermissions is opt-in and comes before --print', async () => {
   assert.ok(args.indexOf('--dangerously-skip-permissions') < args.indexOf('--print=go'));
 });
 
-test('agy has no system-prompt flag, so the contract is delivered to the working directory', async () => {
-  // `agy 1.2.2` has no system-prompt surface at all: `--append-system-prompt`
-  // does not exist. The adapter therefore delivers the assembled project contract
-  // as a Sprout-owned file in the run's working directory, never on argv and
-  // never prepended to the prompt as per-turn user content.
-  const dir = mkdtempSync(join(tmpdir(), 'sprout-agy-contract-'));
-  const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'ok'));
+test('agy has no system-prompt flag, so the contract is injected through its config hook', async () => {
+  // `agy 1.2.2` has no system-prompt surface (`--append-system-prompt` does not
+  // exist) *and* does not read a project `AGENTS.md` in headless mode, so the
+  // adapter installs a `SessionStart` hook in agy's global customization root
+  // that injects the contract as an ephemeral system message. Nothing
+  // contract-shaped ever reaches argv or the prompt.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const payloadDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-payload-'));
+  const argv: string[][] = [];
+  let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory,
+    spawnProcess: (_binary, args, env) => {
+      argv.push([...args]);
+      spawnedEnv = env;
+      return new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok'));
+    },
+  });
   const session = await adapter.startSession({
     agentId: 'scout',
-    workingDirectory: dir,
+    workingDirectory: '/tmp',
     instructions: 'You are Scout.',
   });
   await collect(session.run('go').events);
@@ -221,12 +237,46 @@ test('agy has no system-prompt flag, so the contract is delivered to the working
   );
   assert.ok(!args.includes('You are Scout.'), 'instructions are not injected into argv');
 
-  // The contract reached agy's only channel: a Sprout-owned file in the working
-  // directory it executes in.
-  const written = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
-  assert.ok(written.startsWith(CONTRACT_FILE_MARKER), 'the file is Sprout-owned');
-  assert.match(written, /You are Scout\./);
-  assert.equal(session.contractDelivery?.mechanism, 'agents.md');
+  // The hook is installed and carries the contract payload; the run is spawned
+  // with the env var that selects that payload.
+  const hooks = JSON.parse(readFileSync(join(configDirectory, 'hooks.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  assert.ok(hooks[AGY_CONTRACT_HOOK_NAME], 'the Sprout contract hook is registered');
+  assert.equal(session.contractDelivery?.mechanism, 'engine-hook');
+  const payloadPath = spawnedEnv?.[AGY_CONTRACT_PAYLOAD_ENV];
+  assert.ok(payloadPath, 'the run is spawned with the env var selecting its contract payload');
+  assert.match(
+    readFileSync(payloadPath, 'utf8'),
+    /You are Scout\./,
+    'the payload carries the assembled contract',
+  );
+
+  await session.close();
+});
+
+test('the contract hook is inert without the payload env var', async () => {
+  // The hook always runs for agy; it must do nothing unless Sprout set the env
+  // var for this run, so installing it cannot affect agy runs Sprout did not
+  // start.
+  const configDirectory = mkdtempSync(join(tmpdir(), 'sprout-agy-config-'));
+  const adapter = new AgyEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    configDirectory,
+    payloadDirectory: mkdtempSync(join(tmpdir(), 'sprout-agy-payload-')),
+    spawnProcess: () => new FakeAgyProcess((process) => replaySuccessfulTurn(process, 'ok')),
+  });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  await collect(session.run('go').events);
+
+  assert.equal(session.contractDelivery, undefined, 'no contract, no delivery reported');
+  assert.equal(
+    existsSync(join(configDirectory, 'hooks.json')),
+    false,
+    'no hook is installed when there is no contract',
+  );
+  await session.close();
 });
 
 test('the conversation id from the init frame is reused on the next turn', async () => {
@@ -363,4 +413,8 @@ test('agy declares incremental streaming and its own id', () => {
   assert.equal(adapter.id, 'agy');
   assert.equal(adapter.capabilities.streaming, 'incremental');
   assert.equal(adapter.capabilities.supportsInterrupt, true);
+  // `agy` has no system-prompt flag, but it does take instructions through its
+  // config hook as an injected system message, which is out-of-band, not a file
+  // the engine discovers.
+  assert.equal(adapter.capabilities.standingInstructions, 'out-of-band');
 });

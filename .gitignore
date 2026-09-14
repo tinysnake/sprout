@@ -16,8 +16,8 @@ codexhome/
 *.db
 *.db-journal
 sprout.db
-# The project contract a working-directory engine (agy, opencode) reads. Sprout
-# writes it at run time when the directory's AGENTS.md is not already ours.
+# The fallback contract file a working-directory engine (opencode) reads when
+# the directory's own AGENTS.md belongs to the user. Sprout writes it at run time.
 SPROUT-PROJECT-CONTRACT.md
 
 # Editor and OS noise

@@ -130,12 +130,21 @@ function priorRuns(
 }
 
 /**
+ * How the hand-off opens, so a reader knows it is prior-work context and not a
+ * user request. Chosen so the shortest useful hand-off still states the move.
+ */
+function moveNotice(previousEnvironmentInstanceId: string): string {
+  return `This run continues prior work after a move from environment instance ${previousEnvironmentInstanceId}.`;
+}
+
+/**
  * Build the fact-form hand-off for a run moving to a different environment.
  *
  * Returns `undefined` when there is nothing to hand off. The text is bounded in
  * both entry count and characters; entries are considered newest first and the
  * budget is consumed in that order, so the result depends only on the records and
- * the options.
+ * the options. The bound applies to *every* outcome, including the no-result
+ * notice, so an unusually small `maxCharacters` can never be exceeded.
  */
 export function buildHandOffContext(
   runs: readonly AgentRun[],
@@ -169,10 +178,12 @@ export function buildHandOffContext(
 
   if (entries.length === 0) {
     // A prior run exists but left no fact-form result (e.g. it was interrupted
-    // before settling). The environment change is still worth stating.
+    // before settling). The environment change is still worth stating, but the
+    // notice is bounded like any entry so a tiny budget is honoured rather than
+    // silently exceeded.
     return {
       previousEnvironmentInstanceId: previous.environmentInstanceId,
-      text: `This run continues work after a move to a different environment instance (was ${previous.environmentInstanceId}). No earlier result is available to summarise.`,
+      text: bound(moveNotice(previous.environmentInstanceId), maxCharacters),
       sourceRunIds: [],
     };
   }
@@ -208,9 +219,15 @@ function factFor(run: AgentRun): string | undefined {
 
 /** Collapse whitespace and bound length, so one result cannot dominate the budget. */
 function bounded(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  if (collapsed.length <= MAX_ENTRY_CHARACTERS) return collapsed;
-  return `${collapsed.slice(0, MAX_ENTRY_CHARACTERS - 1)}…`;
+  return bound(text.replace(/\s+/g, ' ').trim(), MAX_ENTRY_CHARACTERS);
+}
+
+/** Truncate to `limit` characters with an ellipsis when it does not fit. */
+function bound(text: string, limit: number): string {
+  if (limit <= 0) return '';
+  if (text.length <= limit) return text;
+  if (limit === 1) return '…';
+  return `${text.slice(0, limit - 1)}…`;
 }
 
 /**
