@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +12,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 import { SqliteStore } from '../run/sqlite-store.ts';
 import type { AgentRun } from '../run/model.ts';
 import { InMemoryTaskStore } from './store.ts';
-import { DurableWriteCrash, TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
+import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { Task } from './model.ts';
 
 const definition: EnvironmentDefinition = { id: 'mac', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
@@ -33,6 +34,70 @@ function build(options: { worker?: TaskContextWorker; store?: InMemoryTaskStore;
   const submitted: { runId: string }[] = [];
   const lifecycle = new TaskEnvironmentLifecycle({ store, pool, agents, projects, ...(options.worker !== undefined ? { worker: options.worker } : {}), ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' }, runs: { submit: async (request) => { submitted.push({ runId: request.runId }); return { id: request.runId }; } } });
   return { store, pool, lifecycle, submitted };
+}
+
+function sqliteLifecycle(store: SqliteStore, options: { leaseId?: string; runId?: () => string } = {}) {
+  const pool = new EnvironmentPool({
+    definitions: [definition],
+    instances: [instance],
+    store: store.leases,
+    idFactory: () => options.leaseId ?? 'lease-1',
+  });
+  const lifecycle = new TaskEnvironmentLifecycle({
+    store: store.tasks,
+    pool,
+    agents,
+    projects,
+    ids: {
+      task: () => 'task',
+      message: () => 'message',
+      lease: () => options.leaseId ?? 'lease-1',
+      run: options.runId ?? (() => 'run-1'),
+    },
+    runs: { submit: async (request) => ({ id: request.runId }) },
+  });
+  return { lifecycle, pool };
+}
+
+/**
+ * Exercise the real process-death path rather than throwing into a caller that
+ * still owns the SQLite connection.  The hook runs immediately after its
+ * transaction commits, so an exit here leaves the exact durable boundary for
+ * the next Sprout process to recover.
+ */
+function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void {
+  const exitCode = boundary === 'begin' ? 91 : 92;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { AgentRegistry } from './src/agent/registry.ts';
+    import { EnvironmentPool } from './src/environment/pool.ts';
+    import { ProjectRegistry } from './src/project/registry.ts';
+    import { SqliteStore } from './src/run/sqlite-store.ts';
+    import { TaskEnvironmentLifecycle } from './src/task/environment-lifecycle.ts';
+
+    const store = new SqliteStore({ filename: ${JSON.stringify(filename)} });
+    const pool = new EnvironmentPool({
+      definitions: [{ id: 'mac', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] }],
+      instances: [{ id: 'mac-1', definitionId: 'mac', workingDirectory: '/work' }],
+      store: store.leases,
+      idFactory: () => 'lease-1',
+    });
+    const lifecycle = new TaskEnvironmentLifecycle({
+      store: store.tasks,
+      pool,
+      agents: new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]),
+      projects: new ProjectRegistry([{ id: 'project', goal: 'Goal', rules: [], availableEnvironmentInstanceIds: ['mac-1'], memberships: [{ agentId: 'pi', responsibilities: [], collaborationInstructions: '' }] }]),
+      ids: { task: () => 'task', message: () => 'message', lease: () => 'lease-1', run: () => 'run-1' },
+      runs: { submit: async (request) => ({ id: request.runId }) },
+      faults: ${boundary === 'begin'
+        ? `{ afterBeginningCommit: () => process.exit(${exitCode}) }`
+        : `{ afterTerminalCommit: () => process.exit(${exitCode}) }`},
+    });
+    await lifecycle.${boundary === 'begin' ? 'begin' : 'end'}('task-1');
+    process.exit(1);
+  `], { cwd: process.cwd(), encoding: 'utf8' });
+  assert.ifError(child.error);
+  assert.equal(child.signal, null, String(child.stderr));
+  assert.equal(child.status, exitCode, String(child.stderr));
 }
 
 test('begin binds a Task-owned non-expiring lease; nested settlement retains it and end releases after recycle', async () => {
@@ -76,78 +141,76 @@ test('interrupted nested work and restart retain exclusion until the owning Task
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
 });
 
-test('SQLite begin and ending crash windows restart as blocking recovery and accept idempotent retries', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-lease-'));
+test('crashed child begin/end boundaries retain idle Task ownership and make retries durable across SQLite restarts', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-lifecycle-crash-'));
   try {
     const filename = join(directory, 'sprout.db');
     const first = new SqliteStore({ filename });
-    const firstPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: first.leases, idFactory: () => 'lease-1' });
-    const prepareThenCrash: TaskContextWorker = { prepare: async () => { throw new Error('crash after prepare'); }, recycle: async () => {} };
-    const initial = new TaskEnvironmentLifecycle({ store: first.tasks, pool: firstPool, agents, projects, worker: prepareThenCrash, runs: { submit: async () => ({ id: 'never' }) } });
     await first.tasks.create(task());
-    await assert.rejects(initial.begin('task-1'), /crash after prepare/);
     first.close();
+    crashLifecycleChild(filename, 'begin');
 
-    const restarted = new SqliteStore({ filename });
-    const restartPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: restarted.leases, idFactory: () => 'lease-2' });
-    const resumed = new TaskEnvironmentLifecycle({ store: restarted.tasks, pool: restartPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) } });
-    await resumed.reconcile();
-    assert.equal((await restarted.tasks.get('task-1'))?.environmentLifecycleState, 'recovery');
-    await resumed.recover('task-1', 'resume');
-    const endCrash = new TaskEnvironmentLifecycle({
-      store: restarted.tasks, pool: restartPool, agents, projects,
-      worker: { prepare: async () => {}, recycle: async () => { throw new Error('crash after recycle'); } },
-      runs: { submit: async () => ({ id: 'never' }) },
-    });
-    await assert.rejects(endCrash.end('task-1'), /crash after recycle/);
-    assert.equal((await restarted.tasks.get('task-1'))?.recoveryState, 'ending');
-    restarted.close();
-    const finalStore = new SqliteStore({ filename });
-    const finalPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: finalStore.leases, idFactory: () => 'lease-3' });
-    const finalLifecycle = new TaskEnvironmentLifecycle({ store: finalStore.tasks, pool: finalPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) } });
-    await finalLifecycle.reconcile();
-    const one = await finalLifecycle.recover('task-1', 'discard');
-    const two = await finalLifecycle.recover('task-1', 'discard');
-    assert.equal(one.environmentLifecycleState, 'discarded');
-    assert.equal(two.environmentLifecycleState, 'discarded');
-    finalStore.close();
+    const second = new SqliteStore({ filename });
+    const resumed = sqliteLifecycle(second);
+    await resumed.lifecycle.reconcile();
+    assert.equal((await second.tasks.get('task-1'))?.environmentLeaseId, 'lease-1');
+    assert.equal(resumed.pool.getLease('lease-1')?.state, 'recovering');
+    assert.equal((await resumed.lifecycle.recover('task-1', 'resume')).environmentLifecycleState, 'idle');
+    // Retrying begin after its crash is idempotent: it keeps the original lease.
+    assert.equal((await resumed.lifecycle.begin('task-1')).environmentLeaseId, 'lease-1');
+    await second.tasks.create(task('task-2'));
+    second.close();
+
+    const idleRestart = new SqliteStore({ filename });
+    const idle = sqliteLifecycle(idleRestart, { leaseId: 'lease-2' });
+    assert.equal((await idleRestart.tasks.get('task-1'))?.environmentLifecycleState, 'idle');
+    assert.equal(idle.pool.getLease('lease-1')?.state, 'active');
+    await assert.rejects(idle.lifecycle.begin('task-2'), /unavailable/);
+    idleRestart.close();
+
+    crashLifecycleChild(filename, 'end');
+    const final = new SqliteStore({ filename });
+    const ended = await final.tasks.get('task-1');
+    assert.equal(ended?.environmentLifecycleState, 'ended');
+    const terminal = sqliteLifecycle(final);
+    assert.equal(terminal.pool.getLease('lease-1')?.state, 'released');
+    assert.equal((await terminal.lifecycle.end('task-1')).environmentLifecycleState, 'ended');
+    assert.equal((await terminal.lifecycle.end('task-1')).environmentLifecycleState, 'ended');
+    final.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('durable begin/end fault boundaries recover across SQLite restart without an unowned lease', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-durable-fault-'));
+test('SQLite restart recovers an interrupted nested run, retains exclusion, and admits one concurrent owner retry', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-nested-restart-'));
   try {
     const filename = join(directory, 'sprout.db');
     const first = new SqliteStore({ filename });
-    const firstPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: first.leases, idFactory: () => 'lease-1' });
+    const initial = sqliteLifecycle(first);
     await first.tasks.create(task());
-    const crashAfterBeginCommit = new TaskEnvironmentLifecycle({
-      store: first.tasks, pool: firstPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) },
-      faults: { afterBeginningCommit: () => { throw new DurableWriteCrash('simulated process crash after beginning commit'); } },
-    });
-    await assert.rejects(crashAfterBeginCommit.begin('task-1'), /simulated process crash/);
+    await initial.lifecycle.begin('task-1');
+    await initial.lifecycle.advanceRun('task-1', 'pi', 'first');
     first.close();
 
-    const second = new SqliteStore({ filename });
-    const secondPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: second.leases, idFactory: () => 'lease-2' });
-    const resumed = new TaskEnvironmentLifecycle({ store: second.tasks, pool: secondPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) } });
-    await resumed.reconcile();
-    assert.equal((await second.tasks.get('task-1'))?.environmentLeaseId, 'lease-1');
-    assert.equal(secondPool.getLease('lease-1')?.holderKind, 'task');
-    await resumed.recover('task-1', 'resume');
-    const crashAfterEndCommit = new TaskEnvironmentLifecycle({
-      store: second.tasks, pool: secondPool, agents, projects, runs: { submit: async () => ({ id: 'never' }) },
-      faults: { afterTerminalCommit: () => { throw new DurableWriteCrash('simulated process crash after terminal commit'); } },
-    });
-    await assert.rejects(crashAfterEndCommit.end('task-1'), /simulated process crash/);
-    second.close();
+    const restarted = new SqliteStore({ filename });
+    let nextRun = 0;
+    const recovered = sqliteLifecycle(restarted, { runId: () => `run-${++nextRun}` });
+    await recovered.lifecycle.reconcile();
+    const interrupted = await restarted.tasks.get('task-1');
+    assert.equal(interrupted?.environmentLifecycleState, 'recovery');
+    assert.equal(interrupted?.recoveryState, 'running');
+    assert.equal(recovered.pool.getLease('lease-1')?.state, 'recovering');
+    const competing = recovered.pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'task-2', taskId: 'task-2', ttlMs: 1 });
+    assert.equal(competing.ok, false);
 
-    const final = new SqliteStore({ filename });
-    const finalPool = new EnvironmentPool({ definitions: [definition], instances: [instance], store: final.leases });
-    const ended = await final.tasks.get('task-1');
-    assert.equal(ended?.environmentLifecycleState, 'ended');
-    assert.equal(finalPool.getLease('lease-1')?.state, 'released');
-    final.close();
+    assert.equal((await recovered.lifecycle.recover('task-1', 'resume')).environmentLifecycleState, 'blocked');
+    const attempts = await Promise.allSettled([
+      recovered.lifecycle.advanceRun('task-1', 'pi', 'retry one'),
+      recovered.lifecycle.advanceRun('task-1', 'pi', 'retry two'),
+    ]);
+    assert.equal(attempts.filter((attempt) => attempt.status === 'fulfilled').length, 1);
+    assert.equal(attempts.filter((attempt) => attempt.status === 'rejected').length, 1);
+    assert.equal((await restarted.tasks.get('task-1'))?.environmentLifecycleState, 'running');
+    restarted.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
