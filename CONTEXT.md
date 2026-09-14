@@ -28,12 +28,16 @@ _Avoid_: Prompt, chat agreement
 The relationship that gives a human or agent its responsibilities and collaboration instructions within one project.
 _Avoid_: Agent role
 
+**Project workspace**:
+The persistent working area of one project inside one environment instance: the repository, project rules, IDE state, build results, and caches. It outlives any one Task or agent run, and successive Tasks in the same project and environment reuse it.
+_Avoid_: Environment instance, Task context directory
+
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent
 
 **Agent run**:
-One bounded activation of an agent in response to a message, task, or system event.
+One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
 _Avoid_: Agent, task
 
 **Session key**:
@@ -49,8 +53,24 @@ The lower-cost model that decides whether a project-channel message should start
 _Avoid_: Cerebellum, small model
 
 **Task**:
-A durable unit of multi-run or automated work that preserves its goal, state, constraints, and results across agent runs.
+A durable unit of multi-run or automated work that preserves its goal, state, constraints, and results across agent runs. A Task owns one environment lease for its whole duration.
 _Avoid_: Message, agent run
+
+**Task begin**:
+The explicit act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
+_Avoid_: Start, first agent run
+
+**Task end**:
+The explicit act that has the environment worker recycle the Task context directory and then releases the Task lease. Only Task end ends a Task's hold on its environment; a failed, stopped, or interrupted agent run does not.
+_Avoid_: Stop, cancel
+
+**Task lease**:
+The one environment lease a Task holds from Task begin to Task end, covering idle, blocked, and human-validation gaps. Agent runs nested inside the Task reuse it and neither acquire nor release it.
+_Avoid_: Run lease, lock
+
+**Task context directory**:
+The Sprout-owned scratch directory an environment's worker creates when a Task begins and recycles when it ends. Only Task-scoped temporary data belongs here; the Project workspace is not recycled with it.
+_Avoid_: Project workspace, working directory
 
 **Environment definition**:
 A description of a kind of work environment, including its declared capabilities, platform, capacity, and provisioning mode.
@@ -69,9 +89,9 @@ The Sprout-owned process inside one environment instance that starts and supervi
 _Avoid_: Agent, daemon, backend
 
 **Environment lease**:
-A time-bounded right for an agent run to use an environment instance's lease-requiring capabilities. Uncommitted working files remain with the lease until preserved or discarded.
+A time-bounded right to use an environment instance's lease-requiring capabilities, held either by a durable Task or by a one-round agent run. Uncommitted working files remain with the lease until preserved or discarded.
 _Avoid_: Agent environment, lock
 
 **Lease recovery**:
-The state an environment instance enters after a lease expires or its holder dies, during which the instance is not reassignable until its uncommitted work is captured or discarded.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until its holder or an operator explicitly resolves it. An unfinished Task's lease stays reserved through recovery and is never silently reassigned.
 _Avoid_: Cleanup, lock timeout
