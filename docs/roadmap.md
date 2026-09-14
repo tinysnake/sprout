@@ -177,14 +177,31 @@ Project contracts and Agent context remain coherent when the same Agent works ac
 
 All four engines can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
 
-**Active development map**: [#24](https://github.com/tinysnake/sprout/issues/24) starts with the collaboration write-path and wake-contract prototype in #25; production Message, channel, and Task tickets remain intentionally unplanned until that evidence resolves the current transport and delivery fog.
+**Active development map**: [#24](https://github.com/tinysnake/sprout/issues/24) advances O6 through a deliberately narrowed same-environment slice: one Task owns one macOS Environment lease from explicit Task begin through explicit Task end, while independent Pi- and Codex-backed Agents work sequentially inside that retained environment and share the persistent Project workspace plus bounded durable Task facts. Agent runs are nested activities; their completion, stop, failure, or idle gaps never release the Task lease. The map's remaining tickets (#30–#36) cover a Project-scope correctness fix, the Task-held-lease/nested-run interface prototype, production retained leases and Worker-owned Task context, Web controls, two live rounds, and the closing review.
+
+**Accepted evidence (#25–#28)**:
+
+- **#25** settled the M1 collaboration write path as **automatic final-result projection** and the deterministic, fail-open wake contract, proven by a disposable prototype and recorded in [`docs/research/collaboration-write-path.md`](research/collaboration-write-path.md).
+- **#26** accepted the production collaboration plane: durable `Message` and `WakeRequest` rows in Sprout's primary SQLite database, the M1 wake contract dispatching `AgentRun`s, one Agent-authored reply per completed run with `inReplyTo` pointing at its causal input, strict exclusion of private run events from conversation, idempotent restart reconciliation, and an observable HTTP boundary.
+- **#27** accepted Web collaboration observability: the project channel with human/agent styling, causal reply links, wake-request inspection (target, status, reason, run link), suppression/failure observations, a composer, and the existing run controls.
+- **#28** accepted a durable Task entity and multi-run advancement lifecycle in SQLite with bounded prior-run summaries, Project scoping, non-member refusal, a single active linked run per Task (HTTP 409 on concurrent advance), and Task environment preference.
+
+#25–#28 are **not** by themselves O6. They prove the collaboration plane and the durable Task entity, but production still acquires and releases a Lease per Agent run. It does not yet retain one Environment for an unfinished Task, prepare Worker-owned Task context, or expose explicit Task begin/end controls; that is the work the map's remaining tickets carry.
+
+**Domain decision recorded**: [ADR-0005](adr/0005-task-held-environment-lease.md) reconciles the vocabulary and architecture around a Task-held Environment lease: one Task retains exclusive use of one Environment from begin through end (including idle, blocked, and human-validation periods), timeout or interruption may never silently make it reassignable, only Task-scoped temporary data is recycled while the Project workspace, repository, IDE state, and caches persist, and the outer Task begin→end lifecycle is distinguished from each nested Agent-run lifecycle.
 
 **Outcome checks**:
 
 - Direct messages and basic project-channel wake behaviour work as defined by the MVP.
+  - Evidenced by #25–#27 for the write path, wake contract, durability, restart reconciliation, and Web observability. Configuring a real low-cost wake model and deciding fan-out behaviour under lease contention remain open fog.
 - One-round work and durable tasks can both be represented.
+  - Evidenced by #26 (Message-completed one-round run) and #28 (durable multi-run Task), which are kept as distinct lifecycles. Retaining one Environment across a Task's runs is not yet implemented (ADR-0005, #31–#35).
 - Multiple Agents coordinate around the same project while environment leases remain correct.
+  - Partly evidenced: sequential Agents already coordinate through the project channel, and #28 links multiple runs to one Task. The Task-held Lease that makes a multi-Agent Task share one retained Environment without conflict is decided (ADR-0005) but not implemented or live-validated; the map's live slice requires exactly Pi → Codex → Pi and Codex → Pi → Codex on one macOS Environment.
 - A human can observe, stop, and correct their runs.
+  - Evidenced by #27 for observing and stopping runs; explicit Task begin/end and recovery-resolution controls are not yet built (#34).
+
+**Deferred breadth (not claimed by this map)**: `agy`/`opencode` collaboration, container/Windows collaboration, and cross-environment Task movement. Live validation is macOS-only with Pi and Codex.
 
 ### O7 — Real game-development MVP validation
 
@@ -211,7 +228,7 @@ O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation m
 
 O5 is **Evidenced**: durable project membership resolves an Agent's environment without binding its identity to one; native session keys continue only in their full environment slot; and deterministic project contracts plus privacy-preserving hand-off carry the relevant context across environments ([#18](https://github.com/tinysnake/sprout/issues/18), [#20](https://github.com/tinysnake/sprout/issues/20), [#21](https://github.com/tinysnake/sprout/issues/21)).
 
-The active frontier is **O6 — Multi-agent collaboration**, advanced by development map [#24](https://github.com/tinysnake/sprout/issues/24). No O6 implementation or acceptance evidence is asserted yet.
+The active frontier is **O6 — Multi-agent collaboration**, advanced by development map [#24](https://github.com/tinysnake/sprout/issues/24). #25–#28 are accepted and recorded above; the retained Task-held lease, Worker-owned Task context, and two-round macOS/Pi/Codex live validation remain unproven, so O6 stays **In progress** and is not claimed as Evidenced.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 

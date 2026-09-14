@@ -25,7 +25,7 @@ Sprout does not develop in a vacuum. Two open-source MIT repositories are standi
 - **Repository**: <https://github.com/paperclipai/paperclip>
 - **License**: MIT
 - **What it is**: an open-source app for managing agents at work (teams, projects, agent management).
-- **Absorbed so far**: none yet. Expected reference areas: team/project/agent permission models, agent run management, and task organisation. It has no equivalent to Sprout's environment lease model, so that area remains Sprout-original.
+- **Absorbed so far**: the separation of a durable project workspace from a temporary per-work execution area, adopted as design (no code) by ADR-0005, consulted at `d351e08deee1b49d3467a950d1a3f01131943441`. Expected reference areas: team/project/agent permission models, agent run management, and task organisation. It has no equivalent to Sprout's environment lease model, so that area remains Sprout-original.
 
 ### AionUi
 
