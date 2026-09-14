@@ -22,6 +22,14 @@ export interface AgentRun {
   readonly environmentInstanceId: string;
   /** The project whose environment set produced `environmentInstanceId`. */
   readonly projectId?: string;
+  /**
+   * The durable Task this run advances, when it is a Task run (#28).
+   *
+   * Absent for a one-round Message run. A Task is not a Message and a Message is
+   * not a Task: this link is the only place the two lifecycles meet, and it never
+   * makes one wrap the other.
+   */
+  readonly taskId?: string;
   readonly status: AgentRunStatus;
   readonly events: readonly AgentRunEvent[];
   /**

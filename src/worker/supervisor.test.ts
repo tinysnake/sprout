@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import type { EngineAdapter, EngineSession, EngineTurn, StartSessionRequest } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
 import type { WorkerConnection } from './carrier.ts';
+import { WorkerContextClient } from './client.ts';
+import { PassThrough } from 'node:stream';
+import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { EnvironmentWorkerRegistry, WorkerSupervisor } from './supervisor.ts';
 
 /**
@@ -12,6 +15,7 @@ import { EnvironmentWorkerRegistry, WorkerSupervisor } from './supervisor.ts';
 class FakeConnection implements WorkerConnection {
   readonly info: { pid: number; environmentInstanceId: string; engines: [] };
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  readonly contexts = new WorkerContextClient(new LineJsonRpcTransport({ input: new PassThrough(), output: new PassThrough() }));
   #alive = true;
   closes = 0;
 

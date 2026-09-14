@@ -9,6 +9,9 @@ import { AgentRegistry, type AgentDefinition } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import type { WorkerConnection } from '../worker/carrier.ts';
+import { WorkerContextClient } from '../worker/client.ts';
+import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
+import { PassThrough } from 'node:stream';
 import { EnvironmentWorkerRegistry } from '../worker/supervisor.ts';
 import { InMemoryRunStore } from './store.ts';
 import { RunOrchestrator } from './orchestrator.ts';
@@ -21,6 +24,9 @@ import { RunOrchestrator } from './orchestrator.ts';
 class FakeWorkerConnection implements WorkerConnection {
   readonly info: { pid: number; environmentInstanceId: string; engines: [] };
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  readonly contexts = new WorkerContextClient(
+    new LineJsonRpcTransport({ input: new PassThrough(), output: new PassThrough() }),
+  );
   #alive = true;
 
   constructor(instanceId: string, adapter: EngineAdapter) {

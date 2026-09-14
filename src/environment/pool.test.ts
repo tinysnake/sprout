@@ -86,6 +86,21 @@ test('releasing a lease makes the instance acquirable again', () => {
   assert.equal(second.ok, true);
 });
 
+test('a restarted pool does not reuse the id of a released durable lease', () => {
+  const store = new InMemoryLeaseStore();
+  const firstPool = new EnvironmentPool({ definitions: [macDefinition], instances: [macInstance], store });
+  const first = firstPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'agent-a', ttlMs: 60_000 });
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  firstPool.releaseLease(first.lease.id);
+
+  const restartedPool = new EnvironmentPool({ definitions: [macDefinition], instances: [macInstance], store });
+  const second = restartedPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'agent-b', ttlMs: 60_000 });
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.notEqual(second.lease.id, first.lease.id);
+});
+
 test('an expired lease stops blocking its instance', () => {
   const { pool, advance } = poolAt(1_000);
   pool.acquireLease({

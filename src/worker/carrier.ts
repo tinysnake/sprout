@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 
 import { LineJsonRpcTransport, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import type { EngineAdapter } from '../engine/port.ts';
-import { WorkerClient } from './client.ts';
+import { WorkerClient, WorkerContextClient } from './client.ts';
 import type { WorkerInfo } from './protocol.ts';
 
 /**
@@ -27,6 +27,8 @@ export interface WorkerConnection {
   readonly info: WorkerInfo;
   /** One adapter per engine the worker hosts, keyed by engine id. */
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  /** Worker-owned persistent Project workspace and Task context operations. */
+  readonly contexts: WorkerContextClient;
   /** Whether this connection is still usable. False once the channel died. */
   readonly alive: boolean;
   /** End the carrier and fail anything still in flight. */
@@ -184,6 +186,7 @@ async function connectEndpoint(options: {
   return {
     info: connected.info,
     adapters,
+    contexts: new WorkerContextClient(holder.transport),
     get alive() {
       for (const adapter of adapters.values()) {
         if ((adapter as { alive?: boolean }).alive === false) return false;
@@ -197,9 +200,10 @@ async function connectEndpoint(options: {
 async function connectWorkerTransport(transport: JsonRpcTransport): Promise<{
   readonly info: WorkerInfo;
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
+  readonly contexts: WorkerContextClient;
 }> {
   const connected = await WorkerClient.connect(transport);
-  return { info: connected.info, adapters: connected.adapters };
+  return { info: connected.info, adapters: connected.adapters, contexts: new WorkerContextClient(transport) };
 }
 
 function waitForReady(

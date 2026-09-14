@@ -17,6 +17,9 @@ import {
   WORKER_NOTIFICATIONS,
   type RunResult,
   type StartSessionResult,
+  type PrepareTaskContextResult,
+  type RecycleTaskContextParams,
+  type TaskContextMaterialization,
   type TurnEventParams,
   type TurnSettledParams,
   type WorkerInfo,
@@ -122,6 +125,7 @@ export class WorkerClient implements EngineAdapter {
           engine: this.id,
           agentId: request.agentId,
           workingDirectory: request.workingDirectory,
+          ...(request.projectWorkspaceId !== undefined ? { projectWorkspaceId: request.projectWorkspaceId } : {}),
           ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
           ...(request.resumeSessionKey !== undefined
             ? { resumeSessionKey: request.resumeSessionKey }
@@ -158,6 +162,23 @@ export class WorkerClient implements EngineAdapter {
         return () => this.#live.delete(handler);
       },
     );
+  }
+}
+
+/** Core-side client for the Worker-owned workspace/context operations. */
+export class WorkerContextClient {
+  readonly #transport: JsonRpcTransport;
+
+  constructor(transport: JsonRpcTransport) {
+    this.#transport = transport;
+  }
+
+  prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
+    return this.#transport.request(WORKER_METHODS.prepareTaskContext, input);
+  }
+
+  recycle(input: RecycleTaskContextParams): Promise<void> {
+    return this.#transport.request(WORKER_METHODS.recycleTaskContext, input);
   }
 }
 

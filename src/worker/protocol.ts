@@ -25,6 +25,10 @@ export const WORKER_METHODS = {
   interrupt: 'session/interrupt',
   /** Tear down a session and its engine process. */
   close: 'session/close',
+  /** Materialize one Task's owned context below its Project workspace. */
+  prepareTaskContext: 'context/prepare',
+  /** Verify and recycle one owned Task context. */
+  recycleTaskContext: 'context/recycle',
 } as const;
 
 export const WORKER_NOTIFICATIONS = {
@@ -74,6 +78,7 @@ export interface StartSessionParams {
   readonly engine: string;
   readonly agentId: string;
   readonly workingDirectory: string;
+  readonly projectWorkspaceId?: string;
   readonly instructions?: string;
   /**
    * The engine-native key of the conversation this session should continue.
@@ -83,6 +88,36 @@ export interface StartSessionParams {
    * this run; the worker does not look one up itself.
    */
   readonly resumeSessionKey?: string;
+}
+
+/** Portable facts the Worker renders into Sprout-owned context files. */
+export interface TaskContextMaterialization {
+  readonly projectId: string;
+  readonly projectGoal: string;
+  readonly projectRules: readonly string[];
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly taskGoal: string;
+  readonly taskConstraints: readonly string[];
+  readonly taskStatus: string;
+  readonly priorRunSummaries: string;
+  readonly agentId: string;
+  readonly responsibilities: readonly string[];
+  readonly collaborationInstructions: string;
+  readonly environmentInstanceId: string;
+  readonly environmentLeaseId: string;
+}
+
+export interface PrepareTaskContextResult {
+  /** Relative paths only: portable, deterministic bootstrap text for engines. */
+  readonly bootstrapInstructions: string;
+}
+
+export interface RecycleTaskContextParams {
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly environmentInstanceId: string;
+  readonly environmentLeaseId: string;
 }
 
 export interface StartSessionResult {

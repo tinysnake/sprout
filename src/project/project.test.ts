@@ -116,7 +116,12 @@ test('an agent that is a member of several projects resolves against the first t
   const usable = sampleProject({ id: 'project-usable', availableEnvironmentInstanceIds: ['container-1'] });
 
   const resolution = resolveEnvironmentInstance([empty, usable], 'agent-run', pool());
-  assert.deepEqual(resolution, { ok: true, instanceId: 'container-1', projectId: 'project-usable' });
+  assert.deepEqual(resolution, {
+    ok: true,
+    instanceId: 'container-1',
+    projectId: 'project-usable',
+    preferred: false,
+  });
 });
 
 test('resolution uses the project environment order, not the pool order', () => {
@@ -152,4 +157,70 @@ test('resolution refuses precisely when no project or no environment can serve t
     pool(),
   );
   assert.equal(lacking.ok, false);
+});
+
+test('an environment preference selects its instance over project order', () => {
+  const project = sampleProject();
+  const resolution = resolveEnvironmentInstance(
+    {
+      projects: [project],
+      capability: 'agent-run',
+      environmentPreference: { kind: 'instance', id: 'container-1' },
+    },
+    pool(),
+  );
+  assert.deepEqual(resolution, {
+    ok: true,
+    instanceId: 'container-1',
+    projectId: 'project-sprout',
+    preferred: true,
+  });
+});
+
+test('a definition preference selects the first granted instance of that kind', () => {
+  const resolution = resolveEnvironmentInstance(
+    {
+      projects: [sampleProject()],
+      capability: 'agent-run',
+      environmentPreference: { kind: 'definition', id: 'container-linux' },
+    },
+    pool(),
+  );
+  assert.equal(resolution.ok && resolution.instanceId, 'container-1');
+  assert.equal(resolution.ok && resolution.preferred, true);
+});
+
+test('an unmatched preference falls through to system matching', () => {
+  const resolution = resolveEnvironmentInstance(
+    {
+      projects: [sampleProject()],
+      capability: 'agent-run',
+      environmentPreference: { kind: 'instance', id: 'decommissioned-host' },
+    },
+    pool(),
+  );
+  assert.deepEqual(resolution, {
+    ok: true,
+    instanceId: 'mac-mini-1',
+    projectId: 'project-sprout',
+    preferred: false,
+  });
+});
+
+test('a preference for an ungranted instance cannot reach past the project set', () => {
+  const restricted = sampleProject({ availableEnvironmentInstanceIds: ['mac-mini-1'] });
+  const resolution = resolveEnvironmentInstance(
+    {
+      projects: [restricted],
+      capability: 'agent-run',
+      environmentPreference: { kind: 'instance', id: 'container-1' },
+    },
+    pool(),
+  );
+  assert.deepEqual(resolution, {
+    ok: true,
+    instanceId: 'mac-mini-1',
+    projectId: 'project-sprout',
+    preferred: false,
+  });
 });

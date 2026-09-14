@@ -109,6 +109,11 @@ export interface StartSessionRequest {
   /** The working directory inside the environment the run executes in. */
   readonly workingDirectory: string;
   /**
+   * A Worker-owned Project workspace.  The core names the portable Project id;
+   * only the Worker resolves that id to a host path before starting an engine.
+   */
+  readonly projectWorkspaceId?: string;
+  /**
    * Standing instructions assembled by the core, if the adapter accepts them.
    *
    * This is the project contract. An `out-of-band` adapter passes it to the

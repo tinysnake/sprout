@@ -8,10 +8,12 @@
     "node": ">=23"
   },
   "scripts": {
-    "test": "node --test 'src/**/*.test.ts'",
+    "test": "node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "start": "node src/main.ts",
     "smoke": "node scripts/live-smoke.ts",
+    "prototype:task-held-lease": "node scripts/prototype-task-held-lease.ts",
+    "probe:collaboration": "node scripts/probe-collaboration.ts",
     "web:build": "vite build",
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.5.1",
+    "jsdom": "^29.1.1",
     "typescript": "^5.6.0",
     "vite": "^7.0.0"
   }

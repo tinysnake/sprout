@@ -11,11 +11,15 @@ import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import { SqliteStore } from './run/sqlite-store.ts';
+import { CollaborationCoordinator } from './collaboration/coordinator.ts';
+import { TaskService } from './task/service.ts';
+import { TaskEnvironmentLifecycle } from './task/environment-lifecycle.ts';
 import { createRunApi } from './web/api.ts';
 import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
+import { parseRuntimeConfiguration } from './runtime-config.ts';
 
 /**
  * The M1 runtime entry point.
@@ -41,6 +45,7 @@ const workingDirectory = process.env.SPROUT_WORKDIR ?? projectRoot;
 const port = Number(process.env.SPROUT_PORT ?? 5174);
 const instanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
 const engineId = process.env.SPROUT_ENGINE ?? 'codex';
+const runtimeConfiguration = parseRuntimeConfiguration(process.env.SPROUT_RUNTIME_CONFIG);
 /** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
 const environmentKind = process.env.SPROUT_ENV_KIND ?? 'local';
 /** For a container environment: the instance's container name. */
@@ -198,7 +203,7 @@ const environmentInstances: readonly EnvironmentInstance[] = [
   },
 ];
 
-const agents: readonly AgentDefinition[] = [
+const defaultAgents: readonly AgentDefinition[] = [
   {
     id: 'scout',
     name: 'Scout',
@@ -209,6 +214,7 @@ const agents: readonly AgentDefinition[] = [
       'Answer the request directly and report what you observed.',
   },
 ];
+const agents: readonly AgentDefinition[] = runtimeConfiguration.agents ?? defaultAgents;
 
 /**
  * The default project.
@@ -216,7 +222,7 @@ const agents: readonly AgentDefinition[] = [
  * Its environment set is what a run's environment is resolved from, so adding an
  * instance here is what makes it usable — the agent no longer names a device.
  */
-const defaultProject: Project = {
+const sampleProject: Project = {
   id: process.env.SPROUT_PROJECT ?? 'sprout',
   goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
   rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
@@ -229,6 +235,7 @@ const defaultProject: Project = {
     },
   ],
 };
+const defaultProject: Project = runtimeConfiguration.project ?? sampleProject;
 
 const registry = new AgentRegistry(agents);
 const store = new SqliteStore({ filename: databasePath });
@@ -242,6 +249,21 @@ const projects = new ProjectRegistry([defaultProject]);
 // definitions. Additional projects can hydrate from the durable store, which is
 // the same store the runs and leases use (ADR-0002); in-memory entries win.
 await projects.load(store.projects);
+
+/**
+ * The durable Task service (#28).
+ *
+ * It shares the orchestrator (to submit Task runs) and the primary SQLite store
+ * (so Task rows and their run links survive a restart). The orchestrator is wired
+ * to it through the two small run-seam contracts rather than importing the Task
+ * service, so the Task and Message lifecycles stay independent.
+ *
+ * The service is declared first as a forward reference so the orchestrator's
+ * `onTaskRunSettled` option can close over the same instance it is given below.
+ */
+let tasks: TaskService;
+let taskLifecycle: TaskEnvironmentLifecycle;
+
 const orchestrator = new RunOrchestrator({
   // Resolved per run *for the resolved instance*, so a worker that died is
   // replaced before the next run instead of failing it against a dead channel
@@ -254,13 +276,63 @@ const orchestrator = new RunOrchestrator({
   // Durable engine session keys, so the same agent on the same environment and
   // working directory continues its prior conversation across runs (O5, #20).
   sessionKeys: store.sessionKeys,
+  // Durable multi-run Tasks (#28): the run seam assembles a Task run's context
+  // and reports its settlement back, without knowing the Task domain model.
+  tasks: {
+    prompt: (input) => tasks.prompt(input),
+    link: (input) => tasks.link(input),
+  },
+  onTaskRunSettled: (input) => tasks.onRunSettled(input),
   leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
+});
+
+taskLifecycle = new TaskEnvironmentLifecycle({
+  store: store.tasks,
+  pool,
+  agents: registry,
+  projects,
+  runs: orchestrator,
+  worker: {
+    prepare: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).prepare(input),
+    recycle: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).recycle(input),
+  },
+  leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
+});
+tasks = new TaskService({ store: store.tasks, runs: orchestrator, lifecycle: taskLifecycle });
+
+/**
+ * The collaboration coordinator: durable Messages, the M1 wake contract, and
+ * automatic final-result projection (#26).
+ *
+ * It shares the process's one SQLite database and the run orchestrator, so a
+ * reply is projected from the same run record the core persisted. No wake model
+ * is configured at M1, which the contract handles explicitly: an unaddressed
+ * project-channel Message fails open to one wake per other member (see
+ * `src/collaboration/wake.ts`) rather than being silently dropped.
+ */
+const collaboration = new CollaborationCoordinator({
+  projects,
+  store: store.collaboration,
+  runs: orchestrator,
+  onObservation: ({ messageId, observation }) => {
+    process.stderr.write(
+      `[collaboration] ${observation.status} (${observation.agentId}) ` +
+        `on message ${messageId}: ${observation.detail}\n`,
+    );
+  },
 });
 
 const staticRoot = join(projectRoot, 'web', 'dist');
 const api = createRunApi({
   orchestrator,
   agents: registry,
+  // The project channel is served over the same core: delivery, wake dispatch,
+  // and projected replies all go through the one coordinator above.
+  collaboration,
+  // Members the Web composer may address (#27); read-only from the registry.
+  projects,
+  // Durable multi-run Tasks (#28): create, list, inspect, and advance.
+  tasks,
   staticRoot,
   readFile: async (path) => {
     if (!existsSync(path)) return undefined;
@@ -272,6 +344,17 @@ const { port: boundPort } = await api.listen(port);
 
 /** Reconcile runs left mid-flight by a previous process before serving. */
 const orphaned = await orchestrator.reconcileOrphanedRuns();
+await tasks.reconcileEnvironmentLifecycle();
+
+/**
+ * Reconcile the collaboration write path after a restart (#26).
+ *
+ * Runs are reconciled first so an orphaned run is already settled as failed and
+ * can never have a reply fabricated for it. This pass then re-admits pending
+ * wakes and re-projects replies for completed runs whose projection was lost; it
+ * is idempotent, so a clean restart changes nothing.
+ */
+const reconciled = await collaboration.reconcile();
 
 process.stdout.write(
   `Sprout listening on http://127.0.0.1:${boundPort}\n` +
@@ -286,6 +369,13 @@ if (orphaned.length > 0) {
   process.stdout.write(
     `  recovered:  ${orphaned.length} run(s) marked failed after restart: ` +
       `${orphaned.map((run) => run.id).join(', ')}\n`,
+  );
+}
+
+if (reconciled.admittedRunIds.length > 0 || reconciled.projectedMessageIds.length > 0) {
+  process.stdout.write(
+    `  collab:     reconciled ${reconciled.admittedRunIds.length} pending wake(s), ` +
+      `projected ${reconciled.projectedMessageIds.length} reply(ies)\n`,
   );
 }
 
