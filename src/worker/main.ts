@@ -38,9 +38,16 @@ const transportMode = process.env.SPROUT_WORKER_TRANSPORT ?? 'endpoint';
 /** Codex must be launched through its real path; a PATH symlink fails sandboxed. */
 function resolveCodexBinary(): string | undefined {
   if (process.env.SPROUT_CODEX_BIN !== undefined) return process.env.SPROUT_CODEX_BIN;
+  // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
+  // Unlike pi's .cmd shim, the Windows codex distribution ships an .exe, so the
+  // first match is the one that runs.
+  const lookup = process.platform === 'win32'
+    ? { file: 'where.exe', args: ['codex'] }
+    : { file: '/bin/sh', args: ['-lc', 'command -v codex'] };
   try {
-    const found = execFileSync('/bin/sh', ['-lc', 'command -v codex'], { encoding: 'utf8' }).trim();
-    return found === '' ? undefined : found;
+    const found = execFileSync(lookup.file, lookup.args, { encoding: 'utf8' }).trim();
+    const first = found.split(/\r?\n/).find((line) => line.trim() !== '');
+    return first === undefined ? undefined : first.trim();
   } catch {
     return undefined;
   }

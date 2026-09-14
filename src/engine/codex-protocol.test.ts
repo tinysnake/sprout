@@ -172,3 +172,24 @@ test('the recorded probe stream maps to the expected run events in order', () =>
   ]);
   assert.deepEqual(finish, { status: 'completed', text: 'done' });
 });
+
+test('a transient codex error with willRetry does not settle the turn', () => {
+  // Found live on Windows: the provider stream dropped and codex emitted
+  // an error notification with willRetry: true, then completed the turn on
+  // retry. Treating that as terminal would fail runs the engine recovers.
+  const state: CodexTurnState = { text: '', finalText: '', failure: undefined };
+  const outcome = mapCodexNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Reconnecting... 2/5', willRetry: true },
+    },
+  }, state);
+  assert.deepEqual(outcome.events, []);
+  assert.equal(outcome.finish, undefined);
+
+  const done = mapCodexNotification({
+    method: 'turn/completed',
+    params: { turn: { status: 'completed', items: [{ type: 'agentMessage', text: 'ok' }] } },
+  } as never, state);
+  assert.equal(done.finish?.status, 'completed');
+});

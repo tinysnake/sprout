@@ -106,10 +106,24 @@ export function mapCodexNotification(
     }
 
     case 'error': {
-      const params = notification.params as { message?: string } | undefined;
+      const params = notification.params as
+        | {
+            message?: string;
+            error?: { message?: string; willRetry?: boolean };
+          }
+        | undefined;
+      // Codex reports transient transport failures (e.g. a reconnecting
+      // stream) as error notifications with willRetry: true — found live on
+      // Windows, where the first provider attempt timed out and the retry
+      // succeeded. Failing the turn there would abandon a turn the engine
+      // itself is still pursuing; only a non-retrying error is terminal.
+      if (params?.error?.willRetry === true) {
+        return { events: [] };
+      }
+      const message = params?.error?.message ?? params?.message ?? 'codex reported an error';
       return {
         events: [],
-        finish: { status: 'failed', message: params?.message ?? 'codex reported an error' },
+        finish: { status: 'failed', message },
       };
     }
 

@@ -127,13 +127,19 @@ cmd_start() {
     printf '@echo off\r\n'
     printf 'set SPROUT_READY_FILE=%s\\worker-ready.json\r\n' "$REMOTE_WIN"
     printf 'set SPROUT_ENV_INSTANCE=%s\r\n' "${SPROUT_WINDOWS_INSTANCE:-windows-dev}"
-    [ -n "${SPROUT_WINDOWS_PROXY:-}" ] && printf 'set HTTPS_PROXY=%s\r\nset HTTP_PROXY=%s\r\n' "$SPROUT_WINDOWS_PROXY" "$SPROUT_WINDOWS_PROXY"
     [ -n "${SPROUT_WINDOWS_CODEX_HOME:-}" ] && printf 'set CODEX_HOME=%s\r\n' "$SPROUT_WINDOWS_CODEX_HOME"
     printf 'node %s/src/worker/main.ts > %s/daemon-out.txt 2> %s/daemon-err.txt\r\n' "$REMOTE_WIN" "$REMOTE_WIN" "$REMOTE_WIN"
   } > "$launcher"
   deploy_file "$launcher" "$SFTP_ROOT/start-daemon.cmd" || { bad "could not deploy the launcher"; return 1; }
   remote "Remove-Item $REMOTE_WIN/worker-ready.json -ErrorAction SilentlyContinue" >/dev/null 2>&1
-  remote "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='$REMOTE_WIN/start-daemon.cmd'} | Out-Null" >/dev/null 2>&1
+  # The scheduled task is the primary launch path: it also provides boot
+  # autostart and restart-on-failure, and `start` through it keeps one launch
+  # story. WMI is the fallback when the task has not been installed.
+  if remote "if (Get-ScheduledTask -TaskName 'SproutWorkerDaemon' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
+    remote "Start-ScheduledTask -TaskName 'SproutWorkerDaemon'" >/dev/null 2>&1
+  else
+    remote "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='$REMOTE_WIN/start-daemon.cmd'} | Out-Null" >/dev/null 2>&1
+  fi
   sleep 3
   if remote "(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { \$_.CommandLine -like '*sprout-daemon*main.ts*' }).ProcessId" 2>/dev/null | LC_ALL=C grep -qE '[0-9]'; then
     ok "daemon started"
@@ -227,6 +233,28 @@ cmd_restart() {
   cmd_start
 }
 
+# Install (or refresh) the scheduled task that starts the daemon at logon and
+# restarts it on failure. Idempotent: -Force overwrites.
+cmd_install_autostart() {
+  local script; script=$(mktemp -t sprout-autostart-ps1)
+  cat > "$script" <<'PS1'
+$action = New-ScheduledTaskAction -Execute 'C:\sprout-daemon\start-daemon.cmd' -WorkingDirectory 'C:\sprout-daemon'
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'SproutWorkerDaemon' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+Write-Output "registered: SproutWorkerDaemon (at logon for $env:USERNAME, restart x3)"
+PS1
+  deploy_file "$script" "$SFTP_ROOT/install-autostart.ps1" || { bad "could not deploy the autostart installer"; return 1; }
+  local out
+  out=$(remote "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE_WIN/install-autostart.ps1" 2>&1 | LC_ALL=C tr -d '\r')
+  if echo "$out" | LC_ALL=C grep -q 'registered'; then
+    ok "$out"
+  else
+    bad "autostart registration failed: $out"
+    return 1
+  fi
+}
+
 case "$COMMAND" in
   deploy)  cmd_deploy ;;
   start)   cmd_start ;;
@@ -234,5 +262,6 @@ case "$COMMAND" in
   status)  cmd_status ;;
   health)  cmd_health ;;
   restart) cmd_restart ;;
-  *) bad "unknown command: $COMMAND (use deploy|start|stop|status|health|restart)"; exit 2 ;;
+  install-autostart) cmd_install_autostart ;;
+  *) bad "unknown command: $COMMAND (use deploy|start|stop|status|health|restart|install-autostart)"; exit 2 ;;
 esac
