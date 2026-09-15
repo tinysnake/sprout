@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
-import type { AgentRun } from '../run/model.ts';
+import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
@@ -577,6 +577,7 @@ export interface RunView {
   readonly handOffAttached: boolean;
   readonly failure?: string;
   readonly result?: unknown;
+  readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
 }
@@ -592,6 +593,7 @@ function toView(run: AgentRun): RunView {
     handOffAttached: run.handOff !== undefined,
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
+    ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
     createdAt: run.createdAt,
     ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
   };

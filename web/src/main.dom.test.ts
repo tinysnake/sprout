@@ -289,6 +289,25 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     await eventually(() => taskText(document, 'task-stop').includes('Activity: Task active · Agent idle'), 'retained idle Task');
     assert.match(taskText(document, 'task-stop'), /Task lease: mac-1 retained by Task \(blocked\)/);
 
+    // Completed history arrives on the same run stream as live updates. The
+    // inspector keeps duration and provider metrics visible for either source.
+    TestEventSource.latest!.emit('run', {
+      id: 'run-history',
+      agentId: 'codex-agent',
+      prompt: 'Completed before this page loaded',
+      status: 'completed',
+      events: [],
+      createdAt: 1_000,
+      completedAt: 2_500,
+      tokenUsage: { promptTokens: 1_200, completionTokens: 300, totalTokens: 1_500 },
+    });
+    await eventually(
+      () => document.querySelector<HTMLElement>('[data-run="run-history"]')?.textContent?.includes('1.5 s') === true,
+      'run duration',
+    );
+    const historyRun = document.querySelector<HTMLElement>('[data-run="run-history"]');
+    assert.match(historyRun?.textContent ?? '', /1,500 total \(1,200 prompt, 300 completion\)/);
+
     // (b, c) The stopped Task retains its Task lease and a Project Agent can be
     // selected for a corrected next advance.
     const stoppedCard = card(document, 'task-stop');

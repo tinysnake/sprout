@@ -1,4 +1,6 @@
-import type { AgentRunEvent, EngineTurnResult } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, TokenUsage } from '../engine/port.ts';
+
+export type { TokenUsage } from '../engine/port.ts';
 
 /** The observable lifecycle of one agent run. */
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
@@ -43,6 +45,8 @@ export interface AgentRun {
   readonly leaseId?: string;
   readonly failure?: string;
   readonly result?: EngineTurnResult;
+  /** Provider-reported consumption for this run, when the engine exposes it. */
+  readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
 }

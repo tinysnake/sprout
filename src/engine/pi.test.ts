@@ -156,6 +156,48 @@ test('a Pi turn streams tool progress and text, then completes', async () => {
   );
 });
 
+test('a Pi turn totals token usage reported for each completed assistant message', async () => {
+  const { adapter } = adapterFor((process) => {
+    process.line({
+      type: 'message_update',
+      usage: { input: 100, output: 20, totalTokens: 120 },
+      assistantMessageEvent: { type: 'text_delta', delta: 'I will use a tool.' },
+    });
+    process.line({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'I will use a tool.' }],
+        usage: { input: 100, output: 20, totalTokens: 120 },
+      },
+    });
+    process.line({
+      type: 'message_update',
+      usage: { input: 180, output: 35, totalTokens: 215 },
+      assistantMessageEvent: { type: 'text_delta', delta: 'Done.' },
+    });
+    process.line({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Done.' }],
+        usage: { input: 180, output: 35, totalTokens: 215 },
+      },
+    });
+    process.line({ type: 'agent_settled' });
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('work');
+  await collect(turn.events);
+
+  assert.deepEqual(await turn.completion, {
+    status: 'completed',
+    text: 'Done.',
+    tokenUsage: { promptTokens: 280, completionTokens: 55, totalTokens: 335 },
+  });
+});
+
 test('a Pi invocation omits model and thinking flags when the Agent does not configure them', async () => {
   const { adapter, argv } = adapterFor((process) => replaySuccessfulTurn(process, 'done'));
 

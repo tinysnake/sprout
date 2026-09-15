@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult } from './port.ts';
+import type { AgentRunEvent, EngineTurnResult, TokenUsage } from './port.ts';
 
 /**
  * Translation from Pi's `--mode json` stream into engine-neutral run events.
@@ -23,10 +23,20 @@ export interface PiTurnState {
   /** The last assistant text block completed, which is a turn's answer. */
   finalText: string;
   failure: string | undefined;
+  /** Sum of completed assistant and compaction calls in this Agent run. */
+  tokenUsage: TokenUsage | undefined;
+  /** The latest cumulative usage for the assistant message now streaming. */
+  pendingMessageUsage: TokenUsage | undefined;
 }
 
 export function newPiTurnState(): PiTurnState {
-  return { text: '', finalText: '', failure: undefined };
+  return {
+    text: '',
+    finalText: '',
+    failure: undefined,
+    tokenUsage: undefined,
+    pendingMessageUsage: undefined,
+  };
 }
 
 export interface PiOutcome {
@@ -44,6 +54,7 @@ interface PiContentPart {
 interface PiMessage {
   readonly role?: string;
   readonly content?: readonly PiContentPart[] | string;
+  readonly usage?: unknown;
 }
 
 export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
@@ -53,8 +64,14 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
   if (typeof type !== 'string') return { events: [], ignored: true };
 
   switch (type) {
-    case 'message_update':
+    case 'message_update': {
+      // Pi reports a cumulative metric while a message streams. It becomes a
+      // run metric only when that assistant message ends, avoiding one count
+      // for every streamed delta.
+      const usage = readPiTokenUsage(message['usage']);
+      if (usage !== undefined) state.pendingMessageUsage = usage;
       return mapAssistantUpdate(message, state);
+    }
 
     case 'tool_execution_start': {
       const name = typeof message['toolName'] === 'string' ? message['toolName'] : 'tool';
@@ -86,13 +103,33 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       if (msg?.role !== 'assistant') return { events: [] };
       const text = extractText(msg.content);
       if (text !== '') state.finalText = text;
+      addTokenUsage(state, readPiTokenUsage(msg.usage) ?? state.pendingMessageUsage);
+      state.pendingMessageUsage = undefined;
+      return { events: [] };
+    }
+
+    case 'compaction_end': {
+      const result = message['result'];
+      const usage =
+        typeof result === 'object' && result !== null
+          ? readPiTokenUsage((result as Record<string, unknown>)['usage'])
+          : undefined;
+      addTokenUsage(state, usage);
       return { events: [] };
     }
 
     case 'agent_settled':
+      // A malformed or interrupted stream may omit message_end. Keep a valid
+      // final update observable rather than failing the otherwise healthy run.
+      addTokenUsage(state, state.pendingMessageUsage);
+      state.pendingMessageUsage = undefined;
       return {
         events: [],
-        finish: { status: 'completed', text: state.finalText || state.text },
+        finish: {
+          status: 'completed',
+          text: state.finalText || state.text,
+          ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+        },
       };
 
     case 'error': {
@@ -171,4 +208,36 @@ function extractText(content: unknown): string {
 function extractContent(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) return '';
   return extractText((payload as { content?: unknown }).content);
+}
+
+/** Map Pi's provider-neutral usage shape to Sprout's neutral turn metric. */
+function readPiTokenUsage(raw: unknown): TokenUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const usage = raw as Record<string, unknown>;
+  const input = usage['input'];
+  const output = usage['output'];
+  const total = usage['totalTokens'];
+  if (!isTokenCount(input) || !isTokenCount(output)) return undefined;
+  if (total !== undefined && !isTokenCount(total)) return undefined;
+  return {
+    promptTokens: input,
+    completionTokens: output,
+    totalTokens: total ?? input + output,
+  };
+}
+
+function addTokenUsage(state: PiTurnState, next: TokenUsage | undefined): void {
+  if (next === undefined) return;
+  const previous = state.tokenUsage;
+  state.tokenUsage = previous === undefined
+    ? next
+    : {
+        promptTokens: previous.promptTokens + next.promptTokens,
+        completionTokens: previous.completionTokens + next.completionTokens,
+        totalTokens: previous.totalTokens + next.totalTokens,
+      };
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
