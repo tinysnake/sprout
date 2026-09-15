@@ -18,7 +18,8 @@
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",
     "image:build": "sh environments/container/build.sh",
-    "setup:game-workspace": "node scripts/setup-game-workspace.ts"
+    "setup:game-workspace": "node scripts/setup-game-workspace.ts",
+    "verify:o7-game-browser": "node scripts/verify-o7-minesweeper-browser.ts"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",

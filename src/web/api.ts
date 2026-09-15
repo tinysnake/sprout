@@ -414,6 +414,33 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // POST /api/runs/:id/release-lease — explicitly resolve a one-round run
+    // lease left in recovery after the previous Sprout process died. A caller
+    // must inspect the recovered run before doing this; the endpoint does not
+    // silently turn a failed run into a successful one.
+    if (
+      request.method === 'POST' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'runs' &&
+      segments[3] === 'release-lease'
+    ) {
+      const run = await orchestrator.load(segments[2] ?? '');
+      if (!run) {
+        sendJson(response, 404, { error: 'unknown run' });
+        return;
+      }
+      const lease = run.leaseId === undefined
+        ? undefined
+        : orchestrator.leases().find((candidate) => candidate.id === run.leaseId);
+      if (lease?.state !== 'recovering' || !orchestrator.releaseLease(lease.id)) {
+        sendJson(response, 409, { error: 'run lease is not recovering' });
+        return;
+      }
+      sendJson(response, 200, { run: toView(run), released: true });
+      return;
+    }
+
     // GET /api/runs/:id — inspect one run.
     if (
       request.method === 'GET' &&
