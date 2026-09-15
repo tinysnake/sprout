@@ -130,6 +130,8 @@ export interface StartSessionRequest {
    * only the Worker resolves that id to a host path before starting an engine.
    */
   readonly projectWorkspaceId?: string;
+  /** Worker-root-relative registered repository location, when the Project has one. */
+  readonly projectWorkspacePath?: string;
   /**
    * Standing instructions assembled by the core, if the adapter accepts them.
    *

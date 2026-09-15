@@ -1,0 +1,27 @@
+:root {
+  color: #f4f7fb;
+  background: #0b1320;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  min-height: 100vh;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+#game-canvas {
+  width: min(80vmin, 640px);
+  height: min(80vmin, 640px);
+  border: 1px solid #5f7088;
+}

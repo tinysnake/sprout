@@ -23,7 +23,7 @@ export class WorkerWorkspace {
 
   async prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
     const root = await this.#rootPath();
-    const workspace = await this.#workspace(root, input.projectId, true);
+    const workspace = await this.#workspace(root, input.projectId, true, input.projectWorkspacePath);
     const sprout = await this.#directory(root, join(workspace, '.sprout'), true);
     const tasks = await this.#directory(root, join(sprout, 'tasks'), true);
     const context = await this.#directory(root, join(tasks, token(input.taskId)), true);
@@ -56,7 +56,7 @@ export class WorkerWorkspace {
 
   async recycle(input: RecycleTaskContextParams): Promise<void> {
     const root = await this.#rootPath();
-    const workspace = await this.#workspace(root, input.projectId, false);
+    const workspace = await this.#workspace(root, input.projectId, false, input.projectWorkspacePath);
     const context = await this.#directory(root, join(workspace, '.sprout', 'tasks', token(input.taskId)), false);
     // This is deliberately before all destructive cleanup.  A missing or
     // replaced Project sentinel must leave the Task context retryable.
@@ -91,9 +91,9 @@ export class WorkerWorkspace {
     await assertProjectSentinel(root, workspace, input.projectId);
   }
 
-  async projectWorkingDirectory(projectId: string): Promise<string> {
+  async projectWorkingDirectory(projectId: string, workspacePath?: string): Promise<string> {
     const root = await this.#rootPath();
-    return this.#workspace(root, projectId, false);
+    return this.#workspace(root, projectId, false, workspacePath);
   }
 
   async #rootPath(): Promise<string> {
@@ -101,7 +101,18 @@ export class WorkerWorkspace {
     return realpath(this.#root);
   }
 
-  async #workspace(root: string, projectId: string, create: boolean): Promise<string> {
+  async #workspace(
+    root: string,
+    projectId: string,
+    create: boolean,
+    workspacePath?: string,
+  ): Promise<string> {
+    if (workspacePath !== undefined) {
+      if (!isSafeRelativePath(workspacePath)) {
+        throw new Error('registered Project workspace path must be relative and stay below the Worker root');
+      }
+      return this.#directory(root, join(root, workspacePath), create);
+    }
     const projects = await this.#directory(root, join(root, 'projects'), create);
     return this.#directory(root, join(projects, token(projectId)), create);
   }
@@ -225,6 +236,11 @@ async function filesBelow(directory: string): Promise<string[]> {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function isSafeRelativePath(path: string): boolean {
+  if (path.startsWith('/') || path.startsWith('\\') || /^[a-zA-Z]:/.test(path)) return false;
+  return path.split(/[\\/]/).every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
 function renderProject(input: TaskContextMaterialization): string {

@@ -128,6 +128,7 @@ export class WorkerClient implements EngineAdapter {
           ...(request.model !== undefined ? { model: request.model } : {}),
           ...(request.effort !== undefined ? { effort: request.effort } : {}),
           ...(request.projectWorkspaceId !== undefined ? { projectWorkspaceId: request.projectWorkspaceId } : {}),
+          ...(request.projectWorkspacePath !== undefined ? { projectWorkspacePath: request.projectWorkspacePath } : {}),
           ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
           ...(request.resumeSessionKey !== undefined
             ? { resumeSessionKey: request.resumeSessionKey }

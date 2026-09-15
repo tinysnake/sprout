@@ -17,7 +17,8 @@
     "web:build": "vite build",
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",
-    "image:build": "sh environments/container/build.sh"
+    "image:build": "sh environments/container/build.sh",
+    "setup:game-workspace": "node scripts/setup-game-workspace.ts"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",

@@ -691,6 +691,20 @@ test('the project-selected environment instance selects the executing worker, an
   );
 });
 
+test('a registered Project workspace is passed to the Worker as its relative repository location', async () => {
+  const { orchestrator, adapter } = build({
+    turns: [{ events: successEvents, result: completed }],
+    projects: [project({ workspaces: [{ environmentInstanceId: 'mac-mini-1', path: 'minesweeper' }] })],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'inspect the scaffold' });
+  await orchestrator.waitFor(id);
+
+  assert.equal(adapter.requests[0]?.projectWorkspaceId, 'project-sprout');
+  assert.equal(adapter.requests[0]?.projectWorkspacePath, 'minesweeper');
+  assert.equal(adapter.requests[0]?.workingDirectory, 'project-workspace:project-sprout');
+});
+
 test('a run records the environment instance it used, observably through the store', async () => {
   const { orchestrator, store } = build({
     turns: [{ events: successEvents, result: completed }],
