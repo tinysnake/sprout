@@ -103,16 +103,35 @@ export type AgentRunEvent =
   | { readonly type: 'tool-output'; readonly text: string }
   | { readonly type: 'notice'; readonly text: string };
 
+/**
+ * Provider-reported token consumption for one engine turn.
+ *
+ * The fields intentionally describe usage rather than a provider's billing
+ * dimensions: adapters map their own input/output names here, and omit this
+ * value altogether when their engine does not report a complete metric.
+ */
+export interface TokenUsage {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+}
+
 export interface StartSessionRequest {
   /** Sprout-owned agent identity. Never derived from the engine installation. */
   readonly agentId: string;
   /** The working directory inside the environment the run executes in. */
   readonly workingDirectory: string;
+  /** The engine-neutral model this session should use, when configured. */
+  readonly model?: string;
+  /** The engine-neutral reasoning effort this session should use, when configured. */
+  readonly effort?: string;
   /**
    * A Worker-owned Project workspace.  The core names the portable Project id;
    * only the Worker resolves that id to a host path before starting an engine.
    */
   readonly projectWorkspaceId?: string;
+  /** Worker-root-relative registered repository location, when the Project has one. */
+  readonly projectWorkspacePath?: string;
   /**
    * Standing instructions assembled by the core, if the adapter accepts them.
    *
@@ -177,11 +196,12 @@ export interface EngineTurn {
 }
 
 export type EngineTurnResult =
-  | { readonly status: 'completed'; readonly text: string }
-  | { readonly status: 'interrupted' }
+  | { readonly status: 'completed'; readonly text: string; readonly tokenUsage?: TokenUsage }
+  | { readonly status: 'interrupted'; readonly tokenUsage?: TokenUsage }
   | {
       readonly status: 'failed';
       readonly message: string;
+      readonly tokenUsage?: TokenUsage;
       /**
        * The engine refused the supplied `resumeSessionKey` and did no work.
        *

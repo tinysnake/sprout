@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
-import type { AgentRun } from '../run/model.ts';
+import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
@@ -87,6 +87,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
+      const awaitReply = body.awaitReply !== false;
       if (
         projectId === '' ||
         authorId === '' ||
@@ -118,6 +119,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         body: text,
         ...(recipients !== undefined ? { recipients } : {}),
         deliveryKey,
+        awaitReply,
       });
       sendJson(response, delivered.duplicate ? 200 : 202, {
         message: toMessageView(delivered.message),
@@ -412,6 +414,33 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // POST /api/runs/:id/release-lease — explicitly resolve a one-round run
+    // lease left in recovery after the previous Sprout process died. A caller
+    // must inspect the recovered run before doing this; the endpoint does not
+    // silently turn a failed run into a successful one.
+    if (
+      request.method === 'POST' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'runs' &&
+      segments[3] === 'release-lease'
+    ) {
+      const run = await orchestrator.load(segments[2] ?? '');
+      if (!run) {
+        sendJson(response, 404, { error: 'unknown run' });
+        return;
+      }
+      const lease = run.leaseId === undefined
+        ? undefined
+        : orchestrator.leases().find((candidate) => candidate.id === run.leaseId);
+      if (lease?.state !== 'recovering' || !orchestrator.releaseLease(lease.id)) {
+        sendJson(response, 409, { error: 'run lease is not recovering' });
+        return;
+      }
+      sendJson(response, 200, { run: toView(run), released: true });
+      return;
+    }
+
     // GET /api/runs/:id — inspect one run.
     if (
       request.method === 'GET' &&
@@ -442,7 +471,8 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/runs — list runs.
     if (request.method === 'GET' && url.pathname === '/api/runs') {
-      sendJson(response, 200, { runs: (await orchestrator.list()).map(toView) });
+      const runs = (await orchestrator.list()).map(toView);
+      sendJson(response, 200, { runs, totals: summarizeRunHistory(runs) });
       return;
     }
 
@@ -577,8 +607,46 @@ export interface RunView {
   readonly handOffAttached: boolean;
   readonly failure?: string;
   readonly result?: unknown;
+  readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
+}
+
+/** Cumulative, observable consumption across the returned durable history. */
+export interface RunHistoryTotals {
+  /** Sum of terminal run elapsed time; active runs are not estimated. */
+  readonly durationMs: number;
+  readonly tokenUsage: TokenUsage;
+  readonly completedRunCount: number;
+  /** Runs whose provider supplied usage, so an absent metric is never hidden. */
+  readonly runsWithTokenUsage: number;
+}
+
+export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals {
+  let durationMs = 0;
+  let completedRunCount = 0;
+  let runsWithTokenUsage = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  for (const run of runs) {
+    if (run.completedAt !== undefined) {
+      completedRunCount += 1;
+      durationMs += Math.max(0, run.completedAt - run.createdAt);
+    }
+    if (run.tokenUsage !== undefined) {
+      runsWithTokenUsage += 1;
+      promptTokens += run.tokenUsage.promptTokens;
+      completionTokens += run.tokenUsage.completionTokens;
+      totalTokens += run.tokenUsage.totalTokens;
+    }
+  }
+  return {
+    durationMs,
+    tokenUsage: { promptTokens, completionTokens, totalTokens },
+    completedRunCount,
+    runsWithTokenUsage,
+  };
 }
 
 function toView(run: AgentRun): RunView {
@@ -592,6 +660,7 @@ function toView(run: AgentRun): RunView {
     handOffAttached: run.handOff !== undefined,
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
+    ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
     createdAt: run.createdAt,
     ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
   };

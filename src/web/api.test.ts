@@ -10,7 +10,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
-import { createRunApi } from './api.ts';
+import { createRunApi, summarizeRunHistory, type RunView } from './api.ts';
 
 const definition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -32,7 +32,10 @@ const projects = new ProjectRegistry([
   },
 ]);
 
-function build(options: { settleAfterMs?: number } = {}) {
+function build(options: {
+  settleAfterMs?: number;
+  tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+} = {}) {
   const adapter = new ScriptedEngineAdapter({
     turns: [
       {
@@ -40,7 +43,11 @@ function build(options: { settleAfterMs?: number } = {}) {
           { type: 'tool-call', name: 'shell', detail: 'echo hi' },
           { type: 'message', text: 'done', final: true },
         ],
-        result: { status: 'completed', text: 'done' },
+        result: {
+          status: 'completed',
+          text: 'done',
+          ...(options.tokenUsage !== undefined ? { tokenUsage: options.tokenUsage } : {}),
+        },
         ...(options.settleAfterMs !== undefined ? { settleAfterMs: options.settleAfterMs } : {}),
       },
     ],
@@ -54,21 +61,25 @@ function build(options: { settleAfterMs?: number } = {}) {
       workingDirectory: '/tmp',
     },
   ]);
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
     projects,
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    pool,
     store: new InMemoryRunStore(),
     leaseTtlMs: 60_000,
   });
   const api = createRunApi({ orchestrator, agents: registry });
-  return { api, orchestrator };
+  return { api, orchestrator, pool };
 }
 
 async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
-  options: { settleAfterMs?: number } = {},
+  options: {
+    settleAfterMs?: number;
+    tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  } = {},
 ): Promise<void> {
   const context = build(options);
   const { port } = await context.api.listen(0);
@@ -110,6 +121,65 @@ test('a user can submit a request from the Web client and inspect the result', a
   });
 });
 
+test('run detail and history expose token usage and timestamps', async () => {
+  const expected = { promptTokens: 120, completionTokens: 30, totalTokens: 150 };
+  await withServer(async (base) => {
+    const submitted = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'say hi' }),
+    });
+    const { id } = (await submitted.json()) as { id: string };
+    const detail = await waitForTerminal(base, id) as {
+      tokenUsage?: unknown;
+      createdAt?: unknown;
+      completedAt?: unknown;
+    };
+    const history = (await (await fetch(`${base}/api/runs`)).json()) as {
+      runs: Array<{ id: string; tokenUsage?: unknown; createdAt?: unknown; completedAt?: unknown }>;
+      totals?: {
+        durationMs: number;
+        tokenUsage: unknown;
+        completedRunCount: number;
+        runsWithTokenUsage: number;
+      };
+    };
+
+    assert.deepEqual(detail.tokenUsage, expected);
+    assert.equal(typeof detail.createdAt, 'number');
+    assert.equal(typeof detail.completedAt, 'number');
+    const historyRun = history.runs.find((run) => run.id === id);
+    assert.deepEqual(historyRun?.tokenUsage, expected);
+    assert.equal(typeof historyRun?.createdAt, 'number');
+    assert.equal(typeof historyRun?.completedAt, 'number');
+    assert.deepEqual(history.totals?.tokenUsage, expected);
+    assert.ok((history.totals?.durationMs ?? -1) >= 0, 'history includes cumulative terminal duration');
+    assert.equal(history.totals?.completedRunCount, 1);
+    assert.equal(history.totals?.runsWithTokenUsage, 1);
+  }, { tokenUsage: expected });
+});
+
+test('run history totals accumulate terminal duration and provider usage without hiding unavailable usage', () => {
+  const runs: RunView[] = [
+    {
+      id: 'run-a', agentId: 'agent-scout', prompt: 'first', status: 'completed', events: [],
+      createdAt: 1_000, completedAt: 2_500,
+      tokenUsage: { promptTokens: 120, completionTokens: 30, totalTokens: 150 }, handOffAttached: false,
+    },
+    {
+      id: 'run-b', agentId: 'agent-scout', prompt: 'second', status: 'completed', events: [],
+      createdAt: 4_000, completedAt: 6_500, handOffAttached: false,
+    },
+  ];
+
+  assert.deepEqual(summarizeRunHistory(runs), {
+    durationMs: 4_000,
+    tokenUsage: { promptTokens: 120, completionTokens: 30, totalTokens: 150 },
+    completedRunCount: 2,
+    runsWithTokenUsage: 1,
+  });
+});
+
 test('a submission without an agent or prompt is rejected', async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/runs`, {
@@ -139,6 +209,32 @@ test('the user can stop a run through the API', async () => {
     },
     { settleAfterMs: 5_000 },
   );
+});
+
+test('a recovered run lease can be explicitly released through its run control', async () => {
+  await withServer(async (base, context) => {
+    const submit = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'long job' }),
+    });
+    const { id } = (await submit.json()) as { id: string };
+
+    let leaseId: string | undefined;
+    for (let attempt = 0; attempt < 100 && leaseId === undefined; attempt += 1) {
+      leaseId = context.orchestrator.get(id)?.leaseId;
+      if (leaseId === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(leaseId, 'the running run acquired its lease');
+    context.pool.markRecovering(leaseId);
+
+    const released = await fetch(`${base}/api/runs/${id}/release-lease`, { method: 'POST' });
+    assert.equal(released.status, 200);
+    assert.equal(((await released.json()) as { released: boolean }).released, true);
+    assert.equal(context.pool.getLease(leaseId)?.state, 'released');
+
+    await fetch(`${base}/api/runs/${id}/stop`, { method: 'POST' });
+  }, { settleAfterMs: 5_000 });
 });
 
 test('the client view exposes progress but no engine internals', async () => {

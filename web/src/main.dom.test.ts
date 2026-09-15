@@ -186,6 +186,15 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     ] });
     if (path === '/api/projects') return response({ projects: [{ id: 'project-sprout', goal: 'Ship', memberIds: ['pi-agent', 'codex-agent'] }] });
     if (path === '/api/leases') return response({ leases: leases() });
+    if (path === '/api/runs') return response({
+      runs: [],
+      totals: {
+        durationMs: 3_500,
+        tokenUsage: { promptTokens: 2_000, completionTokens: 500, totalTokens: 2_500 },
+        completedRunCount: 2,
+        runsWithTokenUsage: 2,
+      },
+    });
     if (path === '/api/messages') return response({ messages: [] });
     if (path === '/api/tasks') return response({ tasks: [...tasks.values()].map(({ task }) => task) });
 
@@ -271,6 +280,8 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     // as the shipped Web client does; no handler is imported or invoked directly.
     await vite.ssrLoadModule('/src/main.ts');
     await eventually(() => document.querySelectorAll('[data-task]').length === tasks.size, 'initial Task cards');
+    assert.match(document.querySelector('#run-totals')?.textContent ?? '', /3\.5 s cumulative duration/);
+    assert.match(document.querySelector('#run-totals')?.textContent ?? '', /2,500 cumulative tokens/);
 
     // (a) An unbegun Task is distinct from a begun Task whose Agent is now idle.
     assert.match(taskText(document, 'task-unbegun'), /Activity: Unbegun/);
@@ -288,6 +299,25 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     });
     await eventually(() => taskText(document, 'task-stop').includes('Activity: Task active · Agent idle'), 'retained idle Task');
     assert.match(taskText(document, 'task-stop'), /Task lease: mac-1 retained by Task \(blocked\)/);
+
+    // Completed history arrives on the same run stream as live updates. The
+    // inspector keeps duration and provider metrics visible for either source.
+    TestEventSource.latest!.emit('run', {
+      id: 'run-history',
+      agentId: 'codex-agent',
+      prompt: 'Completed before this page loaded',
+      status: 'completed',
+      events: [],
+      createdAt: 1_000,
+      completedAt: 2_500,
+      tokenUsage: { promptTokens: 1_200, completionTokens: 300, totalTokens: 1_500 },
+    });
+    await eventually(
+      () => document.querySelector<HTMLElement>('[data-run="run-history"]')?.textContent?.includes('1.5 s') === true,
+      'run duration',
+    );
+    const historyRun = document.querySelector<HTMLElement>('[data-run="run-history"]');
+    assert.match(historyRun?.textContent ?? '', /1,500 total \(1,200 prompt, 300 completion\)/);
 
     // (b, c) The stopped Task retains its Task lease and a Project Agent can be
     // selected for a corrected next advance.

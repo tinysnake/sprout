@@ -1,6 +1,16 @@
 import type { EnvironmentPreference } from '../environment/model.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
-import type { Project } from './model.ts';
+import type { Project, ProjectWorkspace } from './model.ts';
+
+/** The registered workspace for one Project on one Environment, if any. */
+export function workspaceFor(
+  project: Project,
+  environmentInstanceId: string,
+): ProjectWorkspace | undefined {
+  return project.workspaces?.find(
+    (workspace) => workspace.environmentInstanceId === environmentInstanceId,
+  );
+}
 
 /**
  * Environment resolution: choosing the instance a run actually uses.

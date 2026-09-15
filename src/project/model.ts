@@ -18,6 +18,19 @@ export interface ProjectMembership {
   readonly collaborationInstructions: string;
 }
 
+/**
+ * One environment-local location for a persistent Project workspace.
+ *
+ * `path` is deliberately relative to the Environment Worker's configured
+ * workspace root.  A Project never stores a host-specific absolute path: the
+ * same Project can name a different relative workspace on another Environment
+ * instance without binding its portable identity to a machine.
+ */
+export interface ProjectWorkspace {
+  readonly environmentInstanceId: string;
+  readonly path: string;
+}
+
 /** A collaboration space in which members pursue a goal under shared rules. */
 export interface Project {
   readonly id: string;
@@ -32,5 +45,13 @@ export interface Project {
    * which is what keeps an agent usable across environments.
    */
   readonly availableEnvironmentInstanceIds: readonly string[];
+  /**
+   * Optional registered workspace locations, one per Environment instance.
+   *
+   * An absent entry retains the Worker-managed default workspace for this
+   * Project.  A present entry points at an existing repository below that
+   * Worker's root.
+   */
+  readonly workspaces?: readonly ProjectWorkspace[];
   readonly memberships: readonly ProjectMembership[];
 }

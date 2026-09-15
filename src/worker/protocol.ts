@@ -78,7 +78,13 @@ export interface StartSessionParams {
   readonly engine: string;
   readonly agentId: string;
   readonly workingDirectory: string;
+  /** The engine-neutral model this session should use, when configured. */
+  readonly model?: string;
+  /** The engine-neutral reasoning effort this session should use, when configured. */
+  readonly effort?: string;
   readonly projectWorkspaceId?: string;
+  /** Worker-root-relative registered repository location, when the Project has one. */
+  readonly projectWorkspacePath?: string;
   readonly instructions?: string;
   /**
    * The engine-native key of the conversation this session should continue.
@@ -93,6 +99,8 @@ export interface StartSessionParams {
 /** Portable facts the Worker renders into Sprout-owned context files. */
 export interface TaskContextMaterialization {
   readonly projectId: string;
+  /** Worker-root-relative registered repository location, when the Project has one. */
+  readonly projectWorkspacePath?: string;
   readonly projectGoal: string;
   readonly projectRules: readonly string[];
   readonly taskId: string;
@@ -115,6 +123,8 @@ export interface PrepareTaskContextResult {
 
 export interface RecycleTaskContextParams {
   readonly projectId: string;
+  /** Worker-root-relative registered repository location, when the Project has one. */
+  readonly projectWorkspacePath?: string;
   readonly taskId: string;
   readonly environmentInstanceId: string;
   readonly environmentLeaseId: string;

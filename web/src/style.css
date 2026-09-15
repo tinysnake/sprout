@@ -72,6 +72,23 @@ button:disabled {
   border-radius: 0.5rem;
 }
 
+#run-history {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid #22c55e;
+  background: color-mix(in srgb, #22c55e 8%, transparent);
+}
+
+#run-history h2,
+#run-totals {
+  margin: 0;
+}
+
+#run-totals {
+  margin-top: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .run header {
   display: flex;
   align-items: baseline;
@@ -111,6 +128,27 @@ button:disabled {
   opacity: 0.8;
   font-size: 0.9rem;
   white-space: pre-wrap;
+}
+
+.run-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.run-metrics > div {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.run-metrics dt {
+  font-weight: 600;
+}
+
+.run-metrics dd {
+  margin: 0;
 }
 
 .events {

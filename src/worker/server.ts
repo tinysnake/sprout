@@ -164,7 +164,12 @@ export class EnvironmentWorker {
       agentId: params.agentId,
       workingDirectory: params.projectWorkspaceId === undefined
         ? params.workingDirectory
-        : await this.#requireWorkspace().projectWorkingDirectory(params.projectWorkspaceId),
+        : await this.#requireWorkspace().projectWorkingDirectory(
+          params.projectWorkspaceId,
+          params.projectWorkspacePath,
+        ),
+      ...(params.model !== undefined ? { model: params.model } : {}),
+      ...(params.effort !== undefined ? { effort: params.effort } : {}),
       ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
       ...(params.resumeSessionKey !== undefined
         ? { resumeSessionKey: params.resumeSessionKey }

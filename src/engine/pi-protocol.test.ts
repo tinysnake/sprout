@@ -126,6 +126,35 @@ test('agent_settled terminates the turn with the final text', () => {
   assert.deepEqual(outcome.finish, { status: 'completed', text: 'pi-tool-ok' });
 });
 
+test('assistant usage is captured once from a completed message', () => {
+  const state = newPiTurnState();
+  mapPiEvent(
+    {
+      type: 'message_update',
+      usage: { input: 100, output: 20, totalTokens: 120 },
+      assistantMessageEvent: { type: 'text_delta', delta: 'done' },
+    },
+    state,
+  );
+  mapPiEvent(
+    {
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        usage: { input: 100, output: 20, totalTokens: 120 },
+      },
+    },
+    state,
+  );
+
+  assert.deepEqual(mapPiEvent({ type: 'agent_settled' }, state).finish, {
+    status: 'completed',
+    text: 'done',
+    tokenUsage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+  });
+});
+
 test('a user message end is not treated as the turn answer', () => {
   const state = newPiTurnState();
   const outcome = mapPiEvent(

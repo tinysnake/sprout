@@ -11,7 +11,7 @@ import type { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
-import { resolveEnvironmentInstance } from '../project/resolve.ts';
+import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
 import type { Task } from './model.ts';
@@ -28,7 +28,7 @@ export class DurableWriteCrash extends Error {}
 /** #33 replaces this contract implementation with the Worker protocol. */
 export interface TaskContextWorker {
   prepare(input: TaskContextMaterialization): Promise<{ readonly bootstrapInstructions: string }>;
-  recycle(input: { readonly taskId: string; readonly projectId: string; readonly environmentInstanceId: string; readonly environmentLeaseId: string }): Promise<void>;
+  recycle(input: { readonly taskId: string; readonly projectId: string; readonly projectWorkspacePath?: string; readonly environmentInstanceId: string; readonly environmentLeaseId: string }): Promise<void>;
 }
 
 /** Deliberate production stub: no core filesystem operation is permitted by ADR-0003. */
@@ -47,6 +47,7 @@ export interface TaskEnvironmentRunner {
     readonly environmentInstanceId: string;
     readonly environmentLeaseId: string;
     readonly projectWorkspaceId?: string;
+    readonly projectWorkspacePath?: string;
     readonly taskBootstrapInstructions?: string;
   }): Promise<{ readonly id: string }>;
 }
@@ -187,7 +188,14 @@ export class TaskEnvironmentLifecycle {
       await this.#toRecovery(running, 'running');
       throw error;
     }
-    await this.#runs.submit({ runId, taskId, agentId, prompt: input, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId, projectWorkspaceId: task.projectId, taskBootstrapInstructions: prepared.bootstrapInstructions });
+    const workspacePath = this.#workspacePath(task.projectId, task.environmentInstanceId);
+    await this.#runs.submit({
+      runId, taskId, agentId, prompt: input, projectId: task.projectId,
+      environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId,
+      projectWorkspaceId: task.projectId,
+      ...(workspacePath !== undefined ? { projectWorkspacePath: workspacePath } : {}),
+      taskBootstrapInstructions: prepared.bootstrapInstructions,
+    });
     return { task: running, runId };
   }
 
@@ -271,7 +279,12 @@ export class TaskEnvironmentLifecycle {
 
   async #recycleThenRelease(task: Task, terminal: 'ended' | 'discarded'): Promise<Task> {
     try {
-      await this.#worker.recycle({ taskId: task.id, projectId: task.projectId, environmentInstanceId: task.environmentInstanceId!, environmentLeaseId: task.environmentLeaseId! });
+      const workspacePath = this.#workspacePath(task.projectId, task.environmentInstanceId!);
+      await this.#worker.recycle({
+        taskId: task.id, projectId: task.projectId,
+        ...(workspacePath !== undefined ? { projectWorkspacePath: workspacePath } : {}),
+        environmentInstanceId: task.environmentInstanceId!, environmentLeaseId: task.environmentLeaseId!,
+      });
     } catch (error) { await this.#toRecovery(task, 'ending'); throw error; }
     const ended = omit(omit({ ...task, status: terminal === 'ended' ? 'done' as const : 'cancelled' as const, completedAt: this.#clock.now(), environmentLifecycleState: terminal, updatedAt: this.#clock.now() }, 'recoveryState'), 'activeRunId');
     if (!task.environmentLeaseId) {
@@ -306,8 +319,10 @@ export class TaskEnvironmentLifecycle {
     const membership = project?.memberships.find((candidate) => candidate.agentId === agentId);
     if (!project || !membership) throw new Error(`agent ${agentId} is not a member of project ${task.projectId}`);
     const priorRunSummaries = buildTaskContext(task, await this.#store.listRuns(task.id)).text;
+    const workspacePath = workspaceFor(project, task.environmentInstanceId)?.path;
     return this.#worker.prepare({
       projectId: project.id,
+      ...(workspacePath !== undefined ? { projectWorkspacePath: workspacePath } : {}),
       projectGoal: project.goal,
       projectRules: project.rules,
       taskId: task.id,
@@ -322,6 +337,11 @@ export class TaskEnvironmentLifecycle {
       environmentInstanceId: task.environmentInstanceId,
       environmentLeaseId: task.environmentLeaseId,
     });
+  }
+
+  #workspacePath(projectId: string, environmentInstanceId: string): string | undefined {
+    const project = this.#projects.get(projectId);
+    return project === undefined ? undefined : workspaceFor(project, environmentInstanceId)?.path;
   }
 
   async #require(taskId: string): Promise<Task> {

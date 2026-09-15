@@ -51,6 +51,31 @@ For client development with hot reload, run `npm start` in one terminal and
 Environment overrides: `SPROUT_PORT`, `SPROUT_DATABASE`, `SPROUT_WORKDIR`,
 `SPROUT_ENV_INSTANCE`, `SPROUT_LEASE_TTL_MS`, `SPROUT_CODEX_BIN`.
 
+## O7 game workspace
+
+The O7 Minesweeper collaboration configuration is in
+[`config/o7-minesweeper-runtime.json`](config/o7-minesweeper-runtime.json). It
+registers four Agents and a `minesweeper` repository workspace below the local
+macOS Environment Worker's root. Initialize the ignored local repository with:
+
+```bash
+npm run setup:game-workspace
+npm --prefix .sprout-game-workspaces/minesweeper install
+npm --prefix .sprout-game-workspaces/minesweeper test
+```
+
+Run Sprout against the same Worker root and configuration using relative paths:
+
+```bash
+SPROUT_WORKSPACE_ROOT=.sprout-game-workspaces \
+SPROUT_RUNTIME_CONFIG="$(cat config/o7-minesweeper-runtime.json)" \
+npm start
+```
+
+The setup command creates a separate local git repository with the Three.js
+canvas scaffold. It does not overwrite non-template files in an existing game
+workspace.
+
 ## Test
 
 ```bash

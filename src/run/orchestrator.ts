@@ -6,7 +6,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
-import { resolveEnvironmentInstance } from '../project/resolve.ts';
+import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
 import type { RunStore } from './store.ts';
@@ -122,6 +122,8 @@ export interface SubmitRunRequest {
   readonly environmentLeaseId?: string;
   /** Portable Worker workspace reference supplied by the Task lifecycle. */
   readonly projectWorkspaceId?: string;
+  /** Worker-root-relative registered repository location for this Project. */
+  readonly projectWorkspacePath?: string;
   /** Worker-produced relative-file bootstrap for this Task Agent run. */
   readonly taskBootstrapInstructions?: string;
 }
@@ -341,8 +343,17 @@ export class RunOrchestrator {
       }
     }
 
+    const resolvedProject = this.#projects?.get(resolution.projectId);
+    const registeredWorkspace = resolvedProject === undefined
+      ? undefined
+      : workspaceFor(resolvedProject, resolution.instanceId);
     const workspace = {
-      ...(request.projectWorkspaceId !== undefined ? { projectWorkspaceId: request.projectWorkspaceId } : {}),
+      ...(request.projectWorkspaceId !== undefined
+        ? { projectWorkspaceId: request.projectWorkspaceId }
+        : registeredWorkspace !== undefined ? { projectWorkspaceId: resolution.projectId } : {}),
+      ...(request.projectWorkspacePath !== undefined
+        ? { projectWorkspacePath: request.projectWorkspacePath }
+        : registeredWorkspace !== undefined ? { projectWorkspacePath: registeredWorkspace.path } : {}),
       ...(request.taskBootstrapInstructions !== undefined ? { taskBootstrapInstructions: request.taskBootstrapInstructions } : {}),
     };
     const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));
@@ -513,7 +524,7 @@ export class RunOrchestrator {
   async #execute(
     initial: AgentRun,
     agent: AgentDefinition,
-    workspace: { readonly projectWorkspaceId?: string; readonly taskBootstrapInstructions?: string } = {},
+    workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
     // Adapters are resolved *for the instance this run resolved and will lease*,
     // never from a global pool: a run that leases container-1 must execute on
@@ -609,6 +620,7 @@ export class RunOrchestrator {
         appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
         workingDirectory,
         workspace.projectWorkspaceId,
+        workspace.projectWorkspacePath,
       );
 
       // A stored key the engine refuses must not fail the run. Pi and `agy`
@@ -632,6 +644,7 @@ export class RunOrchestrator {
           appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
           workingDirectory,
           workspace.projectWorkspaceId,
+          workspace.projectWorkspacePath,
         );
       }
 
@@ -683,17 +696,21 @@ export class RunOrchestrator {
     instructions: string | undefined,
     workingDirectory: string,
     projectWorkspaceId: string | undefined,
+    projectWorkspacePath: string | undefined,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory,
+        ...(agent.model !== undefined ? { model: agent.model } : {}),
+        ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
         // The assembled project contract is re-sent on every run, because it is
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).
         ...(instructions !== undefined ? { instructions } : {}),
         ...(projectWorkspaceId !== undefined ? { projectWorkspaceId } : {}),
+        ...(projectWorkspacePath !== undefined ? { projectWorkspacePath } : {}),
         ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
     } catch (error) {
@@ -839,6 +856,7 @@ export class RunOrchestrator {
     return this.#advance(run, {
       status,
       result,
+      ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
       completedAt: this.#clock.now(),
       ...(result.status === 'failed' ? { failure: result.message } : {}),
     });

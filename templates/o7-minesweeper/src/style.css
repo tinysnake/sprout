@@ -1,0 +1,9 @@
+:root { color: #e5eefc; background: #0b1020; font-family: ui-sans-serif, system-ui, sans-serif; }
+* { box-sizing: border-box; } body { margin: 0; min-width: 20rem; }
+main { width: min(92vw, 46rem); margin: 0 auto; padding: 1.5rem 0 2rem; text-align: center; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; text-align: left; }
+h1, p { margin: 0; } h1 { font-size: clamp(1.8rem, 5vw, 3rem); }.eyebrow, .help { color: #9fb0ca; font-size: .88rem; }
+button { border: 1px solid #5eead4; border-radius: .5rem; padding: .55rem .8rem; color: #062c30; background: #5eead4; font: inherit; font-weight: 700; cursor: pointer; }
+#mine-counter { margin: 1rem 0 .4rem; color: #fcd34d; font-weight: 700; }
+#game-canvas { display: block; width: min(88vw, 40rem); height: min(88vw, 40rem); margin: 0 auto; border: 3px solid #334a70; border-radius: .4rem; box-shadow: 0 1rem 3rem #0008; touch-action: manipulation; }
+#game-status { min-height: 1.5em; margin: .75rem 0 .35rem; font-weight: 700; }

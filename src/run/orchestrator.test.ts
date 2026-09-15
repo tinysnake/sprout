@@ -141,6 +141,19 @@ test('a submitted run acquires its lease, streams progress, and completes', asyn
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
 });
 
+test('a completed engine turn records its token usage on the durable run', async () => {
+  const tokenUsage = { promptTokens: 120, completionTokens: 30, totalTokens: 150 };
+  const { orchestrator, store } = build({
+    turns: [{ events: successEvents, result: { ...completed, tokenUsage } }],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'say hi' });
+  const settled = await orchestrator.waitFor(id);
+
+  assert.deepEqual(settled.tokenUsage, tokenUsage);
+  assert.deepEqual((await store.get(id))?.tokenUsage, tokenUsage);
+});
+
 test('submission returns before the run settles, and progress is observable meanwhile', async () => {
   const { orchestrator } = build({
     turns: [{ events: successEvents, result: completed, settleAfterMs: 40 }],
@@ -676,6 +689,20 @@ test('the project-selected environment instance selects the executing worker, an
     store.writes.every((write) => write.environmentInstanceId === 'container-1'),
     true,
   );
+});
+
+test('a registered Project workspace is passed to the Worker as its relative repository location', async () => {
+  const { orchestrator, adapter } = build({
+    turns: [{ events: successEvents, result: completed }],
+    projects: [project({ workspaces: [{ environmentInstanceId: 'mac-mini-1', path: 'minesweeper' }] })],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'inspect the scaffold' });
+  await orchestrator.waitFor(id);
+
+  assert.equal(adapter.requests[0]?.projectWorkspaceId, 'project-sprout');
+  assert.equal(adapter.requests[0]?.projectWorkspacePath, 'minesweeper');
+  assert.equal(adapter.requests[0]?.workingDirectory, 'project-workspace:project-sprout');
 });
 
 test('a run records the environment instance it used, observably through the store', async () => {

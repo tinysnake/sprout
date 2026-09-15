@@ -8,6 +8,7 @@ import type {
   EngineTurn,
   EngineTurnResult,
   StartSessionRequest,
+  TokenUsage,
 } from './port.ts';
 import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
@@ -169,6 +170,10 @@ export class CodexEngineAdapter implements EngineAdapter {
         cwd: request.workingDirectory,
         sandbox: this.#options.sandbox ?? 'read-only',
         approvalPolicy: 'never',
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.effort !== undefined
+          ? { config: { model_reasoning_effort: request.effort } }
+          : {}),
         ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
       });
     }
@@ -176,6 +181,10 @@ export class CodexEngineAdapter implements EngineAdapter {
       cwd: request.workingDirectory,
       sandbox: this.#options.sandbox ?? 'read-only',
       approvalPolicy: 'never',
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined
+        ? { config: { model_reasoning_effort: request.effort } }
+        : {}),
       ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
     });
   }
@@ -250,6 +259,8 @@ export class CodexSession implements EngineSession {
   readonly #process: CodexProcess;
   readonly #threadId: string;
   #turnId: string | undefined;
+  /** Usage updates are keyed by turn because Codex emits them separately. */
+  readonly #tokenUsageByTurnId = new Map<string, TokenUsage>();
   #closed = false;
   /**
    * Settles the turn that is currently in flight.
@@ -278,25 +289,32 @@ export class CodexSession implements EngineSession {
       resolveCompletion = resolve;
     });
 
-    const finish = (result: EngineTurnResult) => {
+    let turnId: string | undefined;
+    const finish = (result: EngineTurnResult, completedTurnId = turnId) => {
       if (settled) return;
       settled = true;
       this.#settleTurn = undefined;
-      if (result.status === 'failed') queue.fail(new Error(result.message));
+      const tokenUsage = completedTurnId === undefined ? undefined : this.#tokenUsageByTurnId.get(completedTurnId);
+      if (completedTurnId !== undefined) this.#tokenUsageByTurnId.delete(completedTurnId);
+      const completed = tokenUsage === undefined ? result : { ...result, tokenUsage };
+      if (completed.status === 'failed') queue.fail(new Error(completed.message));
       else queue.end();
-      resolveCompletion(result);
+      resolveCompletion(completed);
     };
     this.#settleTurn = finish;
 
     const unsubscribe = this.#transport.onNotification((notification) => {
       if (notification.method === 'thread/tokenUsage/updated') {
-        // Usage is not on turn/completed for app-server; it is recorded here so
-        // a later observer can read it without re-deriving the protocol.
+        // Usage is not on turn/completed for app-server. `last` is the metric
+        // for this turn; `total` belongs to the whole resumed thread and would
+        // overstate a single AgentRun.
+        const update = readCodexTokenUsage(notification.params);
+        if (update !== undefined) this.#tokenUsageByTurnId.set(update.turnId, update.tokenUsage);
         return;
       }
       const outcome = mapCodexNotification(notification, state);
       for (const event of outcome.events) queue.push(event);
-      if (outcome.finish) finish(outcome.finish);
+      if (outcome.finish) finish(outcome.finish, notificationTurnId(notification.params) ?? turnId);
     });
 
     const onClose = this.#transport.onServerRequest((request) => {
@@ -305,12 +323,17 @@ export class CodexSession implements EngineSession {
       this.#transport.respondError(request.id, -32_601, 'sprout runs non-interactively');
     });
 
-    void this.#startTurn(prompt).catch((error: unknown) => {
-      finish({
-        status: 'failed',
-        message: error instanceof Error ? error.message : String(error),
+    void this.#startTurn(prompt)
+      .then((startedTurnId) => {
+        turnId = startedTurnId;
+        this.#turnId = startedTurnId;
+      })
+      .catch((error: unknown) => {
+        finish({
+          status: 'failed',
+          message: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
 
     return {
       events: queue,
@@ -321,12 +344,12 @@ export class CodexSession implements EngineSession {
     };
   }
 
-  async #startTurn(prompt: string): Promise<void> {
+  async #startTurn(prompt: string): Promise<string> {
     const response = await this.#transport.request<{ turn: { id: string } }>('turn/start', {
       threadId: this.#threadId,
       input: [{ type: 'text', text: prompt }],
     });
-    this.#turnId = response.turn.id;
+    return response.turn.id;
   }
 
   async interrupt(): Promise<boolean> {
@@ -369,4 +392,48 @@ export class CodexSession implements EngineSession {
     this.#transport.close();
     this.#process.kill('SIGTERM');
   }
+}
+
+/** Read Codex's per-turn `last` breakdown without trusting arbitrary JSON-RPC. */
+function readCodexTokenUsage(params: unknown): { readonly turnId: string; readonly tokenUsage: TokenUsage } | undefined {
+  if (typeof params !== 'object' || params === null) return undefined;
+  const update = params as Record<string, unknown>;
+  if (typeof update['turnId'] !== 'string') return undefined;
+  const tokenUsage = update['tokenUsage'];
+  if (typeof tokenUsage !== 'object' || tokenUsage === null) return undefined;
+  const last = (tokenUsage as Record<string, unknown>)['last'];
+  if (typeof last !== 'object' || last === null) return undefined;
+  const breakdown = last as Record<string, unknown>;
+  const inputTokens = breakdown['inputTokens'];
+  const outputTokens = breakdown['outputTokens'];
+  const reasoningOutputTokens = breakdown['reasoningOutputTokens'];
+  const totalTokens = breakdown['totalTokens'];
+  if (
+    !isTokenCount(inputTokens) ||
+    !isTokenCount(outputTokens) ||
+    !isTokenCount(totalTokens) ||
+    (reasoningOutputTokens !== undefined && !isTokenCount(reasoningOutputTokens))
+  ) {
+    return undefined;
+  }
+  return {
+    turnId: update['turnId'],
+    tokenUsage: {
+      promptTokens: inputTokens,
+      completionTokens: outputTokens + (reasoningOutputTokens ?? 0),
+      totalTokens,
+    },
+  };
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function notificationTurnId(params: unknown): string | undefined {
+  if (typeof params !== 'object' || params === null) return undefined;
+  const turn = (params as Record<string, unknown>)['turn'];
+  if (typeof turn !== 'object' || turn === null) return undefined;
+  const id = (turn as Record<string, unknown>)['id'];
+  return typeof id === 'string' ? id : undefined;
 }
