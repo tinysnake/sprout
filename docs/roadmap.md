@@ -172,12 +172,12 @@ Project contracts and Agent context remain coherent when the same Agent works ac
 
 ### O6 — Multi-agent collaboration
 
-**Status**: In progress
+**Status**: Evidenced
 **Depends on**: O4, O5
 
 All four engines can participate in one project, coordinate through direct and project-channel messages, and perform multi-run work without conflicting over environments.
 
-**Map #24 status**: the deliberately narrowed macOS/Pi/Codex collaboration scenario is functionally evidenced by accepted tickets #25–#35. The closing privacy exception (six commits with non-generic personal author/committer metadata from the map's earlier orchestration) was remediated through a deterministic history rewrite with identical trees and messages, and the remediation passed independent review. O6 remains **In progress** pending this map's formal close.
+**Map #24 status**: the deliberately narrowed macOS/Pi/Codex collaboration scenario is functionally evidenced by accepted tickets #25–#35, the closing privacy exception was remediated and reviewed clean (#36), and the integration was merged into `master` via PR #37 (`ef300f8`), formally closing Map #24. The broader four-engine, three-platform, and high-resource editor breadth is folded into the final end-to-end validation under O7.
 
 The evidenced slice is one Task owning one macOS Environment lease from explicit Task begin through explicit Task end. Independent Pi- and Codex-backed Agents work sequentially inside that retained Environment, reuse its persistent Project workspace, and receive bounded durable Task facts in a temporary Task context. Their runs are nested activities: completion, stop, failure, interruption, and idle gaps never release the Task lease; recovery continues to protect the Environment from reassignment.
 
@@ -239,7 +239,7 @@ The complete M1 MVP succeeds on its real game-development acceptance scenario.
 - The human operator can understand and control the complete workflow from the Web client.
 - Every M1 success check above links to acceptance evidence.
 
-## Frontier after O1, O2, O4, and O5
+## Frontier after O1, O2, O4, O5, and O6
 
 O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers.
 
@@ -249,7 +249,9 @@ O4 is **Evidenced**: runs and leases persist to SQLite, restart reconciliation m
 
 O5 is **Evidenced**: durable project membership resolves an Agent's environment without binding its identity to one; native session keys continue only in their full environment slot; and deterministic project contracts plus privacy-preserving hand-off carry the relevant context across environments ([#18](https://github.com/tinysnake/sprout/issues/18), [#20](https://github.com/tinysnake/sprout/issues/20), [#21](https://github.com/tinysnake/sprout/issues/21)).
 
-The active frontier is **O6 — Multi-agent collaboration**. Map [#24](https://github.com/tinysnake/sprout/issues/24) functionally evidenced its narrowed Task-held-lease macOS/Pi/Codex scenario through #25–#35, and the closing privacy exception was remediated and independently reviewed. The broader O6 engine/platform/cross-environment breadth requires a future map, so O6 stays **In progress** until that map is planned and is not claimed as Evidenced.
+O6 is **Evidenced**: Message and Task lifecycles are distinct, Task-held environment leases retain capacity through idle/stop/failure/recovery states, Project workspaces persist across Tasks while temporary Task contexts recycle safely, Web controls govern the collaboration flow, and live Pi/Codex multi-round collaboration is verified on macOS (#24–#36).
+
+The active frontier is **O7 — Real game-development MVP validation**. O7 brings the proven engines, environment targets, and collaboration plane together in a real game-development scenario.
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
