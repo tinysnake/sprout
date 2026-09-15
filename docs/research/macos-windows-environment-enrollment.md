@@ -1,8 +1,14 @@
 # Research report: secure macOS and Windows Environment enrollment
 
-**Issue:** #47  
-**Research date:** 2026-09-15  
+**Issue:** #47
+**Research date:** 2026-09-15
 **Status:** options and evidence for a later product decision; this report does not select product behaviour
+
+> **Channel clarification:** The current Windows SSH channel is an agent
+> automation channel used to deploy, inspect, and test the host. It is not the
+> communication channel between the Worker and Core. Any SSH tunnel described
+> below is an experimental/compatibility carrier evidenced by those tests, not
+> the current Worker-Core application path.
 
 ## Executive summary
 
@@ -21,12 +27,12 @@ private network. Both can carry the same protocol. A relay or overlay should
 transport an already authenticated Worker connection; it should not become the
 source of Sprout identity or engine credentials.
 
-The current Windows implementation proves a useful baseline: a user-session
-Worker daemon binds loopback and the Core reaches it through an SSH local
-forward. SSH is encrypted and authenticated, but it couples runtime reachability
-to SSH account/key setup and is a poor fit for routine Web enrollment. Keep it as
-a provisioning, diagnostics, or compatibility carrier rather than treating the
-existing tunnel as the final enrollment experience.
+The current Windows automation proves a useful host baseline: an agent can use
+SSH to deploy and inspect a user-session Worker daemon, exercise its loopback
+endpoint, and run Windows integration tests. That SSH channel is not the
+Worker-Core communication channel. An SSH tunnel can remain an experimental or
+compatibility carrier, but its account/key setup is a poor fit for routine Web
+enrollment and must not be described as the current application data path.
 
 The security model must keep five facts separate:
 
@@ -128,31 +134,35 @@ The current carriers are:
 - local loopback TCP via [`src/worker/carrier.ts`](../../src/worker/carrier.ts);
 - container exec stdio, with no published port, via
   [`src/worker/container-carrier.ts`](../../src/worker/container-carrier.ts);
-- Windows loopback daemon plus SSH local forwarding via
-  [`src/worker/windows-carrier.ts`](../../src/worker/windows-carrier.ts).
+- an SSH local-forwarding compatibility implementation for Windows via
+  [`src/worker/windows-carrier.ts`](../../src/worker/windows-carrier.ts); this
+  is not the SSH channel used by agent automation to deploy and test the host.
 
 The repository's Windows evidence in
-  [`docs/research/windows-ssh.md`](windows-ssh.md) and its linked #5
-  verification established that a
-physical Windows 11 host can run a detached user-session Worker, start it at
-logon, host Codex and Pi, and expose only a loopback endpoint through an SSH
-`-L` tunnel. That evidence also established that SSH is a carrier, not a
-change to the Worker protocol.
+[`docs/research/windows-ssh.md`](windows-ssh.md) and its linked #5 verification
+was produced through agent-driven deployment and testing. It established that
+a physical Windows 11 host can run a detached user-session Worker, start it at
+logon, host Codex and Pi, and that an SSH `-L` tunnel can be exercised as an
+optional compatibility path to its loopback endpoint. It did not establish SSH
+as the Worker-Core communication channel; SSH remains an automation/test and
+optional carrier concern, while the Worker-Core boundary remains the common
+Worker protocol.
 
 This baseline proves transport feasibility, not enrollment product usability:
 
 - an operator must already have a usable SSH account/key path;
-- the Core reads a readiness file over a provisioning channel and opens a
-  locally selected forward;
+- agent automation can read a readiness file and, in the compatibility test,
+  open a locally selected forward;
 - the Worker has no cryptographic Sprout identity or version negotiation;
 - the Web product has no enrollment transaction or approval step;
 - the Core currently learns configured engine adapters, not a neutral split of
   engine login, installation, and capability permission.
 
-The desired Web flow can therefore wrap the existing deployment as a temporary
-carrier: Web creates an Environment record, the Human performs host bootstrap,
-and the SSH-backed Worker reports online. That is a valid migration/fallback,
-but not evidence that SSH should remain the normal runtime path.
+The desired Web flow can therefore reuse the existing host deployment/testing
+automation as a temporary bootstrap. Web creates an Environment record, the
+Human performs host bootstrap, and the selected Worker carrier reports online.
+The optional SSH compatibility path is not evidence that SSH should remain the
+normal Worker-Core runtime path.
 
 ## 3. Host and startup facts
 
@@ -312,7 +322,7 @@ discovery [RFC 6763](https://www.rfc-editor.org/rfc/rfc6763), February 2013), no
 authentication.
 
 **Advantages:** no relay dependency, low latency, simple same-host model, easy
-to test against the existing loopback carrier.  
+to test against the existing loopback carrier.
 **Costs:** inbound reachability and firewall/certificate handling; direct LAN
 discovery can be spoofed; it does not solve NAT or changing networks.
 
@@ -330,7 +340,7 @@ revoked, and incompatible states. It is also the best fit for hosts whose
 address changes or which sit behind NAT.
 
 **Advantages:** no inbound Worker port, works across NAT/private networks,
-single application carrier, Web can observe lifecycle.  
+single application carrier, Web can observe lifecycle.
 **Costs:** requires a reachable Core rendezvous/control service; an Internet
 outage makes the Environment temporarily unavailable unless a separate private
 carrier is configured; the control service becomes availability and metadata
@@ -354,7 +364,7 @@ infrastructure ([ZeroTier documentation](https://docs.zerotier.com/), accessed
 
 **Advantages:** avoids opening a normal LAN listener to arbitrary local peers;
 can provide direct paths with a relay fallback; provider handles difficult NAT
-cases.  
+cases.
 **Costs:** provider account, node authorization, client lifecycle, and outage
 become host/operator concerns; overlay membership is not Sprout Human approval;
 the application still needs its own Worker identity, TLS/key pinning, protocol
@@ -375,7 +385,7 @@ mechanism ([service tokens](https://developers.cloudflare.com/cloudflare-one/acc
 accessed 2026-09-15).
 
 **Advantages:** outbound-only host connectivity, a mature HTTPS edge, and
-provider access policy.  
+provider access policy.
 **Costs:** the normal shape is a public hostname/edge policy even when the
 origin is private; this adds a third-party identity and policy plane that is
 larger than Sprout's local-operator need. A Cloudflare token authenticates to
@@ -385,29 +395,33 @@ needs Sprout key binding, approval, and revocation.
 Cloudflare is a viable operator-selected carrier for Option B, not a reason to
 make Sprout Worker ports public and not a replacement for the Worker protocol.
 
-### Option E — Existing Windows SSH tunnel
+### Option E — Windows SSH automation and compatibility tunnel
 
-The current evidence uses SSH to provision/debug the Windows daemon and to
-forward a local Core port to a loopback Worker endpoint. Microsoft documents
-the Windows OpenSSH server and configuration above. The repository evidence
-also records the Windows-specific guardrails: no PTY for JSON, keepalives,
-detached user-session startup, and in-band Worker interruption rather than
-assuming POSIX signal forwarding.
+The current agent automation uses SSH to provision, inspect, and test the
+Windows host. Separately, the repository contains an SSH local-forwarding
+compatibility implementation that can be exercised against a loopback Worker
+endpoint. Neither should be described as the current Worker-Core application
+communication channel. Microsoft documents the Windows OpenSSH server and
+configuration above. The repository evidence also records the Windows-specific
+test guardrails: no PTY for JSON, keepalives, detached user-session startup, and
+in-band Worker interruption rather than assuming POSIX signal forwarding.
 
-**Advantages:** already exercised; encrypted/authenticated; no public Worker
-listener; can be a useful bootstrap and emergency diagnostic path.  
+**Advantages:** already exercised by automation/tests; encrypted/authenticated;
+no public Worker listener; can be a useful bootstrap and emergency diagnostic
+path.
 **Costs:** SSH account/key provisioning is a separate Human workflow; Windows
 shell, service, logon, and key ACL behaviour add failure modes; Web cannot
-meaningfully enroll a host that has not already been SSH-prepared; reconnect,
-revocation, and duplicate identity are coupled to SSH configuration unless
-Sprout adds a second identity layer.
+meaningfully use this compatibility path unless the host has already been
+SSH-prepared; reconnect, revocation, and duplicate identity are coupled to SSH
+configuration unless Sprout adds a second identity layer.
 
-**Reconciliation:** preserve `SshTunnelCarrier` as a compatibility carrier
-while a new carrier uses the same Worker protocol. A Web-led enrollment can
-use SSH as the one-time bootstrap if that is the operator's choice, but the
-runtime should not assume SSH, and SSH authorization must not be mistaken for
-Sprout Human approval. This meets the existing evidence without selecting SSH
-as final product behaviour.
+**Reconciliation:** preserve `SshTunnelCarrier` as an optional compatibility
+carrier while a new carrier uses the same Worker protocol. A Web-led enrollment
+may invoke the existing SSH-based host automation as a one-time bootstrap if
+that is the operator's choice, but the Worker-Core runtime should not assume
+SSH, and SSH authorization must not be mistaken for Sprout Human approval. This
+records the test/deployment role accurately without selecting SSH as final
+product behaviour.
 
 ### Comparison matrix
 
@@ -504,13 +518,13 @@ convenience discovery layer.
 - More host/network/firewall setup and poorer Web-only experience across NAT.
 - Still requires Sprout key binding; overlay membership is not approval.
 
-### Option 3: staged migration from the current SSH carrier
+### Option 3: staged migration from the existing SSH automation/compatibility path
 
 Put the Web enrollment record, short-lived approval transaction, Worker identity,
-and capability projection around the existing Windows daemon/tunnel first. Add
-the common authenticated carrier later.
+and capability projection around the existing Windows host automation and
+compatibility tunnel first. Add the common authenticated carrier later.
 
-- Smallest immediate change and reuses live Windows evidence.
+- Smallest immediate change and reuses live Windows test evidence.
 - Preserves SSH's setup burden and does not fully deliver routine Web-led
   onboarding; should be labelled compatibility/fallback rather than the target
   architecture.
