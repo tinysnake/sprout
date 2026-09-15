@@ -12,6 +12,10 @@ _Avoid_: Server, backend
 The shared management boundary containing projects, agents, environments, integrations, and dynamic operational state.
 _Avoid_: Backend, Sprout instance
 
+**Human**:
+A person who participates in Sprout and retains authority that cannot be delegated to an Agent.
+_Avoid_: User account, Human Agent
+
 **Project**:
 A collaboration space in which human and agent members pursue a defined goal under shared rules.
 _Avoid_: Project group, group chat
@@ -48,6 +52,14 @@ _Avoid_: Process, bot instance, environment agent
 One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
 _Avoid_: Agent, task
 
+**Agent run stop**:
+An intentional request by a Human, or by the Task lead for a run it initiated, to settle one active agent run without ending its Task or releasing the Task lease. The Human's operator action is named Interrupt, but its intentional run outcome is stopped, distinct from an unexpected run interruption.
+_Avoid_: Task pause, Task end, interruption
+
+**Interrupt**:
+The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Agent run stop whose outcome is stopped, not interrupted.
+_Avoid_: Interruption, Task pause, Task end
+
 **Session key**:
 The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so the next run in the same environment and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
 _Avoid_: Session id, thread id, conversation id
@@ -61,27 +73,59 @@ The lower-cost model that decides whether a project-channel message should start
 _Avoid_: Cerebellum, small model
 
 **Task**:
-A durable unit of multi-run or automated work that preserves its goal, state, constraints, and results across agent runs. A Task owns one environment lease for its whole duration.
+A durable unit of multi-run or automated work that preserves its goal, state, constraints, and results across agent runs. A begun Task owns one environment lease from Task begin through Task end; an unapproved Task proposal owns none.
 _Avoid_: Message, agent run
 
 **Task proposal**:
-A Task suggested by a human or agent that has not received permission to begin. It holds no environment lease and cannot start an agent run until a human approves its Task begin.
+A Task suggested by a Human or by an Agent belonging to its Project that has not received permission to begin. It holds no environment lease and cannot start an agent run, prepare Task context, or reserve an Environment instance. Its proposer may revise or withdraw it, while a Human may revise, reject, or approve it.
 _Avoid_: Running task, autonomous task
 
+**Task approval**:
+The Human authority decision that accepts the current Task content, names its Task lead, and authorizes Task begin. Approval and the request to begin are one action rather than a durable approved-but-unbegun state; they remain separately observable facts.
+_Avoid_: Agent consent, run approval
+
+**Task content version**:
+One durable version of a Task's goal, constraints, and validation criteria. A Human may create a new version at any time; an active agent run continues with the version it received, and the next run receives the latest version.
+_Avoid_: Prompt, Agent memory
+
 **Task lead**:
-The project member entrusted by a human at Task begin to coordinate agent work within that Task's goal, constraints, membership, and selected environment.
+A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task.
 _Avoid_: Task owner, scheduler
 
 **Task begin**:
-The human-authorized act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
+The Human-authorized act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
 _Avoid_: Start, first agent run
 
+**Task pause request**:
+The admission hold created by a Human's first Pause action while an agent run remains active: no new run may begin, but the current run may settle. The next Human control is Interrupt, which requests an Agent run stop.
+_Avoid_: Agent run stop, blocked, Task end
+
+**Task pause**:
+The Human-controlled resting state reached after a Task pause request has no active run. No new run may begin, and the Task lease remains held until a Human resumes or ends the Task.
+_Avoid_: Task pause request, blocked, Task end
+
+**Task blocker**:
+A routable reason that prevents Task advancement and names the required next action, its responsible actor or external condition, and who advances the Task when it clears. A blocked Task retains its Task lease.
+_Avoid_: Prose-only wait, Task pause
+
+**Task completion claim**:
+The Task lead's fact-form request for human validation, containing an outcome summary, validation evidence, durable changes, known limitations, and a proposed disposition. It does not complete the Task or release its Task lease.
+_Avoid_: Task completion, Agent final answer
+
+**Task validation**:
+The Human decision to accept a Task completion claim or require correction. Acceptance authorizes Task end toward completion; correction retains the same Environment instance and Task lease for another deliberate advance.
+_Avoid_: Agent self-approval, Agent run completion
+
 **Task end**:
-The explicit act that has the environment worker recycle the Task context directory and then releases the Task lease. Only Task end ends a Task's hold on its environment; a failed, stopped, or interrupted agent run does not.
+The Human-authorized act that has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not.
 _Avoid_: Stop, cancel
 
+**Task discard**:
+The Human decision to abandon a begun Task, including during recovery, and authorize Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved.
+_Avoid_: Delete Project workspace, automatic cleanup
+
 **Task lease**:
-The one environment lease a Task holds from Task begin to Task end, covering idle, blocked, and human-validation gaps. Agent runs nested inside the Task reuse it and neither acquire nor release it.
+The one environment lease a Task holds from Task begin to Task end, covering idle, paused, blocked, human-validation, and recovery gaps. Agent runs nested inside the Task reuse it and neither acquire nor release it.
 _Avoid_: Run lease, lock
 
 **Task context directory**:
@@ -109,5 +153,5 @@ A time-bounded right to use an environment instance's lease-requiring capabiliti
 _Avoid_: Agent environment, lock
 
 **Lease recovery**:
-The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until its holder or an operator explicitly resolves it. An unfinished Task's lease stays reserved through recovery and is never silently reassigned.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume or discard it; one-round Agent run recovery retains its existing holder or Human controls.
 _Avoid_: Cleanup, lock timeout

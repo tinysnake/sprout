@@ -1,6 +1,6 @@
 # Reference repositories
 
-Sprout does not develop in a vacuum. Two open-source MIT repositories are standing reference objects: when a feature area has a mature equivalent in one of them, that design (or code) is adopted by default instead of being built from zero. Deviations must be justified in the ticket's work record.
+Sprout does not develop in a vacuum. Three open-source repositories are standing reference objects: when a feature area has a mature equivalent in one of them, that design (or code) is adopted by default instead of being built from zero. Deviations must be justified in the ticket's work record.
 
 ## Policy
 
@@ -25,7 +25,7 @@ Sprout does not develop in a vacuum. Two open-source MIT repositories are standi
 - **Repository**: <https://github.com/paperclipai/paperclip>
 - **License**: MIT
 - **What it is**: an open-source app for managing agents at work (teams, projects, agent management).
-- **Absorbed so far**: the separation of a durable project workspace from a temporary per-work execution area, adopted as design (no code) by ADR-0005, consulted at `d351e08deee1b49d3467a950d1a3f01131943441`. Expected reference areas: team/project/agent permission models, agent run management, and task organisation. It has no equivalent to Sprout's environment lease model, so that area remains Sprout-original.
+- **Absorbed so far**: the separation of a durable project workspace from a temporary per-work execution area, adopted as design (no code) by ADR-0005, consulted at `d351e08deee1b49d3467a950d1a3f01131943441`; and the separation of work status, ownership, and live execution plus the requirement that blocked work have a routable waiting path, adopted as product principles (no code) by ADR-0006 at the same pinned revision. Expected reference areas: team/project/agent permission models, agent run management, and task organisation. It has no equivalent to Sprout's environment lease model, so that area remains Sprout-original.
 
 ### AionUi
 

@@ -54,11 +54,12 @@ We decided that **neither lease timeout nor holder or worker loss ever makes an
 unfinished Task's environment reassignable on its own**. Losing the holder, the
 Sprout core, or the environment worker moves the Task lease into the recovery
 state already established by O4 (#16), where it continues to block acquisition.
-Recovery is resolved explicitly — by the owning Task resuming, or by an operator
-preserving or discarding the work — and only then does the instance become
-acquirable again. Task end is likewise explicit and must be able to complete
-recoverably, so a crash between recycling context and releasing the lease is
-repaired on restart rather than left as a half-released environment.
+Recovery is resolved explicitly, and only then does the instance become
+acquirable again. ADR-0006 later narrows the M2 authority boundary: only a Human
+may resume or discard an unfinished Task in recovery; neither the Agent Task
+lead nor the system may resolve it. Task end is likewise explicit and must be
+able to complete recoverably, so a crash between recycling context and releasing
+the lease is repaired on restart rather than left as a half-released environment.
 
 An automatic expiry that silently freed the environment would be the failure
 `docs/goal.md` names directly: uncommitted work handed to another worker because
