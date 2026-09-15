@@ -16,6 +16,7 @@ codexhome/
 *.db
 *.db-journal
 sprout.db
+.sprout-game-workspaces/
 # The fallback contract file a working-directory engine (opencode) reads when
 # the directory's own AGENTS.md belongs to the user. Sprout writes it at run time.
 SPROUT-PROJECT-CONTRACT.md

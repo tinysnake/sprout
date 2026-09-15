@@ -1,5 +1,5 @@
 import type { AgentDefinition } from './agent/registry.ts';
-import type { Project, ProjectMembership } from './project/model.ts';
+import type { Project, ProjectMembership, ProjectWorkspace } from './project/model.ts';
 
 /** Optional host configuration for deployments with more than the sample Agent. */
 export interface RuntimeConfiguration {
@@ -74,13 +74,41 @@ function parseProject(raw: unknown): Project {
       collaborationInstructions: required(entry, 'collaborationInstructions', 'membership'),
     };
   });
+  const availableEnvironmentInstanceIds = strings(raw.availableEnvironmentInstanceIds, 'project availableEnvironmentInstanceIds');
+  const workspaces = raw.workspaces === undefined ? undefined : parseWorkspaces(raw.workspaces);
+  if (workspaces !== undefined) {
+    const available = new Set(availableEnvironmentInstanceIds);
+    for (const workspace of workspaces) {
+      if (!available.has(workspace.environmentInstanceId)) {
+        throw new Error(`SPROUT_RUNTIME_CONFIG project workspace is not available to the Project: ${workspace.environmentInstanceId}`);
+      }
+    }
+  }
   return {
     id: required(raw, 'id', 'project'),
     goal: required(raw, 'goal', 'project'),
     rules: strings(raw.rules, 'project rules'),
-    availableEnvironmentInstanceIds: strings(raw.availableEnvironmentInstanceIds, 'project availableEnvironmentInstanceIds'),
+    availableEnvironmentInstanceIds,
+    ...(workspaces !== undefined ? { workspaces } : {}),
     memberships,
   };
+}
+
+function parseWorkspaces(raw: unknown): readonly ProjectWorkspace[] {
+  if (!Array.isArray(raw)) throw new Error('SPROUT_RUNTIME_CONFIG project workspaces must be an array');
+  const workspaces = raw.map((entry) => {
+    if (!isRecord(entry)) throw new Error('SPROUT_RUNTIME_CONFIG workspace must be an object');
+    const environmentInstanceId = required(entry, 'environmentInstanceId', 'workspace');
+    const path = required(entry, 'path', 'workspace');
+    if (!isSafeRelativePath(path)) {
+      throw new Error('SPROUT_RUNTIME_CONFIG workspace.path must be a relative path below the Worker root');
+    }
+    return { environmentInstanceId, path };
+  });
+  if (new Set(workspaces.map((workspace) => workspace.environmentInstanceId)).size !== workspaces.length) {
+    throw new Error('SPROUT_RUNTIME_CONFIG project workspaces must have unique environmentInstanceIds');
+  }
+  return workspaces;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -105,4 +133,11 @@ function strings(value: unknown, field: string): readonly string[] {
     throw new Error(`SPROUT_RUNTIME_CONFIG ${field} must be an array of strings`);
   }
   return value;
+}
+
+/** Paths cross the core/Worker seam, so reject absolute and traversal forms here. */
+function isSafeRelativePath(path: string): boolean {
+  if (path.startsWith('/') || path.startsWith('\\') || /^[a-zA-Z]:/.test(path)) return false;
+  const segments = path.split(/[\\/]/);
+  return segments.length > 0 && segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }

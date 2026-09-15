@@ -1,0 +1,87 @@
+{
+  "agents": [
+    {
+      "id": "planner",
+      "name": "Planner",
+      "engine": "codex",
+      "capability": "agent-run",
+      "model": "gpt-5.6-terra",
+      "effort": "medium"
+    },
+    {
+      "id": "designer",
+      "name": "Designer",
+      "engine": "pi",
+      "capability": "agent-run",
+      "model": "antigravity/gemini-3.8-flash",
+      "effort": "high"
+    },
+    {
+      "id": "programmer",
+      "name": "Programmer",
+      "engine": "pi",
+      "capability": "agent-run",
+      "model": "workbuddy/deepseek-v4.1-flash",
+      "effort": "high"
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "engine": "codex",
+      "capability": "agent-run",
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh"
+    }
+  ],
+  "project": {
+    "id": "o7-minesweeper",
+    "goal": "Develop and verify a playable 2D Minesweeper game in the registered Three.js repository.",
+    "rules": [
+      "Work only in the registered Project workspace.",
+      "Report observed facts and verification results; do not claim unverified work.",
+      "Use direct messages for hand-offs and keep the planner informed."
+    ],
+    "availableEnvironmentInstanceIds": ["local-macos"],
+    "workspaces": [
+      {
+        "environmentInstanceId": "local-macos",
+        "path": "minesweeper"
+      }
+    ],
+    "memberships": [
+      {
+        "agentId": "planner",
+        "responsibilities": [
+          "Turn the Human request into a sequenced collaboration plan.",
+          "Assess each teammate report and select the next Agent.",
+          "Pause and resume dispatch when the Human requests it."
+        ],
+        "collaborationInstructions": "Coordinate through direct messages. After a teammate DMs you its completion report, evaluate the evidence, DM the next Agent, and report material progress and final completion to the Human."
+      },
+      {
+        "agentId": "designer",
+        "responsibilities": [
+          "Define the game interaction and visual design before implementation.",
+          "Record concrete acceptance guidance for the programmer."
+        ],
+        "collaborationInstructions": "Work only on the Planner-assigned design step. When finished, direct-message the planner with the design decisions, affected files, and verification or open questions; do not dispatch another Agent."
+      },
+      {
+        "agentId": "programmer",
+        "responsibilities": [
+          "Implement the Planner-approved game changes in the Project workspace.",
+          "Run the relevant repository checks and report their results."
+        ],
+        "collaborationInstructions": "Work only on the Planner-assigned implementation step. When finished or blocked, direct-message the planner with changed files, checks run, observed results, and remaining risks; do not dispatch another Agent."
+      },
+      {
+        "agentId": "reviewer",
+        "responsibilities": [
+          "Inspect the implementation against the Planner-approved design and task acceptance.",
+          "Report actionable defects or verification evidence."
+        ],
+        "collaborationInstructions": "Work only on the Planner-assigned review step. When finished, direct-message the planner with findings, evidence, and a clear pass or follow-up recommendation; do not dispatch another Agent."
+      }
+    ]
+  }
+}
