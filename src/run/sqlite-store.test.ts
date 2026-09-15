@@ -43,6 +43,21 @@ test('a run survives being written to disk and read back', async () => {
   assert.deepEqual(restored, sampleRun());
 });
 
+test('token usage survives a SQLite restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-token-usage-'));
+  const dbPath = join(dir, 'sprout.db');
+  const tokenUsage = { promptTokens: 1_200, completionTokens: 300, totalTokens: 1_500 };
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ tokenUsage }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.deepEqual(restored?.tokenUsage, tokenUsage);
+});
+
 test('saving the same run again updates it rather than duplicating it', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   await store.save(sampleRun());
@@ -146,6 +161,7 @@ test('a run written before the project and hand-off columns existed still reads 
   assert.equal(restored?.environmentInstanceId, 'mac-mini-1');
   assert.equal('projectId' in (restored ?? {}), false);
   assert.equal('handOff' in (restored ?? {}), false);
+  assert.equal('tokenUsage' in (restored ?? {}), false);
 
   // And a new run can still be written through the migrated schema.
   await store.save(sampleRun({ id: 'after-migration' }));

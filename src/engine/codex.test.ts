@@ -303,6 +303,46 @@ test('a turn streams assistant text, tool calls, and tool output before completi
   assert.deepEqual(result, { status: 'completed', text: 'done' });
 });
 
+test('a turn attaches the per-turn Codex token usage notification on completion', async () => {
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+    if (request.method === 'turn/start') {
+      self.respond(request.id, { turn: { id: 'turn-usage' } });
+      queueMicrotask(() => {
+        self.notify('thread/tokenUsage/updated', {
+          threadId: 'thread-1',
+          turnId: 'turn-usage',
+          tokenUsage: {
+            // `total` is cumulative for a resumed thread, whereas `last` is
+            // exactly this turn and therefore exactly this AgentRun.
+            total: { inputTokens: 999, outputTokens: 99, totalTokens: 1_098 },
+            last: {
+              inputTokens: 120,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+              totalTokens: 160,
+            },
+          },
+        });
+        self.notify('turn/completed', {
+          turn: { id: 'turn-usage', status: 'completed', error: null },
+        });
+      });
+    }
+  });
+
+  const session = await startAdapter(server).startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
+  const turn = session.run('count tokens');
+  await collect(turn);
+
+  assert.deepEqual(await turn.completion, {
+    status: 'completed',
+    text: '',
+    tokenUsage: { promptTokens: 120, completionTokens: 40, totalTokens: 160 },
+  });
+});
+
 test('interrupting a turn is reported as interrupted, not as a failure', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});

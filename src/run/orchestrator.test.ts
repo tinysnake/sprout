@@ -141,6 +141,19 @@ test('a submitted run acquires its lease, streams progress, and completes', asyn
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
 });
 
+test('a completed engine turn records its token usage on the durable run', async () => {
+  const tokenUsage = { promptTokens: 120, completionTokens: 30, totalTokens: 150 };
+  const { orchestrator, store } = build({
+    turns: [{ events: successEvents, result: { ...completed, tokenUsage } }],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'say hi' });
+  const settled = await orchestrator.waitFor(id);
+
+  assert.deepEqual(settled.tokenUsage, tokenUsage);
+  assert.deepEqual((await store.get(id))?.tokenUsage, tokenUsage);
+});
+
 test('submission returns before the run settles, and progress is observable meanwhile', async () => {
   const { orchestrator } = build({
     turns: [{ events: successEvents, result: completed, settleAfterMs: 40 }],

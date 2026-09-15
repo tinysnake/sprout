@@ -32,6 +32,13 @@ interface RunView {
   readonly events: readonly RunEvent[];
   readonly failure?: string;
   readonly result?: { readonly status?: string; readonly text?: string; readonly message?: string };
+  readonly tokenUsage?: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+  readonly createdAt: number;
+  readonly completedAt?: number;
 }
 
 interface AgentView {
@@ -903,6 +910,12 @@ function render(run: RunView): void {
     failure.hidden = run.failure === undefined;
   }
 
+  const duration = element.querySelector<HTMLElement>('.duration');
+  if (duration) duration.textContent = formatDuration(run);
+
+  const tokenUsage = element.querySelector<HTMLElement>('.token-usage');
+  if (tokenUsage) tokenUsage.textContent = formatTokenUsage(run.tokenUsage);
+
   const stop = element.querySelector<HTMLButtonElement>('button.stop');
   if (stop) {
     stop.hidden = run.status !== 'running' && run.status !== 'queued';
@@ -934,6 +947,22 @@ function createRunElement(run: RunView): HTMLElement {
   failure.className = 'failure';
   failure.hidden = true;
 
+  const metrics = document.createElement('dl');
+  metrics.className = 'run-metrics';
+  const duration = document.createElement('div');
+  const durationLabel = document.createElement('dt');
+  durationLabel.textContent = 'Duration';
+  const durationValue = document.createElement('dd');
+  durationValue.className = 'duration';
+  duration.append(durationLabel, durationValue);
+  const tokenUsage = document.createElement('div');
+  const tokenUsageLabel = document.createElement('dt');
+  tokenUsageLabel.textContent = 'Tokens';
+  const tokenUsageValue = document.createElement('dd');
+  tokenUsageValue.className = 'token-usage';
+  tokenUsage.append(tokenUsageLabel, tokenUsageValue);
+  metrics.append(duration, tokenUsage);
+
   const actions = document.createElement('div');
   actions.className = 'actions';
   const stop = document.createElement('button');
@@ -948,8 +977,23 @@ function createRunElement(run: RunView): HTMLElement {
   });
   actions.append(stop);
 
-  article.append(header, prompt, events, failure, actions);
+  article.append(header, prompt, metrics, events, failure, actions);
   return article;
+}
+
+function formatDuration(run: RunView): string {
+  if (run.completedAt === undefined) return 'In progress';
+  const milliseconds = Math.max(0, run.completedAt - run.createdAt);
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)} s`;
+  const minutes = Math.floor(milliseconds / 60_000);
+  const seconds = Math.floor((milliseconds % 60_000) / 1_000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatTokenUsage(tokenUsage: RunView['tokenUsage']): string {
+  if (tokenUsage === undefined) return 'Unavailable';
+  return `${tokenUsage.totalTokens.toLocaleString()} total (${tokenUsage.promptTokens.toLocaleString()} prompt, ${tokenUsage.completionTokens.toLocaleString()} completion)`;
 }
 
 function renderEvent(event: RunEvent): HTMLLIElement {

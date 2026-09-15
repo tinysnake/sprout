@@ -32,7 +32,10 @@ const projects = new ProjectRegistry([
   },
 ]);
 
-function build(options: { settleAfterMs?: number } = {}) {
+function build(options: {
+  settleAfterMs?: number;
+  tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+} = {}) {
   const adapter = new ScriptedEngineAdapter({
     turns: [
       {
@@ -40,7 +43,11 @@ function build(options: { settleAfterMs?: number } = {}) {
           { type: 'tool-call', name: 'shell', detail: 'echo hi' },
           { type: 'message', text: 'done', final: true },
         ],
-        result: { status: 'completed', text: 'done' },
+        result: {
+          status: 'completed',
+          text: 'done',
+          ...(options.tokenUsage !== undefined ? { tokenUsage: options.tokenUsage } : {}),
+        },
         ...(options.settleAfterMs !== undefined ? { settleAfterMs: options.settleAfterMs } : {}),
       },
     ],
@@ -68,7 +75,10 @@ function build(options: { settleAfterMs?: number } = {}) {
 
 async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
-  options: { settleAfterMs?: number } = {},
+  options: {
+    settleAfterMs?: number;
+    tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  } = {},
 ): Promise<void> {
   const context = build(options);
   const { port } = await context.api.listen(0);
@@ -108,6 +118,34 @@ test('a user can submit a request from the Web client and inspect the result', a
       ['tool-call', 'message'],
     );
   });
+});
+
+test('run detail and history expose token usage and timestamps', async () => {
+  const expected = { promptTokens: 120, completionTokens: 30, totalTokens: 150 };
+  await withServer(async (base) => {
+    const submitted = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'say hi' }),
+    });
+    const { id } = (await submitted.json()) as { id: string };
+    const detail = await waitForTerminal(base, id) as {
+      tokenUsage?: unknown;
+      createdAt?: unknown;
+      completedAt?: unknown;
+    };
+    const history = (await (await fetch(`${base}/api/runs`)).json()) as {
+      runs: Array<{ id: string; tokenUsage?: unknown; createdAt?: unknown; completedAt?: unknown }>;
+    };
+
+    assert.deepEqual(detail.tokenUsage, expected);
+    assert.equal(typeof detail.createdAt, 'number');
+    assert.equal(typeof detail.completedAt, 'number');
+    const historyRun = history.runs.find((run) => run.id === id);
+    assert.deepEqual(historyRun?.tokenUsage, expected);
+    assert.equal(typeof historyRun?.createdAt, 'number');
+    assert.equal(typeof historyRun?.completedAt, 'number');
+  }, { tokenUsage: expected });
 });
 
 test('a submission without an agent or prompt is rejected', async () => {

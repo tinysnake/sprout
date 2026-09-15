@@ -841,6 +841,7 @@ export class RunOrchestrator {
     return this.#advance(run, {
       status,
       result,
+      ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
       completedAt: this.#clock.now(),
       ...(result.status === 'failed' ? { failure: result.message } : {}),
     });
