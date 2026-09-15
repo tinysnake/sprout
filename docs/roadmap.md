@@ -12,59 +12,172 @@ Future outcomes may be split, merged, reordered, or removed when evidence change
 
 ## Current medium-term goal
 
-### M1 — Local single-user MVP
+### M2 — Local operator MVP
 
 **Status**: In progress
 
-Prove that one technical lead can use Sprout locally to coordinate multiple coding Agents across heterogeneous development environments without binding Agent identity or context to a device.
+Turn Sprout's evidenced coordination foundation into a self-hosted product that one technical lead can operate routinely from either mobile or desktop Web clients without editing runtime configuration for day-to-day work.
 
 **Scope**:
 
-1. One local human uses Sprout through a Web client.
-2. Codex, Pi, `agy`, and `opencode` are the first Agent implementations (four engines, so the run interface is proven by more than a two-adapter seam).
-3. Container, macOS, and Windows are the first environment targets.
-4. Agent identity, configuration, and context remain independent of a specific environment.
-5. A project can define its goal, members, responsibilities, rules, and available environments before work starts.
-6. Direct messages, project-channel messages, and basic wake-model behaviour are supported.
-7. An Agent can investigate through permitted read-only access and obtain a lease for mutating or capacity-intensive work.
-8. An explicitly selected task environment takes priority, with system matching as fallback.
-9. Messages, tasks, run results, and shared context are persisted.
-10. The human can observe and stop Agent runs and manage environment leases.
-11. Sprout, Agent, or lease interruption preserves recoverable state and protects uncommitted work.
+1. One local technical lead operates a self-hosted Sprout instance.
+2. Codex and Pi are the required work engines; the already implemented `agy` and `opencode` adapters do not require long-running product acceptance during M2.
+3. macOS and Windows are the required operator environments.
+4. Projects, reusable Agents, Environment instances, memberships, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
+5. A Task remains bound to one Environment instance from Task begin through Task end.
+6. Humans and Agents may propose Tasks, but only a Human may authorize Task begin and acquisition of the Task lease.
+7. Projects can choose between explicit-only and wake-model-assisted Project-channel routing.
+8. Routine Project communication, Task control, Agent-run observation, Environment management, and recovery are available with mobile and desktop capability parity.
+9. Token usage, duration, and monetary cost are recorded and presented truthfully at useful scopes.
+10. Sprout, lightweight-game, and Unity development provide ongoing dogfooding evidence without any one scenario becoming a mechanical release gate.
 
 **Success checks**:
 
-- All four engines participate as independent Agents in the same project.
-- Agents can be allocated across container, macOS, and Windows environments according to work needs.
-- Multiple Agents collaborate without conflicting over exclusive environments.
-- Restarting Sprout restores project messages, tasks, and observable work state.
-- The human can understand what each Agent is doing and stop or correct it.
-- A real game-development project completes the full scenario with an exclusive high-resource editor environment; a toy repository alone is insufficient evidence.
+- Each supporting outcome below has linked, objective acceptance evidence.
+- A technical lead can complete the settled operator journeys from both mobile and desktop without editing runtime JSON during routine operation.
+- Human authorization remains the boundary for starting lease-holding Tasks, while approved Tasks can use bounded Agent collaboration.
+- macOS and Windows Environment state, compatibility, interruption, and safe recovery remain understandable and controllable.
+- Usage views distinguish authoritative provider or harness facts from estimates and unavailable data, including monetary cost.
+- After sustained dogfooding, the product owner explicitly accepts that Sprout is ready for routine local development coordination. This Human judgement complements rather than replaces objective acceptance for each capability.
 
 **Constraints**:
 
-- The product runs locally and exposes a cross-platform Web client.
+- Agent identity remains independent of Project and Environment.
+- The product remains self-hosted and exposes one Web experience with full mobile and desktop capability parity.
+- Engine credentials remain on the Environment where their harness runs; Sprout does not become a central credential store.
+- An active Task never moves between Environment instances.
 - Core modules remain independently testable and verifiable.
-- Framework, language, and database choices are made when implementation evidence requires them and recorded as ADRs when appropriate.
-- The M1 engine set is Codex, Pi, `agy`, and `opencode`. `zcode` support is deferred until after M1: it requires an ACP bridge on top of the engine, which is extra wiring rather than a first-class engine CLI.
+- Individual capabilities use observable acceptance checks even though overall MVP readiness is a Human product decision.
+- Open product details are settled through [Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44), not guessed in this outcome map.
 
-**Non-goals for M1**:
+**Non-goals for M2**:
 
 - Cloud multi-tenant SaaS.
 - Multiple human users and complex team authorization.
-- Advanced message routing, subscriptions, and topic matching.
 - A complete workflow or project-management system.
-- New model, Agent runtime, container, VM, or remote-execution infrastructure.
-- Remote desktop or a complete embedded IDE.
+- Moving one active Task between Environment instances.
+- Requiring long-running `agy` or `opencode` participation for release.
+- Making container operation, high-resource editor scheduling, or cross-Environment parallel work an M2 release gate.
+- Remote desktop or an embedded IDE.
 - Production deployment governance.
-- General office-work collaboration.
-- An optimal context-compression strategy.
+- Backup, restore, and product-upgrade workflows beyond preserving durable state across an ordinary restart.
+- A single prescribed Sprout, lightweight-game, or Unity scenario as an objective release gate.
+
+## M2 supporting outcomes
+
+These outcomes deliberately remain at product-result level while Map #44 resolves the decision fog. They may be split, merged, or reordered before implementation maps begin.
+
+### M2-O1 — Product-managed collaboration setup
+
+**Status**: Unproven
+**Depends on**: M1
+
+A technical lead can establish reusable Agents, connected Environments, and Projects with explicit contracts and at least one Project template through the product rather than hand-written runtime configuration.
+
+**Outcome checks**:
+
+- Agent, Environment, Project, membership, template, and workspace responsibilities remain distinct and understandable.
+- Routine create, inspect, change, and retirement journeys are available through Web while preserving historical identity.
+- Host-local engine authentication and workspace facts do not leak into portable Agent or Project identity.
+
+### M2-O2 — Human-authorized Agent work
+
+**Status**: Unproven
+**Depends on**: M2-O1
+
+Humans and Agents can propose durable work, Human authorization controls Task begin, and approved Tasks support bounded multi-Agent progress without surrendering Human control of scarce Environments.
+
+**Outcome checks**:
+
+- Human-created and Agent-proposed work are both representable and observable before Task begin.
+- Only a Human can authorize Task begin and its Task lease.
+- A Task remains bound to its selected Environment until Task end.
+- The settled pause, stop, validation, correction, completion, end, and recovery journeys are observable and safe.
+
+### M2-O3 — Intentional and explainable communication routing
+
+**Status**: Unproven
+**Depends on**: M2-O1
+
+Direct messages, explicit Project-channel addressing, and optional wake-model routing let members collaborate without unexplained silence or uncontrolled Agent wakes.
+
+**Outcome checks**:
+
+- Each Project has an explicit wake policy.
+- Addressing, routing, suppression, failure, and retry outcomes are durable and understandable to the Human operator.
+- Routing shares no private raw reasoning and prevents accidental wake loops.
+
+### M2-O4 — Self-hosted macOS and Windows operation
+
+**Status**: Unproven
+**Depends on**: M2-O1
+
+A technical lead can establish and maintain a local Sprout instance with macOS and Windows Environment Workers, understand their health and compatibility, and recover safely from interruption.
+
+**Outcome checks**:
+
+- The required host-local installation and engine-login steps are explicit, while routine management occurs through Web.
+- Environment identity, connectivity, capability permission, engine availability, and version compatibility are observable.
+- Ordinary restart, disconnect, diagnostics, and work-recovery outcomes preserve durable state and protect unfinished work.
+
+### M2-O5 — Truthful usage and monetary-cost observability
+
+**Status**: Unproven
+**Depends on**: M1
+
+The operator can understand token usage, duration, and monetary cost across Agent runs and the larger work they contribute to without estimates being presented as billed facts.
+
+**Outcome checks**:
+
+- Codex and Pi telemetry semantics are measured and documented.
+- Missing, delayed, cached, resumed, failed, reported, and estimated values remain distinguishable.
+- The settled run, Task, Project, Agent, model, and time-range views are available on mobile and desktop.
+
+### M2-O6 — Mobile-first operator control
+
+**Status**: Unproven
+**Depends on**: M2-O1, M2-O2, M2-O3, M2-O4, M2-O5
+
+One coherent Web product lets the technical lead perform every routine management, collaboration, observation, intervention, and recovery journey from either mobile or desktop.
+
+**Outcome checks**:
+
+- Mobile is a complete operating surface rather than a read-only status view.
+- State distinctions and actions remain usable on narrow touch screens and desktop displays.
+- An owner-reviewed interactive prototype provides primary evidence before the production information architecture is fixed.
+
+### M2-O7 — Dogfooded local operator MVP
+
+**Status**: Unproven
+**Depends on**: M2-O2, M2-O3, M2-O4, M2-O5, M2-O6
+
+The completed product capabilities hold up in routine Sprout, lightweight-game, and Unity development until the product owner judges the Local Operator MVP ready for continued use.
+
+**Outcome checks**:
+
+- Every preceding M2 outcome links to objective acceptance evidence.
+- Dogfooding findings are fixed, explicitly deferred, or accepted as known limits rather than silently ignored.
+- The product owner records explicit Human acceptance of overall MVP readiness.
+
+## Current M2 frontier
+
+[Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44) is the active development map. It resolves product and operational decisions across the M2 outcomes before `/to-spec` collapses them into a buildable specification. No production implementation map should guess the decisions still open there.
+
+## Completed medium-term goal
+
+### M1 — Local coordination foundation
+
+**Status**: Evidenced
+
+M1 proved the core seams needed for product development: heterogeneous engines run behind one interface inside Environment Workers; environments are leased and recoverable; project context, Messages, Tasks, and run results are durable; and real Codex/Pi collaboration can produce and review a playable game.
+
+M1 was originally named “Local single-user MVP.” Evidence from its final slice showed that it completed the coordination foundation rather than the operator-ready product. Reclassification preserves the construction evidence below without claiming that four-engine, three-platform, high-resource-editor collaboration ran as one combined scenario.
 
 ## M1 supporting outcomes
 
 ### O1 — Controllable agent runs
 
-**Status**: Evidenced  
+**Status**: Evidenced
 **Depends on**: None
 
 Codex, Pi, `agy`, and `opencode` are all controlled through one Sprout-facing run model rather than being embedded as machine-specific agents. Codex uses the `app-server` transport (ADR-0001).
@@ -222,24 +335,28 @@ The evidenced slice is one Task owning one macOS Environment lease from explicit
 8. The two required live macOS rounds through real Workers and adapters — [#35](https://github.com/tinysnake/sprout/issues/35#issuecomment-5670561136) and the sanitized [live record](evidence/live-macos-pi-codex-task.md).
 9. This narrowed slice and its deferred breadth are recorded here. The #36 closing privacy audit's exception (six commits with non-generic personal author/committer metadata in the earlier integration range) was remediated by rewriting those commits to the repository's generic agent identity with identical trees and messages; the integration range now audits clean.
 
-**Future map required for O6 breadth (not claimed by #24)**: `agy`/`opencode` collaboration, container/Windows collaboration, and cross-environment Task movement. O1 independently proves all four adapters, O2 independently proves all three environment targets, and O5 independently proves cross-environment context hand-off; none of those independent capabilities proves them in this Task collaboration scenario. Live validation here is macOS-only with Pi and Codex.
+**Deferred breadth, not an M1 completion requirement**: `agy`/`opencode` collaboration and container/Windows collaboration were not exercised in this Task scenario. O1 independently proves all four adapters, O2 independently proves all three environment targets, and O5 independently proves cross-environment context hand-off. An active Task moving between Environment instances is intentionally unsupported: a Task retains one selected Environment from Task begin through Task end.
 
-### O7 — Real game-development MVP validation
+### O7 — Real game-development foundation validation
 
-**Status**: Unproven  
+**Status**: Evidenced
 **Depends on**: O2, O4, O5, O6
 
-The complete M1 MVP succeeds on its real game-development acceptance scenario.
+The M1 coordination foundation supports a real, reviewable multi-Agent game-development flow rather than only synthetic tests.
+
+**Acceptance evidence**: [Map: O7 local game development MVP slice](https://github.com/tinysnake/sprout/issues/38) and its accepted tickets #39–#42 were merged through PR #43 (`84c2406`). The sanitized [Minesweeper collaboration record](evidence/o7-minesweeper-collaboration.md) captures the durable conversation, 14 completed Agent turns, Planner-led hand-offs, Human pause/resume, correction after independent review, re-review, final publication, duration, provider-token usage, and real browser interaction. A clean checkout can materialize and verify the playable Three.js game.
 
 **Outcome checks**:
 
-- Multiple project members running different engines work across container, macOS, and Windows environments.
-- A high-resource editor environment remains exclusive while other useful work proceeds elsewhere.
-- Context continues across environments, resource conflicts are prevented, and interrupted work recovers.
-- The human operator can understand and control the complete workflow from the Web client.
-- Every M1 success check above links to acceptance evidence.
+- Four Project members with distinct Planner, Designer, Programmer, and Reviewer responsibilities collaborate through real Codex and Pi Agent runs.
+- The Human pauses and resumes orchestration without replaying the completed work.
+- Independent review can require correction, after which the Programmer corrects the work and the Reviewer re-reviews it before final completion.
+- A real browser verifies reveal, flag, and mine-counter behaviour in the produced game.
+- The durable audit preserves Message causality, Agent attribution, duration, and token usage without synthetic Agent reports or private raw reasoning.
 
-## Frontier after O1, O2, O4, O5, and O6
+**Accepted boundary**: O7 does not claim one combined four-engine, three-platform, high-resource-editor scenario. Those independent seams were already evidenced where needed for the foundation; long-running `agy`/`opencode` use, high-resource editor scheduling, and cross-Environment parallel work are not release gates for the next Local Operator MVP. Task migration across Environment instances is outside the product model.
+
+## M1 completion summary
 
 O1 is **Evidenced**: all four engines (Codex, Pi, `agy`, `opencode`) run live behind the uniform run seam inside environment workers.
 
@@ -251,8 +368,8 @@ O5 is **Evidenced**: durable project membership resolves an Agent's environment 
 
 O6 is **Evidenced**: Message and Task lifecycles are distinct, Task-held environment leases retain capacity through idle/stop/failure/recovery states, Project workspaces persist across Tasks while temporary Task contexts recycle safely, Web controls govern the collaboration flow, and live Pi/Codex multi-round collaboration is verified on macOS (#24–#36).
 
-The active frontier is **O7 — Real game-development MVP validation**. O7 brings the proven engines, environment targets, and collaboration plane together in a real game-development scenario.
+O7 is **Evidenced**: the accepted Minesweeper map demonstrates a complete, durable, Human-interruptible, reviewed, and browser-verified game-development collaboration through real Codex and Pi runs (#38–#43).
 
 `docs/roadmap.md` records outcome state and evidence; it does not define the development workflow.
 
-After O7 is evidenced, mark M1 **Evidenced**, return to `docs/goal.md`, and replace the current medium-term goal and supporting outcome graph rather than extending M1 mechanically.
+M1 is therefore **Evidenced** as the Local coordination foundation. Product work now advances M2 through the active Local Operator MVP decision map rather than extending M1 mechanically.

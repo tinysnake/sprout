@@ -20,9 +20,17 @@ _Avoid_: Project group, group chat
 The shared conversation through which a project's people and agents coordinate.
 _Avoid_: Project, group
 
+**Wake policy**:
+The project-level rule that decides whether an unaddressed project-channel message remains informational or is evaluated by a wake model for Agent recipients. Direct messages and explicit Agent mentions bypass this policy and wake their recipients.
+_Avoid_: Notification setting, workflow
+
 **Project contract**:
 The facts, goals, responsibilities, rules, permissions, environment access, and completion criteria presented to agents collaborating in a project.
 _Avoid_: Prompt, chat agreement
+
+**Project template**:
+A reusable starting shape for a project contract, containing goal guidance, rules, role slots, collaboration instructions, and completion guidance without binding concrete agents, environment instances, or workspace paths.
+_Avoid_: Project copy, runtime configuration
 
 **Project membership**:
 The relationship that gives a human or agent its responsibilities and collaboration instructions within one project.
@@ -56,8 +64,16 @@ _Avoid_: Cerebellum, small model
 A durable unit of multi-run or automated work that preserves its goal, state, constraints, and results across agent runs. A Task owns one environment lease for its whole duration.
 _Avoid_: Message, agent run
 
+**Task proposal**:
+A Task suggested by a human or agent that has not received permission to begin. It holds no environment lease and cannot start an agent run until a human approves its Task begin.
+_Avoid_: Running task, autonomous task
+
+**Task lead**:
+The project member entrusted by a human at Task begin to coordinate agent work within that Task's goal, constraints, membership, and selected environment.
+_Avoid_: Task owner, scheduler
+
 **Task begin**:
-The explicit act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
+The human-authorized act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
 _Avoid_: Start, first agent run
 
 **Task end**:
