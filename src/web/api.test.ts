@@ -10,7 +10,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
-import { createRunApi } from './api.ts';
+import { createRunApi, summarizeRunHistory, type RunView } from './api.ts';
 
 const definition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -137,6 +137,12 @@ test('run detail and history expose token usage and timestamps', async () => {
     };
     const history = (await (await fetch(`${base}/api/runs`)).json()) as {
       runs: Array<{ id: string; tokenUsage?: unknown; createdAt?: unknown; completedAt?: unknown }>;
+      totals?: {
+        durationMs: number;
+        tokenUsage: unknown;
+        completedRunCount: number;
+        runsWithTokenUsage: number;
+      };
     };
 
     assert.deepEqual(detail.tokenUsage, expected);
@@ -146,7 +152,32 @@ test('run detail and history expose token usage and timestamps', async () => {
     assert.deepEqual(historyRun?.tokenUsage, expected);
     assert.equal(typeof historyRun?.createdAt, 'number');
     assert.equal(typeof historyRun?.completedAt, 'number');
+    assert.deepEqual(history.totals?.tokenUsage, expected);
+    assert.ok((history.totals?.durationMs ?? -1) >= 0, 'history includes cumulative terminal duration');
+    assert.equal(history.totals?.completedRunCount, 1);
+    assert.equal(history.totals?.runsWithTokenUsage, 1);
   }, { tokenUsage: expected });
+});
+
+test('run history totals accumulate terminal duration and provider usage without hiding unavailable usage', () => {
+  const runs: RunView[] = [
+    {
+      id: 'run-a', agentId: 'agent-scout', prompt: 'first', status: 'completed', events: [],
+      createdAt: 1_000, completedAt: 2_500,
+      tokenUsage: { promptTokens: 120, completionTokens: 30, totalTokens: 150 }, handOffAttached: false,
+    },
+    {
+      id: 'run-b', agentId: 'agent-scout', prompt: 'second', status: 'completed', events: [],
+      createdAt: 4_000, completedAt: 6_500, handOffAttached: false,
+    },
+  ];
+
+  assert.deepEqual(summarizeRunHistory(runs), {
+    durationMs: 4_000,
+    tokenUsage: { promptTokens: 120, completionTokens: 30, totalTokens: 150 },
+    completedRunCount: 2,
+    runsWithTokenUsage: 1,
+  });
 });
 
 test('a submission without an agent or prompt is rejected', async () => {

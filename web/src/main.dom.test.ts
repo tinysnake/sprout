@@ -186,6 +186,15 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     ] });
     if (path === '/api/projects') return response({ projects: [{ id: 'project-sprout', goal: 'Ship', memberIds: ['pi-agent', 'codex-agent'] }] });
     if (path === '/api/leases') return response({ leases: leases() });
+    if (path === '/api/runs') return response({
+      runs: [],
+      totals: {
+        durationMs: 3_500,
+        tokenUsage: { promptTokens: 2_000, completionTokens: 500, totalTokens: 2_500 },
+        completedRunCount: 2,
+        runsWithTokenUsage: 2,
+      },
+    });
     if (path === '/api/messages') return response({ messages: [] });
     if (path === '/api/tasks') return response({ tasks: [...tasks.values()].map(({ task }) => task) });
 
@@ -271,6 +280,8 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     // as the shipped Web client does; no handler is imported or invoked directly.
     await vite.ssrLoadModule('/src/main.ts');
     await eventually(() => document.querySelectorAll('[data-task]').length === tasks.size, 'initial Task cards');
+    assert.match(document.querySelector('#run-totals')?.textContent ?? '', /3\.5 s cumulative duration/);
+    assert.match(document.querySelector('#run-totals')?.textContent ?? '', /2,500 cumulative tokens/);
 
     // (a) An unbegun Task is distinct from a begun Task whose Agent is now idle.
     assert.match(taskText(document, 'task-unbegun'), /Activity: Unbegun/);

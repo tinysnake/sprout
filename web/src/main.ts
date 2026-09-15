@@ -41,6 +41,13 @@ interface RunView {
   readonly completedAt?: number;
 }
 
+interface RunHistoryTotals {
+  readonly durationMs: number;
+  readonly tokenUsage: NonNullable<RunView['tokenUsage']>;
+  readonly completedRunCount: number;
+  readonly runsWithTokenUsage: number;
+}
+
 interface AgentView {
   readonly id: string;
   readonly name: string;
@@ -128,6 +135,7 @@ const form = document.querySelector<HTMLFormElement>('#request-form');
 const agentSelect = document.querySelector<HTMLSelectElement>('#agent');
 const promptInput = document.querySelector<HTMLTextAreaElement>('#prompt');
 const runsRoot = document.querySelector<HTMLElement>('#runs');
+const runTotals = document.querySelector<HTMLElement>('#run-totals');
 const messageForm = document.querySelector<HTMLFormElement>('#message-form');
 const projectSelect = document.querySelector<HTMLSelectElement>('#project');
 const channelSelect = document.querySelector<HTMLSelectElement>('#channel');
@@ -150,6 +158,7 @@ if (
   !agentSelect ||
   !promptInput ||
   !runsRoot ||
+  !runTotals ||
   !messageForm ||
   !projectSelect ||
   !channelSelect ||
@@ -188,6 +197,7 @@ const taskGoalEl: HTMLTextAreaElement = taskGoal;
 const taskConstraintsEl: HTMLTextAreaElement = taskConstraints;
 const taskErrorEl: HTMLElement = taskError;
 const taskListEl: HTMLElement = taskList;
+const runTotalsEl: HTMLElement = runTotals;
 
 const agents = await loadAgents();
 for (const agent of agents) {
@@ -326,6 +336,7 @@ messageFormEl.addEventListener('submit', async (event) => {
 
 await refreshMessages();
 await refreshTasks();
+await refreshRunHistory();
 
 // One event stream carries every run's progress, so the client never polls and
 // never has to guess when a run changed.
@@ -333,12 +344,39 @@ const stream = new EventSource('/api/events');
 stream.addEventListener('run', (event) => {
   const run = JSON.parse((event as MessageEvent<string>).data) as RunView;
   render(run);
+  scheduleRunHistoryRefresh();
   void loadLeases().then(renderLeases);
   void refreshTasks();
   // A collaboration wake admits a run, and its reply is projected once that run
   // settles; reloading the stream on progress is what surfaces the reply.
   scheduleMessageRefresh();
 });
+
+let runHistoryRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleRunHistoryRefresh(): void {
+  if (runHistoryRefreshTimer !== undefined) return;
+  runHistoryRefreshTimer = setTimeout(() => {
+    runHistoryRefreshTimer = undefined;
+    void refreshRunHistory();
+  }, 100);
+}
+
+async function refreshRunHistory(): Promise<void> {
+  try {
+    const response = await fetch('/api/runs');
+    if (!response.ok) return;
+    const history = await response.json() as { runs?: RunView[]; totals?: RunHistoryTotals };
+    for (const run of history.runs ?? []) render(run);
+    if (history.totals !== undefined) renderRunTotals(history.totals);
+  } catch {
+    // Individual streamed runs remain useful when a history refresh is unavailable.
+  }
+}
+
+function renderRunTotals(totals: RunHistoryTotals): void {
+  const usage = totals.tokenUsage;
+  runTotalsEl.textContent = `${formatDurationMs(totals.durationMs)} cumulative duration across ${totals.completedRunCount} completed run${totals.completedRunCount === 1 ? '' : 's'}; ${usage.totalTokens.toLocaleString()} cumulative tokens (${usage.promptTokens.toLocaleString()} prompt, ${usage.completionTokens.toLocaleString()} completion) from ${totals.runsWithTokenUsage} provider-reported run${totals.runsWithTokenUsage === 1 ? '' : 's'}.`;
+}
 
 /** Coalesce the bursts of run events one admitted run produces. */
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -983,7 +1021,10 @@ function createRunElement(run: RunView): HTMLElement {
 
 function formatDuration(run: RunView): string {
   if (run.completedAt === undefined) return 'In progress';
-  const milliseconds = Math.max(0, run.completedAt - run.createdAt);
+  return formatDurationMs(Math.max(0, run.completedAt - run.createdAt));
+}
+
+function formatDurationMs(milliseconds: number): string {
   if (milliseconds < 1_000) return `${milliseconds} ms`;
   if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)} s`;
   const minutes = Math.floor(milliseconds / 60_000);

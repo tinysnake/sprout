@@ -6,6 +6,7 @@
  * the Project's `workspaces` registration can refer to it with a relative path.
  */
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { access, cp, mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -18,10 +19,11 @@ const repository = join(workspaceRoot, 'minesweeper');
 
 await mkdir(workspaceRoot, { recursive: true });
 await copyTemplate(template, repository);
+installDependencies(repository);
 initializeGitRepository(repository);
 
 process.stdout.write(`O7 game workspace ready: ${relative(projectRoot, repository)}\n`);
-process.stdout.write('Install dependencies with npm --prefix <workspace> install, then run npm --prefix <workspace> test.\n');
+process.stdout.write('Dependencies are installed; run npm --prefix <workspace> test.\n');
 
 async function copyTemplate(source: string, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true });
@@ -48,7 +50,16 @@ function initializeGitRepository(directory: string): void {
   }
   if (hasHead(directory)) return;
   runGit(directory, ['add', '.']);
-  runGit(directory, ['commit', '-m', 'chore: initialize Three.js game scaffold']);
+  runGit(directory, ['commit', '-m', 'chore: initialize Three.js Minesweeper game']);
+}
+
+/** The template lockfile makes the disposable workspace runnable from a clean checkout. */
+function installDependencies(directory: string): void {
+  if (existsSync(join(directory, 'node_modules', 'three'))) return;
+  execFileSync('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], {
+    cwd: directory,
+    stdio: 'inherit',
+  });
 }
 
 function runGit(directory: string, args: readonly string[]): void {

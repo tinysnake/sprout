@@ -471,7 +471,8 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/runs — list runs.
     if (request.method === 'GET' && url.pathname === '/api/runs') {
-      sendJson(response, 200, { runs: (await orchestrator.list()).map(toView) });
+      const runs = (await orchestrator.list()).map(toView);
+      sendJson(response, 200, { runs, totals: summarizeRunHistory(runs) });
       return;
     }
 
@@ -609,6 +610,43 @@ export interface RunView {
   readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
+}
+
+/** Cumulative, observable consumption across the returned durable history. */
+export interface RunHistoryTotals {
+  /** Sum of terminal run elapsed time; active runs are not estimated. */
+  readonly durationMs: number;
+  readonly tokenUsage: TokenUsage;
+  readonly completedRunCount: number;
+  /** Runs whose provider supplied usage, so an absent metric is never hidden. */
+  readonly runsWithTokenUsage: number;
+}
+
+export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals {
+  let durationMs = 0;
+  let completedRunCount = 0;
+  let runsWithTokenUsage = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  for (const run of runs) {
+    if (run.completedAt !== undefined) {
+      completedRunCount += 1;
+      durationMs += Math.max(0, run.completedAt - run.createdAt);
+    }
+    if (run.tokenUsage !== undefined) {
+      runsWithTokenUsage += 1;
+      promptTokens += run.tokenUsage.promptTokens;
+      completionTokens += run.tokenUsage.completionTokens;
+      totalTokens += run.tokenUsage.totalTokens;
+    }
+  }
+  return {
+    durationMs,
+    tokenUsage: { promptTokens, completionTokens, totalTokens },
+    completedRunCount,
+    runsWithTokenUsage,
+  };
 }
 
 function toView(run: AgentRun): RunView {

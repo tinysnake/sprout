@@ -306,9 +306,10 @@ async function writeEvidence(): Promise<void> {
     '- A Chromium browser loaded the Vite-served Three.js game. A primary pointer interaction revealed a covered cell; a secondary pointer interaction on another covered cell toggled its flag and changed the mine counter.',
     '- The browser check observed the live `window.__minesweeper` board state and the rendered canvas after each interaction. It does not rely on source inspection or a production build alone.', '',
     '## Complete conversation audit',
-    '| Message | Kind | Route | Durable outcome |',
-    '| --- | --- | --- | --- |',
+    '| Message | Kind | Route | Message created | Run started | Run completed | Duration | Durable outcome |',
+    '| --- | --- | --- | --- | --- | --- | ---: | --- |',
     ...messages.map((message) => {
+      const turn = turns.find((candidate) => candidate.message.id === message.id);
       const kind = message.inReplyTo === undefined
         ? (message.channel === 'project' ? 'Human-visible completion publication' : 'Turn request')
         : 'Agent reply';
@@ -318,7 +319,10 @@ async function writeEvidence(): Promise<void> {
       const outcome = message.inReplyTo === undefined
         ? (message.channel === 'project' ? 'No Agent wake (Planner self-marker)' : 'One completed Agent turn; reply projected')
         : `Reply to ${alias(message.inReplyTo)}`;
-      return `| ${alias(message.id)} | ${kind} | ${route} | ${outcome} |`;
+      const started = turn === undefined ? '—' : timestamp(turn.run.createdAt);
+      const completed = turn?.run.completedAt === undefined ? '—' : timestamp(turn.run.completedAt);
+      const duration = turn?.run.completedAt === undefined ? '—' : `${Math.max(0, turn.run.completedAt - turn.run.createdAt)} ms`;
+      return `| ${alias(message.id)} | ${kind} | ${route} | ${timestamp(message.createdAt)} | ${started} | ${completed} | ${duration} | ${outcome} |`;
     }), '',
     '## Agent-turn duration and provider-token audit',
     '| Turn | Stage | Direct message | Agent | Duration | Prompt tokens | Completion tokens | Total tokens |',
@@ -397,6 +401,7 @@ function turnStage(index: number): string {
 
 function text(run: Run): string { return run.result?.text ?? run.result?.message ?? ''; }
 function alias(value: string): string { const known = aliases.get(value); if (known) return known; const next = `A${nextAlias++}`; aliases.set(value, next); return next; }
+function timestamp(value: number): string { return new Date(value).toISOString(); }
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function sanitizedServerOutput(): string { return sanitize(serverOutput).slice(-1_000); }
 function sanitize(value: string): string { return value.replace(/\/Users\/[^/\s]+/g, '~').replace(/https?:\/\/[^\s]+/g, '<runtime-endpoint>'); }

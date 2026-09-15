@@ -7,9 +7,11 @@
   </head>
   <body>
     <main>
-      <h1>O7 Minesweeper</h1>
-      <p>Three.js workspace scaffold. Game rules are implemented in the next task.</p>
-      <canvas id="game-canvas" aria-label="Minesweeper game canvas"></canvas>
+      <header><div><p class="eyebrow">Three.js puzzle</p><h1>Minesweeper</h1></div><button id="reset-game" type="button">New board</button></header>
+      <p id="mine-counter" aria-live="polite"></p>
+      <canvas id="game-canvas" aria-label="Minesweeper game board. Left-click to reveal cells; right-click to place a flag."></canvas>
+      <p id="game-status" role="status"></p>
+      <p class="help">Left-click to reveal. Right-click to flag. The first reveal and its neighbours are always safe.</p>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>
