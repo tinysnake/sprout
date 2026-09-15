@@ -9,6 +9,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
+import type { AgentRun } from '../run/model.ts';
 import { CollaborationCoordinator, renderWakePrompt, type RunAdmitter } from './coordinator.ts';
 import { InMemoryCollaborationStore } from './store.ts';
 import type { WakeModel } from './model.ts';
@@ -79,6 +80,46 @@ test('a completed run projects exactly one reply attributed to the run\'s agent'
   assert.equal(reply.author.id, 'scout');
   assert.equal(reply.body, 'Done.');
   assert.equal(reply.inReplyTo, delivered.message.id);
+});
+
+test('a non-blocking delivery admits its wake immediately and projects after settlement', async () => {
+  let settle: ((run: AgentRun) => void) | undefined;
+  const finished = new Promise<AgentRun>((resolve) => {
+    settle = resolve;
+  });
+  const store = new InMemoryCollaborationStore();
+  const coordinator = new CollaborationCoordinator({
+    projects: new ProjectRegistry([project]),
+    store,
+    runs: {
+      submit: async () => ({ id: 'run-later' }),
+      waitFor: async () => finished,
+    },
+  });
+
+  const delivered = await coordinator.deliver({
+    projectId: 'project-sprout',
+    channel: 'direct',
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'take your time',
+    recipients: ['scout'],
+    deliveryKey: 'd1-non-blocking',
+    awaitReply: false,
+  });
+  assert.deepEqual(delivered.admittedRunIds, ['run-later']);
+  assert.equal((await store.listMessages()).length, 1, 'the reply is correctly still pending');
+
+  settle?.({
+    id: 'run-later', agentId: 'scout', prompt: '', environmentInstanceId: 'mac-mini-1',
+    status: 'completed', events: [], createdAt: 0,
+    result: { status: 'completed', text: 'finished later' },
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await store.listMessages()).length === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  const reply = (await store.listMessages()).find((message) => message.author.kind === 'agent');
+  assert.equal(reply?.body, 'finished later');
 });
 
 test('a failed run produces no reply: an answer never produced is not fabricated', async () => {

@@ -120,6 +120,16 @@ export interface DeliverInput {
   readonly recipients?: readonly string[];
   /** Idempotency key. Repeating it must not create a second Message. */
   readonly deliveryKey: string;
+  /**
+   * Whether delivery waits for the addressed run and its projected reply.
+   *
+   * Ordinary interactive delivery retains the established `true` default.  A
+   * control-plane relay may opt out so it can observe and stop a very long
+   * running Agent through the ordinary run API instead of holding its HTTP
+   * request open.  The durable wake is still admitted before this returns, and
+   * its reply is projected when the run eventually settles.
+   */
+  readonly awaitReply?: boolean;
 }
 
 export interface DeliverResult {
@@ -181,6 +191,7 @@ export class CollaborationCoordinator {
       const admittedRunIds = await this.#admitAll(
         (await this.#store.listWakeRequests()).filter((wake) => wake.messageId === existing.id),
         existing,
+        input.awaitReply !== false,
       );
       return {
         message: existing,
@@ -215,7 +226,7 @@ export class CollaborationCoordinator {
       this.#onObservation?.({ messageId: message.id, observation });
     }
 
-    const admittedRunIds = await this.#admitAll(stored.wakes, message);
+    const admittedRunIds = await this.#admitAll(stored.wakes, message, input.awaitReply !== false);
     // Re-read the wake records after admission so the returned result reports
     // the durable state (status + run id) rather than the pre-admission snapshot.
     const finalWakes = (await this.#store.listWakeRequests()).filter(
@@ -233,10 +244,11 @@ export class CollaborationCoordinator {
   async #admitAll(
     wakes: readonly WakeRequest[],
     input: Message,
+    awaitReply: boolean,
   ): Promise<readonly string[]> {
     const admittedRunIds: string[] = [];
     for (const wake of wakes) {
-      const outcome = await this.#admit(wake, input);
+      const outcome = await this.#admit(wake, input, awaitReply);
       if (outcome !== undefined) admittedRunIds.push(outcome.runId);
     }
     return admittedRunIds;
@@ -252,6 +264,7 @@ export class CollaborationCoordinator {
   async #admit(
     wake: WakeRequest,
     input: Message,
+    awaitReply = true,
   ): Promise<{ readonly runId: string; readonly projected: boolean } | undefined> {
     if (wake.status !== 'pending') return undefined;
 
@@ -285,6 +298,12 @@ export class CollaborationCoordinator {
     // Projection is awaited rather than fire-and-forget so delivery has a
     // deterministic, observable effect: when `deliver` returns, the reply for an
     // admitted wake is durable (or the run settled without producing one).
+    if (!awaitReply) {
+      // Deliberately retain projection: callers that need to return before a
+      // long Agent run settles still receive the normal durable reply later.
+      void this.#projectReply(admitted.wake, input).catch(() => undefined);
+      return { runId: submission.id, projected: false };
+    }
     const projected = await this.#projectReply(admitted.wake, input);
     return { runId: submission.id, projected };
   }

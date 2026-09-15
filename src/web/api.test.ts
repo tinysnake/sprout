@@ -61,16 +61,17 @@ function build(options: {
       workingDirectory: '/tmp',
     },
   ]);
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', adapter]]),
     agents: registry,
     projects,
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    pool,
     store: new InMemoryRunStore(),
     leaseTtlMs: 60_000,
   });
   const api = createRunApi({ orchestrator, agents: registry });
-  return { api, orchestrator };
+  return { api, orchestrator, pool };
 }
 
 async function withServer(
@@ -177,6 +178,32 @@ test('the user can stop a run through the API', async () => {
     },
     { settleAfterMs: 5_000 },
   );
+});
+
+test('a recovered run lease can be explicitly released through its run control', async () => {
+  await withServer(async (base, context) => {
+    const submit = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'long job' }),
+    });
+    const { id } = (await submit.json()) as { id: string };
+
+    let leaseId: string | undefined;
+    for (let attempt = 0; attempt < 100 && leaseId === undefined; attempt += 1) {
+      leaseId = context.orchestrator.get(id)?.leaseId;
+      if (leaseId === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(leaseId, 'the running run acquired its lease');
+    context.pool.markRecovering(leaseId);
+
+    const released = await fetch(`${base}/api/runs/${id}/release-lease`, { method: 'POST' });
+    assert.equal(released.status, 200);
+    assert.equal(((await released.json()) as { released: boolean }).released, true);
+    assert.equal(context.pool.getLease(leaseId)?.state, 'released');
+
+    await fetch(`${base}/api/runs/${id}/stop`, { method: 'POST' });
+  }, { settleAfterMs: 5_000 });
 });
 
 test('the client view exposes progress but no engine internals', async () => {
