@@ -37,10 +37,16 @@ interface ConnectedWorker {
   readonly worker: EnvironmentWorker;
   /** Requests the worker received, in order, as seen on the wire. */
   readonly requests: readonly string[];
+  /** Raw session-start payloads as serialized by the core-side WorkerClient. */
+  readonly sessionStartParams: readonly Record<string, unknown>[];
   /** Lines the worker reported through `onLog`. */
   readonly logs: readonly string[];
   /** Simulates the carrier's channel dying. */
   killChannel(): void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -61,6 +67,7 @@ async function connectedWorker(options: {
   const coreToWorker = new PassThrough();
   const workerToCore = new PassThrough();
   const requests: string[] = [];
+  const sessionStartParams: Record<string, unknown>[] = [];
   const logs: string[] = [];
 
   const engine = new ScriptedEngineAdapter({
@@ -97,9 +104,12 @@ async function connectedWorker(options: {
   coreToWorker.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split('\n')) {
       if (line.trim() === '') continue;
-      const message = JSON.parse(line) as { method?: string; id?: unknown };
+      const message = JSON.parse(line) as { method?: string; id?: unknown; params?: unknown };
       if (typeof message.method === 'string' && message.id !== undefined) {
         requests.push(message.method);
+        if (message.method === WORKER_METHODS.startSession && isRecord(message.params)) {
+          sessionStartParams.push(message.params);
+        }
       }
     }
   });
@@ -114,6 +124,7 @@ async function connectedWorker(options: {
     engine,
     worker,
     requests,
+    sessionStartParams,
     logs,
     killChannel: () => {
       workerToCore.destroy();
@@ -125,6 +136,7 @@ async function connectedWorker(options: {
 function buildOrchestrator(
   adapters: ReadonlyMap<string, WorkerClient>,
   sessionKeys?: InMemorySessionKeyStore,
+  agentConfiguration: { readonly model?: string; readonly effort?: string } = {},
 ) {
   const pool = new EnvironmentPool({
     definitions: [definition],
@@ -141,6 +153,7 @@ function buildOrchestrator(
         capability: 'agent-run',
         workingDirectory: '/tmp',
         instructions: 'You are Scout.',
+        ...agentConfiguration,
       },
     ]),
     projects: new ProjectRegistry([
@@ -174,6 +187,32 @@ test('the core identifies a worker and learns which engines it hosts', async (t)
     supportsInterrupt: true,
     standingInstructions: 'out-of-band',
   });
+});
+
+test('Agent model and effort serialize through the worker and deserialize for the engine', async (t) => {
+  const worker = await connectedWorker({
+    turns: [{ events: successEvents, result: { status: 'completed', text: 'done' } }],
+  });
+  t.after(() => worker.killChannel());
+
+  const { orchestrator } = buildOrchestrator(worker.adapters, undefined, {
+    model: 'configured-model',
+    effort: 'medium',
+  });
+  await orchestrator.waitFor((await orchestrator.submit({ agentId: 'agent-scout', prompt: 'go' })).id);
+
+  assert.deepEqual(worker.sessionStartParams, [
+    {
+      engine: 'scripted',
+      agentId: 'agent-scout',
+      workingDirectory: '/tmp',
+      model: 'configured-model',
+      effort: 'medium',
+      instructions: worker.engine.requests[0]?.instructions,
+    },
+  ]);
+  assert.equal(worker.engine.requests[0]?.model, 'configured-model');
+  assert.equal(worker.engine.requests[0]?.effort, 'medium');
 });
 
 test('a run executes through the worker and its events reach the core', async (t) => {

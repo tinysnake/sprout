@@ -79,6 +79,8 @@ export class PiEngineAdapter implements EngineAdapter {
       binaryPath,
       sessionId,
       workingDirectory: request.workingDirectory,
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
       options: this.#options,
     });
@@ -89,6 +91,8 @@ interface PiSessionOptions {
   readonly binaryPath: string;
   readonly sessionId: string;
   readonly workingDirectory: string;
+  readonly model?: string;
+  readonly effort?: string;
   readonly instructions?: string;
   readonly options: PiAdapterOptions;
 }
@@ -110,6 +114,8 @@ export class PiSession implements EngineSession {
   readonly engineSessionKey: string;
   readonly #binaryPath: string;
   readonly #workingDirectory: string;
+  readonly #model: string | undefined;
+  readonly #effort: string | undefined;
   readonly #instructions: string | undefined;
   readonly #options: PiAdapterOptions;
   /** The process for the turn in flight, if any. */
@@ -122,6 +128,8 @@ export class PiSession implements EngineSession {
     this.engineSessionKey = options.sessionId;
     this.#binaryPath = options.binaryPath;
     this.#workingDirectory = options.workingDirectory;
+    this.#model = options.model;
+    this.#effort = options.effort;
     this.#instructions = options.instructions;
     this.#options = options.options;
   }
@@ -216,6 +224,8 @@ export class PiSession implements EngineSession {
       ...(this.#options.sessionDirectory !== undefined
         ? ['--session-dir', this.#options.sessionDirectory]
         : []),
+      ...(this.#model !== undefined ? ['--model', this.#model] : []),
+      ...(this.#effort !== undefined ? ['--thinking', this.#effort] : []),
       ...(this.#instructions !== undefined ? ['--append-system-prompt', this.#instructions] : []),
       ...(this.#options.args ?? []),
       // The prompt is a POSITIONAL argument: `--print`/`-p` is a boolean flag.

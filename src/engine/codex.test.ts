@@ -120,6 +120,8 @@ test('the adapter initialises, starts a thread, and launches the app-server tran
   const session = await adapter.startSession({
     agentId: 'agent-scout',
     workingDirectory: '/tmp',
+    model: 'codex-model',
+    effort: 'high',
     instructions: 'You are Scout.',
   });
 
@@ -133,6 +135,8 @@ test('the adapter initialises, starts a thread, and launches the app-server tran
   const start = server.requests[1]?.params as Record<string, unknown>;
   assert.equal(start.cwd, '/tmp');
   assert.equal(start.baseInstructions, 'You are Scout.');
+  assert.equal(start.model, 'codex-model');
+  assert.deepEqual(start.config, { model_reasoning_effort: 'high' });
   assert.equal(start.sandbox, 'read-only');
 });
 
@@ -161,6 +165,19 @@ test('a stored key resumes the thread instead of starting a new one', async () =
   const resume = server.requests[1]?.params as Record<string, unknown>;
   assert.equal(resume.threadId, 'thread-9');
   assert.equal(resume.cwd, '/tmp');
+});
+
+test('thread initialization omits model configuration when the Agent does not configure it', async () => {
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+  });
+
+  await startAdapter(server).startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
+
+  const start = server.requests[1]?.params as Record<string, unknown>;
+  assert.equal('model' in start, false);
+  assert.equal('config' in start, false);
 });
 
 test('a stale thread id is a hard failure at session start, not a silent fresh session', async () => {

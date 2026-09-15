@@ -689,6 +689,8 @@ export class RunOrchestrator {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory,
+        ...(agent.model !== undefined ? { model: agent.model } : {}),
+        ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
         // The assembled project contract is re-sent on every run, because it is
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).

@@ -78,6 +78,10 @@ export interface StartSessionParams {
   readonly engine: string;
   readonly agentId: string;
   readonly workingDirectory: string;
+  /** The engine-neutral model this session should use, when configured. */
+  readonly model?: string;
+  /** The engine-neutral reasoning effort this session should use, when configured. */
+  readonly effort?: string;
   readonly projectWorkspaceId?: string;
   readonly instructions?: string;
   /**
