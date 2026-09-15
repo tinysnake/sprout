@@ -87,6 +87,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
+      const awaitReply = body.awaitReply !== false;
       if (
         projectId === '' ||
         authorId === '' ||
@@ -118,6 +119,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         body: text,
         ...(recipients !== undefined ? { recipients } : {}),
         deliveryKey,
+        awaitReply,
       });
       sendJson(response, delivered.duplicate ? 200 : 202, {
         message: toMessageView(delivered.message),
