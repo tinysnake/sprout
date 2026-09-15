@@ -48,10 +48,14 @@ function parseAgents(raw: unknown): readonly AgentDefinition[] {
     const capability = required(entry, 'capability', 'agent');
     const workingDirectory = optional(entry, 'workingDirectory', 'agent');
     const instructions = optional(entry, 'instructions', 'agent');
+    const model = optional(entry, 'model', 'agent');
+    const effort = optional(entry, 'effort', 'agent');
     return {
       id, name, engine, capability,
       ...(workingDirectory !== undefined ? { workingDirectory } : {}),
       ...(instructions !== undefined ? { instructions } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { effort } : {}),
     };
   });
   if (new Set(agents.map((agent) => agent.id)).size !== agents.length) throw new Error('SPROUT_RUNTIME_CONFIG agent ids must be unique');

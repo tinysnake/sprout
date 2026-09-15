@@ -169,6 +169,10 @@ export class CodexEngineAdapter implements EngineAdapter {
         cwd: request.workingDirectory,
         sandbox: this.#options.sandbox ?? 'read-only',
         approvalPolicy: 'never',
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.effort !== undefined
+          ? { config: { model_reasoning_effort: request.effort } }
+          : {}),
         ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
       });
     }
@@ -176,6 +180,10 @@ export class CodexEngineAdapter implements EngineAdapter {
       cwd: request.workingDirectory,
       sandbox: this.#options.sandbox ?? 'read-only',
       approvalPolicy: 'never',
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined
+        ? { config: { model_reasoning_effort: request.effort } }
+        : {}),
       ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
     });
   }

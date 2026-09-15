@@ -17,6 +17,10 @@ export interface AgentDefinition {
   readonly engine: string;
   /** The lease-requiring capability this agent's runs must hold. */
   readonly capability: string;
+  /** The engine-neutral model this Agent uses, when configured. */
+  readonly model?: string;
+  /** The engine-neutral reasoning effort this Agent uses, when configured. */
+  readonly effort?: string;
   /**
    * A fallback working directory for runs whose resolved instance declares none.
    *

@@ -6,7 +6,10 @@ import { parseRuntimeConfiguration } from './runtime-config.ts';
 test('runtime configuration registers independently configured Agents and Project membership', () => {
   const configured = parseRuntimeConfiguration(JSON.stringify({
     agents: [
-      { id: 'pi-a', name: 'Pi A', engine: 'pi', capability: 'agent-run' },
+      {
+        id: 'pi-a', name: 'Pi A', engine: 'pi', capability: 'agent-run',
+        model: 'pi-model', effort: 'medium',
+      },
       { id: 'codex-b', name: 'Codex B', engine: 'codex', capability: 'agent-run' },
     ],
     project: {
@@ -19,6 +22,8 @@ test('runtime configuration registers independently configured Agents and Projec
     },
   }));
   assert.equal(configured.agents?.length, 2);
+  assert.equal(configured.agents?.[0]?.model, 'pi-model');
+  assert.equal(configured.agents?.[0]?.effort, 'medium');
   assert.equal(configured.project?.memberships[1]?.agentId, 'codex-b');
 });
 
