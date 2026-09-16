@@ -24,9 +24,37 @@ _Avoid_: Project group, group chat
 The shared conversation through which a project's people and agents coordinate.
 _Avoid_: Project, group
 
+**Message**:
+One durable piece of Human- or Agent-authored conversation in a Project-scoped direct or Project channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+_Avoid_: Task, prompt, run event
+
+**Project event**:
+A durable system-produced fact exposed in a Project, with an explicit routing disposition that determines whether it has a responsible Agent, may be judged by a wake model, remains informational, or requires Human action.
+_Avoid_: System Message, log line
+
+**Routing disposition**:
+The declared treatment of a Project event: addressed, wake-eligible, informational, human-action-required, or non-routing. Only addressed events route deterministically and only wake-eligible events may enter wake-model routing.
+_Avoid_: Notification severity, inferred intent
+
 **Wake policy**:
-The project-level rule that decides whether an unaddressed project-channel message remains informational or is evaluated by a wake model for Agent recipients. Direct messages and explicit Agent mentions bypass this policy and wake their recipients.
+The explicit Project-level choice between explicit-only routing, where unaddressed Project-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Direct Messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
 _Avoid_: Notification setting, workflow
+
+**Routing batch**:
+The durable, frozen set of eligible unaddressed Messages and Project events collected during one Project's bounded wake-model window. One batch may produce at most one Agent run per selected Agent while retaining the outcome of every input.
+_Avoid_: Chat transcript, Task, prompt
+
+**Routing attempt**:
+One wake-model evaluation of one frozen routing batch and its bounded Project-shared context. Validation failure may retry the same snapshot once; a retry is a distinct durable attempt, not a new Message or batch.
+_Avoid_: Agent run, hidden model call
+
+**Wake request**:
+The durable per-recipient decision that a Message or routing batch should admit one Agent run. It preserves the routing reason, admission outcome, and causal links to its input and run.
+_Avoid_: Message, notification, Agent run
+
+**Projected reply**:
+The final assistant text from a completed Message-triggered Agent run, persisted by Sprout as an Agent-authored Message. It is non-routing: it may inform later bounded Project-channel context but cannot itself open a routing window or wake another Agent.
+_Avoid_: Raw run output, Agent-initiated Message
 
 **Project contract**:
 The facts, goals, responsibilities, rules, permissions, environment access, and completion criteria presented to agents collaborating in a project.
