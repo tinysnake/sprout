@@ -23,10 +23,10 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 1. One local technical lead operates a self-hosted Sprout instance.
 2. Codex and Pi are the required work engines; the already implemented `agy` and `opencode` adapters do not require long-running product acceptance during M2.
 3. macOS and Windows are the required operator environments.
-4. Projects, reusable Agents, Environment instances, memberships, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
+4. Projects, reusable Agents, Environment instances, memberships, Working groups, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
 5. A Task remains bound to one Environment instance from Task begin through Task end.
 6. Humans and Agents may propose Tasks, but only a Human may authorize Task begin and acquisition of the Task lease.
-7. Projects can choose between explicit-only and wake-model-assisted Project-channel routing.
+7. Projects can choose between explicit-only and wake-model-assisted routing for their Project and Working group channels.
 8. Routine Project communication, Task control, Agent-run observation, Environment management, and recovery are available with mobile and desktop capability parity.
 9. Token usage, duration, and monetary cost are recorded and presented truthfully at useful scopes.
 10. Sprout, lightweight-game, and Unity development provide ongoing dogfooding evidence without any one scenario becoming a mechanical release gate.
@@ -72,11 +72,11 @@ These outcomes deliberately remain at product-result level while Map #44 resolve
 **Status**: Unproven
 **Depends on**: M1
 
-A technical lead can establish reusable Agents, connected Environments, and Projects with explicit contracts and at least one Project template through the product rather than hand-written runtime configuration.
+A technical lead can establish reusable Agents, connected Environments, and Projects with explicit contracts, Project and Working group communication scopes, and at least one Project template through the product rather than hand-written runtime configuration.
 
 **Outcome checks**:
 
-- Agent, Environment, Project, membership, template, and workspace responsibilities remain distinct and understandable.
+- Agent, Environment, Project, membership, Working group, template, and workspace responsibilities remain distinct and understandable.
 - Routine create, inspect, change, and retirement journeys are available through Web while preserving historical identity.
 - Host-local engine authentication and workspace facts do not leak into portable Agent or Project identity.
 
@@ -99,7 +99,7 @@ Humans and Agents can propose durable work, Human authorization controls Task be
 **Status**: Unproven
 **Depends on**: M2-O1
 
-Direct messages, explicit Project-channel addressing, and optional wake-model routing let members collaborate without unexplained silence or uncontrolled Agent wakes.
+Project-scoped direct messages, Project channels, Working group channels, and optional wake-model routing let members collaborate without unexplained silence or uncontrolled Agent wakes.
 
 **Outcome checks**:
 
