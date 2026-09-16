@@ -104,6 +104,38 @@ _Avoid_: Agent, task
 An intentional request by a Human, or by the Task lead for a run it initiated, to settle one active agent run without ending its Task or releasing the Task lease. The Human's operator action is named Interrupt, but its intentional run outcome is stopped, distinct from an unexpected run interruption.
 _Avoid_: Task pause, Task end, interruption
 
+**Usage activity**:
+One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
+_Avoid_: Billable run, Agent run
+
+**Usage observation**:
+One durable, source- and version-identified token, duration, or monetary fact for a Usage activity, including its completeness, observation time, and any append-only correction relationship.
+_Avoid_: Usage total, invoice line
+
+**Model activity duration**:
+The sum of Sprout wall durations for the Usage activities in an aggregate. It is not Task calendar elapsed time or an engine-native latency.
+_Avoid_: Task duration, provider latency
+
+**Attributable billed cost**:
+A settled provider invoice or ledger amount attributable to one Usage activity. It remains unavailable when an engine exposes only usage or an estimate.
+_Avoid_: API-equivalent cost estimate, reported cost
+
+**API-equivalent cost estimate**:
+A USD valuation of observed model usage that is explicitly not a settled bill. It may be provider-estimated, harness-calculated, or locally estimated, and may be pending, available, or unavailable.
+_Avoid_: Billed cost, actual cost
+
+**Billing basis**:
+Whether a Usage activity used metered API access, subscription-inclusive access, or an unknown access basis. It is independent of valuation provenance; subscription-inclusive does not mean zero attributable cost.
+_Avoid_: Valuation provenance, payment method
+
+**Valuation provenance**:
+The authority that produced an API-equivalent cost estimate: provider-estimated, harness-calculated, or locally estimated from a frozen official-price snapshot.
+_Avoid_: Billing basis, billed status
+
+**Measurement coverage**:
+The complete, partial, pending, or unavailable composition accompanying a usage aggregate so its known subtotal cannot imply that missing activities were measured as zero.
+_Avoid_: Confidence score, success rate
+
 **Interrupt**:
 The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Agent run stop whose outcome is stopped, not interrupted.
 _Avoid_: Interruption, Task pause, Task end
