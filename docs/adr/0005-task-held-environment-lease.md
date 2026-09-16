@@ -57,9 +57,12 @@ state already established by O4 (#16), where it continues to block acquisition.
 Recovery is resolved explicitly, and only then does the instance become
 acquirable again. ADR-0006 later narrows the M2 authority boundary: only a Human
 may resume or discard an unfinished Task in recovery; neither the Agent Task
-lead nor the system may resolve it. Task end is likewise explicit and must be
-able to complete recoverably, so a crash between recycling context and releasing
-the lease is repaired on restart rather than left as a half-released environment.
+lead nor the system may resolve it. ADR-0009 adds Force Release as a Human-only,
+risk-acknowledged emergency resolution when ordinary proof or cleanup cannot
+complete; it is never automatic or timeout-driven. Task end is likewise
+explicit and must be able to complete recoverably, so a crash between recycling
+context and releasing the lease is repaired on restart rather than left as a
+half-released environment.
 
 An automatic expiry that silently freed the environment would be the failure
 `docs/goal.md` names directly: uncommitted work handed to another worker because
