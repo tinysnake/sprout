@@ -16,6 +16,10 @@ _Avoid_: Backend, Sprout instance
 A person who participates in Sprout and retains authority that cannot be delegated to an Agent.
 _Avoid_: User account, Human Agent
 
+**Operator identity**:
+The single authentication boundary through which the Local Operator MVP's one Human controls one Sprout instance from one or more browser sessions. It is not a multi-Human account, role, or Team membership.
+_Avoid_: Admin account, Team owner
+
 **Project**:
 A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment, although it cannot begin Agent work until the required resources are present.
 _Avoid_: Project group, group chat
@@ -161,11 +165,11 @@ The Human decision to accept a Task completion claim or require correction. Acce
 _Avoid_: Agent self-approval, Agent run completion
 
 **Task end**:
-The Human-authorized act that has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not.
+The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed.
 _Avoid_: Stop, cancel
 
 **Task discard**:
-The Human decision to abandon a begun Task, including during recovery, and authorize Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved.
+The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision rather than a successful normal discard.
 _Avoid_: Delete Project workspace, automatic cleanup
 
 **Task lease**:
@@ -201,5 +205,13 @@ A time-bounded right to use an environment instance's lease-requiring capabiliti
 _Avoid_: Agent environment, lock
 
 **Lease recovery**:
-The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume or discard it; one-round Agent run recovery retains its existing holder or Human controls.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume, discard, or Force Release it; one-round Agent run recovery retains its existing holder or Human controls.
 _Avoid_: Cleanup, lock timeout
+
+**Force Release**:
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it abandons and cancels the Task through an emergency Task end without deleting the Project workspace.
+_Avoid_: Automatic expiry, normal release, lease steal
+
+**Operational event**:
+A compact durable fact needed to explain Sprout startup, schema migration, Environment enrollment or connectivity, interruption, reconciliation, recovery, or release without retaining credentials, private infrastructure details, conversation content, or raw logs.
+_Avoid_: Log line, Message, Project event
