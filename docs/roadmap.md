@@ -132,6 +132,7 @@ The operator can understand token usage, duration, and monetary cost across Agen
 - Codex and Pi telemetry semantics are measured and documented.
 - Missing, delayed, cached, resumed, failed, reported, and estimated values remain distinguishable.
 - The settled run, Task, Project, Agent, model, and time-range views are available on mobile and desktop.
+- Project, model, and time-range aggregates distinguish work-model Agent runs from wake-model Routing attempts and expose measurement coverage instead of treating missing activity as zero.
 
 ### M2-O6 — Mobile-first operator control
 
