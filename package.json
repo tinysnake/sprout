@@ -13,7 +13,7 @@
     "start": "node src/main.ts",
     "smoke": "node scripts/live-smoke.ts",
     "prototype:task-held-lease": "node scripts/prototype-task-held-lease.ts",
-    "prototype": "vite --port 41000",
+    "prototype": "vite --port 41000 --host",
     "probe:collaboration": "node scripts/probe-collaboration.ts",
     "web:build": "vite build",
     "web:dev": "vite",
