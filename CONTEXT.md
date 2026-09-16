@@ -17,15 +17,27 @@ A person who participates in Sprout and retains authority that cannot be delegat
 _Avoid_: User account, Human Agent
 
 **Project**:
-A collaboration space in which human and agent members pursue a defined goal under shared rules.
+A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment, although it cannot begin Agent work until the required resources are present.
 _Avoid_: Project group, group chat
 
 **Project channel**:
-The shared conversation through which a project's people and agents coordinate.
+The shared conversation in which all current members of one Project coordinate. Temporary member subsets use Working group channels instead.
 _Avoid_: Project, group
 
+**Working group**:
+A temporary collaboration scope within one Project, containing a subset of current Project members together with an optional goal and rules, its own channel, and durable membership history. It may provide context and provenance for work but does not own Tasks, Environment access, Project workspaces, or leases.
+_Avoid_: Project, Task, default group
+
+**Working group channel**:
+The shared conversation whose participants are the current members of one Working group.
+_Avoid_: Project channel, direct message
+
+**Project-scoped direct message**:
+A private conversation between two current members of one Project, governed and recorded within that Project. The same pair communicating in another Project has a separate conversation and context.
+_Avoid_: Global direct message, cross-Project direct message
+
 **Message**:
-One durable piece of Human- or Agent-authored conversation in a Project-scoped direct or Project channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, or Working group channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
 _Avoid_: Task, prompt, run event
 
 **Project event**:
@@ -37,7 +49,7 @@ The declared treatment of a Project event: addressed, wake-eligible, information
 _Avoid_: Notification severity, inferred intent
 
 **Wake policy**:
-The explicit Project-level choice between explicit-only routing, where unaddressed Project-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Direct Messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
+The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Project-scoped direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
 _Avoid_: Notification setting, workflow
 
 **Routing batch**:
@@ -57,7 +69,7 @@ The final assistant text from a completed Message-triggered Agent run, persisted
 _Avoid_: Raw run output, Agent-initiated Message
 
 **Project contract**:
-The facts, goals, responsibilities, rules, permissions, environment access, and completion criteria presented to agents collaborating in a project.
+The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules without Sprout interpreting conflicts between written rules.
 _Avoid_: Prompt, chat agreement
 
 **Project template**:
@@ -75,6 +87,10 @@ _Avoid_: Environment instance, Task context directory
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent
+
+**Agent work option**:
+One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. At run admission Sprout chooses the first option available on the selected Environment instance, and it never changes options automatically after an engine accepts the run.
+_Avoid_: Environment binding, model fallback retry
 
 **Agent run**:
 One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
@@ -171,6 +187,10 @@ _Avoid_: Tool, command
 **Environment instance**:
 An actual physical system, VM, or container made available for work under an environment definition.
 _Avoid_: Environment definition, workspace
+
+**Environment enrollment**:
+The Human-approved binding between one Environment instance, one Sprout instance, and a Worker identity whose private key remains on the Environment host. Enrollment is independent of current connectivity, protocol compatibility, engine readiness, and Project access.
+_Avoid_: Engine login, transport reachability, Project Environment access
 
 **Environment worker**:
 The Sprout-owned process inside one environment instance that starts and supervises engine sessions on behalf of agent runs. It supervises an engine CLI; it does not implement an agent runtime.
