@@ -9,8 +9,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: 'web/index.html',
+        prototype: 'web/prototype/index.html',
+      },
+    },
   },
   server: {
+    host: '0.0.0.0',
+    allowedHosts: true,
+    cors: true,
     port: 5173,
     proxy: {
       '/api': {
