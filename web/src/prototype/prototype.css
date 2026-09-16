@@ -790,7 +790,61 @@ body {
   color: var(--text-primary);
 }
 
-.metric-sub {
-  font-size: 11px;
-  color: var(--text-secondary);
+/* Floating Variant Switcher Bar (Skill UI.md Requirement) */
+.proto-variant-floating-bar {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0f172a;
+  border: 1px solid #38bdf8;
+  border-radius: var(--radius-full);
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.9);
+  z-index: 180;
+  backdrop-filter: blur(12px);
 }
+
+.proto-switcher-arrow {
+  background: #1e293b;
+  border: 1px solid var(--border-strong);
+  color: #fff;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.proto-switcher-arrow:hover {
+  background: var(--accent-primary);
+  color: #000;
+}
+
+.proto-switcher-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.proto-switcher-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f8fafc;
+  white-space: nowrap;
+}
+
+.proto-switcher-tagline {
+  font-size: 10px;
+  color: var(--accent-primary);
+  white-space: nowrap;
+}
+
