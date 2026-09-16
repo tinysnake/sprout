@@ -9,6 +9,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: 'web/index.html',
+        prototype: 'web/prototype/index.html',
+      },
+    },
   },
   server: {
     port: 5173,
