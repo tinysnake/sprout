@@ -93,14 +93,51 @@ export type MessageItem = {
 
 export type WakePolicy = 'explicit-only' | 'wake-model-assisted';
 
+export type RoutingBatchStatus =
+  | 'open'
+  | 'evaluating'
+  | 'settled'
+  | 'suppressed'
+  | 'failed-closed';
+
+export type RoutingAttemptRecord = {
+  attemptNumber: number;
+  timestamp: string;
+  wakeModel: string;
+  durationMs: number;
+  status: 'success' | 'timeout' | 'malformed_output' | 'failed';
+  errorDetail?: string | undefined;
+};
+
+export type PrivacyBoundaryManifest = {
+  directMessagesExcluded: boolean;
+  privateMemoryExcluded: boolean;
+  sessionsAndTranscriptsExcluded: boolean;
+  credentialsExcluded: boolean;
+  hostFactsExcluded: boolean;
+  transientEnvCapacityExcluded: boolean;
+};
+
+export type ResultingWakeRequestRecord = {
+  wakeRequestId: string;
+  targetAgentId: string;
+  admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed';
+  linkedRunId?: string | undefined;
+  projectedReplyId?: string | undefined;
+  failureReason?: string | undefined;
+};
+
 export type RoutingBatch = {
   id: string;
   projectId: string;
   openedAt: string;
   closedAt: string;
+  collectionWindowDurationSec?: number | undefined;
+  countdownRemainingSec?: number | undefined;
   inputMessageIds: string[];
-  status: 'open' | 'evaluating' | 'settled' | 'failed-closed';
+  status: RoutingBatchStatus;
   attemptsCount: number;
+  attemptsHistory?: RoutingAttemptRecord[] | undefined;
   wakeModel: string;
   frozenContextSummary: {
     tokenCount: number;
@@ -109,6 +146,7 @@ export type RoutingBatch = {
     tasksSummariesCount: number;
     truncated: boolean;
   };
+  privacyBoundaryManifest?: PrivacyBoundaryManifest | undefined;
   decisions: {
     messageId: string;
     targetAgentId?: string | undefined;
@@ -116,6 +154,8 @@ export type RoutingBatch = {
     rationale: string;
   }[];
   resultingWakeRequestIds: string[];
+  resultingWakeRequests?: ResultingWakeRequestRecord[] | undefined;
+  failureReason?: string | undefined;
 };
 
 export type TaskLifecycleState =

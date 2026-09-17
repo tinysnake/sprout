@@ -135,6 +135,16 @@ const initialAgents: AgentDefinition[] = [
       { id: 'opt-r2', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'medium', isConfigured: true },
     ],
   },
+  {
+    id: "researcher", displayName: "Researcher", avatar: "RS",
+    description: 'WebGL profiling, GPU buffer optimization, and browser benchmarks.',
+    standingInstructions: 'Profile frametime bottlenecks and report GPU draw call telemetry.',
+    status: 'active',
+    privateMemoryEntriesCount: 7,
+    workOptions: [
+      { id: 'opt-rs1', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'medium', isConfigured: true },
+    ],
+  },
 ];
 
 const initialEnvironments: EnvironmentInstance[] = [
@@ -310,6 +320,15 @@ const initialProjects: ProjectItem[] = [
         responsibilities: 'Headless browser testing, DOM verification, error detection.',
         joinedAt: '2 days ago',
         status: 'active',
+      },
+      {
+        memberId: 'researcher',
+        memberKind: 'agent',
+        displayName: 'Researcher',
+        avatar: "RS",
+        responsibilities: 'WebGL performance profiling and browser compatibility benchmarks.',
+        joinedAt: '2 days ago',
+        status: 'ended',
       },
     ],
     boundEnvironmentWorkspaces: [
@@ -815,7 +834,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: "Planner", authorAvatar: "OP",
+    authorDisplayName: "Planner", authorAvatar: "PL",
     timestamp: '34m ago',
     content: 'Task #101 has been initiated with Programmer as lead to connect raycasting pointer events.',
     disposition: 'non-routing',
@@ -846,7 +865,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'designer',
     authorKind: 'agent',
-    authorDisplayName: "Designer", authorAvatar: "OP",
+    authorDisplayName: "Designer", authorAvatar: "DS",
     timestamp: '24m ago',
     content: 'I have adjusted the ambient light intensity in CSS/canvas configuration to 1.4 for crisp visibility.',
     disposition: 'non-routing',
@@ -860,12 +879,48 @@ const initialMessages: MessageItem[] = [
     routingCausalChainId: 'batch-002',
   },
   {
+    id: 'msg-suppressed-1',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'project-channel' },
+    authorId: 'op-primary',
+    authorKind: 'human',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
+    timestamp: '18m ago',
+    content: 'Nice weather today for building 3D games!',
+    disposition: 'wake-eligible',
+    routingCausalChainId: 'batch-003',
+  },
+  {
+    id: 'msg-failed-1',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'project-channel' },
+    authorId: 'op-primary',
+    authorKind: 'human',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
+    timestamp: '14m ago',
+    content: 'Please evaluate GPU fallback behavior on legacy Intel Iris GPUs.',
+    disposition: 'wake-eligible',
+    routingCausalChainId: 'batch-004',
+  },
+  {
+    id: 'msg-open-1',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'project-channel' },
+    authorId: 'op-primary',
+    authorKind: 'human',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
+    timestamp: '12s ago',
+    content: 'We should verify touch event latency on iOS Safari before declaring milestone complete.',
+    disposition: 'wake-eligible',
+    routingCausalChainId: 'batch-005',
+  },
+  {
     id: 'msg-5',
     projectId: 'proj-minesweeper',
     scope: { kind: 'working-group-channel', workingGroupId: 'wg-mechanics' },
     authorId: 'programmer',
     authorKind: 'agent',
-    authorDisplayName: "Programmer", authorAvatar: "AG",
+    authorDisplayName: "Programmer", authorAvatar: "PG",
     timestamp: '18m ago',
     content: 'Cascade recursion tested on 30x16 expert grid: depth 42 reached in under 1.2ms.',
     disposition: 'informational',
@@ -876,7 +931,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'working-group-channel', workingGroupId: 'wg-audio' },
     authorId: 'designer',
     authorKind: 'agent',
-    authorDisplayName: "Designer", authorAvatar: "AG",
+    authorDisplayName: "Designer", authorAvatar: "DS",
     timestamp: '12m ago',
     content: 'Synthesizer oscillators hooked to user click gestures; audio buffer warm and latency under 5ms.',
     disposition: 'informational',
@@ -898,7 +953,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'op-primary' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: "Planner", authorAvatar: "AG",
+    authorDisplayName: "Planner", authorAvatar: "PL",
     timestamp: '9m ago',
     content: 'Yes, proposal Task #105 is ready for your Approve-and-Begin decision once Task #101 completes.',
     disposition: 'non-routing',
@@ -910,7 +965,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'programmer' },
     authorId: 'programmer',
     authorKind: 'agent',
-    authorDisplayName: "Programmer", authorAvatar: "AG",
+    authorDisplayName: "Programmer", authorAvatar: "PG",
     timestamp: '6m ago',
     content: 'Lease held on Task #101; awaiting operator review for 3D coordinate mapping verification.',
     disposition: 'addressed',
@@ -921,7 +976,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'reviewer' },
     authorId: 'reviewer',
     authorKind: 'agent',
-    authorDisplayName: "Reviewer", authorAvatar: "AG",
+    authorDisplayName: "Reviewer", authorAvatar: "RV",
     timestamp: '4m ago',
     content: 'All unit test suites passing with 100% assertions green on macOS and Ubuntu runners.',
     disposition: 'informational',
@@ -932,9 +987,20 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'designer' },
     authorId: 'designer',
     authorKind: 'agent',
-    authorDisplayName: "Designer", authorAvatar: "AG",
+    authorDisplayName: "Designer", authorAvatar: "DS",
     timestamp: '2m ago',
     content: 'Refined UI tokens and dark mode contrast ratios for high visibility.',
+    disposition: 'informational',
+  },
+  {
+    id: 'msg-11',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'researcher' },
+    authorId: 'researcher',
+    authorKind: 'agent',
+    authorDisplayName: "Researcher", authorAvatar: "RS",
+    timestamp: '1 day ago',
+    content: 'Baseline WebGL benchmarks completed: 60fps steady on M2 Max, 45fps on Intel Iris.',
     disposition: 'informational',
   },
 ];
@@ -945,9 +1011,19 @@ const initialRoutingBatches: RoutingBatch[] = [
     projectId: 'proj-minesweeper',
     openedAt: '25m 00s ago',
     closedAt: '24m 30s ago',
+    collectionWindowDurationSec: 30,
     inputMessageIds: ['msg-3'],
     status: 'settled',
     attemptsCount: 1,
+    attemptsHistory: [
+      {
+        attemptNumber: 1,
+        timestamp: '24m 30s ago',
+        wakeModel: 'gpt-4o-mini',
+        durationMs: 640,
+        status: 'success',
+      },
+    ],
     wakeModel: 'gpt-4o-mini',
     frozenContextSummary: {
       tokenCount: 1840,
@@ -956,15 +1032,165 @@ const initialRoutingBatches: RoutingBatch[] = [
       tasksSummariesCount: 2,
       truncated: false,
     },
+    privacyBoundaryManifest: {
+      directMessagesExcluded: true,
+      privateMemoryExcluded: true,
+      sessionsAndTranscriptsExcluded: true,
+      credentialsExcluded: true,
+      hostFactsExcluded: true,
+      transientEnvCapacityExcluded: true,
+    },
     decisions: [
       {
         messageId: 'msg-3',
         targetAgentId: 'designer',
         status: 'selected',
-        rationale: 'Message discusses sRGB shader lighting aesthetics which maps directly to Designer responsibility slot.',
+        rationale:
+          'Message discusses sRGB shader lighting aesthetics which maps directly to Designer responsibility slot.',
       },
     ],
     resultingWakeRequestIds: ['wake-02'],
+    resultingWakeRequests: [
+      {
+        wakeRequestId: 'wake-02',
+        targetAgentId: 'designer',
+        admissionStatus: 'admitted',
+        linkedRunId: 'run-202',
+        projectedReplyId: 'msg-4',
+      },
+    ],
+  },
+  {
+    id: 'batch-003',
+    projectId: 'proj-minesweeper',
+    openedAt: '18m 00s ago',
+    closedAt: '17m 30s ago',
+    collectionWindowDurationSec: 30,
+    inputMessageIds: ['msg-suppressed-1'],
+    status: 'suppressed',
+    attemptsCount: 1,
+    attemptsHistory: [
+      {
+        attemptNumber: 1,
+        timestamp: '17m 30s ago',
+        wakeModel: 'gpt-4o-mini',
+        durationMs: 480,
+        status: 'success',
+      },
+    ],
+    wakeModel: 'gpt-4o-mini',
+    frozenContextSummary: {
+      tokenCount: 1520,
+      projectRulesIncluded: true,
+      recentMessagesCount: 5,
+      tasksSummariesCount: 2,
+      truncated: false,
+    },
+    privacyBoundaryManifest: {
+      directMessagesExcluded: true,
+      privateMemoryExcluded: true,
+      sessionsAndTranscriptsExcluded: true,
+      credentialsExcluded: true,
+      hostFactsExcluded: true,
+      transientEnvCapacityExcluded: true,
+    },
+    decisions: [
+      {
+        messageId: 'msg-suppressed-1',
+        targetAgentId: undefined,
+        status: 'suppressed',
+        rationale:
+          'Casual conversational remark does not require project action or agent wake; deliberately suppressed (0 agents selected).',
+      },
+    ],
+    resultingWakeRequestIds: [],
+    resultingWakeRequests: [],
+  },
+  {
+    id: 'batch-004',
+    projectId: 'proj-minesweeper',
+    openedAt: '14m 00s ago',
+    closedAt: '13m 30s ago',
+    collectionWindowDurationSec: 30,
+    inputMessageIds: ['msg-failed-1'],
+    status: 'failed-closed',
+    attemptsCount: 2,
+    attemptsHistory: [
+      {
+        attemptNumber: 1,
+        timestamp: '13m 30s ago',
+        wakeModel: 'gpt-4o-mini',
+        durationMs: 10000,
+        status: 'timeout',
+        errorDetail: 'Gateway timeout (10000ms) waiting for wake model response',
+      },
+      {
+        attemptNumber: 2,
+        timestamp: '13m 15s ago',
+        wakeModel: 'gpt-4o-mini',
+        durationMs: 1200,
+        status: 'malformed_output',
+        errorDetail: 'Model emitted malformed JSON schema lacking complete input accounting',
+      },
+    ],
+    failureReason:
+      'Fails closed after 2 failed model attempts under ADR-0007. Zero agents woken; input message preserved with durable routing failure.',
+    wakeModel: 'gpt-4o-mini',
+    frozenContextSummary: {
+      tokenCount: 1710,
+      projectRulesIncluded: true,
+      recentMessagesCount: 6,
+      tasksSummariesCount: 2,
+      truncated: false,
+    },
+    privacyBoundaryManifest: {
+      directMessagesExcluded: true,
+      privateMemoryExcluded: true,
+      sessionsAndTranscriptsExcluded: true,
+      credentialsExcluded: true,
+      hostFactsExcluded: true,
+      transientEnvCapacityExcluded: true,
+    },
+    decisions: [
+      {
+        messageId: 'msg-failed-1',
+        targetAgentId: undefined,
+        status: 'failed',
+        rationale: 'Attempt 1 timed out (10s); Attempt 2 failed validation. Routing failed closed.',
+      },
+    ],
+    resultingWakeRequestIds: [],
+    resultingWakeRequests: [],
+  },
+  {
+    id: 'batch-005',
+    projectId: 'proj-minesweeper',
+    openedAt: '12s ago',
+    closedAt: 'In 18s',
+    collectionWindowDurationSec: 30,
+    countdownRemainingSec: 18,
+    inputMessageIds: ['msg-open-1'],
+    status: 'open',
+    attemptsCount: 0,
+    wakeModel: 'gpt-4o-mini',
+    frozenContextSummary: {
+      tokenCount: 1400,
+      projectRulesIncluded: true,
+      recentMessagesCount: 6,
+      tasksSummariesCount: 2,
+      truncated: false,
+    },
+    privacyBoundaryManifest: {
+      directMessagesExcluded: true,
+      privateMemoryExcluded: true,
+      sessionsAndTranscriptsExcluded: true,
+      credentialsExcluded: true,
+      hostFactsExcluded: true,
+      transientEnvCapacityExcluded: true,
+    },
+    decisions: [],
+    resultingWakeRequestIds: [],
+    resultingWakeRequests: [],
   },
 ];
 
@@ -1375,7 +1601,11 @@ class StateManager {
       if (this.state.scenarioLog.length > 50) this.state.scenarioLog.pop();
     }
     for (const listener of this.listeners) {
-      listener();
+      try {
+        listener();
+      } catch {
+        // Ignore listener exceptions during DOM teardown
+      }
     }
   }
 
@@ -3119,20 +3349,70 @@ class StateManager {
         this.notify('Loaded Scenario: Archived Read-Only Project');
         break;
       case 'proj-chat':
+      case 'chat-project-broadcast':
         this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'chat');
-        this.notify('Loaded Scenario: Project Discussion & Working Groups Chat');
+        this.openChatDetail('project-channel');
+        this.notify('Loaded Scenario: Project Broadcast Channel (#general) & Wake Policy');
         break;
-      case 'emergency-force-release':
-        this.setPrimaryNav('manage', undefined, 'environments');
-        this.state.selectedEnvironmentId = 'win-dev-box';
-        this.openInspector('force-release', 'win-dev-box');
-        this.notify('Loaded Scenario: Emergency Override Force Release Modal');
-        break;
-      case 'wake-routing-batch':
+      case 'chat-working-group':
+        this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('working-group-channel', 'wg-mechanics');
+        this.notify('Loaded Scenario: Working Group Channel (Core Mechanics WG)');
+        break;
+      case 'chat-direct-message':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('direct-message', 'programmer');
+        this.notify('Loaded Scenario: Project-Scoped Direct Message (@Programmer)');
+        break;
+      case 'chat-batch-open':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('project-channel');
+        this.openInspector('routing', 'batch-005');
+        this.notify('Loaded Scenario: Active 30s Collection Window (Open Batch)');
+        break;
+      case 'chat-batch-inspect-selected':
+      case 'wake-routing-batch':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('project-channel');
         this.openInspector('routing', 'batch-002');
-        this.notify('Loaded Scenario: Wake-Model Assisted Routing Batch & Causal Evidence');
+        this.notify('Loaded Scenario: Causal Routing Batch with Selected Agent & Projected Reply');
+        break;
+      case 'chat-batch-inspect-suppressed':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('project-channel');
+        this.openInspector('routing', 'batch-003');
+        this.notify('Loaded Scenario: Causal Routing Batch with Deliberate Suppression');
+        break;
+      case 'chat-batch-inspect-failed':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('project-channel');
+        this.openInspector('routing', 'batch-004');
+        this.notify('Loaded Scenario: Causal Routing Batch with Fail-Closed after 2 Attempts');
+        break;
+      case 'chat-empty-scope':
+        this.selectProject('proj-docs-portal');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('project-channel');
+        this.notify('Loaded Scenario: Empty Conversation Scope');
+        break;
+      case 'chat-disbanded-wg':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('working-group-channel', 'wg-audio');
+        this.notify('Loaded Scenario: Disbanded Working Group (Read-Only State & History)');
+        break;
+      case 'chat-ended-membership':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.openChatDetail('direct-message', 'researcher');
+        this.notify('Loaded Scenario: Direct Message with Ended Agent Membership (Read-Only)');
         break;
       case 'usage-telemetry':
         this.setPrimaryNav('manage', undefined, 'usage');
