@@ -449,21 +449,21 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
 
     <!-- 4 Streamlined Urgency Pills (Single Row 4-Column Bar with Top Stat & Bottom Label) -->
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
-      <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
+      <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all" title="All (${scopedItems.length})">
         <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedItems.length}</span>
-        <span class="urgency-pill-bottom">All</span>
+        <span class="urgency-pill-bottom" title="All">All</span>
       </button>
-      <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
+      <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required" title="Action Required (${redItems.length})">
         <span class="urgency-pill-top"><span class="status-dot red"></span> ${redItems.length}</span>
-        <span class="urgency-pill-bottom">Action Req.</span>
+        <span class="urgency-pill-bottom" title="Action Required">Action Required</span>
       </button>
-      <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention">
+      <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention" title="Attention (${yellowItems.length})">
         <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${yellowItems.length}</span>
-        <span class="urgency-pill-bottom">Attention</span>
+        <span class="urgency-pill-bottom" title="Attention">Attention</span>
       </button>
-      <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info">
+      <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info" title="Info & Notices (${blueItems.length})">
         <span class="urgency-pill-top"><span class="status-dot blue"></span> ${blueItems.length}</span>
-        <span class="urgency-pill-bottom">Info/Notices</span>
+        <span class="urgency-pill-bottom" title="Info & Notices">Info & Notices</span>
       </button>
     </div>
 
@@ -553,9 +553,7 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
                     #${task.id}: ${task.currentVersion.title}
                   </h4>
                 </div>
-                <span class="provenance-tag active" style="font-size: 11px;">
-                  <span class="status-dot pulsing blue"></span> In Progress
-                </span>
+                <span class="status-dot pulsing blue" title="In Progress"></span>
               </div>
 
               <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary); background: var(--bg-surface-elevated); padding: 8px 10px; border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 4px;">
@@ -734,7 +732,7 @@ function renderAttentionCardHtml(item: AttentionItem): string {
           <span class="category-icon-pill">${categoryIcon} ${categoryName}</span>
           ${item.projectName ? `<span class="badge badge-info" style="font-size: 10px;">${item.projectName}</span>` : ''}
         </div>
-        <span class="badge ${severityClass}">${severityLabel}</span>
+        <span class="status-dot ${item.severity === 'action_required' ? 'red' : item.severity === 'attention' ? 'yellow' : 'blue'}" title="${severityLabel}"></span>
       </div>
 
       <div style="display: flex; flex-direction: column; gap: 3px; margin-top: 4px;">

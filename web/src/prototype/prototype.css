@@ -1742,18 +1742,20 @@ code {
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
-  padding: 6px 2px;
+  padding: 6px 4px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s ease;
   min-height: 48px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   text-align: center;
   gap: 2px;
+  overflow: hidden;
 }
 
 .urgency-pill-top {
@@ -1764,6 +1766,7 @@ code {
   gap: 5px;
   line-height: 1.1;
   color: var(--text-primary);
+  max-width: 100%;
 }
 
 .urgency-pill-top .status-dot {
@@ -1781,6 +1784,11 @@ code {
   color: var(--text-muted);
   line-height: 1.1;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  width: 100%;
+  display: block;
 }
 
 .urgency-pill-btn:hover {
@@ -1939,8 +1947,12 @@ code {
   gap: 6px;
 }
 
-/* Active Work Cards */
+/* Active Work Cards (Aligned with Attention Cards) */
 .active-task-card {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border-left: 4px solid var(--accent-primary);
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1949,6 +1961,15 @@ code {
 .active-task-card:hover {
   border-color: var(--accent-primary-hover);
   background: var(--bg-surface-elevated);
+}
+
+.attention-card-header .status-dot,
+.active-task-card .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  display: inline-block;
 }
 
 .status-dot.pulsing {
