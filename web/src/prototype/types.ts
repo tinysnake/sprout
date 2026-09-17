@@ -45,6 +45,11 @@ export type AgentAttributionRecord = {
   summary: string;
 };
 
+export type AgentExecutionAttribution = Pick<
+  AgentAttributionRecord,
+  'configVersionUsed' | 'engineUsed' | 'modelUsed' | 'effortUsed'
+>;
+
 export type AgentDefinition = {
   id: string;
   displayName: string;
@@ -107,6 +112,7 @@ export type MessageItem = {
   timestamp: string;
   content: string;
   disposition: RoutingDisposition;
+  agentAttribution?: AgentExecutionAttribution | undefined;
   isProjectedReply?: boolean | undefined;
   projectedReplyMeta?:
     | {
@@ -258,6 +264,7 @@ export type NestedAgentRun = {
   engine: EngineKind;
   workModel: string;
   effort: string;
+  agentConfigVersionUsed: number;
   contentVersionUsed: number;
   lifecycle: AgentRunLifecycleState;
   startedAt: string;

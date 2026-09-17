@@ -2,6 +2,7 @@ import { renderIcon } from '../icons.js';
 import {
   checkEngineModelAvailability,
   checkEnvironmentEligibility,
+  getAgentAttributionHistory,
   stateManager,
   type PrototypeState,
 } from '../state.js';
@@ -330,6 +331,7 @@ function renderAgentDetailCard(
   detailCard.className = 'agent-detail-card';
 
   const st = getTrafficLight(agent, state.environments);
+  const attributionHistory = getAgentAttributionHistory(state, agent);
 
   // Project Memberships for this agent
   const activeMemberships = state.projects
@@ -726,7 +728,7 @@ function renderAgentDetailCard(
           <span>Historical Run Attribution & Provenance</span>
         </div>
         <div class="foldable-header-right">
-          <span class="badge badge" style="font-size: 10px;">${agent.attributionHistory?.length || 0} Facts</span>
+          <span class="badge badge" style="font-size: 10px;">${attributionHistory.length} Facts</span>
           <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
         </div>
       </div>
@@ -737,7 +739,7 @@ function renderAgentDetailCard(
           </p>
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <span class="badge badge" style="font-size: 10px;">
-              ${agent.attributionHistory?.length || 0} recorded execution facts · Attribution survives rename & archive
+              ${attributionHistory.length} recorded execution facts · Attribution survives rename & archive
             </span>
             <button class="btn btn-ghost btn-sm" id="btn-view-attribution" style="font-size: 11px;">
               ${renderIcon('history', 12)} Full Trace Details
@@ -901,7 +903,7 @@ function renderAgentDetailCard(
   });
 
   detailCard.querySelector('#btn-view-attribution')?.addEventListener('click', () => {
-    openAttributionHistoryDialog(agent);
+    openAttributionHistoryDialog(agent, state);
   });
 
   // Admission Fallback Simulation Handler
@@ -1309,7 +1311,7 @@ function openArchiveConfirmDialog(agent: AgentDefinition) {
   document.body.appendChild(overlay);
 }
 
-function openAttributionHistoryDialog(agent: AgentDefinition) {
+function openAttributionHistoryDialog(agent: AgentDefinition, state: PrototypeState) {
   const existing = document.getElementById('dialog-attribution-trace');
   if (existing) existing.remove();
 
@@ -1317,7 +1319,7 @@ function openAttributionHistoryDialog(agent: AgentDefinition) {
   overlay.id = 'dialog-attribution-trace';
   overlay.className = 'proto-modal-backdrop';
 
-  const history = agent.attributionHistory || [];
+  const history = getAgentAttributionHistory(state, agent);
 
   overlay.innerHTML = `
     <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 560px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
@@ -1348,6 +1350,7 @@ function openAttributionHistoryDialog(agent: AgentDefinition) {
                       <span class="badge ${attr.entityKind === 'task_run' ? 'badge-info' : 'badge'}" style="font-size: 10px;">
                         ${attr.entityKind === 'task_run' ? 'Task Run' : 'Message'}
                       </span>
+                      <span style="font-size: 10px; color: var(--text-muted);"><code>${attr.entityId}</code></span>
                       <strong style="color: var(--text-primary); font-size: 12px;">${attr.projectName}</strong>
                     </div>
                     <span style="font-size: 10px; color: var(--text-muted);">${attr.timestamp}</span>

@@ -2,6 +2,7 @@ import type {
   ActiveDialog,
   ActivityFeedItem,
   AgentDefinition,
+  AgentAttributionRecord,
   AgentWorkOption,
   AttentionCategory,
   AttentionItem,
@@ -186,6 +187,75 @@ export interface PrototypeState {
   attentionItems: AttentionItem[];
   activityFeedItems: ActivityFeedItem[];
   scenarioLog: string[];
+}
+
+/**
+ * Projects retain runs and messages as the source of truth. The Agent detail
+ * projects those durable facts instead of relying only on its older summary
+ * cache, which can otherwise drift after an Agent is archived.
+ */
+export function getAgentAttributionHistory(
+  state: Pick<PrototypeState, 'projects' | 'tasks' | 'messages'>,
+  agent: AgentDefinition
+): AgentAttributionRecord[] {
+  const records = new Map<string, AgentAttributionRecord>();
+  const projectNameFor = (projectId: string) =>
+    state.projects.find((project) => project.id === projectId)?.displayName ?? projectId;
+  const add = (record: AgentAttributionRecord) => {
+    const key = `${record.entityKind}:${record.entityId}`;
+    if (!records.has(key)) records.set(key, record);
+  };
+
+  state.tasks.forEach((task) => {
+    task.runs
+      .filter((run) => run.agentId === agent.id)
+      .forEach((run) => {
+        add({
+          id: `run:${run.id}`,
+          projectName: projectNameFor(task.projectId),
+          projectId: task.projectId,
+          entityKind: 'task_run',
+          entityId: run.id,
+          timestamp: run.settledAt ?? run.startedAt,
+          configVersionUsed: run.agentConfigVersionUsed,
+          engineUsed: run.engine,
+          modelUsed: run.workModel,
+          effortUsed: run.effort,
+          summary: run.finalAssistantText ?? `Task run for “${task.currentVersion.title}” (${run.lifecycle}).`,
+        });
+      });
+  });
+
+  state.messages
+    .filter((message) => message.authorKind === 'agent' && message.authorId === agent.id)
+    .forEach((message) => {
+      const attribution = message.agentAttribution;
+      if (!attribution) return;
+      add({
+        id: `message:${message.id}`,
+        projectName: projectNameFor(message.projectId),
+        projectId: message.projectId,
+        entityKind: 'message',
+        entityId: message.id,
+        timestamp: message.timestamp,
+        ...attribution,
+        summary: message.content,
+      });
+    });
+
+  (agent.attributionHistory ?? []).forEach(add);
+  return [...records.values()];
+}
+
+function currentAgentExecutionAttribution(agent: AgentDefinition) {
+  const option = agent.workOptions.find((candidate) => candidate.isConfigured) ?? agent.workOptions[0];
+  if (!option) return undefined;
+  return {
+    configVersionUsed: agent.version ?? 1,
+    engineUsed: option.engine,
+    modelUsed: option.workModel,
+    effortUsed: option.effort,
+  };
 }
 
 // Initial realistic seeded data
@@ -1002,6 +1072,7 @@ const initialTasks: TaskItem[] = [
         engine: 'pi',
         workModel: 'claude-3-5-sonnet',
         effort: 'high',
+        agentConfigVersionUsed: 3,
         contentVersionUsed: 1,
         lifecycle: 'completed',
         startedAt: '32m ago',
@@ -1039,6 +1110,7 @@ const initialTasks: TaskItem[] = [
         engine: 'codex',
         workModel: 'gpt-4o',
         effort: 'high',
+        agentConfigVersionUsed: 2,
         contentVersionUsed: 1,
         lifecycle: 'completed',
         startedAt: '12m ago',
@@ -1102,6 +1174,7 @@ const initialTasks: TaskItem[] = [
         engine: 'codex',
         workModel: 'gpt-4o',
         effort: 'medium',
+        agentConfigVersionUsed: 2,
         contentVersionUsed: 1,
         lifecycle: 'running',
         startedAt: '2m ago',
@@ -1177,6 +1250,7 @@ const initialTasks: TaskItem[] = [
         engine: 'codex',
         workModel: 'gpt-4o',
         effort: 'high',
+        agentConfigVersionUsed: 3,
         contentVersionUsed: 1,
         lifecycle: 'interrupted',
         startedAt: '48m ago',
@@ -1309,6 +1383,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '34m ago',
     content: 'Task #101 has been initiated with Programmer as lead to connect raycasting pointer events.',
     disposition: 'non-routing',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'high' },
     isProjectedReply: true,
     projectedReplyMeta: {
       runId: 'run-201',
@@ -1340,6 +1415,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '24m ago',
     content: 'I have adjusted the ambient light intensity in CSS/canvas configuration to 1.4 for crisp visibility.',
     disposition: 'non-routing',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'codex', modelUsed: 'gpt-4o', effortUsed: 'medium' },
     isProjectedReply: true,
     projectedReplyMeta: {
       runId: 'run-202',
@@ -1395,6 +1471,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '18m ago',
     content: 'Cascade recursion tested on 30x16 expert grid: depth 42 reached in under 1.2ms.',
     disposition: 'informational',
+    agentAttribution: { configVersionUsed: 3, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'high' },
   },
   {
     id: 'msg-5b',
@@ -1406,6 +1483,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '12m ago',
     content: 'Synthesizer oscillators hooked to user click gestures; audio buffer warm and latency under 5ms.',
     disposition: 'informational',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'codex', modelUsed: 'gpt-4o', effortUsed: 'medium' },
   },
   {
     id: 'msg-6',
@@ -1428,6 +1506,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '9m ago',
     content: 'Yes, proposal Task #105 is ready for your Approve-and-Begin decision once Task #101 completes.',
     disposition: 'non-routing',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'high' },
     isProjectedReply: true,
   },
   {
@@ -1440,6 +1519,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '6m ago',
     content: 'Lease held on Task #101; awaiting operator review for 3D coordinate mapping verification.',
     disposition: 'addressed',
+    agentAttribution: { configVersionUsed: 3, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'high' },
   },
   {
     id: 'msg-9',
@@ -1451,6 +1531,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '4m ago',
     content: 'All unit test suites passing with 100% assertions green on macOS and Ubuntu runners.',
     disposition: 'informational',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'codex', modelUsed: 'gpt-4o', effortUsed: 'high' },
   },
   {
     id: 'msg-10',
@@ -1462,6 +1543,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '2m ago',
     content: 'Refined UI tokens and dark mode contrast ratios for high visibility.',
     disposition: 'informational',
+    agentAttribution: { configVersionUsed: 2, engineUsed: 'codex', modelUsed: 'gpt-4o', effortUsed: 'medium' },
   },
   {
     id: 'msg-11',
@@ -1473,6 +1555,7 @@ const initialMessages: MessageItem[] = [
     timestamp: '1 day ago',
     content: 'Baseline WebGL benchmarks completed: 60fps steady on M2 Max, 45fps on Intel Iris.',
     disposition: 'informational',
+    agentAttribution: { configVersionUsed: 1, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'medium' },
   },
 ];
 
@@ -3274,6 +3357,7 @@ class StateManager {
       engine: selectedOption.engine,
       workModel: selectedOption.workModel,
       effort: selectedOption.effort,
+      agentConfigVersionUsed: leadAgent.version ?? 1,
       contentVersionUsed: task.currentVersion.version,
       lifecycle: 'running',
       startedAt: 'Just now',
@@ -3426,6 +3510,7 @@ class StateManager {
         engine: selectedOption.engine,
         workModel: selectedOption.workModel,
         effort: selectedOption.effort,
+        agentConfigVersionUsed: admission.agent?.version ?? 1,
         contentVersionUsed: task.currentVersion.version,
         lifecycle: 'running',
         startedAt: 'Just now',
@@ -3654,6 +3739,7 @@ class StateManager {
           timestamp: 'Just now',
           content: `Acknowledged: "${content.slice(0, 40)}...". Proceeding with deterministic execution.`,
           disposition: 'non-routing',
+          agentAttribution: currentAgentExecutionAttribution(agent),
           isProjectedReply: true,
           projectedReplyMeta: {
             runId: `run-det-${Date.now().toString().slice(-3)}`,
@@ -3699,6 +3785,7 @@ class StateManager {
       newMsg.routingCausalChainId = batchId;
 
       setTimeout(() => {
+        const agent = this.state.agents.find((candidate) => candidate.id === 'designer');
         batch.status = 'settled';
         batch.closedAt = 'Just now';
         const replyMsg: MessageItem = {
@@ -3711,6 +3798,7 @@ class StateManager {
           timestamp: 'Just now',
           content: `Evaluating unaddressed input from batch ${batchId}: Design updates configured.`,
           disposition: 'non-routing',
+          agentAttribution: agent ? currentAgentExecutionAttribution(agent) : undefined,
           isProjectedReply: true,
           projectedReplyMeta: {
             runId: `run-proj-${Date.now().toString().slice(-3)}`,
@@ -4295,6 +4383,7 @@ class StateManager {
       engine: selectedOption.engine,
       workModel: selectedOption.workModel,
       effort: selectedOption.effort,
+      agentConfigVersionUsed: agent.version ?? 1,
       contentVersionUsed: task.currentVersion.version,
       lifecycle: 'running',
       startedAt: 'Just now',

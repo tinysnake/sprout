@@ -986,6 +986,11 @@ export function renderNewWorkingGroupModal(
       membership.status === 'active' &&
       state.agents.find((agent) => agent.id === membership.memberId)?.status === 'active'
   );
+  const hasArchivedAgent = project.memberships.some(
+    (membership) =>
+      membership.memberKind === 'agent' &&
+      state.agents.find((agent) => agent.id === membership.memberId)?.status === 'archived'
+  );
 
   modal.innerHTML = `
     <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-wg-title" style="max-width: 500px;">
@@ -1029,6 +1034,11 @@ export function renderNewWorkingGroupModal(
                     .join('')
             }
           </div>
+          ${
+            hasArchivedAgent && activeAgents.length > 0
+              ? `<span class="wg-archived-note" style="font-size: 11px; color: var(--text-muted);">Archived Agent history remains review-only.</span>`
+              : ''
+          }
         </div>
 
         <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px;">

@@ -915,6 +915,7 @@ test('Archived Agents: chat and Working Group admission reject new collaboration
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
     initPrototype(appMount);
+    const document = dom.window.document;
 
     const projectId = 'proj-minesweeper';
     const reviewerHistory = stateManager
@@ -930,6 +931,10 @@ test('Archived Agents: chat and Working Group admission reject new collaboration
     assert.equal(stateManager.getSnapshot().messages.length, activeMessageCount + 1);
 
     assert.equal(stateManager.archiveAgent('reviewer').success, true, 'Idle active member can be archived');
+    const reviewerRunIds = stateManager
+      .getSnapshot()
+      .tasks.flatMap((task) => task.runs.filter((run) => run.agentId === 'reviewer').map((run) => run.id));
+    assert.deepEqual(reviewerRunIds, ['run-204'], 'Archive preserves Reviewer run history');
     const messagesBeforeRejectedSend = stateManager.getSnapshot().messages.length;
     const directResult = stateManager.sendMessage(
       projectId,
@@ -947,8 +952,24 @@ test('Archived Agents: chat and Working Group admission reject new collaboration
     assert.match(workingGroupResult.reason ?? '', /Working Group.*archived/i);
     assert.equal(project.workingGroups.length, workingGroupCount, 'Rejected Working Group admission creates no membership or group');
 
+    // The same retained source facts must remain visible from the archived
+    // Agent detail, rather than relying on an empty per-Agent summary cache.
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.selectAgent('reviewer');
+    assert.match(document.body.textContent ?? '', /2 Facts/, 'Archived Agent detail counts retained run and message facts');
+    const attributionButton = document.querySelector('#btn-view-attribution') as HTMLButtonElement;
+    assert.ok(attributionButton, 'Archived Agent keeps the attribution detail entry point');
+    attributionButton.click();
+    const attributionDialog = document.querySelector('#dialog-attribution-trace');
+    assert.ok(attributionDialog);
+    assert.match(attributionDialog.textContent ?? '', /run-204/);
+    assert.match(attributionDialog.textContent ?? '', /msg-9/);
+    assert.match(attributionDialog.textContent ?? '', /Verification passed with zero console errors/);
+    assert.match(attributionDialog.textContent ?? '', /All unit test suites passing/);
+    assert.doesNotMatch(attributionDialog.textContent ?? '', /No historical task runs or messages/);
+    (attributionDialog.querySelector('.close-modal-btn') as HTMLButtonElement).click();
+
     stateManager.setPrimaryNav('project', 'chat');
-    const document = dom.window.document;
     const createWorkingGroupButton = document.querySelector('#btn-create-wg') as HTMLButtonElement;
     assert.ok(createWorkingGroupButton, 'Working Group creation entry remains available for active collaborators');
     createWorkingGroupButton.click();
@@ -958,6 +979,11 @@ test('Archived Agents: chat and Working Group admission reject new collaboration
       workingGroupModal.querySelector('.wg-agent-check[value="reviewer"]'),
       null,
       'Archived Agent is hidden from Working Group invitations'
+    );
+    assert.match(
+      workingGroupModal.textContent ?? '',
+      /Archived Agent history remains review-only/,
+      'Working Group invitation explains why archived Agents are unavailable'
     );
     (workingGroupModal.querySelector('.close-modal-btn') as HTMLButtonElement).click();
 
