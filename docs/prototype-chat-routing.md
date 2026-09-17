@@ -161,7 +161,7 @@ In accordance with ADR-0007:
 ### Responsive Viewport Parity
 - **Phone Viewport (390px simulated iPhone)**:
   - *Level 1 (Chat List)*: Full-screen categorized scope cards (`Project Channels`, `Working Groups`, `Direct Messages`) with unread counter badges and last message previews.
-  - *Level 2 (Chat Detail)*: Full-screen conversation timeline, sticky `← Back to Chats` header button with native browser history integration (`pushState`/`popstate`), and bottom composer with quick mention chips.
+  - *Level 2 (Chat Detail)*: Full-screen conversation timeline, sticky `← Back to Chats` header button with native browser history integration (`pushState`/`popstate`), and bottom composer with live addressing feedback.
 - **Desktop Viewport**:
   - *Split-Pane Layout*: Left column (310px) categorized scope cards; Right column conversation detail with sticky header, active window banner, message stream, and rich composer.
 
