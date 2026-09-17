@@ -141,10 +141,7 @@ function renderTaskListPage(
 
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-secondary);">
                     <span>Lead: <strong>${t.taskLeadId}</strong></span>
-                    <span style="display: inline-flex; align-items: center; gap: 4px; color: var(--accent-primary);">
-                      <span>Inspect</span>
-                      ${renderIcon('chevron-right', 12)}
-                    </span>
+                    <span>${t.selectedEnvironmentId ? t.selectedEnvironmentId.split('-')[0] : 'No lease'}</span>
                   </div>
                 </div>
               `;
@@ -197,7 +194,7 @@ function renderTaskDetailPage(
   project: ProjectItem | undefined,
   selectedTask: TaskItem
 ): HTMLElement {
-  // 3-Lifecycle Disambiguation Banner (App-Header handles Back button)
+  // 3-Lifecycle Disambiguation Banner (Foldable Box: Default Collapsed)
   const lifecycleCard = document.createElement('div');
   lifecycleCard.className = 'lifecycle-disambiguation-box';
 
@@ -230,31 +227,52 @@ function renderTaskDetailPage(
   }
 
   lifecycleCard.innerHTML = `
-    <div class="lifecycle-sentence-row">
-      ${renderIcon('settings', 14)}
-      <span>${lifecycleSentence}</span>
+    <div class="lifecycle-fold-header lifecycle-sentence-row" id="lifecycle-fold-toggle" role="button" aria-expanded="false" title="Click to expand/collapse lifecycle facts">
+      <div class="lifecycle-sentence-text">
+        ${renderIcon('settings', 14)}
+        <span>${lifecycleSentence}</span>
+      </div>
+      <div class="lifecycle-fold-chevron">
+        ${renderIcon('chevron-right', 14)}
+      </div>
     </div>
-    <div class="lifecycle-pills-wrap">
-      <span class="status-pill ${taskStateColor}">
-        <strong>Task:</strong> ${selectedTask.lifecycle}
-      </span>
-      <span class="status-pill ${selectedTask.agentRunLifecycle === 'running' ? 'purple' : 'neutral'}">
-        <strong>Agent Run:</strong> ${selectedTask.agentRunLifecycle}
-      </span>
-      <span class="status-pill ${selectedTask.leaseLifecycle === 'held' ? 'green' : selectedTask.leaseLifecycle === 'recovering' ? 'red' : 'neutral'}">
-        <strong>Task Lease:</strong> ${selectedTask.leaseLifecycle} ${selectedTask.selectedEnvironmentId ? `(${selectedTask.selectedEnvironmentId})` : ''}
-      </span>
-      <span class="status-pill neutral">
-        <strong>Content Version:</strong> v${selectedTask.currentVersion.version}
-      </span>
-      <span class="status-pill neutral">
-        <strong>Lead:</strong> ${selectedTask.taskLeadId}
-      </span>
-      <span class="status-pill neutral">
-        <strong>Proposer:</strong> ${selectedTask.currentVersion.createdBy}
-      </span>
+
+    <div class="lifecycle-details-list" id="lifecycle-details-list">
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Task Lifecycle:</span>
+        <span class="status-pill ${taskStateColor}">${selectedTask.lifecycle}</span>
+      </div>
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Agent Run Lifecycle:</span>
+        <span class="status-pill ${selectedTask.agentRunLifecycle === 'running' ? 'purple' : 'neutral'}">${selectedTask.agentRunLifecycle}</span>
+      </div>
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Task Lease State:</span>
+        <span class="status-pill ${selectedTask.leaseLifecycle === 'held' ? 'green' : selectedTask.leaseLifecycle === 'recovering' ? 'red' : 'neutral'}">
+          ${selectedTask.leaseLifecycle} ${selectedTask.selectedEnvironmentId ? `(${selectedTask.selectedEnvironmentId})` : ''}
+        </span>
+      </div>
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Content Version:</span>
+        <span class="status-pill neutral">v${selectedTask.currentVersion.version}</span>
+      </div>
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Task Lead Agent:</span>
+        <span class="status-pill neutral">${selectedTask.taskLeadId}</span>
+      </div>
+      <div class="lifecycle-detail-row">
+        <span class="lifecycle-detail-label">Proposer Attribution:</span>
+        <span class="status-pill neutral">${selectedTask.currentVersion.createdBy}</span>
+      </div>
     </div>
   `;
+
+  lifecycleCard.querySelector('#lifecycle-fold-toggle')?.addEventListener('click', () => {
+    const isExpanded = lifecycleCard.classList.toggle('expanded');
+    const toggle = lifecycleCard.querySelector('#lifecycle-fold-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', String(isExpanded));
+  });
+
   container.appendChild(lifecycleCard);
 
   // STAGE 1: Proposal Authority Card (when proposed)
