@@ -3146,14 +3146,18 @@ code {
 }
 
 /* 26. Environment Management & Recovery Styles (Ticket #65) */
+.envs-header-card {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .env-filter-boxes {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 6px;
   width: 100%;
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-subtle);
 }
 
 .env-filter-box-btn {

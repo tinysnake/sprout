@@ -30,7 +30,7 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
   const headerCard = document.createElement('div');
   headerCard.className = 'card envs-header-card';
   headerCard.innerHTML = `
-    <div class="card-header envs-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
+    <div class="envs-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
       <div style="flex: 1; min-width: 0;">
         <h2 style="font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${renderIcon('environments', 18)}
@@ -48,7 +48,7 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
     </div>
 
     <!-- Filter Row: Modeled after Attention Urgency Pills (Discrete Boxes, Icon Top, Text Bottom, Auto-Fitting Single Row) -->
-    <div class="envs-filter-row env-filter-boxes" role="group" aria-label="Filter environments by health status">
+    <div class="env-filter-boxes" role="group" aria-label="Filter environments by health status">
       <button class="env-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" title="All (${allEnvs.length})">
         <span class="env-filter-box-top"><span class="status-dot purple"></span> ${allEnvs.length}</span>
         <span class="env-filter-box-bottom">All<span class="sr-only"> (${allEnvs.length})</span></span>
@@ -332,62 +332,62 @@ function renderEnvironmentDetailCard(
           <span style="font-size: 10px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;">
+        <div class="dimensions-2x2-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
           <!-- 1. Enrollment -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
-            <div style="display: flex; flex-direction: column; min-width: 0;">
-              <span style="font-size: 12px; font-weight: 600;">1. Enrollment</span>
-              <span style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.workerIdentityKey.slice(0, 16)}...
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
+            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">1. Enrollment</span>
+              <span style="font-size: 9px; color: var(--text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.workerIdentityKey.slice(0, 12)}...
               </span>
             </div>
             <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}" style="font-size: 10px;">
+              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px;">
                 ${env.enrollmentStatus.toUpperCase()}
               </span>
               ${
                 env.enrollmentStatus === 'pending'
-                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn">Approve</button>`
+                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn" style="padding: 2px 5px; font-size: 9px;">Approve</button>`
                   : ''
               }
             </div>
           </div>
 
           <!-- 2. Connection -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
-            <div style="display: flex; flex-direction: column; min-width: 0;">
-              <span style="font-size: 12px; font-weight: 600;">2. Connection</span>
-              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                Confirmed: ${env.lastConfirmedTime}
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
+            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">2. Connection</span>
+              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.lastConfirmedTime}
               </span>
             </div>
-            <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}" style="font-size: 10px; flex-shrink: 0;">
+            <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
               ${env.connectionState.toUpperCase()}
             </span>
           </div>
 
           <!-- 3. Protocol Compatibility -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
-            <div style="display: flex; flex-direction: column; min-width: 0;">
-              <span style="font-size: 12px; font-weight: 600;">3. Protocol</span>
-              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                Version: ${env.protocolVersion} (Req: v2.x)
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
+            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">3. Protocol</span>
+              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.protocolVersion}
               </span>
             </div>
-            <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}" style="font-size: 10px; flex-shrink: 0;">
+            <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
               ${env.protocolCompatibility.toUpperCase()}
             </span>
           </div>
 
           <!-- 4. Work Safety & Lease -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
-            <div style="display: flex; flex-direction: column; min-width: 0;">
-              <span style="font-size: 12px; font-weight: 600;">4. Work Safety</span>
-              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
+            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">4. Work Safety</span>
+              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'Clear'}
               </span>
             </div>
-            <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}" style="font-size: 10px; flex-shrink: 0;">
+            <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
               ${env.workSafety.toUpperCase()}
             </span>
           </div>
@@ -403,7 +403,7 @@ function renderEnvironmentDetailCard(
           <span style="font-size: 10px; color: var(--text-muted);">ADR-0008</span>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px;">
+        <div class="permissions-2x2-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
           <!-- File Read/Write -->
           <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
             <span style="font-size: 12px;">File R/W</span>
