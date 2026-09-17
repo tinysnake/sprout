@@ -147,7 +147,13 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
     `;
   } else if (kind === 'force-release') {
     const env = state.environments.find((e) => e.id === entityId) ?? state.environments[1]!;
-    const task = state.tasks.find((t) => t.selectedEnvironmentId === env.id && t.lifecycle === 'recovery');
+    const task = state.tasks.find((t) => t.selectedEnvironmentId === env.id && (t.lifecycle === 'recovery' || t.leaseLifecycle === 'recovering'));
+
+    const unresolvedFacts = env.leaseRecovery?.unresolvedFacts ?? [
+      'Host worker connection offline: engine process stop unconfirmed over carrier',
+      'Temporary task scratch context directory unrecycled on host',
+      'Partial run settlement telemetry uncollected from host',
+    ];
 
     sheet.innerHTML = `
       <div class="inspector-header" style="border-bottom: 2px solid var(--red-action);">
@@ -156,54 +162,75 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
             ${renderIcon('warning', 18)}
             <span>Emergency Force Release</span>
           </h3>
-          <p style="font-size: 11px; color: var(--text-secondary);">Human-only override for otherwise stuck recovery (ADR-0009)</p>
+          <p style="font-size: 11px; color: var(--text-secondary);">Human-only override for otherwise unrecoverable state (ADR-0009)</p>
         </div>
         <button class="btn btn-secondary btn-sm close-sheet-btn" aria-label="Close sheet">${renderIcon('close', 14)}</button>
       </div>
       <div class="inspector-body">
-        <div style="background: var(--red-action-bg); border: 1px solid var(--red-action); padding: 12px; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary);">
+        <div style="background: var(--red-action-bg); border: 1px solid var(--red-action); padding: 12px; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary); line-height: 1.4;">
           <strong>EMERGENCY OVERRIDE WARNING:</strong><br/>
-          Force Release bypasses normal worker proof and scratch context cleanup. It permanently marks Task #${task?.id ?? '104'} as cancelled with a forced release disposition, preserves the Project workspace, and makes the Environment immediately reassignable.
+          Force Release bypasses normal worker proof and scratch context cleanup. It permanently marks Task #${task?.id ?? '104'} as cancelled with a permanent forced release disposition, preserves the Project workspace, and makes Environment <strong>${env.displayName}</strong> immediately reassignable.
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <h4 style="font-size: 13px; font-weight: 700;">Unresolved Operational Facts</h4>
-          <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); font-size: 12px; display: flex; flex-direction: column; gap: 4px;">
-            <div>• Worker connection: Offline for 14m (engine process stop unverified).</div>
-            <div>• Temporary Task context: Unrecycled on host.</div>
-            <div>• Telemetry: Partial run telemetry uncollected.</div>
+          <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); font-size: 12px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border-subtle);">
+            ${unresolvedFacts.map((f) => `<div>• ${f}</div>`).join('')}
           </div>
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          <label style="font-size: 12px; font-weight: 700;">Required Reason for Emergency Override:</label>
-          <input class="force-reason-input" type="text" placeholder="e.g. Host OS kernel panic; worker cannot reconnect" style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); color: var(--text-primary); padding: 8px; border-radius: var(--radius-sm); font-size: 13px;" value="Host machine hard rebooted without clean worker exit" />
+          <label class="form-label" for="force-reason-input" style="font-size: 12px; font-weight: 700;">
+            Mandatory Operator Reason:
+          </label>
+          <input id="force-reason-input" class="force-reason-input form-input" type="text" placeholder="e.g. Host machine kernel panic; worker cannot reconnect" value="Host machine hard rebooted without clean worker exit" />
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label class="form-label" for="force-confirm-typed" style="font-size: 12px; font-weight: 700;">
+            Type <code>FORCE RELEASE</code> to confirm:
+          </label>
+          <input id="force-confirm-typed" class="form-input force-confirm-typed" type="text" placeholder="FORCE RELEASE" autocomplete="off" />
         </div>
 
         <div style="display: flex; align-items: flex-start; gap: 8px; margin-top: 4px;">
-          <input type="checkbox" id="ack-risks" style="margin-top: 3px;" />
-          <label for="ack-risks" style="font-size: 12px; color: var(--text-secondary);">
-            I acknowledge the risks of concurrent execution and leftover temporary state, and authorize permanent emergency release.
+          <input type="checkbox" id="ack-risks" class="ack-risks-checkbox" style="margin-top: 3px;" />
+          <label for="ack-risks" style="font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
+            I acknowledge the risks of concurrent execution, missing telemetry, and leftover temporary state, and authorize permanent emergency release.
           </label>
         </div>
 
-        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px;">
+        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;">
           <button class="btn btn-secondary btn-sm close-sheet-btn">Cancel</button>
-          <button class="btn btn-danger confirm-force-btn">
+          <button class="btn btn-danger confirm-force-btn" id="confirm-force-btn" disabled>
             Authorize Force Release (Emergency Human Action)
           </button>
         </div>
       </div>
     `;
 
-    sheet.querySelector('.confirm-force-btn')?.addEventListener('click', () => {
-      const ack = (sheet.querySelector('#ack-risks') as HTMLInputElement)?.checked;
-      if (!ack) {
-        alert('You must acknowledge the risks by checking the box before proceeding.');
+    const typedInput = sheet.querySelector('#force-confirm-typed') as HTMLInputElement;
+    const ackCheckbox = sheet.querySelector('#ack-risks') as HTMLInputElement;
+    const confirmBtn = sheet.querySelector('#confirm-force-btn') as HTMLButtonElement;
+
+    const updateConfirmState = () => {
+      const isTyped = typedInput.value.trim() === 'FORCE RELEASE';
+      const isChecked = ackCheckbox.checked;
+      confirmBtn.disabled = !(isTyped && isChecked);
+    };
+
+    typedInput?.addEventListener('input', updateConfirmState);
+    ackCheckbox?.addEventListener('change', updateConfirmState);
+
+    confirmBtn?.addEventListener('click', () => {
+      const ack = ackCheckbox?.checked;
+      if (!ack || typedInput.value.trim() !== 'FORCE RELEASE') {
+        alert('You must acknowledge risks and type FORCE RELEASE to proceed.');
         return;
       }
-      const reason = (sheet.querySelector('.force-reason-input') as HTMLInputElement)?.value;
-      stateManager.emergencyForceRelease(env.id, task?.id ?? 'task-104', reason || 'Emergency operator override', ack);
+      const reasonInput = sheet.querySelector('#force-reason-input') as HTMLInputElement;
+      const reason = reasonInput?.value || 'Emergency operator override';
+      stateManager.emergencyForceRelease(env.id, task?.id ?? 'task-104', reason, ack);
       stateManager.closeInspector();
     });
   }

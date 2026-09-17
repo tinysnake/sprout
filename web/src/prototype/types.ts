@@ -297,6 +297,33 @@ export type TaskItem = {
 
 export type EnvironmentTrafficLight = 'green' | 'yellow' | 'red';
 
+export type EngineStatus = 'ready' | 'login-required' | 'missing' | 'unknown';
+
+export type EngineDetailInfo = {
+  version: string;
+  authStatus: 'authenticated' | 'login-required' | 'uninstalled' | 'unknown';
+  modelAvailability: string;
+  notes?: string | undefined;
+};
+
+export type ProbeRecord = {
+  id: string;
+  timestamp: string;
+  latencyMs: number;
+  protocolOk: boolean;
+  enginesOk: boolean;
+  capabilitiesOk: boolean;
+  summary: string;
+};
+
+export type ReconciledEvidence = {
+  retainedEventsCount: number;
+  turnSettlementObserved: boolean;
+  engineSessionStopped: boolean;
+  taskContextRecycled: boolean;
+  synchronizedAt: string;
+};
+
 export type EnvironmentInstance = {
   id: string;
   displayName: string;
@@ -304,13 +331,14 @@ export type EnvironmentInstance = {
   hostUser: string;
   trafficLight: EnvironmentTrafficLight;
   trafficLightReason: string;
-  enrollmentStatus: 'approved' | 'pending' | 'revoked';
+  enrollmentStatus: 'approved' | 'pending' | 'revoked' | 'archived';
   workerIdentityKey: string;
   connectionState: 'online' | 'reconnecting' | 'offline' | 'never connected';
   lastConfirmedTime: string;
   connectionAgeSec: number;
   protocolCompatibility: 'compatible' | 'incompatible' | 'unknown';
   protocolVersion: string;
+  protocolMismatchDetail?: string | undefined;
   capabilityPermissions: {
     fileReadWrite: boolean;
     processExecution: boolean;
@@ -318,11 +346,12 @@ export type EnvironmentInstance = {
     guiAutomation: boolean;
   };
   engineReadiness: {
-    codex: 'ready' | 'login-required' | 'missing' | 'unknown';
-    pi: 'ready' | 'login-required' | 'missing' | 'unknown';
-    agy: 'ready' | 'login-required' | 'missing' | 'unknown';
-    opencode: 'ready' | 'login-required' | 'missing' | 'unknown';
+    codex: EngineStatus;
+    pi: EngineStatus;
+    agy: EngineStatus;
+    opencode: EngineStatus;
   };
+  engineDetails?: Record<EngineKind, EngineDetailInfo> | undefined;
   workSafety: 'clear' | 'reconciling' | 'recovery';
   workspaceRoots: string[];
   activeLeaseHolder?:
@@ -331,15 +360,29 @@ export type EnvironmentInstance = {
         holderId: string;
         projectId: string;
         acquiredAt: string;
+        taskTitle?: string | undefined;
+        leadAgentName?: string | undefined;
       }
     | undefined;
   leaseRecovery?:
     | {
         cause: string;
         interruptedRunId?: string | undefined;
+        interruptedRunAgent?: string | undefined;
         unresolvedFacts: string[];
+        reconciledEvidence?: ReconciledEvidence | undefined;
       }
     | undefined;
+  forcedReleaseRecord?:
+    | {
+        actor: string;
+        timestamp: string;
+        reason: string;
+        unresolvedFacts: string[];
+        risksAcknowledged: boolean;
+      }
+    | undefined;
+  probeHistory?: ProbeRecord[] | undefined;
 };
 
 export type ProjectItem = {
