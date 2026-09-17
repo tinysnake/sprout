@@ -359,14 +359,10 @@ test('Causal Wake Routing Inspector: settles, suppresses, fails-closed, verifies
     stateManager.openChatDetail('project-channel');
     const document = dom.window.document;
 
-    // 1. Open Inspector via Header Info Button -> Inspect Routing
-    const infoBtn = document.querySelector('#chat-scope-info-btn') as HTMLButtonElement;
-    assert.ok(infoBtn);
-    infoBtn.click();
-
-    const inspectBtn = document.querySelector('.inspect-routing-btn') as HTMLButtonElement;
-    assert.ok(inspectBtn);
-    inspectBtn.click();
+    // 1. Open Inspector directly via message's causal routing batch tag
+    const batchTag = document.querySelector('.msg-routing-tag') as HTMLElement;
+    assert.ok(batchTag, 'Message causal routing tag exists');
+    batchTag.click();
 
     let modal = document.querySelector('.proto-modal-dialog');
     assert.ok(modal);

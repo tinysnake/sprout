@@ -163,7 +163,6 @@ export function renderProjectChat(
                             <span class="chat-card-title">${w.displayName}</span>
                             <div class="chat-card-meta-right">
                               ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
-                              ${isDisbanded ? `<span class="status-pill neutral" style="font-size: 9px; padding: 0 4px;">Disbanded</span>` : ''}
                               ${!isDisbanded && unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
                             </div>
                           </div>
@@ -208,7 +207,6 @@ export function renderProjectChat(
                       <span class="chat-card-title">@${m.displayName}</span>
                       <div class="chat-card-meta-right">
                         ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
-                        ${isEnded ? `<span class="status-pill neutral" style="font-size: 9px; padding: 0 4px;">Ended</span>` : ''}
                         ${!isEnded && unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
                       </div>
                     </div>
@@ -233,12 +231,6 @@ export function renderProjectChat(
         <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
-          </div>
-          
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <button class="btn btn-secondary btn-sm chat-info-btn" id="chat-scope-info-btn" title="Conversation Details & Routing Policy" aria-label="Conversation Details & Routing Policy" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
-              ${renderIcon('info', 16)}
-            </button>
           </div>
         </div>
 

@@ -88,7 +88,6 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
             </button>
             <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
               <span>${activeChatTitle}</span>
-              <span class="status-pill neutral" style="font-size: 10px;">Chat</span>
             </div>
           </div>
         `

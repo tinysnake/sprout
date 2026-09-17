@@ -157,25 +157,13 @@ test('Project Overview & Chat: renders contract, memberships, workspaces, and ch
     const unreadDots = document.querySelectorAll('.unread-badge-dot');
     assert.ok(unreadDots.length > 0, 'Unread badge dots rendered');
 
-    // 3. Chat Info Modal & Routing Inspector Modal (Moved out of titlebar into modal)
-    stateManager.openChatDetail('direct-message', 'programmer');
-    const chatInfoBtn = document.querySelector('#chat-scope-info-btn') as HTMLButtonElement;
-    assert.ok(chatInfoBtn, 'Chat info button rendered in conversation header');
-    chatInfoBtn.click();
+    // 3. Causal Routing Inspector via message tag
+    stateManager.openChatDetail('project-channel');
+    const batchTag = document.querySelector('.msg-routing-tag') as HTMLElement;
+    assert.ok(batchTag, 'Message causal routing tag exists');
+    batchTag.click();
 
-    let modal = document.querySelector('.proto-modal-dialog');
-    assert.ok(modal, 'Chat information modal opened');
-    assert.match(modal.textContent ?? '', /Conversation Information/);
-    assert.match(modal.textContent ?? '', /@Programmer/);
-    assert.match(modal.textContent ?? '', /Direct Message/);
-
-    // Open Inspect Routing Chain from Chat Info Modal
-    const inspectRoutingBtn = modal.querySelector('.inspect-routing-btn') as HTMLButtonElement;
-    assert.ok(inspectRoutingBtn, 'Inspect routing button present in chat info modal');
-    inspectRoutingBtn.click();
-
-    // Verify Causal Routing Inspector Modal Dialog
-    const routingModal = document.querySelectorAll('.proto-modal-dialog')[1] ?? document.querySelectorAll('.proto-modal-dialog')[0];
+    const routingModal = document.querySelector('.proto-modal-dialog');
     assert.ok(routingModal, 'Routing inspector modal opened');
     assert.match(routingModal.textContent ?? '', /Causal Wake Routing Inspector/);
     assert.match(routingModal.textContent ?? '', /Frozen Context Bounds/);
