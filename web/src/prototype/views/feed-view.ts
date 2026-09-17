@@ -520,7 +520,7 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
   section.innerHTML = `
     <div class="section-title-bar">
       <div style="display: flex; align-items: center; gap: 8px;">
-        <span class="status-dot pulsing blue"></span>
+        ${renderIcon('plane', 18)}
         <h3 style="font-size: 15px; font-weight: 700;">Live In-Flight Work</h3>
         <span class="badge badge-blue">${activeTasks.length} Active</span>
       </div>
@@ -625,26 +625,35 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
   section.innerHTML = `
     <div class="section-title-bar">
       <div style="display: flex; align-items: center; gap: 8px;">
-        ${renderIcon('usage', 18)}
+        ${renderIcon('activity', 18)}
         <h3 style="font-size: 15px; font-weight: 700;">Recent Operational Activity</h3>
+        <span class="badge badge-info">${scopedActivities.length} Total</span>
       </div>
-      <div class="segmented-control" style="font-size: 11px;" role="group" aria-label="Filter activity stream">
-        <button class="segmented-btn ${state.feedActivityFilter === 'all' ? 'active' : ''}" data-act-filter="all">
-          All (${scopedActivities.length})
-        </button>
-        <button class="segmented-btn ${state.feedActivityFilter === 'tasks' ? 'active' : ''}" data-act-filter="tasks">
-          Tasks (${tasksActivities.length})
-        </button>
-        <button class="segmented-btn ${state.feedActivityFilter === 'messages' ? 'active' : ''}" data-act-filter="messages">
-          Chat (${msgActivities.length})
-        </button>
-        <button class="segmented-btn ${state.feedActivityFilter === 'envs' ? 'active' : ''}" data-act-filter="envs">
-          Envs (${envActivities.length})
-        </button>
-        <button class="segmented-btn ${state.feedActivityFilter === 'usage' ? 'active' : ''}" data-act-filter="usage">
-          Cost (${costActivities.length})
-        </button>
-      </div>
+      <span style="font-size: 11px; color: var(--text-muted);">Audit log scoped to project</span>
+    </div>
+
+    <!-- 5 Streamlined Activity Filter Pills (Discrete Cards matching Urgency Pills style) -->
+    <div class="activity-filter-pills" role="group" aria-label="Filter activity stream">
+      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'all' ? 'active' : ''}" data-act-filter="all" title="All Activity (${scopedActivities.length})">
+        <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedActivities.length}</span>
+        <span class="urgency-pill-bottom" title="All">All</span>
+      </button>
+      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'tasks' ? 'active' : ''}" data-act-filter="tasks" title="Task & Agent Lifecycle (${tasksActivities.length})">
+        <span class="urgency-pill-top"><span class="status-dot blue"></span> ${tasksActivities.length}</span>
+        <span class="urgency-pill-bottom" title="Tasks">Tasks</span>
+      </button>
+      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'messages' ? 'active' : ''}" data-act-filter="messages" title="Chat Messages & Routing (${msgActivities.length})">
+        <span class="urgency-pill-top"><span class="status-dot green"></span> ${msgActivities.length}</span>
+        <span class="urgency-pill-bottom" title="Chat">Chat</span>
+      </button>
+      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'envs' ? 'active' : ''}" data-act-filter="envs" title="Environment & Host Events (${envActivities.length})">
+        <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${envActivities.length}</span>
+        <span class="urgency-pill-bottom" title="Environments">Envs</span>
+      </button>
+      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'usage' ? 'active' : ''}" data-act-filter="usage" title="Cost & Usage Milestones (${costActivities.length})">
+        <span class="urgency-pill-top"><span class="status-dot gray"></span> ${costActivities.length}</span>
+        <span class="urgency-pill-bottom" title="Cost & Usage">Cost</span>
+      </button>
     </div>
 
     <div class="activity-stream-list" style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
@@ -660,7 +669,7 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
     </div>
   `;
 
-  section.querySelectorAll('.segmented-btn[data-act-filter]').forEach((btn) => {
+  section.querySelectorAll('.activity-filter-pill-btn[data-act-filter]').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       const filter = (ev.currentTarget as HTMLElement).getAttribute('data-act-filter') as any;
       stateManager.setFeedActivityFilter(filter);
@@ -677,13 +686,6 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
 // ---------------------------------------------------------------------------
 
 function renderAttentionCardHtml(item: AttentionItem): string {
-  const severityClass =
-    item.severity === 'action_required'
-      ? 'badge-red'
-      : item.severity === 'attention'
-        ? 'badge-yellow'
-        : 'badge-info';
-
   const severityLabel =
     item.severity === 'action_required'
       ? 'Action Required'
