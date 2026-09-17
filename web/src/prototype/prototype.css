@@ -1761,9 +1761,18 @@ code {
   font-weight: 700;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   line-height: 1.1;
   color: var(--text-primary);
+}
+
+.urgency-pill-top .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
 }
 
 .urgency-pill-bottom {

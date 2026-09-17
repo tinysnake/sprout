@@ -450,7 +450,7 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
     <!-- 4 Streamlined Urgency Pills (Single Row 4-Column Bar with Top Stat & Bottom Label) -->
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
       <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
-        <span class="urgency-pill-top">${scopedItems.length}</span>
+        <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedItems.length}</span>
         <span class="urgency-pill-bottom">全部</span>
       </button>
       <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
