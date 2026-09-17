@@ -52,7 +52,7 @@ async function setupPrototypeDom() {
   };
 }
 
-test('Project Multi-View: renders project switcher, info button, metadata modal, and sub-nav tabs', async () => {
+test('Project Multi-View: renders project switcher, info button, and metadata modal', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -76,11 +76,7 @@ test('Project Multi-View: renders project switcher, info button, metadata modal,
     assert.ok(projectSelector, 'Project dropdown selector rendered');
     assert.match(projectSelector.textContent ?? '', /Three.js Minesweeper Game/);
 
-    // 2. Verify Segmented Sub-Nav Tabs: Overview, Tasks, Chat
-    const subNavTabs = document.querySelectorAll('.project-segmented-tab');
-    assert.equal(subNavTabs.length, 3, 'Overview, Tasks, and Chat tabs rendered');
-
-    // 3. Verify Project Info Button and Modal Popup
+    // 2. Verify Project Info Button and Modal Popup
     const infoBtn = document.querySelector('#project-info-btn') as HTMLButtonElement;
     assert.ok(infoBtn, 'Project info button rendered');
     infoBtn.click();
@@ -100,7 +96,7 @@ test('Project Multi-View: renders project switcher, info button, metadata modal,
   }
 });
 
-test('Project Overview: renders contract, wake policy, memberships, bound workspaces, and working groups', async () => {
+test('Project Overview & Chat: renders contract, memberships, workspaces, and chat scope cards', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -114,14 +110,15 @@ test('Project Overview: renders contract, wake policy, memberships, bound worksp
     assert.ok(appMount);
     initPrototype(appMount);
 
+    // 1. Overview Tab
     stateManager.setPrimaryNav('project', 'overview');
     const document = dom.window.document;
 
-    // 1. Contract & Purpose Card
+    // Contract & Purpose Card
     assert.match(document.body.textContent ?? '', /Project Contract & Purpose/);
     assert.match(document.body.textContent ?? '', /Three.js 3D Minesweeper game/);
 
-    // 2. Wake Policy Switcher
+    // Wake Policy Switcher
     const policyBtn = document.querySelector('.toggle-policy-btn') as HTMLButtonElement;
     assert.ok(policyBtn, 'Wake policy button rendered');
     assert.match(policyBtn.textContent ?? '', /Switch to Explicit-only/);
@@ -129,18 +126,29 @@ test('Project Overview: renders contract, wake policy, memberships, bound worksp
     policyBtn.click();
     assert.equal(stateManager.getSnapshot().projects[0].wakePolicy, 'explicit-only');
 
-    // 3. Memberships List
+    // Memberships List
     assert.match(document.body.textContent ?? '', /Project Memberships/);
     assert.match(document.body.textContent ?? '', /Operator \(Human\)/);
     assert.match(document.body.textContent ?? '', /Programmer/);
 
-    // 4. Bound Workspaces
+    // Bound Workspaces
     assert.match(document.body.textContent ?? '', /Bound Workspaces & Host Environments/);
     assert.match(document.body.textContent ?? '', /minesweeper-threejs/);
 
-    // 5. Working Groups
+    // 2. Chat Tab with Scope Cards and Unread Badges
+    stateManager.setPrimaryNav('project', 'chat');
+    assert.ok(document.querySelector('.chat-scopes-grid'), 'Chat scopes grid rendered');
+
+    const chatCards = document.querySelectorAll('.chat-scope-card');
+    assert.ok(chatCards.length >= 3, 'Rendered #general, Working Group, and DM cards');
+
+    assert.match(document.body.textContent ?? '', /#general/);
     assert.match(document.body.textContent ?? '', /Core Mechanics WG/);
-    assert.match(document.body.textContent ?? '', /WebAudio Effects WG/);
+    assert.match(document.body.textContent ?? '', /@Programmer/);
+
+    // Check red unread badge dots
+    const unreadDots = document.querySelectorAll('.unread-badge-dot');
+    assert.ok(unreadDots.length > 0, 'Unread badge dots rendered');
   } finally {
     await cleanup();
   }

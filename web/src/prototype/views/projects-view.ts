@@ -1,6 +1,6 @@
 import { renderIcon } from '../icons.js';
 import { stateManager, type PrototypeState } from '../state.js';
-import type { ProjectItem, ProjectTab } from '../types.js';
+import type { ProjectItem } from '../types.js';
 import { renderTasksView } from './tasks-view.js';
 
 export function renderProjectsView(state: PrototypeState): HTMLElement {
@@ -56,8 +56,8 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
       stateManager.closeTaskDetail();
     });
   } else {
+    // Standard Project App-Header: Project selector on left, Info and New buttons on right (segmented tabs removed)
     projectNav.innerHTML = `
-      <!-- Top Project Selector & Actions Bar (App-Header style, flush with edge) -->
       <header class="project-top-bar">
         <div class="project-selector-row">
           <div class="project-selector-left">
@@ -77,38 +77,17 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
           </div>
 
           <div class="project-header-actions">
-            <!-- Info Button (Item 6) -->
+            <!-- Info Button -->
             <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
               ${renderIcon('info', 16)}
             </button>
 
-            <!-- + New Project Button (Item 2: only +, tooltip) -->
+            <!-- + New Project Button -->
             <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
               ${renderIcon('plus', 16)}
             </button>
           </div>
         </div>
-
-        <!-- Segmented Sub-Nav Tabs (Item 4 & 5: responsive icon+label, hidden on desktop sidebar) -->
-        <nav class="project-segmented-tabs" role="tablist" aria-label="Project Sub-Views">
-          <button class="project-segmented-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-tab="overview" role="tab" aria-selected="${state.projectTab === 'overview'}">
-            <span class="tab-icon-row">${renderIcon('overview', 16)}</span>
-            <span class="tab-label">Overview</span>
-          </button>
-          <button class="project-segmented-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-tab="tasks" role="tab" aria-selected="${state.projectTab === 'tasks'}">
-            <span class="tab-icon-row">
-              ${renderIcon('tasks', 16)}
-              <span class="tab-badge">${projectTasks.length}</span>
-            </span>
-            <span class="tab-label">Tasks</span>
-          </button>
-          <button class="project-segmented-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-tab="chat" role="tab" aria-selected="${state.projectTab === 'chat'}">
-            <span class="tab-icon-row">
-              ${renderIcon('chat', 16)}
-            </span>
-            <span class="tab-label">Chat</span>
-          </button>
-        </nav>
       </header>
     `;
 
@@ -132,14 +111,6 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
         recoveryTasks,
         activeMembers
       );
-    });
-
-    // Segmented sub-tab listeners
-    projectNav.querySelectorAll('.project-segmented-tab[data-tab]').forEach((btn) => {
-      btn.addEventListener('click', (ev) => {
-        const tab = (ev.currentTarget as HTMLElement).getAttribute('data-tab') as ProjectTab;
-        stateManager.setProjectTab(tab);
-      });
     });
 
     // New Project modal listener
@@ -168,7 +139,7 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
 }
 
 /**
- * Renders the Project Overview Sub-View (Contract, Memberships, Workspaces, Communication Entry Points)
+ * Renders the Project Overview Sub-View (Contract, Memberships, Bound Workspaces)
  */
 function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTMLElement {
   const overviewEl = document.createElement('div');
@@ -375,82 +346,6 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
           .join('')}
       </div>
     </div>
-
-    <!-- 4. Communication & Working Groups Entry Points Card -->
-    <div class="card grid-col-full">
-      <div class="card-header">
-        <div>
-          <span class="card-title">Communication Scopes & Working Groups</span>
-          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
-            Project Channel (<code>#general</code>) · ${project.workingGroups.filter((w) => w.status === 'active').length} Active Working Groups
-          </div>
-        </div>
-        <button class="btn btn-secondary btn-sm create-wg-btn" title="Create Focused Working Group" aria-label="Create Focused Working Group" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
-          ${renderIcon('plus', 14)}
-        </button>
-      </div>
-
-      <div class="card-body" style="display: flex; flex-direction: column; gap: 10px;">
-        <!-- Project Channel Preview -->
-        <div style="background: var(--bg-surface-elevated); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; cursor: pointer;" class="jump-chat-btn" title="Open Project Channel">
-          <div>
-            <div style="font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-              ${renderIcon('chat', 14)}
-              <span>Project Discussion Channel (<code>#general</code>)</span>
-              <span class="status-pill purple" style="font-size: 10px;">All Members</span>
-            </div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-              Primary project channel for multi-agent coordination and broadcast instructions.
-            </div>
-          </div>
-          <span style="color: var(--accent-primary); display: inline-flex; align-items: center; gap: 4px; font-size: 12px;">
-            ${renderIcon('chevron-right', 14)}
-          </span>
-        </div>
-
-        <!-- Working Groups Sub-List -->
-        <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-top: 4px;">
-          Working Groups (${project.workingGroups.length})
-        </div>
-
-        ${
-          project.workingGroups.length === 0
-            ? `<div style="font-size: 12px; color: var(--text-muted); padding: 8px 0;">No working groups created yet. Working groups provide focused sub-team collaboration scopes.</div>`
-            : project.workingGroups
-                .map(
-                  (wg) => `
-              <div style="background: var(--bg-surface-elevated); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; ${wg.status === 'disbanded' ? 'opacity: 0.65;' : ''}">
-                <div>
-                  <div style="font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-                    <span>${wg.displayName}</span>
-                    <span class="status-pill ${wg.status === 'active' ? 'purple' : 'gray'}" style="font-size: 10px;">
-                      ${wg.status === 'active' ? 'Active WG' : 'Disbanded (Read-Only)'}
-                    </span>
-                  </div>
-                  ${wg.goal ? `<div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;"><strong>Goal:</strong> ${wg.goal}</div>` : ''}
-                  <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">
-                    Members (${wg.memberIds.length}): ${wg.memberIds.join(', ')} · Created: ${wg.createdAt}
-                  </div>
-                </div>
-                <div style="display: flex; gap: 6px; align-items: center;">
-                  <button class="btn btn-secondary btn-sm jump-wg-chat-btn" data-wg="${wg.id}">
-                    Open WG Chat →
-                  </button>
-                  ${
-                    project.status === 'active'
-                      ? wg.status === 'active'
-                        ? `<button class="btn btn-ghost btn-sm disband-wg-btn" data-wg="${wg.id}" title="Disband Working Group (preserves history)">${renderIcon('close', 12)}</button>`
-                        : `<button class="btn btn-ghost btn-sm restore-wg-btn" data-wg="${wg.id}" title="Restore Working Group">${renderIcon('refresh', 12)}</button>`
-                      : ''
-                  }
-                </div>
-              </div>
-            `
-                )
-                .join('')
-        }
-      </div>
-    </div>
   `;
 
   // --- Event Listeners for Overview ---
@@ -574,51 +469,11 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
     });
   });
 
-  // Working Groups
-  overviewEl.querySelector('.create-wg-btn')?.addEventListener('click', () => {
-    renderCreateWorkingGroupModal(overviewEl, project);
-  });
-
-  overviewEl.querySelectorAll('.disband-wg-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const wgId = (ev.currentTarget as HTMLElement).getAttribute('data-wg')!;
-      if (
-        confirm(
-          `Disband Working Group? The channel will become read-only and all history preserved.`
-        )
-      ) {
-        stateManager.disbandWorkingGroup(project.id, wgId);
-      }
-    });
-  });
-
-  overviewEl.querySelectorAll('.restore-wg-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const wgId = (ev.currentTarget as HTMLElement).getAttribute('data-wg')!;
-      stateManager.restoreWorkingGroup(project.id, wgId);
-    });
-  });
-
-  overviewEl.querySelectorAll('.jump-chat-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      stateManager.selectScope('project-channel');
-      stateManager.setProjectTab('chat');
-    });
-  });
-
-  overviewEl.querySelectorAll('.jump-wg-chat-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const wgId = (ev.currentTarget as HTMLElement).getAttribute('data-wg')!;
-      stateManager.selectScope('working-group-channel', wgId);
-      stateManager.setProjectTab('chat');
-    });
-  });
-
   return overviewEl;
 }
 
 /**
- * Renders the Project Discussion & Working Groups Chat View
+ * Renders the Project Discussion & Working Groups Chat View (Each Chat Scope is a clean Card with Red Unread Dot)
  */
 function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLElement {
   const chatEl = document.createElement('div');
@@ -648,51 +503,82 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
     filteredMessages = filteredMessages.filter((m) => m.scope.kind === 'project-channel');
   }
 
+  // Simulated unread message counts per scope
+  const unreadMap: Record<string, number> = {
+    'project-channel': 2,
+    'wg-mechanics': 1,
+    programmer: 1,
+  };
+
+  const isGeneralActive = state.selectedScopeKind === 'project-channel';
+
   chatEl.innerHTML = `
-    <div class="card" style="display: flex; flex-direction: column; min-height: 520px;">
-      <div class="card-header">
+    <!-- Top Scope Cards Grid (One Card per Chat Scope with Red Unread Dot) -->
+    <div class="chat-scopes-grid" role="tablist" aria-label="Conversation Scopes">
+      <!-- 1. Project #general Channel Card -->
+      <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
+        <div class="chat-scope-card-left">
+          ${renderIcon('chat', 16)}
+          <span class="chat-scope-card-title">#general</span>
+        </div>
+        ${unreadMap['project-channel'] ? `<span class="unread-badge-dot">${unreadMap['project-channel']}</span>` : ''}
+      </div>
+
+      <!-- 2. Working Group Cards -->
+      ${project.workingGroups
+        .filter((w) => w.status === 'active')
+        .map((w) => {
+          const isActive =
+            state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId === w.id;
+          const unreadCount = unreadMap[w.id] || 0;
+          return `
+            <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" aria-selected="${isActive}">
+              <div class="chat-scope-card-left">
+                ${renderIcon('users', 16)}
+                <span class="chat-scope-card-title">${w.displayName}</span>
+              </div>
+              ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+            </div>
+          `;
+        })
+        .join('')}
+
+      <!-- 3. Direct Message Cards -->
+      ${project.memberships
+        .filter((m) => m.memberKind === 'agent' && m.status === 'active')
+        .map((m) => {
+          const isActive =
+            state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId === m.memberId;
+          const unreadCount = unreadMap[m.memberId] || 0;
+          return `
+            <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
+              <div class="chat-scope-card-left">
+                ${renderIcon('bot', 16)}
+                <span class="chat-scope-card-title">@${m.displayName}</span>
+              </div>
+              ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+            </div>
+          `;
+        })
+        .join('')}
+    </div>
+
+    <!-- Active Conversation View -->
+    <div class="card" style="display: flex; flex-direction: column; min-height: 480px;">
+      <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
         <div>
           <span class="card-title">${currentScopeLabel}</span>
           <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
             Project: <code>${project.displayName}</code> · Routing: <code>${project.wakePolicy}</code>
           </div>
         </div>
-        <div style="display: flex; gap: 8px;">
-          <button class="btn btn-secondary btn-sm open-inspector-btn" title="Inspect Causal Wake Routing Chain">
-            ${renderIcon('lightning', 14)} Inspect Routing
-          </button>
-        </div>
-      </div>
-
-      <!-- Scope Switcher Chips -->
-      <div style="padding: 8px 14px; background: var(--bg-surface-elevated); border-bottom: 1px solid var(--border-subtle); display: flex; gap: 6px; overflow-x: auto;">
-        <button class="btn btn-sm ${state.selectedScopeKind === 'project-channel' ? 'btn-primary' : 'btn-secondary'} chat-scope-pill" data-kind="project-channel">
-          #general
+        <button class="btn btn-secondary btn-sm open-inspector-btn" title="Inspect Causal Wake Routing Chain">
+          ${renderIcon('lightning', 14)} Inspect Routing
         </button>
-        ${project.workingGroups
-          .filter((w) => w.status === 'active')
-          .map(
-            (w) => `
-          <button class="btn btn-sm ${state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId === w.id ? 'btn-primary' : 'btn-secondary'} chat-scope-pill" data-kind="working-group-channel" data-id="${w.id}">
-            wg:${w.displayName}
-          </button>
-        `
-          )
-          .join('')}
-        ${project.memberships
-          .filter((m) => m.memberKind === 'agent' && m.status === 'active')
-          .map(
-            (m) => `
-          <button class="btn btn-sm ${state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId === m.memberId ? 'btn-primary' : 'btn-secondary'} chat-scope-pill" data-kind="direct-message" data-id="${m.memberId}">
-            @${m.displayName}
-          </button>
-        `
-          )
-          .join('')}
       </div>
 
       <!-- Chat Timeline Messages -->
-      <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 400px;">
+      <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 380px;">
         ${
           filteredMessages.length === 0
             ? `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 0;">
@@ -740,9 +626,9 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
     </div>
   `;
 
-  // Scope pill clicks
-  chatEl.querySelectorAll('.chat-scope-pill').forEach((pill) => {
-    pill.addEventListener('click', (ev) => {
+  // Scope Card Click Listeners (Select Scope)
+  chatEl.querySelectorAll('.chat-scope-card').forEach((card) => {
+    card.addEventListener('click', (ev) => {
       const target = ev.currentTarget as HTMLElement;
       const kind = target.getAttribute('data-kind') as any;
       const id = target.getAttribute('data-id') || undefined;
@@ -750,12 +636,12 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
     });
   });
 
-  // Routing Inspector
+  // Routing Inspector Listener
   chatEl.querySelector('.open-inspector-btn')?.addEventListener('click', () => {
     stateManager.openInspector('routing', 'batch-001');
   });
 
-  // Send message
+  // Send message handler
   const inputEl = chatEl.querySelector('.chat-input-text') as HTMLInputElement;
   const sendBtn = chatEl.querySelector('.send-msg-btn') as HTMLButtonElement;
 
@@ -1142,77 +1028,6 @@ function renderBindEnvironmentModal(
       stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
       modal.remove();
     }
-  });
-
-  parentEl.appendChild(modal);
-}
-
-function renderCreateWorkingGroupModal(
-  parentEl: HTMLElement,
-  project: ProjectItem
-) {
-  const modal = document.createElement('div');
-  modal.className = 'proto-modal-backdrop';
-
-  modal.innerHTML = `
-    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-wg-title">
-      <div class="proto-modal-header">
-        <strong id="create-wg-title" style="font-size: 15px;">Create Focused Working Group</strong>
-        <button class="btn btn-ghost btn-sm close-modal-btn">${renderIcon('close', 12)}</button>
-      </div>
-      <div class="proto-modal-body">
-        <div>
-          <label style="font-size: 12px; font-weight: 700;">Working Group Name *</label>
-          <input type="text" class="form-input wg-name-input" placeholder="e.g. Core Shader Engine WG" style="width: 100%; margin-top: 4px;" />
-        </div>
-        <div>
-          <label style="font-size: 12px; font-weight: 700;">Goal</label>
-          <input type="text" class="form-input wg-goal-input" placeholder="e.g. Optimize ray-traced ambient lighting shaders" style="width: 100%; margin-top: 4px;" />
-        </div>
-        <div>
-          <label style="font-size: 12px; font-weight: 700;">Select Group Members (from Project)</label>
-          <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 6px;">
-            ${project.memberships
-              .filter((m) => m.status === 'active')
-              .map(
-                (m) => `
-              <label style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
-                <input type="checkbox" class="wg-member-cb" value="${m.memberId}" ${m.memberKind === 'human' ? 'checked disabled' : 'checked'} />
-                <span>${m.displayName} (${m.memberKind})</span>
-              </label>
-            `
-              )
-              .join('')}
-          </div>
-        </div>
-      </div>
-      <div class="proto-modal-footer">
-        <button class="btn btn-secondary close-modal-btn">Cancel</button>
-        <button class="btn btn-primary confirm-create-wg-btn">Create Working Group</button>
-      </div>
-    </div>
-  `;
-
-  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
-
-  modal.querySelector('.confirm-create-wg-btn')?.addEventListener('click', () => {
-    const nameInput = modal.querySelector('.wg-name-input') as HTMLInputElement;
-    const goalInput = modal.querySelector('.wg-goal-input') as HTMLInputElement;
-    const memberCheckboxes = modal.querySelectorAll('.wg-member-cb:checked') as NodeListOf<HTMLInputElement>;
-
-    if (!nameInput.value.trim()) {
-      alert('Working group name is required.');
-      return;
-    }
-
-    const memberIds = Array.from(memberCheckboxes).map((cb) => cb.value);
-    stateManager.createWorkingGroup(
-      project.id,
-      nameInput.value.trim(),
-      memberIds,
-      goalInput.value.trim() || undefined
-    );
-    modal.remove();
   });
 
   parentEl.appendChild(modal);

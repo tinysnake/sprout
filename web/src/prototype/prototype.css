@@ -2300,84 +2300,77 @@ code {
   flex-shrink: 0;
 }
 
-.project-segmented-tabs {
+/* Chat Scope Grid & Cards */
+.chat-scopes-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  width: 100%;
-  background: var(--bg-surface-elevated);
-  padding: 4px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
-.viewport-stage.mode-desktop .project-segmented-tabs {
-  display: none;
-}
-
-@media (min-width: 860px) {
-  .viewport-stage.mode-fluid .project-segmented-tabs {
-    display: none;
+@media (max-width: 600px) {
+  .chat-scopes-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
   }
 }
 
-.project-segmented-tab {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  padding: 6px 4px;
-  min-height: 44px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
+.chat-scope-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
   cursor: pointer;
   transition: all 0.15s ease;
-  min-width: 0;
-  text-decoration: none;
-}
-
-.project-segmented-tab:hover {
-  color: var(--text-primary);
-  background: var(--bg-surface);
-}
-
-.project-segmented-tab.active {
-  color: var(--text-primary);
-  background: var(--bg-surface);
-  border-color: var(--border-subtle);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-}
-
-.project-segmented-tab .tab-icon-row {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 8px;
+  user-select: none;
+  min-height: 44px;
 }
 
-.project-segmented-tab .tab-label {
-  font-size: 11px;
-  font-weight: 600;
+.chat-scope-card:hover {
+  background: var(--bg-surface-elevated);
+  border-color: var(--border-strong);
+}
+
+.chat-scope-card.active {
+  background: var(--bg-surface-elevated);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary);
+}
+
+.chat-scope-card-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-scope-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
 }
 
-.project-segmented-tab .tab-badge {
-  font-size: 10px;
+.unread-badge-dot {
+  min-width: 18px;
+  height: 18px;
   padding: 0 5px;
   border-radius: var(--radius-full);
-  background: var(--border-subtle);
-  color: var(--text-secondary);
-  font-weight: 700;
-}
-
-.project-segmented-tab.active .tab-badge {
-  background: var(--accent-primary);
+  background: var(--red-action);
   color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 /* Project Overview Grid */
