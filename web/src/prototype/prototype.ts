@@ -10,6 +10,9 @@ import { renderReviewDrawer } from './views/review-drawer.js';
 
 export function initPrototype(mountEl: HTMLElement): void {
   function render() {
+    if (typeof document === 'undefined' || !document.documentElement || !mountEl.isConnected) {
+      return;
+    }
     const state = stateManager.getSnapshot();
     mountEl.innerHTML = '';
 
@@ -89,6 +92,18 @@ export function initPrototype(mountEl: HTMLElement): void {
         <!-- Scenario Jumpers Dropdown -->
         <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
           <option value="" disabled selected>Jump to Scenario...</option>
+          <optgroup label="Ticket #64: Chat Scopes & Wake Routing (ADR-0007, ADR-0008)">
+            <option value="chat-project-broadcast">Chat: Project Broadcast Channel (#general)</option>
+            <option value="chat-working-group">Chat: Working Group Channel (Core Mechanics WG)</option>
+            <option value="chat-direct-message">Chat: Project-Scoped Direct Message (@Programmer)</option>
+            <option value="chat-batch-open">Chat: Active 30s Collection Window (Open Batch)</option>
+            <option value="chat-batch-inspect-selected">Chat: Causal Routing (Selected Agent & Projected Reply)</option>
+            <option value="chat-batch-inspect-suppressed">Chat: Causal Routing (Deliberate Suppression / No-Wake)</option>
+            <option value="chat-batch-inspect-failed">Chat: Causal Routing (Fail-Closed after 2 Retries)</option>
+            <option value="chat-empty-scope">Chat: Empty Scope State (Zero Messages)</option>
+            <option value="chat-disbanded-wg">Chat: Disbanded Working Group (Read-Only State)</option>
+            <option value="chat-ended-membership">Chat: Ended Agent Membership DM (Read-Only State)</option>
+          </optgroup>
           <optgroup label="Ticket #63: Multi-View Project & Task Loop">
             <option value="proj-overview">Project: Overview, Contract & Memberships</option>
             <option value="proj-active-task">Project: Active Running Task (2-Stage Pause & Interrupt)</option>
