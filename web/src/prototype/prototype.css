@@ -3147,10 +3147,15 @@ code {
 
 /* 26. Environment Management & Recovery Styles (Ticket #65) */
 .envs-header-card {
-  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0 0 14px 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .env-filter-boxes {

@@ -244,6 +244,9 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           <li>
             <strong>Preempting Active Clean Leases with Force Release:</strong> Rejected in ADR-0009; Force Release is strictly barred on clean active leases and is accessible only when an environment is in recovery.
           </li>
+          <li>
+            <strong>Top Control Bar Space-Occupying Candidate Dropdowns:</strong> Rejected per owner review (<code>top-state-matrix-select</code>, <code>top-layout-select</code>, <code>scenario-jumper</code>); prototype top bar is streamlined to essential viewports and baseline controls, while underlying state matrices, scenario definitions, and backend requirements are fully preserved for downstream production implementation.
+          </li>
         </ul>
       </div>
 

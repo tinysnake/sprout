@@ -71,76 +71,6 @@ export function initPrototype(mountEl: HTMLElement): void {
           ${renderIcon('palette', 14)} Style Baseline
         </button>
 
-        <!-- State Matrix Quick Preset -->
-        <select class="scenario-select" id="top-state-matrix-select" aria-label="State Matrix Preset" title="State Matrix (7 Realistic Operational States)">
-          <option value="mixed" ${state.feedStatePreset === 'mixed' ? 'selected' : ''}>State: 1. Mixed (Default)</option>
-          <option value="empty" ${state.feedStatePreset === 'empty' ? 'selected' : ''}>State: 2. Empty (All Clear)</option>
-          <option value="healthy" ${state.feedStatePreset === 'healthy' ? 'selected' : ''}>State: 3. Healthy Active</option>
-          <option value="stale" ${state.feedStatePreset === 'stale' ? 'selected' : ''}>State: 4. Stale Telemetry</option>
-          <option value="pending" ${state.feedStatePreset === 'pending' ? 'selected' : ''}>State: 5. Pending Approvals</option>
-          <option value="degraded" ${state.feedStatePreset === 'degraded' ? 'selected' : ''}>State: 6. Degraded Host</option>
-          <option value="intervention" ${state.feedStatePreset === 'intervention' ? 'selected' : ''}>State: 7. Intervention</option>
-        </select>
-
-        <!-- Layout Paradigm Selector -->
-        <select class="scenario-select" id="top-layout-select" aria-label="Layout Paradigm" title="Feed Layout Paradigm">
-          <option value="unified" ${state.feedLayoutVariant === 'unified' ? 'selected' : ''}>Layout: A. Unified Stream</option>
-          <option value="split-board" ${state.feedLayoutVariant === 'split-board' ? 'selected' : ''}>Layout: B. Split Board</option>
-          <option value="project-grouped" ${state.feedLayoutVariant === 'project-grouped' ? 'selected' : ''}>Layout: C. Project Grouped</option>
-        </select>
-
-        <!-- Scenario Jumpers Dropdown -->
-        <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
-          <option value="" disabled selected>Jump to Scenario...</option>
-          <optgroup label="Ticket #65: Environments & Recovery (ADR-0005, ADR-0008, ADR-0009)">
-            <option value="env-healthy-macos">Envs: macOS Studio Host (Green: Ready · Lease Held)</option>
-            <option value="env-recovery-win">Envs: Windows Dev Host in Lease Recovery (Red: Action Required)</option>
-            <option value="env-pending-macair">Envs: MacBook Air Pending Enrollment Approval (Yellow: Attention)</option>
-            <option value="env-degraded-login">Envs: Linux Container Degraded Engine Login (Yellow: Attention)</option>
-            <option value="env-protocol-mismatch">Envs: Legacy Worker Protocol Mismatch (Red: Action Required)</option>
-            <option value="env-force-release-flow">Envs: Emergency Force Release Flow (Typed Confirmation)</option>
-            <option value="env-reconnect-reconcile">Envs: Reconnect & Evidence Reconciliation Flow</option>
-            <option value="env-archived">Envs: Archived Environment Instance (Read-Only State)</option>
-          </optgroup>
-          <optgroup label="Ticket #64: Chat Scopes & Wake Routing (ADR-0007, ADR-0008)">
-            <option value="chat-project-broadcast">Chat: Project Broadcast Channel (#general)</option>
-            <option value="chat-working-group">Chat: Working Group Channel (Core Mechanics WG)</option>
-            <option value="chat-direct-message">Chat: Project-Scoped Direct Message (@Programmer)</option>
-            <option value="chat-batch-open">Chat: Active 30s Collection Window (Open Batch)</option>
-            <option value="chat-batch-inspect-selected">Chat: Causal Routing (Selected Agent & Projected Reply)</option>
-            <option value="chat-batch-inspect-suppressed">Chat: Causal Routing (Deliberate Suppression / No-Wake)</option>
-            <option value="chat-batch-inspect-failed">Chat: Causal Routing (Fail-Closed after 2 Retries)</option>
-            <option value="chat-empty-scope">Chat: Empty Scope State (Zero Messages)</option>
-            <option value="chat-disbanded-wg">Chat: Disbanded Working Group (Read-Only State)</option>
-            <option value="chat-ended-membership">Chat: Ended Agent Membership DM (Read-Only State)</option>
-          </optgroup>
-          <optgroup label="Ticket #63: Multi-View Project & Task Loop">
-            <option value="proj-overview">Project: Overview, Contract & Memberships</option>
-            <option value="proj-active-task">Project: Active Running Task (2-Stage Pause & Interrupt)</option>
-            <option value="proj-validation-claim">Project: Task Validation Claim Review</option>
-            <option value="proj-blocker">Project: Routable Blocker & Content Versioning</option>
-            <option value="proj-proposal">Project: Task Proposal (Approve & Begin)</option>
-            <option value="proj-recovery">Project: Interrupted Run & Lease Recovery</option>
-            <option value="proj-archived">Project: Archived Read-Only Project</option>
-            <option value="proj-chat">Project: Discussion & Working Groups Chat</option>
-          </optgroup>
-          <optgroup label="Ticket #62: Feed & Attention States">
-            <option value="feed-matrix-mixed">Feed: 1. Mixed Realistic Operations (Default)</option>
-            <option value="feed-matrix-empty">Feed: 2. Empty State (All Systems Clear)</option>
-            <option value="feed-matrix-healthy">Feed: 3. Healthy State (Active Work Progressing)</option>
-            <option value="feed-matrix-stale">Feed: 4. Stale Telemetry Warning</option>
-            <option value="feed-matrix-pending">Feed: 5. Pending Approvals & Enrollments</option>
-            <option value="feed-matrix-degraded">Feed: 6. Degraded Host & Login Required</option>
-            <option value="feed-matrix-intervention">Feed: 7. Urgent Blockers & Claim Validation</option>
-          </optgroup>
-          <optgroup label="Cross-Module Scenarios (ADR-0006 - ADR-0010)">
-            <option value="emergency-force-release">Emergency Override (Force Release)</option>
-            <option value="wake-routing-batch">Wake-Model Assisted Routing Batch</option>
-            <option value="usage-telemetry">Usage & Cost Observability (6 Views)</option>
-            <option value="primitives-showcase">Shared Primitives & State Language</option>
-          </optgroup>
-        </select>
-
         <button class="review-btn" id="open-review-btn">
           ${renderIcon('clipboard', 14)} Owner Review
         </button>
@@ -165,33 +95,6 @@ export function initPrototype(mountEl: HTMLElement): void {
 
     controlBar.querySelector('#top-primitives-btn')?.addEventListener('click', () => {
       stateManager.setPrimaryNav('primitives');
-    });
-
-    const stateMatrixSelect = controlBar.querySelector('#top-state-matrix-select') as HTMLSelectElement;
-    stateMatrixSelect?.addEventListener('change', (ev) => {
-      const val = (ev.target as HTMLSelectElement).value as any;
-      if (val) {
-        stateManager.setPrimaryNav('feed');
-        stateManager.setFeedStatePreset(val);
-      }
-    });
-
-    const layoutSelect = controlBar.querySelector('#top-layout-select') as HTMLSelectElement;
-    layoutSelect?.addEventListener('change', (ev) => {
-      const val = (ev.target as HTMLSelectElement).value as any;
-      if (val) {
-        stateManager.setPrimaryNav('feed');
-        stateManager.setFeedLayoutVariant(val);
-      }
-    });
-
-    const scenarioSelect = controlBar.querySelector('#scenario-jumper') as HTMLSelectElement;
-    scenarioSelect?.addEventListener('change', (ev) => {
-      const val = (ev.target as HTMLSelectElement).value;
-      if (val) {
-        stateManager.loadScenarioPreset(val);
-        scenarioSelect.value = '';
-      }
     });
 
     controlBar.querySelector('#open-review-btn')?.addEventListener('click', () => {

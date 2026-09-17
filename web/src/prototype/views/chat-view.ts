@@ -226,6 +226,7 @@ export function renderProjectChat(
         <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
+            ${activeDirectPeer?.status === 'ended' ? `<span class="status-pill neutral" style="font-size: 10px;">Ended</span>` : ''}
           </div>
           
           <div style="display: flex; align-items: center; gap: 6px;">

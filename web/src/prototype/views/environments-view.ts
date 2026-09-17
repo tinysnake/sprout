@@ -28,7 +28,7 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
 
   // --- 1. Header Area with Filter Bar and Actions ---
   const headerCard = document.createElement('div');
-  headerCard.className = 'card envs-header-card';
+  headerCard.className = 'envs-header-card';
   headerCard.innerHTML = `
     <div class="envs-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
       <div style="flex: 1; min-width: 0;">

@@ -203,10 +203,11 @@ The prototype provides 100% interactive parity across 390px mobile screens and w
 
 ## 8. Verification & Review Drawer Recording
 
-- **DOM Test Suite**: `web/src/prototype/environments.dom.test.ts` (10 extensive tests covering health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries).
+- **DOM Test Suite**: `web/src/prototype/environments.dom.test.ts` (extensive tests covering health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries).
+- **Owner Review Decision on Top Controls**: Per explicit owner review, space-occupying candidate select dropdowns (`top-state-matrix-select`, `top-layout-select`, `scenario-jumper`) are cleanly removed from the top prototype harness bar. Crucially, removing these UI controls does not remove underlying state matrices, scenario data models, or backend requirements, which are strictly preserved for downstream production specification and implementation.
 - **Owner Review Drawer**: Integrated into `web/src/prototype/views/review-drawer.ts` with complete checklist, accepted decisions, rejected alternatives, and unresolved notes.
 - **Verification Command**:
   ```bash
   npm test && npm run typecheck
   ```
-  Result: 188 unit & integration tests passing with 0 errors.
+  Result: 188+ unit & integration tests passing with 0 errors.
