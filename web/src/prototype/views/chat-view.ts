@@ -38,7 +38,10 @@ export function renderProjectChat(
     activeDirectPeer = project.memberships.find((m) => m.memberId === state.selectedDirectMessagePeerId);
     const agentDef = state.agents.find((a) => a.id === state.selectedDirectMessagePeerId);
     currentScopeTitle = `@${activeDirectPeer?.displayName || agentDef?.displayName || state.selectedDirectMessagePeerId}`;
-    if (activeDirectPeer?.status === 'ended') {
+    if (agentDef?.status === 'archived') {
+      isReadOnly = true;
+      readOnlyReason = `Agent @${agentDef.displayName} is archived. History is preserved for review; restore the Agent before sending new messages.`;
+    } else if (activeDirectPeer?.status === 'ended') {
       isReadOnly = true;
       readOnlyReason = `Agent membership for @${activeDirectPeer.displayName} has ended in this project. History is preserved; new messages cannot be sent.`;
     }
@@ -90,6 +93,13 @@ export function renderProjectChat(
 
   const workingGroups = project.workingGroups || [];
   const agentMembers = project.memberships.filter((m) => m.memberKind === 'agent');
+  const archivedWorkingGroupAgent = activeWorkingGroup?.memberIds
+    .map((memberId) => state.agents.find((agent) => agent.id === memberId))
+    .find((agent) => agent?.status === 'archived');
+  if (archivedWorkingGroupAgent) {
+    isReadOnly = true;
+    readOnlyReason = `Agent @${archivedWorkingGroupAgent.displayName} is archived. This Working Group history is review-only; create a new group for active Agents.`;
+  }
 
   chatViewEl.innerHTML = `
     <!-- Left Pane: Categorized Chat Cards List -->
@@ -130,7 +140,7 @@ export function renderProjectChat(
       <div class="chat-section">
         <div class="chat-section-header">
           <span>Working Groups (${workingGroups.length})</span>
-          <button class="btn btn-ghost btn-sm" id="btn-create-wg" title="Create New Working Group" style="font-size: 11px; padding: 2px 6px; height: auto;">
+          <button class="btn btn-ghost btn-sm" id="btn-create-wg" title="${project.status === 'archived' ? 'Archived Project: Working Group history is read-only' : 'Create New Working Group'}" style="font-size: 11px; padding: 2px 6px; height: auto;" ${project.status === 'archived' ? 'disabled' : ''}>
             ${renderIcon('plus', 11)} New WG
           </button>
         </div>
@@ -189,7 +199,9 @@ export function renderProjectChat(
                 state.selectedDirectMessagePeerId === m.memberId;
               const lastMsg = getLastMessage('direct-message', m.memberId);
               const unreadCount = unreadMap[m.memberId] || 0;
-              const isEnded = m.status === 'ended';
+              const agent = state.agents.find((candidate) => candidate.id === m.memberId);
+              const isArchived = agent?.status === 'archived';
+              const isEnded = m.status === 'ended' || isArchived;
               return `
                 <div class="chat-scope-card ${isActive ? 'active' : ''} ${isEnded ? 'card-ended' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
                   <div class="chat-card-avatar-wrap">
@@ -200,6 +212,7 @@ export function renderProjectChat(
                   <div class="chat-card-main">
                     <div class="chat-card-header-row">
                       <span class="chat-card-title">@${m.displayName}</span>
+                      ${isArchived ? `<span class="status-pill neutral" style="font-size: 9px;">Archived</span>` : ''}
                       <div class="chat-card-meta-right">
                         ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
                         ${!isEnded && unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
@@ -226,7 +239,7 @@ export function renderProjectChat(
         <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
-            ${activeDirectPeer?.status === 'ended' ? `<span class="status-pill neutral" style="font-size: 10px;">Ended</span>` : ''}
+            ${state.agents.find((agent) => agent.id === activeDirectPeer?.memberId)?.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px;">Archived</span>` : activeDirectPeer?.status === 'ended' ? `<span class="status-pill neutral" style="font-size: 10px;">Ended</span>` : ''}
           </div>
           
           <div style="display: flex; align-items: center; gap: 6px;">
@@ -504,8 +517,8 @@ export function renderProjectChat(
       scope = { kind: 'direct-message', recipientId: state.selectedDirectMessagePeerId };
     }
 
-    stateManager.sendMessage(project.id, scope, text);
-    inputEl.value = '';
+    const result = stateManager.sendMessage(project.id, scope, text);
+    if (result.success) inputEl.value = '';
   };
 
   sendBtn?.addEventListener('click', handleSend);
@@ -961,13 +974,18 @@ export function renderRoutingInspectorModal(
  */
 export function renderNewWorkingGroupModal(
   parentEl: HTMLElement,
-  _state: PrototypeState,
+  state: PrototypeState,
   project: ProjectItem
 ) {
   const modal = document.createElement('div');
   modal.className = 'proto-modal-backdrop';
 
-  const activeAgents = project.memberships.filter((m) => m.memberKind === 'agent' && m.status === 'active');
+  const activeAgents = project.memberships.filter(
+    (membership) =>
+      membership.memberKind === 'agent' &&
+      membership.status === 'active' &&
+      state.agents.find((agent) => agent.id === membership.memberId)?.status === 'active'
+  );
 
   modal.innerHTML = `
     <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-wg-title" style="max-width: 500px;">
@@ -996,16 +1014,20 @@ export function renderNewWorkingGroupModal(
         <div style="display: flex; flex-direction: column; gap: 6px;">
           <label style="font-size: 12px; font-weight: 700;">Initial Agent Members:</label>
           <div style="display: flex; flex-direction: column; gap: 4px; max-height: 140px; overflow-y: auto; background: var(--bg-surface); padding: 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            ${activeAgents
-              .map(
-                (a) => `
+            ${
+              activeAgents.length === 0
+                ? `<span style="font-size: 12px; color: var(--text-muted);">No active Agents are available. Archived Agent history remains review-only.</span>`
+                : activeAgents
+                    .map(
+                      (a) => `
               <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer;">
                 <input type="checkbox" class="wg-agent-check" value="${a.memberId}" checked />
                 <span>@${a.displayName} <span style="color: var(--text-muted); font-size: 11px;">(${a.responsibilities?.slice(0, 35)}...)</span></span>
               </label>
             `
-              )
-              .join('')}
+                    )
+                    .join('')
+            }
           </div>
         </div>
 
@@ -1040,8 +1062,8 @@ export function renderNewWorkingGroupModal(
       selectedAgentIds.push((chk as HTMLInputElement).value);
     });
 
-    stateManager.createWorkingGroup(project.id, name, selectedAgentIds, goalInput.value.trim() || undefined);
-    modal.remove();
+    const result = stateManager.createWorkingGroup(project.id, name, selectedAgentIds, goalInput.value.trim() || undefined);
+    if (result.success) modal.remove();
   });
 
   parentEl.appendChild(modal);

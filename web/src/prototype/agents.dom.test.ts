@@ -901,3 +901,79 @@ test('Task and Project admission: archived Agents cannot receive new membership 
     await cleanup();
   }
 });
+
+test('Archived Agents: chat and Working Group admission reject new collaboration while history remains readable (F-66-09)', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const projectId = 'proj-minesweeper';
+    const reviewerHistory = stateManager
+      .getSnapshot()
+      .messages.filter((message) => message.projectId === projectId && message.authorId === 'reviewer')
+      .map((message) => message.id);
+    assert.ok(reviewerHistory.length > 0, 'Fixture provides archived-Agent message attribution to preserve');
+
+    // The active path remains admitted before archive.
+    const activeMessageCount = stateManager.getSnapshot().messages.length;
+    const activeResult = stateManager.sendMessage(projectId, { kind: 'direct-message', recipientId: 'planner' }, 'Active path check');
+    assert.equal(activeResult.success, true, 'Active Agent still receives direct messages');
+    assert.equal(stateManager.getSnapshot().messages.length, activeMessageCount + 1);
+
+    assert.equal(stateManager.archiveAgent('reviewer').success, true, 'Idle active member can be archived');
+    const messagesBeforeRejectedSend = stateManager.getSnapshot().messages.length;
+    const directResult = stateManager.sendMessage(
+      projectId,
+      { kind: 'direct-message', recipientId: 'reviewer' },
+      'This must not be persisted or wake a reply'
+    );
+    assert.equal(directResult.success, false);
+    assert.match(directResult.reason ?? '', /archived.*restore/i);
+    assert.equal(stateManager.getSnapshot().messages.length, messagesBeforeRejectedSend, 'Rejected DM creates no message or projected reply');
+
+    const project = stateManager.getSnapshot().projects.find((candidate) => candidate.id === projectId)!;
+    const workingGroupCount = project.workingGroups.length;
+    const workingGroupResult = stateManager.createWorkingGroup(projectId, 'Archived reviewer exclusion', ['reviewer']);
+    assert.equal(workingGroupResult.success, false);
+    assert.match(workingGroupResult.reason ?? '', /Working Group.*archived/i);
+    assert.equal(project.workingGroups.length, workingGroupCount, 'Rejected Working Group admission creates no membership or group');
+
+    stateManager.setPrimaryNav('project', 'chat');
+    const document = dom.window.document;
+    const createWorkingGroupButton = document.querySelector('#btn-create-wg') as HTMLButtonElement;
+    assert.ok(createWorkingGroupButton, 'Working Group creation entry remains available for active collaborators');
+    createWorkingGroupButton.click();
+    const workingGroupModal = document.querySelector('.proto-modal-dialog');
+    assert.ok(workingGroupModal);
+    assert.equal(
+      workingGroupModal.querySelector('.wg-agent-check[value="reviewer"]'),
+      null,
+      'Archived Agent is hidden from Working Group invitations'
+    );
+    (workingGroupModal.querySelector('.close-modal-btn') as HTMLButtonElement).click();
+
+    stateManager.openChatDetail('direct-message', 'reviewer');
+    assert.match(document.body.textContent ?? '', /Agent @Reviewer is archived/);
+    assert.match(document.body.textContent ?? '', /All unit test suites passing/, 'Archived Agent history remains readable');
+    assert.equal((document.querySelector('#chat-main-input') as HTMLInputElement).disabled, true, 'Archived direct-message composer is disabled');
+    assert.deepEqual(
+      stateManager
+        .getSnapshot()
+        .messages.filter((message) => message.projectId === projectId && message.authorId === 'reviewer')
+        .map((message) => message.id),
+      reviewerHistory,
+      'Archived Agent message attribution is retained'
+    );
+  } finally {
+    await cleanup();
+  }
+});

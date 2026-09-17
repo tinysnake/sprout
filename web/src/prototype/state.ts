@@ -3600,9 +3600,15 @@ class StateManager {
     projectId: string,
     scope: MessageItem['scope'],
     content: string
-  ) {
+  ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+
+    const admission = this.checkChatAdmission(project, scope);
+    if (!admission.success) {
+      this.notify(admission.reason);
+      return admission;
+    }
 
     const newMsgId = `msg-${Date.now().toString().slice(-4)}`;
     const isDirect = scope.kind === 'direct-message';
@@ -3722,6 +3728,7 @@ class StateManager {
     } else {
       this.notify(`Sent informational message ${newMsgId}.`);
     }
+    return { success: true };
   }
 
   public setProjectWakePolicy(projectId: string, policy: 'explicit-only' | 'wake-model-assisted') {
@@ -3732,9 +3739,34 @@ class StateManager {
     this.notify(`Updated Project wake policy to ${policy}. Affects future messages only.`);
   }
 
-  public createWorkingGroup(projectId: string, name: string, memberIds: string[], goal?: string) {
+  public createWorkingGroup(
+    projectId: string,
+    name: string,
+    memberIds: string[],
+    goal?: string
+  ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status === 'archived') {
+      const reason = `Cannot create a Working Group in archived Project "${project.displayName}". Communication history is read-only.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    for (const memberId of new Set(memberIds)) {
+      const member = project.memberships.find((candidate) => candidate.memberId === memberId);
+      const agent = this.state.agents.find((candidate) => candidate.id === memberId);
+      if (!member || member.memberKind !== 'agent' || member.status !== 'active') {
+        const reason = `Cannot add Agent "${agent?.displayName || memberId}" to a Working Group: an active Project membership is required.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      if (!agent || agent.status === 'archived') {
+        const reason = `Cannot add Agent "${agent?.displayName || member.displayName}" to a Working Group: Agent is archived. Restore the Agent first; historical collaboration remains review-only (ADR-0008).`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+    }
 
     const wgId = `wg-${Date.now().toString().slice(-4)}`;
     const newWg = {
@@ -3749,6 +3781,7 @@ class StateManager {
     };
     project.workingGroups.push(newWg);
     this.notify(`Created Working group "${name}" atomically with creator as initial member.`);
+    return { success: true };
   }
 
   public disbandWorkingGroup(projectId: string, wgId: string) {
@@ -3761,14 +3794,73 @@ class StateManager {
     this.notify(`Disbanded Working group "${wg.displayName}". Channel is now read-only; history preserved.`);
   }
 
-  public restoreWorkingGroup(projectId: string, wgId: string) {
+  public restoreWorkingGroup(projectId: string, wgId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
     const wg = project.workingGroups.find((g) => g.id === wgId);
-    if (!wg) return;
+    if (!wg) return { success: false, reason: 'Working Group not found' };
+    const archivedAgent = wg.memberIds
+      .map((memberId) => this.state.agents.find((agent) => agent.id === memberId))
+      .find((agent) => agent?.status === 'archived');
+    if (archivedAgent) {
+      const reason = `Cannot restore Working Group "${wg.displayName}": Agent "${archivedAgent.displayName}" is archived. Restore the Agent first; group history remains review-only (ADR-0008).`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
     wg.status = 'active';
     this.notify(`Restored Working group "${wg.displayName}". Channel is active.`);
+    return { success: true };
+  }
+
+  private checkChatAdmission(
+    project: ProjectItem,
+    scope: MessageItem['scope']
+  ): { success: boolean; reason?: string } {
+    if (project.status === 'archived') {
+      return {
+        success: false,
+        reason: `Cannot send a message in archived Project "${project.displayName}". Communication history is read-only.`,
+      };
+    }
+
+    if (scope.kind === 'direct-message') {
+      const member = project.memberships.find((candidate) => candidate.memberId === scope.recipientId);
+      const agent = this.state.agents.find((candidate) => candidate.id === scope.recipientId);
+      if (!agent || agent.status === 'archived') {
+        return {
+          success: false,
+          reason: `Cannot message Agent "${agent?.displayName || scope.recipientId}": Agent is archived. Restore the Agent first; message history remains review-only (ADR-0008).`,
+        };
+      }
+      if (!member || member.memberKind !== 'agent' || member.status !== 'active') {
+        return {
+          success: false,
+          reason: `Cannot message Agent "${agent.displayName}": an active Project membership is required. History remains readable.`,
+        };
+      }
+    }
+
+    if (scope.kind === 'working-group-channel') {
+      const wg = project.workingGroups.find((group) => group.id === scope.workingGroupId);
+      if (!wg || wg.status !== 'active') {
+        return {
+          success: false,
+          reason: 'Cannot send a message: this Working Group is unavailable for new collaboration. History remains readable.',
+        };
+      }
+      const archivedAgent = wg.memberIds
+        .map((memberId) => this.state.agents.find((agent) => agent.id === memberId))
+        .find((agent) => agent?.status === 'archived');
+      if (archivedAgent) {
+        return {
+          success: false,
+          reason: `Cannot send to Working Group "${wg.displayName}": Agent "${archivedAgent.displayName}" is archived. Its collaboration history is review-only; create a new group for active Agents.`,
+        };
+      }
+    }
+
+    return { success: true };
   }
 
   // --- Project Domain Actions (ADR-0006, ADR-0008) ---
