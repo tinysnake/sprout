@@ -273,37 +273,26 @@ export function renderProjectChat(
                       <div class="chat-msg ${isMe ? 'msg-me' : 'msg-them'} ${isProjected ? 'msg-projected' : ''}" data-msg-id="${msg.id}">
                         
                         <!-- Author & Timestamp Row -->
-                        <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; position: relative;">
                           <div style="display: flex; align-items: center; gap: 6px;">
                             <span class="msg-author-name" style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName || msg.authorId}</span>
+                          </div>
+                          <div class="msg-meta-actions" style="display: flex; align-items: center; gap: 6px; position: relative;">
                             ${
-                              isProjected
-                                ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;" title="Non-routing projected reply (ADR-0007 loop prevention)">
-                                    ${renderIcon('check', 10)} Projected Reply · Non-Routing
-                                  </span>`
+                              isProjected && msg.projectedReplyMeta
+                                ? `<button class="btn btn-ghost btn-sm msg-projected-info-btn" data-msg-id="${msg.id}" title="Projected Reply Information" aria-label="Projected Reply Information" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); border-radius: 50%; cursor: pointer;">
+                                    ${renderIcon('info', 13)}
+                                  </button>`
                                 : ''
                             }
+                            <span class="msg-time" style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
                           </div>
-                          <span class="msg-time" style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
                         </div>
 
                         <!-- Message Content -->
                         <div class="msg-text" style="font-size: 13px; line-height: 1.45; word-break: break-word;">
                           ${renderMessageTextWithMentions(msg.content)}
                         </div>
-
-                        <!-- Projected Reply Provenance & Loop Prevention Card -->
-                        ${
-                          isProjected && msg.projectedReplyMeta
-                            ? `<div class="projected-reply-meta-card" style="margin-top: 6px; padding: 6px 8px; background: rgba(88, 101, 242, 0.07); border-radius: var(--radius-xs); border: 1px solid rgba(88, 101, 242, 0.2); font-size: 11px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 2px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                  <span><strong>Run:</strong> <code>${msg.projectedReplyMeta.runId}</code> · <strong>Wake:</strong> <code>${msg.projectedReplyMeta.wakeRequestId}</code></span>
-                                  <span style="font-size: 9px; color: var(--text-muted); font-style: italic;">Non-routing boundary</span>
-                                </div>
-                                <div>Triggered by Message: <code>${msg.projectedReplyMeta.triggeringMessageIds.join(', ')}</code></div>
-                              </div>`
-                            : ''
-                        }
 
                         <!-- Causal Routing Tag / Evidence Badge -->
                         ${
@@ -413,6 +402,57 @@ export function renderProjectChat(
       const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-002';
       renderRoutingInspectorModal(rootContainer, state, batchId);
     });
+  });
+
+  // Projected Reply Info popup opener
+  chatViewEl.querySelectorAll('.msg-projected-info-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const msgId = (ev.currentTarget as HTMLElement).getAttribute('data-msg-id');
+      const msg = filteredMessages.find((m) => m.id === msgId);
+      if (!msg || !msg.projectedReplyMeta) return;
+
+      const parentMeta = (ev.currentTarget as HTMLElement).closest('.msg-meta-actions');
+      if (!parentMeta) return;
+
+      // Close any existing popups first
+      chatViewEl.querySelectorAll('.projected-reply-popup').forEach((p) => p.remove());
+
+      const popup = document.createElement('div');
+      popup.className = 'projected-reply-popup card';
+      popup.style.cssText =
+        'position: absolute; right: 0; top: 22px; z-index: 60; width: 280px; max-width: 85vw; padding: 10px 12px; background: var(--bg-surface-elevated); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); font-size: 11px; display: flex; flex-direction: column; gap: 6px;';
+
+      popup.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px;">
+          <span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;" title="Non-routing projected reply (ADR-0007 loop prevention)">
+            ${renderIcon('check', 10)} Projected Reply · Non-Routing
+          </span>
+          <button class="btn btn-ghost btn-sm close-projected-popup-btn" aria-label="Close details" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer;">
+            ${renderIcon('close', 10)}
+          </button>
+        </div>
+        <div class="projected-reply-meta-content" style="display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); line-height: 1.45;">
+          <div><strong>Run:</strong> <code>${msg.projectedReplyMeta.runId}</code> · <strong>Wake:</strong> <code>${msg.projectedReplyMeta.wakeRequestId}</code></div>
+          <div><strong>Triggered by:</strong> <code>${msg.projectedReplyMeta.triggeringMessageIds.join(', ')}</code></div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+            Non-routing boundary: Assistant output projected upon completion cannot trigger downstream wake evaluations.
+          </div>
+        </div>
+      `;
+
+      popup.querySelector('.close-projected-popup-btn')?.addEventListener('click', (closeEv) => {
+        closeEv.stopPropagation();
+        popup.remove();
+      });
+
+      parentMeta.appendChild(popup);
+    });
+  });
+
+  // Click outside listener to dismiss popup
+  document.addEventListener('click', () => {
+    chatViewEl.querySelectorAll('.projected-reply-popup').forEach((p) => p.remove());
   });
 
   const inputEl = chatViewEl.querySelector('#chat-main-input') as HTMLInputElement;

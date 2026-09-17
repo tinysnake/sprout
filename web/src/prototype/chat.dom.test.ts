@@ -288,17 +288,34 @@ test('Durable Projected Replies: loop-prevention badge, provenance metadata, and
     stateManager.openChatDetail('project-channel');
     const document = dom.window.document;
 
-    // Verify Projected Reply elements
-    const projectedBadge = document.querySelector('.badge-purple');
-    assert.ok(projectedBadge, 'Projected reply badge rendered');
-    assert.match(projectedBadge.textContent ?? '', /Projected Reply · Non-Routing/);
+    // 1. Verify Projected Reply badge and meta card are NOT permanently displayed in message
+    assert.equal(document.querySelector('.projected-reply-meta-card'), null, 'Meta card not displayed in chat body');
+    assert.equal(document.querySelector('.msg-author-row .badge-purple'), null, 'Badge not displayed permanently in author row');
 
-    // Verify Provenance Meta Card
-    const metaCard = document.querySelector('.projected-reply-meta-card');
-    assert.ok(metaCard, 'Projected reply provenance meta rendered');
-    assert.match(metaCard.textContent ?? '', /run-202|run-201/);
-    assert.match(metaCard.textContent ?? '', /wake-02|wake-01/);
-    assert.match(metaCard.textContent ?? '', /Non-routing boundary/);
+    // 2. Verify trigger 'i' button exists to the left of msg-time
+    const infoTrigger = document.querySelector('.msg-projected-info-btn') as HTMLButtonElement;
+    assert.ok(infoTrigger, 'Projected reply info trigger button exists next to timestamp');
+
+    // 3. Click trigger 'i' button to open popup
+    infoTrigger.click();
+
+    const popup = document.querySelector('.projected-reply-popup');
+    assert.ok(popup, 'Projected reply popup opened');
+
+    // Verify badge and meta inside popup
+    const popupBadge = popup.querySelector('.badge-purple');
+    assert.ok(popupBadge, 'Projected reply badge rendered in popup');
+    assert.match(popupBadge.textContent ?? '', /Projected Reply · Non-Routing/);
+
+    assert.match(popup.textContent ?? '', /run-202|run-201/);
+    assert.match(popup.textContent ?? '', /wake-02|wake-01/);
+    assert.match(popup.textContent ?? '', /Non-routing boundary/i);
+
+    // 4. Close popup
+    const closeBtn = popup.querySelector('.close-projected-popup-btn') as HTMLButtonElement;
+    assert.ok(closeBtn);
+    closeBtn.click();
+    assert.equal(document.querySelector('.projected-reply-popup'), null, 'Popup closed on dismiss');
   } finally {
     await cleanup();
   }

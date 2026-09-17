@@ -141,9 +141,13 @@ When evaluating a routing batch:
 
 When an Agent completes a run triggered by a message or wake request:
 - Sprout projects **only the completed run's final assistant text** as a durable message in the channel.
-- **Non-Routing Tag**: The projected reply is stamped with `disposition: non-routing` and displays the `Projected Reply · Non-Routing` badge.
+- **Non-Routing Tag & Provenance Popup**: Rather than permanently displaying intrusive badges and provenance cards in the chat timeline, each projected reply features an unobtrusive `i` info trigger button directly to the left of the message timestamp (`msg-time`).
+- **On-Demand Inspection Popup**: Clicking the `i` button opens a compact popup displaying:
+  1. The `Projected Reply · Non-Routing` badge.
+  2. Agent Run ID (`#run-202`) and WakeRequest ID (`#wake-02`).
+  3. Triggering input message ID(s).
+  4. Non-routing boundary explanation.
 - **Loop Prevention Boundary**: Automatic projected replies **cannot open collection windows or trigger wake evaluations**, even if their generated text contains `@all` or agent mentions.
-- **Provenance Links**: Each projected reply retains explicit links to its triggering input message, Agent Run ID (`#run-202`), and WakeRequest ID (`#wake-02`).
 
 ---
 
@@ -203,6 +207,7 @@ In accordance with ADR-0007:
 6. **Hard Deletion of Groups or DMs**: Rejected; damages historical traceability.
 7. **Permanent Quick-Mention Chips & In-Composer Addressing Feedback Pills**: Rejected per owner review in favor of a clean, uncluttered composer; deterministic addressing and collection windows remain governed by ADR-0007 invariants.
 8. **Intrusive In-Chat Collection Window Countdown Banners**: Rejected per owner review in favor of a clean conversation flow; routing batches remain inspectable via message tags and conversation details without interrupting chat view.
+9. **Permanent In-Message Display of Projected Reply Badges & Provenance Cards**: Rejected per owner review in favor of an on-demand popup triggered by an `i` button to the left of the message timestamp, avoiding visual clutter in conversation flow.
 
 ### Unresolved Questions
 1. **Working Group Creation Authority**: In M2, any Project member can create a Working Group; creator is automatically enrolled.
