@@ -36,36 +36,38 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
           ${renderIcon('environments', 18)}
           <span>Environments & Host Infrastructure</span>
         </h2>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-          Multi-dimension health facts, task-held lease safety, reconciliation, and recovery (ADR-0005, ADR-0008, ADR-0009).
-        </p>
       </div>
-      <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
-        <button class="btn btn-primary btn-sm register-host-btn" id="btn-register-host">
-          ${renderIcon('plus', 13)} Register New Host
+      <div style="display: flex; gap: 6px; align-items: center;">
+        <button class="btn btn-primary btn-sm register-host-btn icon-only-btn" id="btn-register-host" title="Register New Host" aria-label="Register New Host">
+          ${renderIcon('plus', 14)}
         </button>
-        <button class="btn btn-secondary btn-sm host-guide-btn" id="btn-host-guide">
-          ${renderIcon('terminal', 13)} Host Bootstrap Guide
+        <button class="btn btn-secondary btn-sm host-guide-btn icon-only-btn" id="btn-host-guide" title="Host Bootstrap Guide" aria-label="Host Bootstrap Guide">
+          ${renderIcon('guide', 14)}
         </button>
       </div>
     </div>
 
-    <!-- Filter Pills / Segmented Controls -->
-    <div class="envs-filter-row" style="display: flex; gap: 6px; overflow-x: auto; padding-top: 4px; border-top: 1px solid var(--border-subtle);">
-      <button class="btn btn-sm filter-pill ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}" data-filter="all">
-        All (${allEnvs.length})
+    <!-- Filter Row: Modeled after Attention Urgency Pills (Discrete Boxes, Icon Top, Text Bottom, Auto-Fitting Single Row) -->
+    <div class="envs-filter-row env-filter-boxes" role="group" aria-label="Filter environments by health status">
+      <button class="env-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" title="All (${allEnvs.length})">
+        <span class="env-filter-box-top"><span class="status-dot purple"></span> ${allEnvs.length}</span>
+        <span class="env-filter-box-bottom">All<span class="sr-only"> (${allEnvs.length})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'ready' ? 'btn-primary' : 'btn-secondary'}" data-filter="ready">
-        <span class="status-dot green"></span> Ready (${readyCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'ready' ? 'active' : ''}" data-filter="ready" title="Ready (${readyCount})">
+        <span class="env-filter-box-top"><span class="status-dot green"></span> ${readyCount}</span>
+        <span class="env-filter-box-bottom">Ready<span class="sr-only"> (${readyCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'attention' ? 'btn-primary' : 'btn-secondary'}" data-filter="attention">
-        <span class="status-dot yellow"></span> Attention (${attentionCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'attention' ? 'active' : ''}" data-filter="attention" title="Attention (${attentionCount})">
+        <span class="env-filter-box-top"><span class="status-dot yellow"></span> ${attentionCount}</span>
+        <span class="env-filter-box-bottom">Attention<span class="sr-only"> (${attentionCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'action-required' ? 'btn-primary' : 'btn-secondary'}" data-filter="action-required">
-        <span class="status-dot red"></span> Action Required (${actionRequiredCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'action-required' ? 'active' : ''}" data-filter="action-required" title="Action Required (${actionRequiredCount})">
+        <span class="env-filter-box-top"><span class="status-dot red"></span> ${actionRequiredCount}</span>
+        <span class="env-filter-box-bottom">Action Required<span class="sr-only"> (${actionRequiredCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'archived' ? 'btn-primary' : 'btn-secondary'}" data-filter="archived">
-        <span class="status-dot neutral"></span> Archived (${archivedCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" title="Archived (${archivedCount})">
+        <span class="env-filter-box-top"><span class="status-dot neutral"></span> ${archivedCount}</span>
+        <span class="env-filter-box-bottom">Archived<span class="sr-only"> (${archivedCount})</span></span>
       </button>
     </div>
   `;
@@ -87,13 +89,13 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
 
   container.appendChild(headerCard);
 
-  // --- 2. Master / Detail Layout Construction (Phone / Desktop Parity) ---
-  const isMobile = state.viewportMode === 'mobile';
-  const showMobileDetail = isMobile && state.environmentViewMode === 'detail' && selectedEnv;
+  // --- 2. Master / Detail Layout Construction (Phone & Fluid Parity / Desktop Split) ---
+  const isSingleColumn = state.viewportMode === 'mobile' || state.viewportMode === 'fluid';
+  const showSingleColumnDetail = isSingleColumn && state.environmentViewMode === 'detail' && selectedEnv;
 
-  if (isMobile) {
-    if (showMobileDetail) {
-      // Mobile Detail View with Sticky Back Header
+  if (isSingleColumn) {
+    if (showSingleColumnDetail) {
+      // Single Column Detail View with Sticky Back Header
       const mobileDetailWrapper = document.createElement('div');
       mobileDetailWrapper.className = 'envs-mobile-detail-wrapper';
 
@@ -117,7 +119,7 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
       mobileDetailWrapper.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
       container.appendChild(mobileDetailWrapper);
     } else {
-      // Mobile Master List View
+      // Single Column Master List View
       const listContainer = document.createElement('div');
       listContainer.className = 'envs-master-list mobile-full';
       listContainer.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
@@ -201,9 +203,7 @@ function renderEnvironmentMasterList(
             <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${env.hostUser} · ${env.workerIdentityKey.slice(0, 16)}</span>
           </div>
         </div>
-        <span class="status-pill ${env.trafficLight === 'green' ? 'green' : env.trafficLight === 'yellow' ? 'yellow' : 'red'}" style="font-size: 10px; font-weight: 700;">
-          <span class="status-dot ${env.trafficLight}"></span> ${trafficLightLabel}
-        </span>
+        <span class="status-dot ${env.trafficLight}" title="${trafficLightLabel}" aria-label="${trafficLightLabel}"></span>
       </div>
 
       <div class="env-reason-snippet" style="font-size: 12px; color: var(--text-secondary); line-height: 1.35; margin: 6px 0 8px 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">

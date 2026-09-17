@@ -119,6 +119,11 @@ export function renderIcon(name: string, size = 18, className = 'proto-icon'): s
     case 'terminal':
       return `<svg ${common}><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg>`;
 
+    case 'book':
+    case 'manual':
+    case 'guide':
+      return `<svg ${common}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" /></svg>`;
+
     case 'layers':
       return `<svg ${common}><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" /></svg>`;
 
