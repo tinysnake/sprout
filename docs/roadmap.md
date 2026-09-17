@@ -164,6 +164,14 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 
 [Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44) is the active development map. It resolves product and operational decisions across the M2 outcomes before `/to-spec` collapses them into a buildable specification. No production implementation map should guess the decisions still open there.
 
+## Prototype-to-implementation boundary
+
+The focused prototype Tickets in Map #44 are decision artifacts for the operator experience. Accepting a prototype settles the demonstrated interaction patterns, terminology, boundaries, and owner decisions; it does **not** claim that the corresponding production capabilities or backend contracts are implemented.
+
+Prototype UI simplification is also not backend scope reduction. Hiding, moving into an on-demand inspector, or removing a field or control from a page must not be interpreted as permission to delete the corresponding domain data, lifecycle state, routing metadata, batching and failure evidence, audit/provenance links, API contract, or storage requirement. A backend capability is removed or deferred only by an explicit product decision recorded separately from the visual prototype.
+
+Backend implementation begins after Map #44 satisfies its exit criteria and the owner confirms the settled direction. Wayfinder then hands the decisions through `/to-spec` and `/to-tickets`, which create buildable implementation Tickets with explicit backend acceptance and links to the relevant prototype evidence. Until that hand-off, prototype work must not be treated as production implementation; after it, implementation Tickets must preserve every backend obligation that the prototype only hides or presents on demand.
+
 ## Completed medium-term goal
 
 ### M1 — Local coordination foundation
