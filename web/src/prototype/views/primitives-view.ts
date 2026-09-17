@@ -201,9 +201,9 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
             <div class="form-group">
               <label class="form-label" for="demo-search-1">Filter Activities</label>
               <div class="search-input-wrapper">
-                <span class="search-icon">🔍</span>
+                <span class="search-icon">${renderIcon('search', 14)}</span>
                 <input type="text" class="form-input form-input-search" id="demo-search-1" placeholder="Search tasks, agents, errors..." />
-                <button class="search-clear-btn" id="demo-search-clear" aria-label="Clear search">✕</button>
+                <button class="search-clear-btn" id="demo-search-clear" aria-label="Clear search">${renderIcon('close', 12)}</button>
               </div>
             </div>
           </div>

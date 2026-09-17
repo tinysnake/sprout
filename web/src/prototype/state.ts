@@ -1,9 +1,14 @@
 import type {
   ActiveDialog,
+  ActivityFeedItem,
   AgentDefinition,
+  AttentionCategory,
   AttentionItem,
+  AttentionSeverity,
   DensityMode,
   EnvironmentInstance,
+  FeedLayoutVariant,
+  FeedStatePreset,
   ManageTab,
   MessageItem,
   NestedAgentRun,
@@ -30,6 +35,13 @@ export interface PrototypeState {
   projectTab: ProjectTab;
   manageTab: ManageTab;
   activeTab: ActiveTab;
+  feedLayoutVariant: FeedLayoutVariant;
+  feedStatePreset: FeedStatePreset;
+  feedScopeFilter: string;
+  feedAttentionSeverityFilter: 'all' | AttentionSeverity;
+  feedAttentionFilter: 'all' | AttentionCategory | AttentionSeverity;
+  feedActivityFilter: 'all' | 'tasks' | 'messages' | 'envs' | 'usage';
+  mobileFeedSplitTab: 'attention' | 'activity';
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -60,6 +72,7 @@ export interface PrototypeState {
   routingBatches: RoutingBatch[];
   usageActivities: UsageActivity[];
   attentionItems: AttentionItem[];
+  activityFeedItems: ActivityFeedItem[];
   scenarioLog: string[];
 }
 
@@ -75,9 +88,7 @@ const initialOperator: OperatorIdentity = {
 
 const initialAgents: AgentDefinition[] = [
   {
-    id: 'planner',
-    displayName: 'Planner',
-    avatar: '🧭',
+    id: "planner", displayName: "Planner", avatar: "PL",
     description: 'High-level architecture, task breakdown, and coordination lead.',
     standingInstructions: 'Always verify acceptance criteria before coordinating next steps.',
     status: 'active',
@@ -88,9 +99,7 @@ const initialAgents: AgentDefinition[] = [
     ],
   },
   {
-    id: 'designer',
-    displayName: 'Designer',
-    avatar: '🎨',
+    id: "designer", displayName: "Designer", avatar: "DS",
     description: 'UI/UX layout, CSS theme variables, and interaction specifications.',
     standingInstructions: 'Prioritize mobile touch targets and clear high-contrast hierarchy.',
     status: 'active',
@@ -101,9 +110,7 @@ const initialAgents: AgentDefinition[] = [
     ],
   },
   {
-    id: 'programmer',
-    displayName: 'Programmer',
-    avatar: '💻',
+    id: "programmer", displayName: "Programmer", avatar: "PG",
     description: 'Core logic, Three.js game loop, and DOM rendering implementation.',
     standingInstructions: 'Write pure functions where possible; ensure build and verification scripts pass.',
     status: 'active',
@@ -115,9 +122,7 @@ const initialAgents: AgentDefinition[] = [
     ],
   },
   {
-    id: 'reviewer',
-    displayName: 'Reviewer',
-    avatar: '🔍',
+    id: "reviewer", displayName: "Reviewer", avatar: "RV",
     description: 'Browser verification, regression tests, and acceptance audits.',
     standingInstructions: 'Run headless browser verification and check console error logs.',
     status: 'active',
@@ -261,7 +266,7 @@ const initialProjects: ProjectItem[] = [
         memberId: 'op-primary',
         memberKind: 'human',
         displayName: 'Operator (Human)',
-        avatar: '👤',
+        avatar: "OP",
         responsibilities: 'Final task approval, validation, recovery, and scope changes.',
         joinedAt: '2 days ago',
         status: 'active',
@@ -270,7 +275,7 @@ const initialProjects: ProjectItem[] = [
         memberId: 'planner',
         memberKind: 'agent',
         displayName: 'Planner',
-        avatar: '🧭',
+        avatar: "PL",
         responsibilities: 'Roadmap planning, task coordination, task proposal formulation.',
         collaborationInstructions: 'Break tasks down into verifiable slices under 5 minutes duration.',
         joinedAt: '2 days ago',
@@ -280,7 +285,7 @@ const initialProjects: ProjectItem[] = [
         memberId: 'designer',
         memberKind: 'agent',
         displayName: 'Designer',
-        avatar: '🎨',
+        avatar: "DS",
         responsibilities: 'Color palette, 3D mesh geometry styles, mobile touch controls.',
         joinedAt: '2 days ago',
         status: 'active',
@@ -289,7 +294,7 @@ const initialProjects: ProjectItem[] = [
         memberId: 'programmer',
         memberKind: 'agent',
         displayName: 'Programmer',
-        avatar: '💻',
+        avatar: "PG",
         responsibilities: 'Board data structures, tile reveal recursion, mine placement algorithm.',
         joinedAt: '2 days ago',
         status: 'active',
@@ -298,7 +303,7 @@ const initialProjects: ProjectItem[] = [
         memberId: 'reviewer',
         memberKind: 'agent',
         displayName: 'Reviewer',
-        avatar: '🔍',
+        avatar: "RV",
         responsibilities: 'Headless browser testing, DOM verification, error detection.',
         joinedAt: '2 days ago',
         status: 'active',
@@ -618,8 +623,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'op-primary',
     authorKind: 'human',
-    authorDisplayName: 'Operator (Human)',
-    authorAvatar: '👤',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
     timestamp: '35m ago',
     content: '@all Let us review the Three.js board mechanics and make sure touch coordinates map accurately.',
     disposition: 'addressed',
@@ -631,8 +635,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: 'Planner',
-    authorAvatar: '🧭',
+    authorDisplayName: "Planner", authorAvatar: "OP",
     timestamp: '34m ago',
     content: 'Task #101 has been initiated with Programmer as lead to connect raycasting pointer events.',
     disposition: 'non-routing',
@@ -651,8 +654,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'op-primary',
     authorKind: 'human',
-    authorDisplayName: 'Operator (Human)',
-    authorAvatar: '👤',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
     timestamp: '25m ago',
     content: 'The shader lighting looks slightly dark on standard sRGB displays.',
     disposition: 'wake-eligible',
@@ -664,8 +666,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'project-channel' },
     authorId: 'designer',
     authorKind: 'agent',
-    authorDisplayName: 'Designer',
-    authorAvatar: '🎨',
+    authorDisplayName: "Designer", authorAvatar: "OP",
     timestamp: '24m ago',
     content: 'I have adjusted the ambient light intensity in CSS/canvas configuration to 1.4 for crisp visibility.',
     disposition: 'non-routing',
@@ -684,8 +685,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'working-group-channel', workingGroupId: 'wg-mechanics' },
     authorId: 'programmer',
     authorKind: 'agent',
-    authorDisplayName: 'Programmer',
-    authorAvatar: '💻',
+    authorDisplayName: "Programmer", authorAvatar: "OP",
     timestamp: '18m ago',
     content: 'Cascade recursion tested on 30x16 expert grid: depth 42 reached in under 1.2ms.',
     disposition: 'informational',
@@ -696,8 +696,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'planner' },
     authorId: 'op-primary',
     authorKind: 'human',
-    authorDisplayName: 'Operator (Human)',
-    authorAvatar: '👤',
+    authorDisplayName: "Operator (Human)", authorAvatar: "OP",
     timestamp: '10m ago',
     content: 'Should we schedule Task #105 (Fireworks particle effect) right after validation?',
     disposition: 'addressed',
@@ -708,8 +707,7 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'op-primary' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: 'Planner',
-    authorAvatar: '🧭',
+    authorDisplayName: "Planner", authorAvatar: "OP",
     timestamp: '9m ago',
     content: 'Yes, proposal Task #105 is ready for your Approve-and-Begin decision once Task #101 completes.',
     disposition: 'non-routing',
@@ -878,43 +876,205 @@ const initialUsageActivities: UsageActivity[] = [
 const initialAttentionItems: AttentionItem[] = [
   {
     id: 'att-1',
-    severity: 'action_required',
+    severity: 'attention',
     category: 'task_validation',
     title: 'Task #101 Awaiting Human Validation',
-    summary: 'Lead Programmer submitted completion claim with browser verification evidence. Human decision required to accept or require correction.',
+    summary: 'Lead Programmer submitted completion claim with browser verification evidence (14/14 tests pass). Human decision required to accept or require correction.',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
     referenceId: 'task-101',
-    actionLabel: 'Review Completion Claim',
+    referenceType: 'task',
+    actionLabel: 'Review Claim in Tasks',
     actionTargetView: 'tasks',
+    targetNav: 'project',
+    targetProjectTab: 'tasks',
+    timestamp: '3m ago',
+    lifecycleSentence: 'Task awaiting validation · Run completed · Lease held',
+    attribution: 'Programmer (Pi claude-3-5-sonnet)',
   },
   {
     id: 'att-2',
     severity: 'action_required',
     category: 'task_recovery',
     title: 'Task #104 in Lease Recovery (Windows Host Offline)',
-    summary: 'Windows worker disconnected during nested Agent run #206. Lease held in recovery; Human action needed (Resume, Discard, or Force Release).',
+    summary: 'Windows worker disconnected during nested Agent run #206. Lease held in recovery; Human action needed in Tasks (Resume, Discard, or Force Release).',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
     referenceId: 'task-104',
-    actionLabel: 'Inspect Recovery Options',
+    referenceType: 'task',
+    actionLabel: 'Inspect Recovery in Tasks',
     actionTargetView: 'tasks',
+    targetNav: 'project',
+    targetProjectTab: 'tasks',
+    timestamp: '12m ago',
+    lifecycleSentence: 'Task recovery · Run interrupted · Lease recovering',
+    attribution: 'Worker Host (sprout-wk-windev-a19)',
   },
   {
     id: 'att-3',
-    severity: 'attention',
+    severity: 'action_required',
     category: 'task_blocker',
     title: 'Task #103 Blocked on Asset Permission',
-    summary: 'Lead Programmer reported blocker: Operator permission required to unpack spatial audio sound effect assets.',
+    summary: 'Lead Programmer reported blocker: Operator permission required to unpack spatial audio sound effect assets into workspace.',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
     referenceId: 'task-103',
-    actionLabel: 'Resolve Blocker',
+    referenceType: 'task',
+    actionLabel: 'Resolve Blocker in Tasks',
     actionTargetView: 'tasks',
+    targetNav: 'project',
+    targetProjectTab: 'tasks',
+    timestamp: '18m ago',
+    lifecycleSentence: 'Task blocked · Run stopped · Lease held',
+    attribution: 'Programmer (Pi claude-3-5-sonnet)',
   },
   {
     id: 'att-4',
     severity: 'attention',
     category: 'env_enrollment',
     title: 'Pending Worker Enrollment: MacBook Air',
-    summary: 'Worker sprout-wk-macair-e018df33 is requesting capability permissions approval.',
+    summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
+    projectId: undefined,
+    projectName: 'Infrastructure',
     referenceId: 'mac-laptop-pending',
-    actionLabel: 'Review Enrollment',
+    referenceType: 'environment',
+    actionLabel: 'Review Enrollment in Envs',
     actionTargetView: 'environments',
+    targetNav: 'manage',
+    targetManageTab: 'environments',
+    timestamp: '5m ago',
+    lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
+    attribution: 'sprout-wk-macair-e018df33 (Worker)',
+  },
+];
+
+const initialActivityFeedItems: ActivityFeedItem[] = [
+  {
+    id: 'act-1',
+    kind: 'task_lifecycle',
+    timestamp: '2025-05-18T14:32:00Z',
+    relativeTime: '3m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Task #101: Reviewer completed validation check (14/14 passed)',
+    subtitle: 'Playwright browser verification suite passed with zero errors · Completion claim submitted for operator review',
+    badgeKind: 'purple',
+    badgeLabel: 'Validation Claim',
+    actor: { name: "Reviewer", avatar: "RV", kind: "agent" },
+    targetNav: 'project',
+    targetProjectTab: 'tasks',
+    targetEntityId: 'task-101',
+    metadata: { tokens: { input: 12100, output: 4100, cached: 24500 }, durationMs: 98000, costEstimate: '$0.089' },
+  },
+  {
+    id: 'act-2',
+    kind: 'agent_turn',
+    timestamp: '2025-05-18T14:27:00Z',
+    relativeTime: '8m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Task #102: Designer active turn running on Sound FX Synthesis',
+    subtitle: 'Codex gpt-4o (run-205) executing Web Audio API oscillators on mac-studio-primary',
+    badgeKind: 'blue',
+    badgeLabel: 'Active Turn',
+    actor: { name: "Designer", avatar: "DS", kind: "agent" },
+    targetNav: 'project',
+    targetProjectTab: 'tasks',
+    targetEntityId: 'task-102',
+    metadata: { durationMs: 480000, costEstimate: '$0.045' },
+  },
+  {
+    id: 'act-3',
+    kind: 'env_heartbeat',
+    timestamp: '2025-05-18T14:25:00Z',
+    relativeTime: '10m ago',
+    projectId: undefined,
+    projectName: 'Infrastructure',
+    title: 'New Worker Connected: sprout-wk-macair-e018df33',
+    subtitle: 'Private Overlay transport · Protocol v1.4 compatible · Requesting enrollment approval',
+    badgeKind: 'yellow',
+    badgeLabel: 'Enrollment',
+    actor: { name: "MacBook Air", avatar: "MB", kind: "worker" },
+    targetNav: 'manage',
+    targetManageTab: 'environments',
+    targetEntityId: 'mac-laptop-pending',
+  },
+  {
+    id: 'act-4',
+    kind: 'chat_message',
+    timestamp: '2025-05-18T14:22:00Z',
+    relativeTime: '13m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Project Channel: Planner posted sprint architecture update',
+    subtitle: '"Touch zoom and 3D raycasting ready; sound effects in progress by Designer."',
+    badgeKind: 'blue',
+    badgeLabel: 'Message',
+    actor: { name: "Planner", avatar: "PL", kind: "agent" },
+    targetNav: 'project',
+    targetProjectTab: 'chat',
+  },
+  {
+    id: 'act-5',
+    kind: 'env_heartbeat',
+    timestamp: '2025-05-18T14:18:00Z',
+    relativeTime: '17m ago',
+    projectId: undefined,
+    projectName: 'Infrastructure',
+    title: 'Worker win-dev-box heartbeat timed out',
+    subtitle: 'Missed 4 consecutive heartbeat cycles · Task #104 lease placed in recovery',
+    badgeKind: 'red',
+    badgeLabel: 'Degraded',
+    actor: { name: "Worker win-dev-box", avatar: "WN", kind: "system" },
+    targetNav: 'manage',
+    targetManageTab: 'environments',
+    targetEntityId: 'win-dev-box',
+  },
+  {
+    id: 'act-6',
+    kind: 'routing_batch',
+    timestamp: '2025-05-18T14:14:00Z',
+    relativeTime: '21m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Wake-Model Assisted Routing Batch #002 settled',
+    subtitle: 'Woke 2 recipients (Programmer, Designer) · Frozen context 1,420 tokens',
+    badgeKind: 'green',
+    badgeLabel: 'Routing',
+    actor: { name: "Wake Model", avatar: "WM", kind: "system" },
+    targetNav: 'project',
+    targetProjectTab: 'chat',
+    metadata: { routingDecision: 'Selected 2 agents; suppressed 1 non-actionable message' },
+  },
+  {
+    id: 'act-7',
+    kind: 'usage_milestone',
+    timestamp: '2025-05-18T14:08:00Z',
+    relativeTime: '27m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Usage Milestone: O7 Minesweeper reached $0.38 API-equivalent today',
+    subtitle: '4 agent runs · 103.3k total tokens · 0 unallocated token debt',
+    badgeKind: 'gray',
+    badgeLabel: 'Cost',
+    actor: { name: "Metering", avatar: "MT", kind: "system" },
+    targetNav: 'manage',
+    targetManageTab: 'usage',
+  },
+  {
+    id: 'act-8',
+    kind: 'chat_message',
+    timestamp: '2025-05-18T14:02:00Z',
+    relativeTime: '33m ago',
+    projectId: 'proj-minesweeper',
+    projectName: 'O7 Minesweeper',
+    title: 'Direct Message: Programmer → Designer',
+    subtitle: '"Can you verify that CSS variables match high-contrast dark theme before audio merges?"',
+    badgeKind: 'blue',
+    badgeLabel: 'DM',
+    actor: { name: "Programmer", avatar: "PG", kind: "agent" },
+    targetNav: 'project',
+    targetProjectTab: 'chat',
   },
 ];
 
@@ -931,6 +1091,13 @@ class StateManager {
       projectTab: 'tasks',
       manageTab: 'environments',
       activeTab: 'attention',
+      feedLayoutVariant: 'unified',
+      feedStatePreset: 'mixed',
+      feedScopeFilter: 'all',
+      feedAttentionSeverityFilter: 'all',
+      feedAttentionFilter: 'all',
+      feedActivityFilter: 'all',
+      mobileFeedSplitTab: 'attention',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -957,6 +1124,7 @@ class StateManager {
       routingBatches: initialRoutingBatches,
       usageActivities: initialUsageActivities,
       attentionItems: initialAttentionItems,
+      activityFeedItems: initialActivityFeedItems,
       scenarioLog: [
         'Seeded Sprout M2 prototype with 4 Agents, 3 Environments, 5 Tasks, and live multi-agent history.',
       ],
@@ -1073,6 +1241,8 @@ class StateManager {
       fromLabel,
       fromProjectTab: this.state.projectTab,
       fromManageTab: this.state.manageTab,
+      fromFeedScope: this.state.feedScopeFilter,
+      fromFeedSeverity: this.state.feedAttentionSeverityFilter,
     };
     if (target.taskId) this.state.selectedTaskId = target.taskId;
     if (target.envId) this.state.selectedEnvironmentId = target.envId;
@@ -1083,8 +1253,11 @@ class StateManager {
 
   public popReturnContext() {
     if (this.state.returnContext) {
-      const { fromNav, fromProjectTab, fromManageTab, fromLabel } = this.state.returnContext;
+      const { fromNav, fromProjectTab, fromManageTab, fromLabel, fromFeedScope, fromFeedSeverity } =
+        this.state.returnContext;
       this.state.returnContext = null;
+      if (fromFeedScope) this.state.feedScopeFilter = fromFeedScope;
+      if (fromFeedSeverity) this.state.feedAttentionSeverityFilter = fromFeedSeverity as any;
       this.setPrimaryNav(fromNav, fromProjectTab, fromManageTab);
       this.notify(`Returned back to ${fromLabel}`);
     }
@@ -1120,6 +1293,358 @@ class StateManager {
   public setViewportMode(mode: ViewportMode) {
     this.state.viewportMode = mode;
     this.notify(`Switched viewport mode to ${mode}`);
+  }
+
+  // --- Feed & Attention Actions (Ticket #62) ---
+
+  public setFeedLayoutVariant(variant: FeedLayoutVariant) {
+    this.state.feedLayoutVariant = variant;
+    this.notify(`Feed layout variant set to ${variant}`);
+  }
+
+  public setFeedStatePreset(preset: FeedStatePreset) {
+    this.state.feedStatePreset = preset;
+    this.applyFeedPreset(preset);
+  }
+
+  public setFeedScopeFilter(scope: string) {
+    this.state.feedScopeFilter = scope;
+    this.notify(`Feed scope filter set to ${scope}`);
+  }
+
+  public setFeedAttentionSeverityFilter(severity: 'all' | AttentionSeverity) {
+    this.state.feedAttentionSeverityFilter = severity;
+    this.notify(`Feed attention severity filter set to ${severity}`);
+  }
+
+  public setFeedAttentionFilter(filter: 'all' | AttentionCategory | AttentionSeverity) {
+    this.state.feedAttentionFilter = filter;
+    this.notify(`Feed attention filter set to ${filter}`);
+  }
+
+  public setFeedActivityFilter(filter: 'all' | 'tasks' | 'messages' | 'envs' | 'usage') {
+    this.state.feedActivityFilter = filter;
+    this.notify(`Feed activity filter set to ${filter}`);
+  }
+
+  public setMobileFeedSplitTab(tab: 'attention' | 'activity') {
+    this.state.mobileFeedSplitTab = tab;
+    this.notify(`Mobile feed split tab set to ${tab}`);
+  }
+
+  public applyFeedPreset(preset: FeedStatePreset) {
+    this.state.feedStatePreset = preset;
+    switch (preset) {
+      case 'mixed': {
+        this.state.attentionItems = [...initialAttentionItems];
+        this.state.activityFeedItems = [...initialActivityFeedItems];
+        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
+        if (t101) {
+          t101.lifecycle = 'awaiting validation';
+          t101.agentRunLifecycle = 'completed';
+          t101.leaseLifecycle = 'held';
+        }
+        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
+        if (t102) {
+          t102.lifecycle = 'active';
+          t102.agentRunLifecycle = 'running';
+          t102.leaseLifecycle = 'held';
+        }
+        const t103 = this.state.tasks.find((t) => t.id === 'task-103');
+        if (t103) {
+          t103.lifecycle = 'blocked';
+          t103.agentRunLifecycle = 'stopped';
+          t103.leaseLifecycle = 'held';
+        }
+        const t104 = this.state.tasks.find((t) => t.id === 'task-104');
+        if (t104) {
+          t104.lifecycle = 'recovery';
+          t104.agentRunLifecycle = 'interrupted';
+          t104.leaseLifecycle = 'recovering';
+        }
+        const winEnv = this.state.environments.find((e) => e.id === 'win-dev-box');
+        if (winEnv) {
+          winEnv.trafficLight = 'red';
+          winEnv.trafficLightReason = 'Heartbeat timed out 12m ago · Task #104 lease held in unconfirmed recovery';
+          winEnv.connectionState = 'offline';
+        }
+        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        if (macStudio) {
+          macStudio.trafficLight = 'green';
+          macStudio.trafficLightReason = 'All 4 engine readiness probes confirmed · Lease held for Task #101';
+          macStudio.connectionState = 'online';
+        }
+        const macLaptop = this.state.environments.find((e) => e.id === 'mac-laptop-pending');
+        if (macLaptop) {
+          macLaptop.enrollmentStatus = 'pending';
+          macLaptop.trafficLight = 'yellow';
+          macLaptop.trafficLightReason = 'Pending enrollment: Worker requesting capability permissions approval';
+        }
+        this.notify('Applied State Matrix Preset: Mixed (Default Realistic Operations)');
+        break;
+      }
+      case 'empty': {
+        this.state.attentionItems = [];
+        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
+        if (t101) { t101.lifecycle = 'completed'; t101.agentRunLifecycle = 'completed'; t101.leaseLifecycle = 'released'; }
+        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
+        if (t102) { t102.lifecycle = 'completed'; t102.agentRunLifecycle = 'completed'; t102.leaseLifecycle = 'released'; }
+        const t103 = this.state.tasks.find((t) => t.id === 'task-103');
+        if (t103) { t103.lifecycle = 'completed'; t103.agentRunLifecycle = 'completed'; t103.leaseLifecycle = 'released'; }
+        const t104 = this.state.tasks.find((t) => t.id === 'task-104');
+        if (t104) { t104.lifecycle = 'completed'; t104.agentRunLifecycle = 'completed'; t104.leaseLifecycle = 'released'; }
+        for (const env of this.state.environments) {
+          env.trafficLight = 'green';
+          env.trafficLightReason = 'All engine readiness probes confirmed · Lease clear';
+          env.connectionState = 'online';
+          if (env.id === 'mac-laptop-pending') env.enrollmentStatus = 'approved';
+        }
+        this.notify('Applied State Matrix Preset: Empty (All Systems Clear)');
+        break;
+      }
+      case 'healthy': {
+        this.state.attentionItems = [];
+        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
+        if (t101) {
+          t101.lifecycle = 'active';
+          t101.agentRunLifecycle = 'running';
+          t101.leaseLifecycle = 'held';
+        }
+        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
+        if (t102) {
+          t102.lifecycle = 'active';
+          t102.agentRunLifecycle = 'running';
+          t102.leaseLifecycle = 'held';
+        }
+        for (const env of this.state.environments) {
+          env.trafficLight = 'green';
+          env.trafficLightReason = 'Ready · All engines active · Low latency';
+          env.connectionState = 'online';
+          if (env.id === 'mac-laptop-pending') env.enrollmentStatus = 'approved';
+        }
+        this.notify('Applied State Matrix Preset: Healthy (Active Work Running Smoothly)');
+        break;
+      }
+      case 'stale': {
+        this.state.attentionItems = [
+          {
+            id: 'att-stale-1',
+            severity: 'attention',
+            category: 'env_unhealthy',
+            title: 'Stale Heartbeat on mac-studio-primary',
+            summary: 'Heartbeat overdue by 14 minutes. Environment telemetry unconfirmed; agent runs may be proceeding without status confirmation.',
+            projectName: 'Infrastructure',
+            referenceId: 'mac-studio-primary',
+            referenceType: 'environment',
+            actionLabel: 'Inspect Environment in Envs',
+            actionTargetView: 'environments',
+            targetNav: 'manage',
+            targetManageTab: 'environments',
+            timestamp: '14m overdue',
+            lifecycleSentence: 'Heartbeat overdue 14m · Telemetry stale',
+            attribution: 'Worker mac-studio-primary',
+          },
+          {
+            id: 'att-stale-2',
+            severity: 'attention',
+            category: 'task_recovery',
+            title: 'Unconfirmed Task #101 Lease Status',
+            summary: 'Worker telemetry stale; Task lease status unconfirmed since 14m ago. Operator check advised.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'task-101',
+            referenceType: 'task',
+            actionLabel: 'Inspect Lease in Tasks',
+            actionTargetView: 'tasks',
+            targetNav: 'project',
+            targetProjectTab: 'tasks',
+            timestamp: '14m ago',
+            lifecycleSentence: 'Task active · Run unconfirmed · Lease stale',
+            attribution: 'Worker mac-studio-primary',
+          },
+        ];
+        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        if (macStudio) {
+          macStudio.trafficLight = 'yellow';
+          macStudio.trafficLightReason = 'Heartbeat overdue 14m · Unconfirmed telemetry';
+          macStudio.connectionState = 'reconnecting';
+        }
+        this.notify('Applied State Matrix Preset: Stale (Stale Telemetry & Unconfirmed Lease)');
+        break;
+      }
+      case 'pending': {
+        this.state.attentionItems = [
+          {
+            id: 'att-pend-1',
+            severity: 'info',
+            category: 'task_proposed',
+            title: 'Proposed Task #105: High Score Persistence & Leaderboard',
+            summary: 'Planner proposed new task with 3 constraints and 2 verification criteria. Awaiting Human Authorization to begin and acquire Environment lease.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'task-105',
+            referenceType: 'task',
+            actionLabel: 'Authorize Task in Tasks',
+            actionTargetView: 'tasks',
+            targetNav: 'project',
+            targetProjectTab: 'tasks',
+            timestamp: '10m ago',
+            lifecycleSentence: 'Task proposed · Run none · Lease none',
+            attribution: 'Planner (Agent Proposal)',
+          },
+          {
+            id: 'att-pend-2',
+            severity: 'info',
+            category: 'task_proposed',
+            title: 'Proposed Task #106: Spatial Audio Reverb Engine',
+            summary: 'Designer proposed audio expansion task for custom impulse response filters. Awaiting Human Begin Authorization.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'task-105',
+            referenceType: 'task',
+            actionLabel: 'Authorize Task in Tasks',
+            actionTargetView: 'tasks',
+            targetNav: 'project',
+            targetProjectTab: 'tasks',
+            timestamp: '8m ago',
+            lifecycleSentence: 'Task proposed · Run none · Lease none',
+            attribution: 'Designer (Agent Proposal)',
+          },
+          {
+            id: 'att-pend-3',
+            severity: 'attention',
+            category: 'env_enrollment',
+            title: 'Pending Worker Enrollment: MacBook Air',
+            summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
+            projectName: 'Infrastructure',
+            referenceId: 'mac-laptop-pending',
+            referenceType: 'environment',
+            actionLabel: 'Review Enrollment in Envs',
+            actionTargetView: 'environments',
+            targetNav: 'manage',
+            targetManageTab: 'environments',
+            timestamp: '5m ago',
+            lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
+            attribution: 'sprout-wk-macair-e018df33 (Worker)',
+          },
+        ];
+        this.notify('Applied State Matrix Preset: Pending (Proposed Tasks & Worker Enrollment)');
+        break;
+      }
+      case 'degraded': {
+        this.state.attentionItems = [
+          {
+            id: 'att-deg-1',
+            severity: 'action_required',
+            category: 'env_unhealthy',
+            title: 'Windows Worker Offline (Task #104 Lease Held)',
+            summary: 'Host win-dev-box disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'win-dev-box',
+            referenceType: 'environment',
+            actionLabel: 'Inspect Host in Envs',
+            actionTargetView: 'environments',
+            targetNav: 'manage',
+            targetManageTab: 'environments',
+            timestamp: '22m ago',
+            lifecycleSentence: 'Worker offline 22m · Held lease blocked',
+            attribution: 'win-dev-box (Windows Host)',
+          },
+          {
+            id: 'att-deg-2',
+            severity: 'attention',
+            category: 'env_unhealthy',
+            title: 'Codex Engine Login Required on mac-studio-primary',
+            summary: 'Codex engine reports login-required. 1 of 4 engines degraded; Pi, agy, and opencode remain ready.',
+            projectName: 'Infrastructure',
+            referenceId: 'mac-studio-primary',
+            referenceType: 'environment',
+            actionLabel: 'Inspect Readiness in Envs',
+            actionTargetView: 'environments',
+            targetNav: 'manage',
+            targetManageTab: 'environments',
+            timestamp: '30m ago',
+            lifecycleSentence: '1/4 engine offline (Codex login-required)',
+            attribution: 'mac-studio-primary (Worker)',
+          },
+          {
+            id: 'att-deg-3',
+            severity: 'info',
+            category: 'routing_fallback',
+            title: 'Wake-Model Assisted Routing Failure Notice',
+            summary: 'Wake model syntax error in Batch #002; failed open to broadcast all project members per ADR-0007.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'batch-002',
+            referenceType: 'routing_batch',
+            actionLabel: 'Inspect Batch in Chat',
+            actionTargetView: 'chat',
+            targetNav: 'project',
+            targetProjectTab: 'chat',
+            timestamp: '4m ago',
+            lifecycleSentence: 'Routing batch failed-open · Broadcast delivered',
+            attribution: 'Wake Model (System)',
+          },
+        ];
+        const winEnv = this.state.environments.find((e) => e.id === 'win-dev-box');
+        if (winEnv) {
+          winEnv.trafficLight = 'red';
+          winEnv.trafficLightReason = 'Heartbeat timed out 22m ago · Task #104 lease held in unconfirmed recovery';
+          winEnv.connectionState = 'offline';
+        }
+        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        if (macStudio) {
+          macStudio.trafficLight = 'yellow';
+          macStudio.trafficLightReason = '1/4 engine offline (Codex login-required) · Reconnecting';
+          macStudio.engineReadiness.codex = 'login-required';
+        }
+        this.notify('Applied State Matrix Preset: Degraded (Offline Host & Engine Degraded)');
+        break;
+      }
+      case 'intervention': {
+        this.state.attentionItems = [
+          {
+            id: 'att-int-1',
+            severity: 'action_required',
+            category: 'task_blocker',
+            title: 'Task #103 Blocked on Spatial Audio Asset Permission',
+            summary: 'Lead Programmer declared blocker: Operator permission required to unpack spatial audio sound effect assets into workspace.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'task-103',
+            referenceType: 'task',
+            actionLabel: 'Resolve Blocker in Tasks',
+            actionTargetView: 'tasks',
+            targetNav: 'project',
+            targetProjectTab: 'tasks',
+            timestamp: '18m ago',
+            lifecycleSentence: 'Task blocked · Run stopped · Lease held',
+            attribution: 'Programmer (Pi claude-3-5-sonnet)',
+          },
+          {
+            id: 'att-int-2',
+            severity: 'action_required',
+            category: 'task_validation',
+            title: 'Task #101 Awaiting Operator Validation',
+            summary: 'Lead Programmer submitted completion claim with browser verification evidence (14/14 passed). Human decision required to accept or require correction.',
+            projectId: 'proj-minesweeper',
+            projectName: 'O7 Minesweeper',
+            referenceId: 'task-101',
+            referenceType: 'task',
+            actionLabel: 'Review Claim in Tasks',
+            actionTargetView: 'tasks',
+            targetNav: 'project',
+            targetProjectTab: 'tasks',
+            timestamp: '3m ago',
+            lifecycleSentence: 'Task awaiting validation · Run completed · Lease held',
+            attribution: 'Programmer (Pi claude-3-5-sonnet)',
+          },
+        ];
+        this.notify('Applied State Matrix Preset: Intervention (Blockers & Validation Claims)');
+        break;
+      }
+    }
   }
 
   // --- Dialog & Sheet Actions ---
@@ -1431,8 +1956,14 @@ class StateManager {
       title: `Recovery Required on ${env.displayName}`,
       summary: 'Carrier channel lost during active run. Lease held in recovery.',
       referenceId: task?.id ?? env.id,
-      actionLabel: 'Inspect Recovery',
+      referenceType: task ? 'task' : 'environment',
+      actionLabel: 'Inspect Recovery in Tasks',
       actionTargetView: 'tasks',
+      targetNav: 'project',
+      targetProjectTab: 'tasks',
+      timestamp: 'Just now',
+      lifecycleSentence: 'Task recovery · Run interrupted · Lease recovering',
+      attribution: `Worker (${env.displayName})`,
     });
 
     this.notify(`Simulated worker disconnect on ${envId}. Lease locked in recovery; no automatic reassignment.`);
@@ -1528,7 +2059,7 @@ class StateManager {
       authorId: this.state.operator.id,
       authorKind: 'human',
       authorDisplayName: this.state.operator.name,
-      authorAvatar: '👤',
+      authorAvatar: "OP",
       timestamp: 'Just now',
       content,
       disposition,
@@ -1607,8 +2138,7 @@ class StateManager {
           scope,
           authorId: 'designer',
           authorKind: 'agent',
-          authorDisplayName: 'Designer',
-          authorAvatar: '🎨',
+          authorDisplayName: "Designer", authorAvatar: "OP",
           timestamp: 'Just now',
           content: `Evaluating unaddressed input from batch ${batchId}: Design updates configured.`,
           disposition: 'non-routing',
@@ -1697,8 +2227,40 @@ class StateManager {
   public loadScenarioPreset(preset: string) {
     switch (preset) {
       case 'attention':
+      case 'feed-matrix-mixed':
         this.setPrimaryNav('feed');
-        this.notify('Loaded Scenario: Feed & Prominent Attention Section');
+        this.applyFeedPreset('mixed');
+        this.notify('Loaded Scenario: Feed & Prominent Attention Section (Mixed Default)');
+        break;
+      case 'feed-matrix-empty':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('empty');
+        this.notify('Loaded Scenario: Feed Empty State (All Systems Clear)');
+        break;
+      case 'feed-matrix-healthy':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('healthy');
+        this.notify('Loaded Scenario: Feed Healthy State (Active Work Progressing)');
+        break;
+      case 'feed-matrix-stale':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('stale');
+        this.notify('Loaded Scenario: Feed Stale Telemetry State');
+        break;
+      case 'feed-matrix-pending':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('pending');
+        this.notify('Loaded Scenario: Feed Pending Approvals & Enrollments State');
+        break;
+      case 'feed-matrix-degraded':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('degraded');
+        this.notify('Loaded Scenario: Feed Degraded Host & Login Required State');
+        break;
+      case 'feed-matrix-intervention':
+        this.setPrimaryNav('feed');
+        this.applyFeedPreset('intervention');
+        this.notify('Loaded Scenario: Feed Intervention State (Blockers & Validation)');
         break;
       case 'active-task':
         this.setPrimaryNav('project', 'tasks');

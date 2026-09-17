@@ -380,6 +380,8 @@ export type ReturnContext = {
   fromLabel: string;
   fromProjectTab?: ProjectTab | undefined;
   fromManageTab?: ManageTab | undefined;
+  fromFeedScope?: string | undefined;
+  fromFeedSeverity?: string | undefined;
 };
 
 export type ActiveDialogKind =
@@ -404,16 +406,75 @@ export type ActiveDialog = {
   metadata?: Record<string, any> | undefined;
 };
 
+export type AttentionSeverity = 'action_required' | 'attention' | 'info';
+
+export type AttentionCategory =
+  | 'task_validation'
+  | 'task_recovery'
+  | 'task_blocker'
+  | 'task_proposed'
+  | 'env_enrollment'
+  | 'env_unhealthy'
+  | 'routing_fallback';
+
+export type FeedStatePreset =
+  | 'mixed'
+  | 'empty'
+  | 'healthy'
+  | 'stale'
+  | 'pending'
+  | 'degraded'
+  | 'intervention';
+
+export type FeedLayoutVariant = 'unified' | 'split-board' | 'project-grouped';
+
 export type AttentionItem = {
   id: string;
-  severity: 'action_required' | 'attention' | 'info';
-  category: 'task_validation' | 'task_recovery' | 'task_blocker' | 'env_enrollment' | 'env_unhealthy';
+  severity: AttentionSeverity;
+  category: AttentionCategory;
   title: string;
   summary: string;
+  projectId?: string | undefined;
+  projectName?: string | undefined;
   referenceId: string;
+  referenceType: 'task' | 'environment' | 'message' | 'routing_batch' | 'usage';
   actionLabel: string;
-  actionTargetView: 'tasks' | 'environments' | 'projects' | 'feed';
+  actionTargetView: 'tasks' | 'environments' | 'projects' | 'chat' | 'usage' | 'feed';
   targetNav?: PrimaryNav | undefined;
   targetProjectTab?: ProjectTab | undefined;
   targetManageTab?: ManageTab | undefined;
+  timestamp: string;
+  lifecycleSentence?: string | undefined;
+  attribution?: string | undefined;
+};
+
+export type ActivityFeedKind =
+  | 'task_lifecycle'
+  | 'agent_turn'
+  | 'chat_message'
+  | 'routing_batch'
+  | 'env_heartbeat'
+  | 'usage_milestone';
+
+export type ActivityFeedItem = {
+  id: string;
+  kind: ActivityFeedKind;
+  timestamp: string;
+  relativeTime: string;
+  projectId?: string | undefined;
+  projectName?: string | undefined;
+  title: string;
+  subtitle: string;
+  badgeKind: 'purple' | 'blue' | 'green' | 'yellow' | 'red' | 'gray';
+  badgeLabel?: string | undefined;
+  actor: {
+    name: string;
+    avatar: string;
+    kind: 'human' | 'agent' | 'system' | 'worker';
+  };
+  targetNav: PrimaryNav;
+  targetProjectTab?: ProjectTab | undefined;
+  targetManageTab?: ManageTab | undefined;
+  targetEntityId?: string | undefined;
+  metadata?: Record<string, any> | undefined;
 };

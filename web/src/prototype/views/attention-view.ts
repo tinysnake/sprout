@@ -1,3 +1,4 @@
+import { renderIcon } from "../icons.js";
 import { stateManager, type PrototypeState } from '../state.js';
 
 export function renderAttentionView(state: PrototypeState): HTMLElement {
@@ -9,7 +10,7 @@ export function renderAttentionView(state: PrototypeState): HTMLElement {
   attentionHeader.className = 'card-header';
   attentionHeader.innerHTML = `
     <div>
-      <h2 style="font-size: 18px; font-weight: 700;">🚨 Operator Attention Hub</h2>
+      <h2 style="font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px;">${renderIcon("lightning", 18)} Operator Attention Hub</h2>
       <p style="font-size: 13px; color: var(--text-secondary); margin-top: 2px;">
         Fast-intervention items requiring Human authority under ADR-0006 & ADR-0009.
       </p>
@@ -25,7 +26,7 @@ export function renderAttentionView(state: PrototypeState): HTMLElement {
     emptyCard.className = 'card';
     emptyCard.innerHTML = `
       <div style="text-align: center; padding: 24px;">
-        <span style="font-size: 32px;">✅</span>
+        <div style="color: var(--green-ready); margin-bottom: 6px;">${renderIcon("check", 32)}</div>
         <h3 style="font-weight: 600; margin-top: 8px;">All Systems Clear</h3>
         <p style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
           No active blockers, unvalidated claims, recovering leases, or pending enrollments.
@@ -39,7 +40,7 @@ export function renderAttentionView(state: PrototypeState): HTMLElement {
       card.className = `card ${item.severity === 'action_required' ? 'border-red' : 'border-yellow'}`;
       card.style.borderLeft = `4px solid ${item.severity === 'action_required' ? 'var(--red-action)' : 'var(--yellow-attention)'}`;
 
-      const icon = item.category === 'task_validation' ? '📝' : item.category === 'task_recovery' ? '⚠️' : item.category === 'task_blocker' ? '🛑' : '🔑';
+      const icon = item.category === "task_validation" ? renderIcon("check", 16) : item.category === "task_recovery" ? renderIcon("warning", 16) : renderIcon("alert", 16);
 
       card.innerHTML = `
         <div class="card-header">
@@ -81,7 +82,7 @@ export function renderAttentionView(state: PrototypeState): HTMLElement {
   overviewCard.className = 'card';
   overviewCard.innerHTML = `
     <div class="card-header">
-      <span class="card-title">📊 Operational Overview</span>
+      <span class="card-title" style="display: flex; align-items: center; gap: 6px;">${renderIcon("overview", 14)} Operational Overview</span>
       <span style="font-size: 12px; color: var(--text-muted);">Sprout Local Operator MVP</span>
     </div>
     <div class="metrics-grid">
@@ -114,7 +115,7 @@ export function renderAttentionView(state: PrototypeState): HTMLElement {
   feedCard.className = 'card';
   feedCard.innerHTML = `
     <div class="card-header">
-      <span class="card-title">📜 Operational Event Log</span>
+      <span class="card-title" style="display: flex; align-items: center; gap: 6px;">${renderIcon("clock", 14)} Operational Event Log</span>
       <span style="font-size: 11px; color: var(--text-muted);">Sanitized durable audit</span>
     </div>
     <div class="scenario-feed">

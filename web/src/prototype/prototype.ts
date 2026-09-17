@@ -68,18 +68,46 @@ export function initPrototype(mountEl: HTMLElement): void {
           ${renderIcon('palette', 14)} Style Baseline
         </button>
 
+        <!-- State Matrix Quick Preset -->
+        <select class="scenario-select" id="top-state-matrix-select" aria-label="State Matrix Preset" title="State Matrix (7 Realistic Operational States)">
+          <option value="mixed" ${state.feedStatePreset === 'mixed' ? 'selected' : ''}>State: 1. Mixed (Default)</option>
+          <option value="empty" ${state.feedStatePreset === 'empty' ? 'selected' : ''}>State: 2. Empty (All Clear)</option>
+          <option value="healthy" ${state.feedStatePreset === 'healthy' ? 'selected' : ''}>State: 3. Healthy Active</option>
+          <option value="stale" ${state.feedStatePreset === 'stale' ? 'selected' : ''}>State: 4. Stale Telemetry</option>
+          <option value="pending" ${state.feedStatePreset === 'pending' ? 'selected' : ''}>State: 5. Pending Approvals</option>
+          <option value="degraded" ${state.feedStatePreset === 'degraded' ? 'selected' : ''}>State: 6. Degraded Host</option>
+          <option value="intervention" ${state.feedStatePreset === 'intervention' ? 'selected' : ''}>State: 7. Intervention</option>
+        </select>
+
+        <!-- Layout Paradigm Selector -->
+        <select class="scenario-select" id="top-layout-select" aria-label="Layout Paradigm" title="Feed Layout Paradigm">
+          <option value="unified" ${state.feedLayoutVariant === 'unified' ? 'selected' : ''}>Layout: A. Unified Stream</option>
+          <option value="split-board" ${state.feedLayoutVariant === 'split-board' ? 'selected' : ''}>Layout: B. Split Board</option>
+          <option value="project-grouped" ${state.feedLayoutVariant === 'project-grouped' ? 'selected' : ''}>Layout: C. Project Grouped</option>
+        </select>
+
         <!-- Scenario Jumpers Dropdown -->
         <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
           <option value="" disabled selected>Jump to Scenario...</option>
-          <option value="attention">1. Feed & Prominent Attention Section</option>
-          <option value="active-task">2. Active Task (2-Stage Pause & Interrupt)</option>
-          <option value="validation-claim">3. Task Claim (Validation / Correction)</option>
-          <option value="blocker-versioning">4. Task Blocker & Content Versioning</option>
-          <option value="ordinary-recovery">5. Worker Disconnect & Lease Recovery</option>
-          <option value="emergency-force-release">6. Emergency Override (Force Release)</option>
-          <option value="wake-routing-batch">7. Wake-Model Assisted Routing Batch</option>
-          <option value="usage-telemetry">8. Usage & Cost Observability (6 Views)</option>
-          <option value="primitives-showcase">9. Shared Primitives & State Language</option>
+          <optgroup label="Ticket #62: Feed & Attention States">
+            <option value="feed-matrix-mixed">Feed: 1. Mixed Realistic Operations (Default)</option>
+            <option value="feed-matrix-empty">Feed: 2. Empty State (All Systems Clear)</option>
+            <option value="feed-matrix-healthy">Feed: 3. Healthy State (Active Work Progressing)</option>
+            <option value="feed-matrix-stale">Feed: 4. Stale Telemetry Warning</option>
+            <option value="feed-matrix-pending">Feed: 5. Pending Approvals & Enrollments</option>
+            <option value="feed-matrix-degraded">Feed: 6. Degraded Host & Login Required</option>
+            <option value="feed-matrix-intervention">Feed: 7. Urgent Blockers & Claim Validation</option>
+          </optgroup>
+          <optgroup label="Cross-Module Scenarios (ADR-0006 - ADR-0010)">
+            <option value="active-task">Active Task (2-Stage Pause & Interrupt)</option>
+            <option value="validation-claim">Task Claim (Validation / Correction)</option>
+            <option value="blocker-versioning">Task Blocker & Content Versioning</option>
+            <option value="ordinary-recovery">Worker Disconnect & Lease Recovery</option>
+            <option value="emergency-force-release">Emergency Override (Force Release)</option>
+            <option value="wake-routing-batch">Wake-Model Assisted Routing Batch</option>
+            <option value="usage-telemetry">Usage & Cost Observability (6 Views)</option>
+            <option value="primitives-showcase">Shared Primitives & State Language</option>
+          </optgroup>
         </select>
 
         <button class="review-btn" id="open-review-btn">
@@ -106,6 +134,24 @@ export function initPrototype(mountEl: HTMLElement): void {
 
     controlBar.querySelector('#top-primitives-btn')?.addEventListener('click', () => {
       stateManager.setPrimaryNav('primitives');
+    });
+
+    const stateMatrixSelect = controlBar.querySelector('#top-state-matrix-select') as HTMLSelectElement;
+    stateMatrixSelect?.addEventListener('change', (ev) => {
+      const val = (ev.target as HTMLSelectElement).value as any;
+      if (val) {
+        stateManager.setPrimaryNav('feed');
+        stateManager.setFeedStatePreset(val);
+      }
+    });
+
+    const layoutSelect = controlBar.querySelector('#top-layout-select') as HTMLSelectElement;
+    layoutSelect?.addEventListener('change', (ev) => {
+      const val = (ev.target as HTMLSelectElement).value as any;
+      if (val) {
+        stateManager.setPrimaryNav('feed');
+        stateManager.setFeedLayoutVariant(val);
+      }
     });
 
     const scenarioSelect = controlBar.querySelector('#scenario-jumper') as HTMLSelectElement;
@@ -144,7 +190,7 @@ export function initPrototype(mountEl: HTMLElement): void {
         <button class="return-context-btn" id="btn-pop-return">
           <span>← Back to ${state.returnContext.fromLabel}</span>
         </button>
-        <button class="return-dismiss-btn" id="btn-dismiss-return" title="Dismiss return link">✕</button>
+        <button class="return-dismiss-btn" id="btn-dismiss-return" title="Dismiss return link" aria-label="Dismiss return link">${renderIcon('close', 12)}</button>
       `;
 
       returnBanner.querySelector('#btn-pop-return')?.addEventListener('click', () => {

@@ -98,6 +98,37 @@
   margin: 0;
   padding: 0;
   -webkit-tap-highlight-color: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover,
+*:focus-within {
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: var(--radius-full);
+  transition: background-color 0.25s ease;
+}
+
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted) !important;
 }
 
 *:focus-visible {
@@ -1610,11 +1641,271 @@ code {
   opacity: 0.9;
 }
 
-/* 15. Attention Card Styles (Feed View) */
+/* 15. Feed & Attention Styles (Ticket #62) */
+.feed-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.feed-header {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 14px;
+}
+
+/* Scope Filter Bar (Dropdown Only) */
+.feed-scope-filter-bar {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.feed-scope-dropdown-wrapper {
+  width: 100%;
+  max-width: 100%;
+}
+
+.feed-scope-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  transition: all 0.15s ease;
+  min-height: 40px;
+}
+
+.feed-scope-inner:focus-within {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.feed-scope-icon {
+  color: var(--accent-primary);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.feed-scope-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.feed-scope-select {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  height: 36px;
+  background-color: transparent;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  outline: none;
+  padding: 0 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.feed-scope-select option,
+.form-select option,
+.scenario-select option {
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.feed-scope-select:focus {
+  outline: none;
+}
+
+/* 4 Streamlined Urgency Pills & Activity Filter Pills (Discrete Cards) */
+.attention-urgency-pills {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.activity-filter-pills {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.urgency-pill-btn,
+.activity-filter-pill-btn {
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  min-height: 48px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.urgency-pill-btn:hover,
+.activity-filter-pill-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.urgency-pill-btn.active,
+.activity-filter-pill-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.activity-filter-pill-btn.active .urgency-pill-top {
+  color: var(--accent-primary);
+}
+
+.activity-filter-pill-btn.active .urgency-pill-bottom {
+  color: var(--accent-primary);
+  font-weight: 700;
+}
+
+.urgency-pill-top {
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  line-height: 1.1;
+  color: var(--text-primary);
+  max-width: 100%;
+}
+
+.urgency-pill-top .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+
+.urgency-pill-bottom {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  width: 100%;
+  display: block;
+}
+
+.urgency-pill-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.urgency-pill-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.urgency-pill-btn.active .urgency-pill-top {
+  color: var(--accent-primary);
+}
+
+.urgency-pill-btn.active .urgency-pill-bottom {
+  color: var(--accent-primary);
+  font-weight: 700;
+}
+
+.urgency-pill-btn.pill-danger.active {
+  background: var(--red-action-bg);
+  border-color: var(--red-action);
+  color: var(--red-action);
+}
+
+.urgency-pill-btn.pill-danger.active .urgency-pill-top {
+  color: var(--red-action);
+}
+
+.urgency-pill-btn.pill-danger.active .urgency-pill-bottom {
+  color: var(--red-action);
+  font-weight: 700;
+}
+
+.urgency-pill-btn.pill-warning.active {
+  background: var(--yellow-attention-bg);
+  border-color: var(--yellow-attention);
+  color: var(--yellow-attention);
+}
+
+.urgency-pill-btn.pill-warning.active .urgency-pill-top {
+  color: var(--yellow-attention);
+}
+
+.urgency-pill-btn.pill-warning.active .urgency-pill-bottom {
+  color: var(--yellow-attention);
+  font-weight: 700;
+}
+
+.urgency-pill-btn.pill-info.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.urgency-pill-btn.pill-info.active .urgency-pill-top {
+  color: var(--accent-primary);
+}
+
+.urgency-pill-btn.pill-info.active .urgency-pill-bottom {
+  color: var(--accent-primary);
+  font-weight: 700;
+}
+
+/* Lightweight Project Clear Banner */
+.project-clear-banner {
+  background: var(--green-ready-bg);
+  border: 1px solid var(--green-ready-border);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Attention Cards */
 .attention-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--yellow-attention);
+  border-left: 4px solid var(--yellow-attention);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
   display: flex;
@@ -1627,10 +1918,22 @@ code {
 .attention-card:hover {
   background: var(--bg-surface-elevated);
   border-color: var(--border-strong);
+  transform: translateY(-1px);
 }
 
-.attention-card[data-cat="env_unhealthy"] {
+.attention-card.severity-action-required {
   border-left-color: var(--red-action);
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.05) 0%, transparent 40%);
+}
+
+.attention-card.severity-attention {
+  border-left-color: var(--yellow-attention);
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.05) 0%, transparent 40%);
+}
+
+.attention-card.severity-info {
+  border-left-color: var(--accent-primary);
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.05) 0%, transparent 40%);
 }
 
 .attention-card-header {
@@ -1638,6 +1941,26 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.category-icon-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.lifecycle-sentence {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-surface-elevated);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  display: inline-block;
+  width: fit-content;
 }
 
 .attention-card-summary {
@@ -1651,6 +1974,123 @@ code {
   align-items: center;
   justify-content: space-between;
   margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Active Work Cards (Aligned with Attention Cards) */
+.active-task-card {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 4px solid var(--accent-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.active-task-card:hover {
+  border-color: var(--accent-primary-hover);
+  background: var(--bg-surface-elevated);
+}
+
+.attention-card-header .status-dot,
+.active-task-card .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.status-dot.pulsing {
+  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.7);
+  animation: pulseDot 2s infinite;
+}
+
+@keyframes pulseDot {
+  0% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(56, 189, 248, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+}
+
+/* Activity Stream Rows */
+.activity-feed-row {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.activity-feed-row:hover {
+  background: var(--bg-surface-elevated);
+  border-color: var(--border-strong);
+}
+
+/* Split Board Layout */
+.feed-layout-split-board {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.split-board-mobile-tabs {
+  display: none;
+}
+
+.split-board-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 840px) {
+  .split-board-mobile-tabs {
+    display: block;
+  }
+  .split-board-columns {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .split-column.mobile-hidden {
+    display: none !important;
+  }
+  .split-column.mobile-visible {
+    display: flex !important;
+    flex-direction: column;
+    gap: 16px;
+  }
+}
+
+/* Project Grouped Layout */
+.feed-layout-project-grouped {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.feed-global-attention-banner {
+  background: var(--yellow-attention-bg);
+  border: 1px solid var(--yellow-attention-border);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.feed-project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* 16. Review Drawer */

@@ -1,3 +1,4 @@
+import { renderIcon } from "../icons.js";
 import { stateManager, type PrototypeState } from '../state.js';
 
 /**
@@ -18,7 +19,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
   headerCard.innerHTML = `
     <div class="card-header">
       <div>
-        <h2 style="font-size: 16px; font-weight: 700;">📋 Multi-Agent Task & Lease Deck</h2>
+        <h2 style="font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px;">${renderIcon("tasks", 18)} Multi-Agent Task & Lease Deck</h2>
         <p style="font-size: 12px; color: var(--text-secondary);">
           Variant C: Kanban / Work-deck architecture. Tasks hold scarce leases across lifecycle stages.
         </p>
@@ -57,7 +58,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
     laneEl.style.borderLeft = '4px solid var(--yellow-attention)';
     laneEl.innerHTML = `
       <div class="card-header">
-        <span style="font-weight: 700; font-size: 13px; color: var(--yellow-attention);">📝 VALIDATION QUEUE (${validationTasks.length})</span>
+        <span style="font-weight: 700; font-size: 13px; color: var(--yellow-attention);">VALIDATION QUEUE (${validationTasks.length})</span>
         <span class="status-pill yellow" style="font-size: 10px;">Lease Held</span>
       </div>
       <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -102,7 +103,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
   activeLane.className = 'card';
   activeLane.innerHTML = `
     <div class="card-header">
-      <span style="font-weight: 700; font-size: 13px; color: var(--accent-primary);">⚡ ACTIVE TASKS (${activeTasks.length})</span>
+      <span style="font-weight: 700; font-size: 13px; color: var(--accent-primary);">ACTIVE TASKS (${activeTasks.length})</span>
       <span class="status-pill purple" style="font-size: 10px;">Lease Held</span>
     </div>
     <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -156,7 +157,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
     recLane.style.borderLeft = '4px solid var(--red-action)';
     recLane.innerHTML = `
       <div class="card-header">
-        <span style="font-weight: 700; font-size: 13px; color: var(--red-action);">🛑 BLOCKED / RECOVERY LANE (${recoveryTasks.length})</span>
+        <span style="font-weight: 700; font-size: 13px; color: var(--red-action);">BLOCKED / RECOVERY LANE (${recoveryTasks.length})</span>
         <span class="status-pill red" style="font-size: 10px;">Action Required</span>
       </div>
       <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -207,7 +208,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
     propLane.className = 'card';
     propLane.innerHTML = `
       <div class="card-header">
-        <span style="font-weight: 700; font-size: 13px;">💡 TASK PROPOSALS (${proposals.length})</span>
+        <span style="font-weight: 700; font-size: 13px;">TASK PROPOSALS (${proposals.length})</span>
         <span class="status-pill neutral" style="font-size: 10px;">No Lease Held</span>
       </div>
       <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -219,7 +220,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
             <div style="color: var(--text-secondary);">${t.currentVersion.goal}</div>
             <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
               <button class="btn btn-primary btn-sm app-begin-btn" data-id="${t.id}" style="font-size: 11px; padding: 3px 8px;">
-                👑 Approve & Begin
+                Approve & Begin →
               </button>
             </div>
           </div>

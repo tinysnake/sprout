@@ -1,3 +1,4 @@
+import { renderIcon } from "../icons.js";
 import { stateManager, type PrototypeState } from '../state.js';
 
 export function renderOnboardingView(_state: PrototypeState): HTMLElement {
@@ -10,7 +11,7 @@ export function renderOnboardingView(_state: PrototypeState): HTMLElement {
     <div class="card-header">
       <div>
         <h2 style="font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
-          <span>🌱</span> First-Run Onboarding Wizard
+          ${renderIcon('user', 18)} First-Run Onboarding Wizard
         </h2>
         <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
           Web-led bootstrap to establish first Environment, Agent, and Project (ADR-0008).
@@ -37,7 +38,7 @@ sprout-worker init --overlay=100.64.0.4:5174</pre>
           Pending worker: <code>sprout-wk-mac-7f89a1c2</code> (macOS). Operator approves file & terminal permissions.
         </p>
         <button class="btn btn-secondary btn-sm" style="margin-top: 6px;" onclick="alert('Worker identity confirmed and capabilities granted.')">
-          ✅ Approve Worker Permissions
+          Approve Worker Permissions
         </button>
       </div>
 
@@ -60,7 +61,7 @@ sprout-worker init --overlay=100.64.0.4:5174</pre>
 
     <div style="display: flex; justify-content: flex-end; margin-top: 12px; border-top: 1px solid var(--border-subtle); padding-top: 12px;">
       <button class="btn btn-primary finish-onboarding-btn">
-        🚀 Complete Onboarding & Enter Project Channel
+        Complete Onboarding & Enter Project Channel →
       </button>
     </div>
   `;
