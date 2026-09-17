@@ -22,6 +22,29 @@ export type AgentWorkOption = {
   isConfigured: boolean;
 };
 
+export type AgentVersionRecord = {
+  version: number;
+  timestamp: string;
+  author: string;
+  changeSummary: string;
+  optionsCount: number;
+  standingInstructions?: string | undefined;
+};
+
+export type AgentAttributionRecord = {
+  id: string;
+  projectName: string;
+  projectId: string;
+  entityKind: 'task_run' | 'message' | 'validation_claim';
+  entityId: string;
+  timestamp: string;
+  configVersionUsed: number;
+  engineUsed: EngineKind;
+  modelUsed: string;
+  effortUsed: string;
+  summary: string;
+};
+
 export type AgentDefinition = {
   id: string;
   displayName: string;
@@ -31,6 +54,11 @@ export type AgentDefinition = {
   workOptions: AgentWorkOption[];
   status: 'active' | 'archived';
   privateMemoryEntriesCount: number;
+  version?: number | undefined;
+  createdAt?: string | undefined;
+  updatedAt?: string | undefined;
+  versionHistory?: AgentVersionRecord[] | undefined;
+  attributionHistory?: AgentAttributionRecord[] | undefined;
 };
 
 export type ProjectMembership = {

@@ -2,10 +2,12 @@ import type {
   ActiveDialog,
   ActivityFeedItem,
   AgentDefinition,
+  AgentWorkOption,
   AttentionCategory,
   AttentionItem,
   AttentionSeverity,
   DensityMode,
+  EngineKind,
   EnvironmentInstance,
   FeedLayoutVariant,
   FeedStatePreset,
@@ -47,6 +49,9 @@ export interface PrototypeState {
   chatViewMode: 'list' | 'detail';
   environmentViewMode: 'list' | 'detail';
   environmentFilter: string;
+  agentViewMode: 'list' | 'detail';
+  agentFilter: string;
+  agentSearchQuery?: string | undefined;
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -93,58 +98,277 @@ const initialOperator: OperatorIdentity = {
 
 const initialAgents: AgentDefinition[] = [
   {
-    id: "planner", displayName: "Planner", avatar: "PL",
-    description: 'High-level architecture, task breakdown, and coordination lead.',
-    standingInstructions: 'Always verify acceptance criteria before coordinating next steps.',
-    status: 'active',
-    privateMemoryEntriesCount: 14,
-    workOptions: [
-      { id: 'opt-p1', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'high', isConfigured: true },
-      { id: 'opt-p2', engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
-    ],
-  },
-  {
-    id: "designer", displayName: "Designer", avatar: "DS",
-    description: 'UI/UX layout, CSS theme variables, and interaction specifications.',
-    standingInstructions: 'Prioritize mobile touch targets and clear high-contrast hierarchy.',
-    status: 'active',
-    privateMemoryEntriesCount: 9,
-    workOptions: [
-      { id: 'opt-d1', engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
-      { id: 'opt-d2', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'default', isConfigured: true },
-    ],
-  },
-  {
-    id: "programmer", displayName: "Programmer", avatar: "PG",
+    id: 'programmer',
+    displayName: 'Programmer',
+    avatar: 'PG',
     description: 'Core logic, Three.js game loop, and DOM rendering implementation.',
     standingInstructions: 'Write pure functions where possible; ensure build and verification scripts pass.',
     status: 'active',
     privateMemoryEntriesCount: 26,
+    version: 3,
+    createdAt: '3 days ago',
+    updatedAt: '2 hours ago',
     workOptions: [
       { id: 'opt-pr1', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'high', isConfigured: true },
       { id: 'opt-pr2', engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
       { id: 'opt-pr3', engine: 'opencode', workModel: 'deepseek-coder-v2', effort: 'default', isConfigured: false },
     ],
+    versionHistory: [
+      {
+        version: 3,
+        timestamp: '2 hours ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Added opencode deepseek-coder-v2 fallback option and refined testing instructions.',
+        optionsCount: 3,
+        standingInstructions: 'Write pure functions where possible; ensure build and verification scripts pass.',
+      },
+      {
+        version: 2,
+        timestamp: '1 day ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Switched primary engine from Codex to Pi claude-3-5-sonnet for superior spatial reasoning.',
+        optionsCount: 2,
+        standingInstructions: 'Write pure functions where possible; ensure build passes.',
+      },
+      {
+        version: 1,
+        timestamp: '3 days ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Initial Agent configuration created with Codex gpt-4o.',
+        optionsCount: 1,
+        standingInstructions: 'Build game logic.',
+      },
+    ],
+    attributionHistory: [
+      {
+        id: 'attr-pr1',
+        projectName: 'Minesweeper Three.js Web',
+        projectId: 'proj-minesweeper',
+        entityKind: 'task_run',
+        entityId: 'run-101-1',
+        timestamp: '10m ago',
+        configVersionUsed: 3,
+        engineUsed: 'pi',
+        modelUsed: 'claude-3-5-sonnet',
+        effortUsed: 'high',
+        summary: 'Implemented 3D board mesh generation and texture buffer allocations.',
+      },
+      {
+        id: 'attr-pr2',
+        projectName: 'Minesweeper Three.js Web',
+        projectId: 'proj-minesweeper',
+        entityKind: 'message',
+        entityId: 'msg-gen-4',
+        timestamp: '25m ago',
+        configVersionUsed: 3,
+        engineUsed: 'pi',
+        modelUsed: 'claude-3-5-sonnet',
+        effortUsed: 'high',
+        summary: 'Clarified WebGL context loss recovery strategy in #general.',
+      },
+      {
+        id: 'attr-pr3',
+        projectName: 'General Data Pipeline',
+        projectId: 'proj-data-pipeline',
+        entityKind: 'task_run',
+        entityId: 'run-92-4',
+        timestamp: '2 days ago',
+        configVersionUsed: 2,
+        engineUsed: 'codex',
+        modelUsed: 'gpt-4o',
+        effortUsed: 'medium',
+        summary: 'Generated parquet compression benchmark scripts.',
+      },
+    ],
   },
   {
-    id: "reviewer", displayName: "Reviewer", avatar: "RV",
+    id: 'planner',
+    displayName: 'Planner',
+    avatar: 'PL',
+    description: 'High-level architecture, task breakdown, and coordination lead.',
+    standingInstructions: 'Always verify acceptance criteria before coordinating next steps.',
+    status: 'active',
+    privateMemoryEntriesCount: 14,
+    version: 2,
+    createdAt: '4 days ago',
+    updatedAt: '1 day ago',
+    workOptions: [
+      { id: 'opt-p1', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'high', isConfigured: true },
+      { id: 'opt-p2', engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
+    ],
+    versionHistory: [
+      {
+        version: 2,
+        timestamp: '1 day ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Added Codex fallback option with medium effort.',
+        optionsCount: 2,
+        standingInstructions: 'Always verify acceptance criteria before coordinating next steps.',
+      },
+      {
+        version: 1,
+        timestamp: '4 days ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Initial Planner agent setup with Pi claude-3-5-sonnet.',
+        optionsCount: 1,
+      },
+    ],
+    attributionHistory: [
+      {
+        id: 'attr-p1',
+        projectName: 'Minesweeper Three.js Web',
+        projectId: 'proj-minesweeper',
+        entityKind: 'task_run',
+        entityId: 'run-102-1',
+        timestamp: '1 hour ago',
+        configVersionUsed: 2,
+        engineUsed: 'pi',
+        modelUsed: 'claude-3-5-sonnet',
+        effortUsed: 'high',
+        summary: 'Formulated audio synthesis sprint breakdown.',
+      },
+    ],
+  },
+  {
+    id: 'designer',
+    displayName: 'Designer',
+    avatar: 'DS',
+    description: 'UI/UX layout, CSS theme variables, and interaction specifications.',
+    standingInstructions: 'Prioritize mobile touch targets and clear high-contrast hierarchy.',
+    status: 'active',
+    privateMemoryEntriesCount: 9,
+    version: 2,
+    createdAt: '3 days ago',
+    updatedAt: '1 day ago',
+    workOptions: [
+      { id: 'opt-d1', engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
+      { id: 'opt-d2', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'default', isConfigured: true },
+    ],
+    versionHistory: [
+      {
+        version: 2,
+        timestamp: '1 day ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Configured secondary Pi fallback option.',
+        optionsCount: 2,
+      },
+    ],
+    attributionHistory: [],
+  },
+  {
+    id: 'reviewer',
+    displayName: 'Reviewer',
+    avatar: 'RV',
     description: 'Browser verification, regression tests, and acceptance audits.',
     standingInstructions: 'Run headless browser verification and check console error logs.',
     status: 'active',
     privateMemoryEntriesCount: 18,
+    version: 2,
+    createdAt: '3 days ago',
+    updatedAt: '2 days ago',
     workOptions: [
       { id: 'opt-r1', engine: 'codex', workModel: 'gpt-4o', effort: 'high', isConfigured: true },
       { id: 'opt-r2', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'medium', isConfigured: true },
     ],
+    versionHistory: [
+      {
+        version: 2,
+        timestamp: '2 days ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Added Pi claude-3-5-sonnet validation fallback.',
+        optionsCount: 2,
+      },
+    ],
+    attributionHistory: [],
   },
   {
-    id: "researcher", displayName: "Researcher", avatar: "RS",
+    id: 'researcher',
+    displayName: 'Researcher',
+    avatar: 'RS',
     description: 'WebGL profiling, GPU buffer optimization, and browser benchmarks.',
     standingInstructions: 'Profile frametime bottlenecks and report GPU draw call telemetry.',
     status: 'active',
     privateMemoryEntriesCount: 7,
+    version: 1,
+    createdAt: '2 days ago',
+    updatedAt: '2 days ago',
     workOptions: [
       { id: 'opt-rs1', engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'medium', isConfigured: true },
+      { id: 'opt-rs2', engine: 'agy', workModel: 'gemini-1.5-pro', effort: 'default', isConfigured: true },
+    ],
+    versionHistory: [
+      {
+        version: 1,
+        timestamp: '2 days ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Initial profile researcher agent definition.',
+        optionsCount: 2,
+      },
+    ],
+    attributionHistory: [],
+  },
+  {
+    id: 'sentinel',
+    displayName: 'Sentinel',
+    avatar: 'ST',
+    description: 'Automated container sandbox validator and compiler regression watcher.',
+    standingInstructions: 'Audit compilation memory footprints and binary symbol visibility.',
+    status: 'active',
+    privateMemoryEntriesCount: 3,
+    version: 1,
+    createdAt: '1 day ago',
+    updatedAt: '1 day ago',
+    workOptions: [
+      { id: 'opt-st1', engine: 'opencode', workModel: 'deepseek-coder-v2', effort: 'high', isConfigured: false },
+    ],
+    versionHistory: [
+      {
+        version: 1,
+        timestamp: '1 day ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Setup sentinel compiler audit agent requiring opencode engine.',
+        optionsCount: 1,
+      },
+    ],
+    attributionHistory: [],
+  },
+  {
+    id: 'legacy-coder',
+    displayName: 'Legacy Coder (Archived)',
+    avatar: 'LC',
+    description: 'Former prototype engine coordinator retired after M1 architectural transition.',
+    standingInstructions: 'Preserved standing instructions from M1 sprint.',
+    status: 'archived',
+    privateMemoryEntriesCount: 12,
+    version: 1,
+    createdAt: '2 weeks ago',
+    updatedAt: '1 week ago',
+    workOptions: [
+      { id: 'opt-lc1', engine: 'codex', workModel: 'gpt-4o-mini', effort: 'low', isConfigured: true },
+    ],
+    versionHistory: [
+      {
+        version: 1,
+        timestamp: '2 weeks ago',
+        author: 'Lead Technical Operator',
+        changeSummary: 'Legacy M1 agent setup.',
+        optionsCount: 1,
+      },
+    ],
+    attributionHistory: [
+      {
+        id: 'attr-lc1',
+        projectName: 'Minesweeper Three.js Web',
+        projectId: 'proj-minesweeper',
+        entityKind: 'task_run',
+        entityId: 'run-88-1',
+        timestamp: '1 week ago',
+        configVersionUsed: 1,
+        engineUsed: 'codex',
+        modelUsed: 'gpt-4o-mini',
+        effortUsed: 'low',
+        summary: 'Initial canvas boilerplates and random seed generation during M1 sprint.',
+      },
     ],
   },
 ];
@@ -1734,6 +1958,9 @@ class StateManager {
       chatViewMode: 'list',
       environmentViewMode: 'list',
       environmentFilter: 'all',
+      agentViewMode: 'list',
+      agentFilter: 'all',
+      agentSearchQuery: '',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -2430,9 +2657,320 @@ class StateManager {
     this.notify(`Set environment filter to ${filter}`);
   }
 
-  public selectAgent(agentId: string) {
+  public selectAgent(agentId: string, pushHistory = true) {
     this.state.selectedAgentId = agentId;
+    this.state.agentViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'agent-detail', agentId }, '', `#agents/${agentId}`);
+    }
     this.notify(`Selected Agent ${agentId}`);
+  }
+
+  public openAgentDetail(agentId: string, pushHistory = true) {
+    this.state.selectedAgentId = agentId;
+    this.state.agentViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'agent-detail', agentId }, '', `#agents/${agentId}`);
+    }
+    this.notify(`Opened Agent Detail for ${agentId}`);
+  }
+
+  public closeAgentDetail(pushHistory = true) {
+    this.state.agentViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'agent-list' }, '', '#agents');
+    }
+    this.notify('Returned to Agent list');
+  }
+
+  public setAgentFilter(filter: string) {
+    this.state.agentFilter = filter;
+    this.notify(`Set agent filter to ${filter}`);
+  }
+
+  public setAgentSearch(query: string) {
+    this.state.agentSearchQuery = query;
+    this.notify(`Filtered agents by search: "${query}"`);
+  }
+
+  public createAgent(agent: {
+    displayName: string;
+    description: string;
+    avatar?: string | undefined;
+    standingInstructions?: string | undefined;
+    workOptions?: AgentWorkOption[] | undefined;
+  }) {
+    const id = agent.displayName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `agent-${Date.now()}`;
+    const avatar = agent.avatar || agent.displayName.slice(0, 2).toUpperCase();
+    const workOptions: AgentWorkOption[] = (agent.workOptions && agent.workOptions.length > 0)
+      ? agent.workOptions
+      : [
+          { id: `opt-${id}-1`, engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'high', isConfigured: true },
+        ];
+
+    const newAgent: AgentDefinition = {
+      id,
+      displayName: agent.displayName.trim(),
+      avatar,
+      description: agent.description.trim(),
+      standingInstructions: agent.standingInstructions?.trim() || undefined,
+      workOptions,
+      status: 'active',
+      privateMemoryEntriesCount: 0,
+      version: 1,
+      createdAt: 'Just now',
+      updatedAt: 'Just now',
+      versionHistory: [
+        {
+          version: 1,
+          timestamp: 'Just now',
+          author: this.state.operator.name,
+          changeSummary: 'Initial Agent creation with portable work options.',
+          optionsCount: workOptions.length,
+          standingInstructions: agent.standingInstructions?.trim() || undefined,
+        },
+      ],
+      attributionHistory: [],
+    };
+    this.state.agents.push(newAgent);
+    this.state.selectedAgentId = id;
+    this.state.agentViewMode = 'detail';
+    this.notify(`Created Agent "${newAgent.displayName}" (v1).`);
+    return newAgent;
+  }
+
+  public updateAgentIdentity(
+    agentId: string,
+    updates: { displayName?: string | undefined; description?: string | undefined; standingInstructions?: string | undefined }
+  ) {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+
+    const oldVersion = agent.version || 1;
+    const newVersion = oldVersion + 1;
+    agent.version = newVersion;
+    agent.updatedAt = 'Just now';
+
+    const changes: string[] = [];
+    if (updates.displayName !== undefined && updates.displayName !== agent.displayName) {
+      changes.push(`Renamed to "${updates.displayName}"`);
+      agent.displayName = updates.displayName;
+    }
+    if (updates.description !== undefined && updates.description !== agent.description) {
+      changes.push(`Updated description`);
+      agent.description = updates.description;
+    }
+    if (updates.standingInstructions !== undefined && updates.standingInstructions !== agent.standingInstructions) {
+      changes.push(`Updated standing instructions`);
+      agent.standingInstructions = updates.standingInstructions.trim() || undefined;
+    }
+
+    if (!agent.versionHistory) agent.versionHistory = [];
+    agent.versionHistory.unshift({
+      version: newVersion,
+      timestamp: 'Just now',
+      author: this.state.operator.name,
+      changeSummary: changes.join(', ') || 'Updated agent identity facts.',
+      optionsCount: agent.workOptions.length,
+      standingInstructions: agent.standingInstructions,
+    });
+
+    this.notify(`Updated Agent "${agent.displayName}" to v${newVersion}.`);
+  }
+
+  public addAgentWorkOption(
+    agentId: string,
+    option: { engine: EngineKind; workModel: string; effort: 'low' | 'medium' | 'high' | 'default'; isConfigured?: boolean }
+  ) {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+
+    const newOptId = `opt-${agent.id}-${Date.now()}`;
+    const newOption: AgentWorkOption = {
+      id: newOptId,
+      engine: option.engine,
+      workModel: option.workModel,
+      effort: option.effort,
+      isConfigured: option.isConfigured ?? true,
+    };
+    agent.workOptions.push(newOption);
+
+    const oldVersion = agent.version || 1;
+    const newVersion = oldVersion + 1;
+    agent.version = newVersion;
+    agent.updatedAt = 'Just now';
+
+    if (!agent.versionHistory) agent.versionHistory = [];
+    agent.versionHistory.unshift({
+      version: newVersion,
+      timestamp: 'Just now',
+      author: this.state.operator.name,
+      changeSummary: `Added Priority ${agent.workOptions.length} option: ${option.engine.toUpperCase()} (${option.workModel} · ${option.effort}).`,
+      optionsCount: agent.workOptions.length,
+      standingInstructions: agent.standingInstructions,
+    });
+
+    this.notify(`Added work option to Agent "${agent.displayName}" (v${newVersion}).`);
+  }
+
+  public removeAgentWorkOption(agentId: string, optionId: string): boolean {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return false;
+
+    // Invariant (ADR-0008): Cannot leave an Agent with no work option
+    if (agent.workOptions.length <= 1) {
+      if (typeof window !== 'undefined' && window.alert) {
+        window.alert('Cannot remove the only work option. An Agent must have at least one ordered work option (ADR-0008).');
+      }
+      return false;
+    }
+
+    const targetOpt = agent.workOptions.find((o) => o.id === optionId);
+    agent.workOptions = agent.workOptions.filter((o) => o.id !== optionId);
+
+    const oldVersion = agent.version || 1;
+    const newVersion = oldVersion + 1;
+    agent.version = newVersion;
+    agent.updatedAt = 'Just now';
+
+    if (!agent.versionHistory) agent.versionHistory = [];
+    agent.versionHistory.unshift({
+      version: newVersion,
+      timestamp: 'Just now',
+      author: this.state.operator.name,
+      changeSummary: `Removed work option ${targetOpt?.engine.toUpperCase()} (${targetOpt?.workModel}).`,
+      optionsCount: agent.workOptions.length,
+      standingInstructions: agent.standingInstructions,
+    });
+
+    this.notify(`Removed work option from Agent "${agent.displayName}" (v${newVersion}).`);
+    return true;
+  }
+
+  public moveAgentWorkOption(agentId: string, optionId: string, direction: 'up' | 'down') {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+
+    const idx = agent.workOptions.findIndex((o) => o.id === optionId);
+    if (idx === -1) return;
+
+    if (direction === 'up' && idx > 0) {
+      const temp = agent.workOptions[idx]!;
+      agent.workOptions[idx] = agent.workOptions[idx - 1]!;
+      agent.workOptions[idx - 1] = temp;
+    } else if (direction === 'down' && idx < agent.workOptions.length - 1) {
+      const temp = agent.workOptions[idx]!;
+      agent.workOptions[idx] = agent.workOptions[idx + 1]!;
+      agent.workOptions[idx + 1] = temp;
+    } else {
+      return;
+    }
+
+    const oldVersion = agent.version || 1;
+    const newVersion = oldVersion + 1;
+    agent.version = newVersion;
+    agent.updatedAt = 'Just now';
+
+    if (!agent.versionHistory) agent.versionHistory = [];
+    agent.versionHistory.unshift({
+      version: newVersion,
+      timestamp: 'Just now',
+      author: this.state.operator.name,
+      changeSummary: `Reordered execution preferences (Priority ${direction === 'up' ? idx + 1 : idx + 2} -> Priority ${direction === 'up' ? idx : idx + 1}).`,
+      optionsCount: agent.workOptions.length,
+      standingInstructions: agent.standingInstructions,
+    });
+
+    this.notify(`Reordered work options for Agent "${agent.displayName}" (v${newVersion}).`);
+  }
+
+  public archiveAgent(agentId: string): { success: boolean; reason?: string } {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return { success: false, reason: 'Agent not found' };
+
+    // Invariant (ADR-0008): An Agent cannot be archived during an active run or while it remains Task lead of an unfinished Task.
+    const activeTasksWithLead = this.state.tasks.filter(
+      (t) => t.taskLeadId === agentId && t.lifecycle !== 'completed' && t.lifecycle !== 'cancelled' && t.lifecycle !== 'rejected' && t.lifecycle !== 'withdrawn'
+    );
+    if (activeTasksWithLead.length > 0) {
+      const msg = `Cannot archive Agent "${agent.displayName}": Agent is currently Task lead for ${activeTasksWithLead.length} unfinished task(s) (e.g. Task #${activeTasksWithLead[0]!.id.replace('task-', '')}). Reassign or complete tasks first (ADR-0008).`;
+      if (typeof window !== 'undefined' && window.alert) {
+        window.alert(msg);
+      }
+      return { success: false, reason: msg };
+    }
+
+    agent.status = 'archived';
+    this.notify(`Archived Agent "${agent.displayName}". Historical attribution, private memory, and session slots preserved.`);
+    return { success: true };
+  }
+
+  public restoreAgent(agentId: string) {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    if (!agent) return;
+
+    agent.status = 'active';
+    this.notify(`Restored Agent "${agent.displayName}". Agent is available for new project assignments and runs.`);
+  }
+
+  public evaluateAdmissionFallback(agentId: string, environmentId: string) {
+    const agent = this.state.agents.find((a) => a.id === agentId);
+    const env = this.state.environments.find((e) => e.id === environmentId);
+    if (!agent || !env) return null;
+
+    const evaluationSteps: {
+      priority: number;
+      option: AgentWorkOption;
+      status: 'selected' | 'skipped_unsupported' | 'skipped_unauthenticated' | 'skipped_model_missing';
+      reason: string;
+    }[] = [];
+
+    let selectedOption: AgentWorkOption | null = null;
+
+    for (let i = 0; i < agent.workOptions.length; i++) {
+      const opt = agent.workOptions[i]!;
+      const engineReadiness = env.engineReadiness[opt.engine];
+
+      if (engineReadiness === 'missing' || !engineReadiness) {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unsupported',
+          reason: `Engine "${opt.engine}" is not installed or supported on host ${env.displayName}.`,
+        });
+      } else if (engineReadiness === 'login-required') {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unauthenticated',
+          reason: `Engine "${opt.engine}" requires login/authentication on host ${env.displayName}.`,
+        });
+      } else if (engineReadiness === 'ready') {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'selected',
+          reason: `Engine "${opt.engine}" is permitted, authenticated, and model "${opt.workModel}" is available.`,
+        });
+        selectedOption = opt;
+        break; // Sprout selects the FIRST available option at run admission
+      } else {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unsupported',
+          reason: `Engine readiness status is ${engineReadiness}.`,
+        });
+      }
+    }
+
+    return {
+      agent,
+      environment: env,
+      evaluationSteps,
+      selectedOption,
+      guaranteeNote: 'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
+    };
   }
 
   public setUsageFilter(filter: Partial<PrototypeState['usageFilter']>) {
@@ -3013,7 +3551,7 @@ class StateManager {
     for (const envId of boundEnvIds) {
       const env = this.state.environments.find((e) => e.id === envId);
       if (env) {
-        const root = env.workspaceRoots[0] || (env.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
+        const root = env.workspaceRoots[0] || (env.platform === 'windows' ? 'C:\\SproutWorkspaces' : '~/workspace/sprout-projects');
         boundEnvironmentWorkspaces.push({
           environmentId: env.id,
           workspaceRoot: root,
