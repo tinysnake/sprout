@@ -16,7 +16,6 @@ export function renderProjectChat(
   // Resolve current active scope identity
   let currentScopeTitle = '#general';
   let currentScopeTypeBadge = 'Project Broadcast';
-  let currentScopeDesc = 'Broadcast channel for all project agents and operator.';
   let isReadOnly = project.status === 'archived';
   let readOnlyReason = project.status === 'archived' ? 'Project is archived. All communication is read-only.' : '';
   let activeWorkingGroup: WorkingGroup | undefined = undefined;
@@ -28,7 +27,6 @@ export function renderProjectChat(
     activeWorkingGroup = project.workingGroups.find((w) => w.id === state.selectedWorkingGroupId);
     currentScopeTitle = activeWorkingGroup?.displayName || state.selectedWorkingGroupId;
     currentScopeTypeBadge = activeWorkingGroup?.status === 'disbanded' ? 'Working Group (Disbanded)' : 'Working Group';
-    currentScopeDesc = activeWorkingGroup?.goal || 'Focused sub-team working group.';
     if (activeWorkingGroup?.status === 'disbanded') {
       isReadOnly = true;
       readOnlyReason = 'This Working Group has been disbanded. Conversation history is preserved as read-only.';
@@ -43,7 +41,6 @@ export function renderProjectChat(
     const agentDef = state.agents.find((a) => a.id === state.selectedDirectMessagePeerId);
     currentScopeTitle = `@${activeDirectPeer?.displayName || agentDef?.displayName || state.selectedDirectMessagePeerId}`;
     currentScopeTypeBadge = activeDirectPeer?.status === 'ended' ? 'Direct Message (Ended)' : 'Direct Message';
-    currentScopeDesc = activeDirectPeer?.responsibilities || agentDef?.description || '1-on-1 project-scoped agent collaboration.';
     if (activeDirectPeer?.status === 'ended') {
       isReadOnly = true;
       readOnlyReason = `Agent membership for @${activeDirectPeer.displayName} has ended in this project. History is preserved; new messages cannot be sent.`;
@@ -760,13 +757,44 @@ export function renderRoutingInspectorModal(
   modal.className = 'proto-modal-backdrop';
 
   // Find or fallback batch
-  let currentBatch = state.routingBatches.find((b) => b.id === batchId) ?? state.routingBatches[0];
+  const defaultFallbackBatch: RoutingBatch = {
+    id: 'batch-002',
+    projectId: 'proj-minesweeper',
+    openedAt: '25m 00s ago',
+    closedAt: '24m 30s ago',
+    collectionWindowDurationSec: 30,
+    inputMessageIds: ['msg-3'],
+    status: 'settled',
+    attemptsCount: 1,
+    wakeModel: 'gpt-4o-mini',
+    frozenContextSummary: {
+      tokenCount: 1840,
+      projectRulesIncluded: true,
+      recentMessagesCount: 4,
+      tasksSummariesCount: 2,
+      truncated: false,
+    },
+    decisions: [
+      {
+        messageId: 'msg-3',
+        targetAgentId: 'designer',
+        status: 'selected',
+        rationale:
+          'Message discusses sRGB shader lighting aesthetics which maps directly to Designer responsibility slot.',
+      },
+    ],
+    resultingWakeRequestIds: ['wake-02'],
+  };
+
+  let currentBatch: RoutingBatch =
+    state.routingBatches.find((b) => b.id === batchId) ??
+    state.routingBatches[0] ??
+    defaultFallbackBatch;
 
   const renderContent = (batch: RoutingBatch) => {
     const isSettled = batch.status === 'settled';
     const isSuppressed = batch.status === 'suppressed';
     const isFailedClosed = batch.status === 'failed-closed';
-    const isOpen = batch.status === 'open' || batch.status === 'evaluating';
 
     const statusBadgeClass = isSettled ? 'green' : isFailedClosed ? 'red' : isSuppressed ? 'neutral' : 'blue';
 
@@ -976,7 +1004,7 @@ export function renderRoutingInspectorModal(
  */
 export function renderNewWorkingGroupModal(
   parentEl: HTMLElement,
-  state: PrototypeState,
+  _state: PrototypeState,
   project: ProjectItem
 ) {
   const modal = document.createElement('div');
@@ -1067,7 +1095,7 @@ export function renderNewWorkingGroupModal(
  */
 export function renderWorkingGroupDetailsModal(
   parentEl: HTMLElement,
-  state: PrototypeState,
+  _state: PrototypeState,
   project: ProjectItem,
   wg: WorkingGroup
 ) {
