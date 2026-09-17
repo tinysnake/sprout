@@ -3295,9 +3295,14 @@ code {
 
 .env-master-card-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.env-master-card-header .status-dot {
+  margin-top: 3px;
+  flex-shrink: 0;
 }
 
 .env-platform-icon {

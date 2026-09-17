@@ -533,14 +533,6 @@ function renderEnvironmentDetailCard(
       }
 
       ${
-        env.workSafety === 'recovery'
-          ? `<button class="btn btn-danger btn-sm force-release-btn">
-              ${renderIcon('warning', 13)} Emergency Force Release
-            </button>`
-          : ''
-      }
-
-      ${
         env.enrollmentStatus === 'approved' && !env.activeLeaseHolder && env.workSafety === 'clear'
           ? `<button class="btn btn-secondary btn-sm archive-env-btn">
               ${renderIcon('archive', 13)} Archive Instance
@@ -608,8 +600,10 @@ function renderEnvironmentDetailCard(
     stateManager.triggerSimulatedWorkerReconnect(env.id);
   });
 
-  detailEl.querySelector('.force-release-btn')?.addEventListener('click', () => {
-    stateManager.openInspector('force-release', env.id);
+  detailEl.querySelectorAll('.force-release-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      stateManager.openInspector('force-release', env.id);
+    });
   });
 
   detailEl.querySelector('.archive-env-btn')?.addEventListener('click', () => {
