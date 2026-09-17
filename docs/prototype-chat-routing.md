@@ -161,7 +161,7 @@ In accordance with ADR-0007:
 ### Responsive Viewport Parity
 - **Phone Viewport (390px simulated iPhone)**:
   - *Level 1 (Chat List)*: Full-screen categorized scope cards (`Project Channels`, `Working Groups`, `Direct Messages`) with unread counter badges and last message previews.
-  - *Level 2 (Chat Detail)*: Full-screen conversation timeline, sticky `← Back to Chats` header button with native browser history integration (`pushState`/`popstate`), and bottom composer with live addressing feedback.
+  - *Level 2 (Chat Detail)*: Full-screen conversation timeline, sticky `← Back to Chats` header button with native browser history integration (`pushState`/`popstate`), conversation information button opening modal scope details, and streamlined bottom composer.
 - **Desktop Viewport**:
   - *Split-Pane Layout*: Left column (310px) categorized scope cards; Right column conversation detail with sticky header, active window banner, message stream, and rich composer.
 
@@ -201,6 +201,7 @@ In accordance with ADR-0007:
 4. **Automatic Wake Routing of Projected Replies**: Rejected; causes infinite wake loops.
 5. **Debounce Reset-on-Message Window**: Rejected; starves active channels indefinitely.
 6. **Hard Deletion of Groups or DMs**: Rejected; damages historical traceability.
+7. **Permanent Quick-Mention Chips & In-Composer Addressing Feedback Pills**: Rejected per owner review in favor of a clean, uncluttered composer; deterministic addressing and collection windows remain governed by ADR-0007 invariants.
 
 ### Unresolved Questions
 1. **Working Group Creation Authority**: In M2, any Project member can create a Working Group; creator is automatically enrolled.

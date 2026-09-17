@@ -215,6 +215,9 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Hard Deletion of Groups or DMs:</strong> Rejected in ADR-0008; damages historical traceability.
           </li>
           <li>
+            <strong>Permanent Quick-Mention Chips & In-Composer Addressing Pills:</strong> Rejected per owner review in favor of a clean, uncluttered composer; deterministic addressing and collection windows remain governed by ADR-0007 invariants.
+          </li>
+          <li>
             <strong>Automatic Timeout-Driven Lease Release:</strong> Rejected in ADR-0005; silently releasing an idle or blocked Task's environment causes catastrophic loss of uncommitted state in scarce host environments.
           </li>
           <li>
