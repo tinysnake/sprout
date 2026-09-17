@@ -221,10 +221,10 @@ test('Feed & Attention: deep-link navigation preserves scope and filter state on
     scopeSelect.value = 'proj-minesweeper';
     scopeSelect.dispatchEvent(new dom.window.Event('change'));
 
-    // 2. Click "Review Claim in Tasks →" button on Task #101 card
-    const actionBtn = document.querySelector('.attention-action-btn[data-attention-id="att-1"]') as HTMLButtonElement;
-    assert.ok(actionBtn);
-    actionBtn.click();
+    // 2. Click Task #101 attention card
+    const actionCard = document.querySelector('.attention-card[data-attention-id="att-1"]') as HTMLElement;
+    assert.ok(actionCard);
+    actionCard.click();
 
     // Verify navigated to Project Tasks view with return banner
     assert.ok(document.querySelector('.projects-view'), 'Navigated to Project view');

@@ -125,10 +125,10 @@ test('prototype navigates across Feed, Project, Manage, and Primitives with deep
     const attentionCards = document.querySelectorAll('.attention-card');
     assert.ok(attentionCards.length > 0, 'Attention cards are rendered');
 
-    // 2. Click an attention action button to test deep linking with return context
-    const firstActionBtn = document.querySelector('.attention-action-btn') as HTMLButtonElement;
-    assert.ok(firstActionBtn, 'Attention action button exists');
-    firstActionBtn.click();
+    // 2. Click an attention card to test deep linking with return context
+    const firstAttentionCard = document.querySelector('.attention-card') as HTMLElement;
+    assert.ok(firstAttentionCard, 'Attention card exists');
+    firstAttentionCard.click();
 
     // Now should have return banner
     const returnBanner = document.querySelector('.return-context-banner');

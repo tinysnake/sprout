@@ -565,12 +565,6 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
                   Goal: ${task.currentVersion.goal}
                 </div>
               </div>
-
-              <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
-                <button class="btn btn-primary btn-sm btn-view-task" data-task-id="${task.id}">
-                  View Task in Project →
-                </button>
-              </div>
             </div>
           `;
           })
@@ -579,16 +573,6 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
     `
     }
   `;
-
-  section.querySelectorAll('.btn-view-task').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const taskId = (ev.currentTarget as HTMLElement).getAttribute('data-task-id');
-      if (taskId) {
-        stateManager.navigateWithReturn({ nav: 'project', projectTab: 'tasks', taskId }, 'Feed');
-      }
-    });
-  });
 
   section.querySelectorAll('.active-task-card').forEach((card) => {
     card.addEventListener('click', (ev) => {
@@ -752,9 +736,6 @@ function renderAttentionCardHtml(item: AttentionItem): string {
           <span>•</span>
           <span>${item.timestamp}</span>
         </div>
-        <button class="btn btn-primary btn-sm attention-action-btn" data-attention-id="${item.id}">
-          ${item.actionLabel} →
-        </button>
       </div>
     </div>
   `;
@@ -787,48 +768,6 @@ function renderActivityRowHtml(item: ActivityFeedItem): string {
 }
 
 function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
-  root.querySelectorAll('.attention-action-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const attId = (ev.currentTarget as HTMLElement).getAttribute('data-attention-id');
-      const item = state.attentionItems.find((a) => a.id === attId);
-      if (!item) return;
-
-      if (
-        item.category === 'task_validation' ||
-        item.category === 'task_blocker' ||
-        item.category === 'task_recovery' ||
-        item.category === 'task_proposed'
-      ) {
-        stateManager.navigateWithReturn(
-          {
-            nav: 'project',
-            projectTab: 'tasks',
-            taskId: item.referenceId,
-          },
-          'Feed'
-        );
-      } else if (item.category === 'env_enrollment' || item.category === 'env_unhealthy') {
-        stateManager.navigateWithReturn(
-          {
-            nav: 'manage',
-            manageTab: 'environments',
-            envId: item.referenceId,
-          },
-          'Feed'
-        );
-      } else if (item.category === 'routing_fallback') {
-        stateManager.navigateWithReturn(
-          {
-            nav: 'project',
-            projectTab: 'chat',
-          },
-          'Feed'
-        );
-      }
-    });
-  });
-
   root.querySelectorAll('.attention-card').forEach((card) => {
     card.addEventListener('click', (ev) => {
       const attId = (ev.currentTarget as HTMLElement).getAttribute('data-attention-id');
