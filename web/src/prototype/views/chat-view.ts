@@ -232,6 +232,12 @@ export function renderProjectChat(
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
           </div>
+          
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <button class="btn btn-secondary btn-sm chat-info-btn" id="chat-scope-info-btn" title="Conversation Details & Routing Policy" aria-label="Conversation Details & Routing Policy" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+              ${renderIcon('info', 16)}
+            </button>
+          </div>
         </div>
 
         <!-- Read-Only Banner if applicable -->
@@ -342,20 +348,6 @@ export function renderProjectChat(
 
         <!-- Chat Composer Area -->
         <div class="chat-composer-wrap" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; flex-direction: column; gap: 8px;">
-          
-          <!-- Live Addressing Feedback Pill -->
-          <div class="composer-meta-bar" style="display: flex; align-items: center; justify-content: flex-end; min-height: 18px;">
-            <div class="addressing-feedback-pill" id="composer-addressing-pill" style="font-size: 10px; color: var(--text-secondary); display: flex; align-items: center; gap: 4px;">
-              ${
-                state.selectedScopeKind === 'direct-message'
-                  ? `<span>⚡ Direct DM: Deterministic wake (bypasses model)</span>`
-                  : project.wakePolicy === 'wake-model-assisted'
-                    ? `<span>⏳ Unaddressed input enters 30s batch window</span>`
-                    : `<span>ℹ️ Explicit-only policy (persisted without waking)</span>`
-              }
-            </div>
-          </div>
-
           <!-- Input Row -->
           <div class="composer-input-row" style="display: flex; gap: 8px; align-items: center;">
             <input
@@ -420,6 +412,21 @@ export function renderProjectChat(
     }
   });
 
+  // Chat Info Modal Opener
+  chatViewEl.querySelector('#chat-scope-info-btn')?.addEventListener('click', () => {
+    renderChatInfoModal(
+      rootContainer,
+      state,
+      project,
+      state.selectedScopeKind,
+      state.selectedScopeKind === 'working-group-channel'
+        ? state.selectedWorkingGroupId
+        : state.selectedScopeKind === 'direct-message'
+          ? state.selectedDirectMessagePeerId
+          : undefined
+    );
+  });
+
   // Open Batch Button in Window Banner
   chatViewEl.querySelector('.inspect-open-batch-btn')?.addEventListener('click', (ev) => {
     const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-005';
@@ -435,25 +442,6 @@ export function renderProjectChat(
   });
 
   const inputEl = chatViewEl.querySelector('#chat-main-input') as HTMLInputElement;
-  const addressingPill = chatViewEl.querySelector('#composer-addressing-pill') as HTMLElement;
-
-  // Live input feedback handler
-  const updateAddressingFeedback = (val: string) => {
-    if (!addressingPill) return;
-    if (state.selectedScopeKind === 'direct-message') {
-      addressingPill.innerHTML = `<span>⚡ Direct DM: Deterministic wake (bypasses model)</span>`;
-    } else if (val.includes('@all') || val.includes('@')) {
-      addressingPill.innerHTML = `<span style="color: var(--green-ready); font-weight: 600;">⚡ Mention detected: Deterministic wake (bypasses batch window)</span>`;
-    } else if (project.wakePolicy === 'wake-model-assisted') {
-      addressingPill.innerHTML = `<span>⏳ Unaddressed input enters 30s batch window</span>`;
-    } else {
-      addressingPill.innerHTML = `<span>ℹ️ Explicit-only policy (persisted without waking)</span>`;
-    }
-  };
-
-  inputEl?.addEventListener('input', () => {
-    updateAddressingFeedback(inputEl.value);
-  });
 
   // Send message handler
   const sendBtn = chatViewEl.querySelector('#btn-send-chat-msg') as HTMLButtonElement;
@@ -470,7 +458,6 @@ export function renderProjectChat(
 
     stateManager.sendMessage(project.id, scope, text);
     inputEl.value = '';
-    updateAddressingFeedback('');
   };
 
   sendBtn?.addEventListener('click', handleSend);
