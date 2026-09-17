@@ -112,7 +112,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
 
   let optionsHtml = `
     <option value="all" ${currentScope === 'all' ? 'selected' : ''}>
-      全部项目 / All Projects (${allAttCount} 待办)
+      All Projects (${allAttCount} pending)
     </option>
   `;
 
@@ -125,7 +125,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
     );
     optionsHtml += `
       <option value="${proj.id}" ${currentScope === proj.id ? 'selected' : ''}>
-        ${proj.displayName} (${projItems.length} 待办)
+        ${proj.displayName} (${projItems.length} pending)
       </option>
     `;
   }
@@ -135,7 +135,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
   );
   optionsHtml += `
     <option value="infrastructure" ${currentScope === 'infrastructure' ? 'selected' : ''}>
-      基础设施 / Infrastructure (${infraItems.length} 待办)
+      Infrastructure (${infraItems.length} pending)
     </option>
   `;
 
@@ -282,7 +282,7 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
           : `
         <div class="project-clear-banner" style="margin-top: 8px;">
           <span class="status-dot green"></span>
-          <span>${project.displayName}: 当前无待办事项，系统自主运行中。</span>
+          <span>${project.displayName}: All clear, system running autonomously.</span>
         </div>
       `
       }
@@ -451,19 +451,19 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
       <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
         <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedItems.length}</span>
-        <span class="urgency-pill-bottom">全部</span>
+        <span class="urgency-pill-bottom">All</span>
       </button>
       <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
         <span class="urgency-pill-top"><span class="status-dot red"></span> ${redItems.length}</span>
-        <span class="urgency-pill-bottom">需干预</span>
+        <span class="urgency-pill-bottom">Action Req.</span>
       </button>
       <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention">
         <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${yellowItems.length}</span>
-        <span class="urgency-pill-bottom">待审批</span>
+        <span class="urgency-pill-bottom">Attention</span>
       </button>
       <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info">
         <span class="urgency-pill-top"><span class="status-dot blue"></span> ${blueItems.length}</span>
-        <span class="urgency-pill-bottom">提案/通知</span>
+        <span class="urgency-pill-bottom">Info/Notices</span>
       </button>
     </div>
 
@@ -483,7 +483,7 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
           : `
         <div class="project-clear-banner" style="margin-top: 10px;">
           <span class="status-dot green"></span>
-          <span><strong>${scopeLabel}</strong>: 当前分类无待办事项，系统自主运行中。</span>
+          <span><strong>${scopeLabel}</strong>: No attention items in this category. System running autonomously.</span>
         </div>
       `
         : `
