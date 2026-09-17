@@ -3124,3 +3124,140 @@ code {
   animation: fadeIn 0.2s ease-out;
 }
 
+/* 26. Environment Management & Recovery Styles (Ticket #65) */
+.envs-split-layout {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+.envs-master-column {
+  width: 340px;
+  min-width: 300px;
+  max-width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.envs-detail-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.envs-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.env-master-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-sm);
+}
+
+.env-master-card:hover {
+  background: var(--bg-surface-elevated);
+  border-color: var(--accent-primary);
+  transform: translateY(-1px);
+}
+
+.env-master-card.active {
+  background: var(--bg-surface-elevated);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1.5px var(--accent-primary);
+}
+
+.env-master-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.env-platform-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.env-platform-icon.macos {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent-primary);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.env-platform-icon.windows {
+  background: rgba(168, 85, 247, 0.15);
+  color: var(--purple-agent);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.env-platform-icon.container {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--green-ready);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.envs-mobile-detail-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.mobile-detail-nav-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: var(--shadow-sm);
+}
+
+.env-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.perm-toggle-btn {
+  min-width: 60px;
+  font-weight: 600;
+  transition: all 0.15s ease;
+}
+
+.perm-toggle-btn.btn-success {
+  background: var(--green-ready-bg);
+  color: var(--green-ready);
+  border: 1px solid var(--green-ready-border);
+}
+
+.perm-toggle-btn.btn-success:hover {
+  background: var(--green-ready);
+  color: var(--text-inverse);
+}
+
+

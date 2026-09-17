@@ -107,7 +107,7 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
     const document = dom.window.document;
 
     // Initial state: All Projects
-    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'All 4 attention items initially');
+    assert.equal(document.querySelectorAll('.attention-card').length, 6, 'All 6 attention items initially');
     assert.equal(document.querySelectorAll('.active-task-card').length, 1, '1 active task in all scope');
 
     // Select O7 Minesweeper in Scope Dropdown
@@ -136,8 +136,8 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
 
     // Verify Attention items filtered to infrastructure
     const infraCards = document.querySelectorAll('.attention-card');
-    assert.equal(infraCards.length, 1, '1 generic infrastructure attention item (MacBook Air enrollment)');
-    assert.match(infraCards[0]?.textContent ?? '', /Pending Worker Enrollment: MacBook Air/);
+    assert.equal(infraCards.length, 3, '3 infrastructure attention items (MacBook Air, Container CI, Mac mini)');
+    assert.ok(Array.from(infraCards).some((c) => c.textContent?.includes('Pending Worker Enrollment: MacBook Air')));
 
     // Verify 0 active tasks under Infrastructure
     assert.equal(document.querySelectorAll('.active-task-card').length, 0, '0 active tasks under infrastructure');
@@ -145,7 +145,7 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
     // Reset to All
     scopeSelect.value = 'all';
     scopeSelect.dispatchEvent(new dom.window.Event('change'));
-    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Reset to all 4 attention items');
+    assert.equal(document.querySelectorAll('.attention-card').length, 6, 'Reset to all 6 attention items');
   } finally {
     await cleanup();
   }
@@ -174,7 +174,7 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
     dangerPill.click();
 
     const redCards = document.querySelectorAll('.attention-card');
-    assert.equal(redCards.length, 2, '2 action required cards (Task #104 recovery & Task #103 blocker)');
+    assert.equal(redCards.length, 3, '3 action required cards (Task #104 recovery, Task #103 blocker, Mac mini protocol mismatch)');
 
     // Filter by Pending Approval (Validation & Enrollment)
     const warningPill = document.querySelector('.urgency-pill-btn[data-severity="attention"]') as HTMLButtonElement;
@@ -182,7 +182,7 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
     warningPill.click();
 
     const yellowCards = document.querySelectorAll('.attention-card');
-    assert.equal(yellowCards.length, 2, '2 pending approval cards (Task #101 claim & MacAir enrollment)');
+    assert.equal(yellowCards.length, 3, '3 pending approval cards (Task #101 claim, MacAir enrollment, CI container degraded)');
 
     // Filter by Proposals & Notices (Info)
     const infoPill = document.querySelector('.urgency-pill-btn[data-severity="info"]') as HTMLButtonElement;
@@ -196,7 +196,7 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
     // Reset to All
     const allPill = document.querySelector('.urgency-pill-btn[data-severity="all"]') as HTMLButtonElement;
     allPill.click();
-    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Restored all 4 items');
+    assert.equal(document.querySelectorAll('.attention-card').length, 6, 'Restored all 6 items');
   } finally {
     await cleanup();
   }
@@ -293,7 +293,7 @@ test('Feed & Attention: exercises 7-state realistic matrix via top harness contr
 
     // 7. Mixed Default State
     selectStatePreset('mixed');
-    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Mixed state restored with 4 items');
+    assert.equal(document.querySelectorAll('.attention-card').length, 6, 'Mixed state restored with 6 items');
   } finally {
     await cleanup();
   }

@@ -45,6 +45,8 @@ export interface PrototypeState {
   taskViewMode: 'list' | 'detail';
   taskFilter: string;
   chatViewMode: 'list' | 'detail';
+  environmentViewMode: 'list' | 'detail';
+  environmentFilter: string;
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -152,9 +154,9 @@ const initialEnvironments: EnvironmentInstance[] = [
     id: 'mac-studio-primary',
     displayName: 'macOS Studio Host (M2 Max)',
     platform: 'macos',
-    hostUser: 'operator-local',
+    hostUser: 'mac-operator',
     trafficLight: 'green',
-    trafficLightReason: 'All capabilities permitted, engines authenticated, lease clear',
+    trafficLightReason: 'All capabilities permitted · Engines authenticated · Lease held by Task #101',
     enrollmentStatus: 'approved',
     workerIdentityKey: 'sprout-wk-mac-7f89a1c2',
     connectionState: 'online',
@@ -174,14 +176,26 @@ const initialEnvironments: EnvironmentInstance[] = [
       agy: 'ready',
       opencode: 'ready',
     },
+    engineDetails: {
+      codex: { version: 'v0.18.2', authStatus: 'authenticated', modelAvailability: 'gpt-4o, gpt-4o-mini', notes: 'OAuth session active on host' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Claude token validated' },
+      agy: { version: 'v1.4.0', authStatus: 'authenticated', modelAvailability: 'gemini-1.5-pro', notes: 'Config hook installed' },
+      opencode: { version: 'v0.8.0', authStatus: 'authenticated', modelAvailability: 'deepseek-coder-v2', notes: 'Local harness ready' },
+    },
     workSafety: 'clear',
-    workspaceRoots: ['/Users/workspace/sprout-projects'],
+    workspaceRoots: ['~/workspace/sprout-projects'],
     activeLeaseHolder: {
       holderKind: 'task',
       holderId: 'task-101',
       projectId: 'proj-minesweeper',
       acquiredAt: '18m ago',
+      taskTitle: 'Implement 3D Board Grid & Click Reveal Logic',
+      leadAgentName: 'Programmer',
     },
+    probeHistory: [
+      { id: 'pr-mac-1', timestamp: '10s ago', latencyMs: 14, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Readiness probe confirmed: 4 engines ready, TLS/WSS latency 14ms' },
+      { id: 'pr-mac-2', timestamp: '5m ago', latencyMs: 16, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Periodic heartbeat confirmed: Protocol v2.1 compatible' },
+    ],
   },
   {
     id: 'win-dev-box',
@@ -189,7 +203,7 @@ const initialEnvironments: EnvironmentInstance[] = [
     platform: 'windows',
     hostUser: 'win-operator',
     trafficLight: 'red',
-    trafficLightReason: 'Worker offline for 14 minutes · Lease recovery required',
+    trafficLightReason: 'Worker offline for 14 minutes · Lease recovery required (interrupted run #206)',
     enrollmentStatus: 'approved',
     workerIdentityKey: 'sprout-wk-win-3b44c8d9',
     connectionState: 'offline',
@@ -209,6 +223,12 @@ const initialEnvironments: EnvironmentInstance[] = [
       agy: 'missing',
       opencode: 'unknown',
     },
+    engineDetails: {
+      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Engine session expired on Windows host' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Pi harness authenticated' },
+      agy: { version: 'missing', authStatus: 'uninstalled', modelAvailability: 'none', notes: 'Not installed on host' },
+      opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown', notes: 'Host worker unprobed' },
+    },
     workSafety: 'recovery',
     workspaceRoots: ['C:\\SproutWorkspaces'],
     activeLeaseHolder: {
@@ -216,16 +236,23 @@ const initialEnvironments: EnvironmentInstance[] = [
       holderId: 'task-104',
       projectId: 'proj-minesweeper',
       acquiredAt: '45m ago',
+      taskTitle: 'Refactor Particle Explode Shader for Loss Animation',
+      leadAgentName: 'Programmer',
     },
     leaseRecovery: {
       cause: 'Worker process terminated unexpectedly during active nested Agent run #206',
       interruptedRunId: 'run-206',
+      interruptedRunAgent: 'Programmer',
       unresolvedFacts: [
         'Host worker offline: engine process stop cannot be confirmed over carrier',
         'Temporary task scratch context directory unrecycled on Windows host',
         'Settlement telemetry uncollected for last 2 turns of turn execution',
       ],
     },
+    probeHistory: [
+      { id: 'pr-win-1', timestamp: '14m ago', latencyMs: 320, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe failed: Connection timed out after 320ms' },
+      { id: 'pr-win-2', timestamp: '45m ago', latencyMs: 24, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Probe confirmed: All harnesses online prior to disconnect' },
+    ],
   },
   {
     id: 'mac-laptop-pending',
@@ -233,7 +260,7 @@ const initialEnvironments: EnvironmentInstance[] = [
     platform: 'macos',
     hostUser: 'traveler-user',
     trafficLight: 'yellow',
-    trafficLightReason: 'Pending enrollment approval by operator',
+    trafficLightReason: 'Pending enrollment approval by operator · Worker key verified',
     enrollmentStatus: 'pending',
     workerIdentityKey: 'sprout-wk-macair-e018df33',
     connectionState: 'reconnecting',
@@ -253,8 +280,126 @@ const initialEnvironments: EnvironmentInstance[] = [
       agy: 'unknown',
       opencode: 'unknown',
     },
+    engineDetails: {
+      codex: { version: 'v0.18.2', authStatus: 'authenticated', modelAvailability: 'gpt-4o', notes: 'CLI session verified' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'CLI session verified' },
+      agy: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+      opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+    },
     workSafety: 'clear',
-    workspaceRoots: ['/Users/traveler/projects'],
+    workspaceRoots: ['~/projects/mobile-work'],
+    probeHistory: [
+      { id: 'pr-air-1', timestamp: 'Just now', latencyMs: 12, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Bootstrap enrollment probe: Host public key verified over TLS/WSS' },
+    ],
+  },
+  {
+    id: 'linux-container-ci',
+    displayName: 'Linux Container CI (Docker)',
+    platform: 'container',
+    hostUser: 'ci-runner',
+    trafficLight: 'yellow',
+    trafficLightReason: 'Degraded · Codex engine login required · GUI automation unavailable',
+    enrollmentStatus: 'approved',
+    workerIdentityKey: 'sprout-wk-ci-9a882d14',
+    connectionState: 'online',
+    lastConfirmedTime: '45s ago',
+    connectionAgeSec: 45,
+    protocolCompatibility: 'compatible',
+    protocolVersion: 'v2.1',
+    capabilityPermissions: {
+      fileReadWrite: true,
+      processExecution: true,
+      networkAccess: true,
+      guiAutomation: false,
+    },
+    engineReadiness: {
+      codex: 'login-required',
+      pi: 'ready',
+      agy: 'ready',
+      opencode: 'ready',
+    },
+    engineDetails: {
+      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Codex credentials expired in container' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'API key mounted in container' },
+      agy: { version: 'v1.4.0', authStatus: 'authenticated', modelAvailability: 'gemini-1.5-flash', notes: 'Local CLI ready' },
+      opencode: { version: 'v0.8.0', authStatus: 'authenticated', modelAvailability: 'deepseek-coder-v2', notes: 'Local model weights cached' },
+    },
+    workSafety: 'clear',
+    workspaceRoots: ['/var/sprout/workspaces'],
+    probeHistory: [
+      { id: 'pr-ci-1', timestamp: '45s ago', latencyMs: 8, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe degraded: Codex requires interactive auth on host' },
+    ],
+  },
+  {
+    id: 'mac-mini-mismatch',
+    displayName: 'Mac mini (Legacy Worker)',
+    platform: 'macos',
+    hostUser: 'mac-operator',
+    trafficLight: 'red',
+    trafficLightReason: 'Protocol incompatible: worker protocol v1.8 is below required v2.0+',
+    enrollmentStatus: 'approved',
+    workerIdentityKey: 'sprout-wk-mini-4f11e99c',
+    connectionState: 'online',
+    lastConfirmedTime: '1m ago',
+    connectionAgeSec: 60,
+    protocolCompatibility: 'incompatible',
+    protocolVersion: 'v1.8',
+    protocolMismatchDetail: 'Worker protocol v1.8 is outdated. Update Sprout worker binary on host to v2.1+ to enable Task admission.',
+    capabilityPermissions: {
+      fileReadWrite: true,
+      processExecution: true,
+      networkAccess: false,
+      guiAutomation: false,
+    },
+    engineReadiness: {
+      codex: 'ready',
+      pi: 'ready',
+      agy: 'unknown',
+      opencode: 'unknown',
+    },
+    engineDetails: {
+      codex: { version: 'v0.16.0', authStatus: 'authenticated', modelAvailability: 'gpt-4o', notes: 'Older harness' },
+      pi: { version: 'v0.2.8', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Older harness' },
+      agy: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+      opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+    },
+    workSafety: 'clear',
+    workspaceRoots: ['~/workspace/legacy'],
+    probeHistory: [
+      { id: 'pr-mini-1', timestamp: '1m ago', latencyMs: 16, protocolOk: false, enginesOk: true, capabilitiesOk: true, summary: 'Probe incompatible: Protocol version mismatch (v1.8 < v2.0)' },
+    ],
+  },
+  {
+    id: 'win-workstation-archived',
+    displayName: 'Windows Workstation (Archived)',
+    platform: 'windows',
+    hostUser: 'win-operator',
+    trafficLight: 'yellow',
+    trafficLightReason: 'Archived instance · Enrollment preserved · No active work admitted',
+    enrollmentStatus: 'archived',
+    workerIdentityKey: 'sprout-wk-win-arch-6c77a44b',
+    connectionState: 'offline',
+    lastConfirmedTime: '3d ago',
+    connectionAgeSec: 259200,
+    protocolCompatibility: 'compatible',
+    protocolVersion: 'v2.0',
+    capabilityPermissions: {
+      fileReadWrite: true,
+      processExecution: true,
+      networkAccess: true,
+      guiAutomation: true,
+    },
+    engineReadiness: {
+      codex: 'ready',
+      pi: 'ready',
+      agy: 'ready',
+      opencode: 'ready',
+    },
+    workSafety: 'clear',
+    workspaceRoots: ['D:\\SproutDev'],
+    probeHistory: [
+      { id: 'pr-arch-1', timestamp: '3d ago', latencyMs: 22, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Last probe before archive: all clear' },
+    ],
   },
 ];
 
@@ -334,7 +479,7 @@ const initialProjects: ProjectItem[] = [
     boundEnvironmentWorkspaces: [
       {
         environmentId: 'mac-studio-primary',
-        workspaceRoot: '/Users/workspace/sprout-projects',
+        workspaceRoot: '~/workspace/sprout-projects',
         relativeWorkspacePath: 'minesweeper-threejs',
         isPrepared: true,
       },
@@ -468,7 +613,7 @@ const initialProjects: ProjectItem[] = [
     boundEnvironmentWorkspaces: [
       {
         environmentId: 'mac-studio-primary',
-        workspaceRoot: '/Users/workspace/sprout-projects',
+        workspaceRoot: '~/workspace/sprout-projects',
         relativeWorkspacePath: 'docs-portal',
         isPrepared: true,
       },
@@ -1396,6 +1541,42 @@ const initialAttentionItems: AttentionItem[] = [
     lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
     attribution: 'sprout-wk-macair-e018df33 (Worker)',
   },
+  {
+    id: 'att-5',
+    severity: 'attention',
+    category: 'env_unhealthy',
+    title: 'Degraded Host: Linux Container CI',
+    summary: 'Codex engine credentials expired in container. Pi harness ready; GUI automation unavailable.',
+    projectId: undefined,
+    projectName: 'Infrastructure',
+    referenceId: 'linux-container-ci',
+    referenceType: 'environment',
+    actionLabel: 'Inspect Environment in Envs',
+    actionTargetView: 'environments',
+    targetNav: 'manage',
+    targetManageTab: 'environments',
+    timestamp: '45s ago',
+    lifecycleSentence: 'Host degraded · Codex login required · Clear safety',
+    attribution: 'sprout-wk-ci-9a882d14 (Worker)',
+  },
+  {
+    id: 'att-6',
+    severity: 'action_required',
+    category: 'env_unhealthy',
+    title: 'Protocol Mismatch: Mac mini (Legacy Worker)',
+    summary: 'Worker protocol v1.8 is below required v2.0+. Worker update on host required to admit Tasks.',
+    projectId: undefined,
+    projectName: 'Infrastructure',
+    referenceId: 'mac-mini-mismatch',
+    referenceType: 'environment',
+    actionLabel: 'Inspect Protocol in Envs',
+    actionTargetView: 'environments',
+    targetNav: 'manage',
+    targetManageTab: 'environments',
+    timestamp: '1m ago',
+    lifecycleSentence: 'Protocol incompatible · Task admission barred',
+    attribution: 'sprout-wk-mini-4f11e99c (Worker)',
+  },
 ];
 
 const initialActivityFeedItems: ActivityFeedItem[] = [
@@ -1551,6 +1732,8 @@ class StateManager {
       taskViewMode: 'list',
       taskFilter: 'all',
       chatViewMode: 'list',
+      environmentViewMode: 'list',
+      environmentFilter: 'all',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -2216,9 +2399,35 @@ class StateManager {
     this.notify(`Set task filter to ${filter}`);
   }
 
-  public selectEnvironment(envId: string) {
+  public selectEnvironment(envId: string, pushHistory = true) {
     this.state.selectedEnvironmentId = envId;
+    this.state.environmentViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'env-detail', envId }, '', `#env-${envId}`);
+    }
     this.notify(`Selected Environment ${envId}`);
+  }
+
+  public openEnvironmentDetail(envId: string, pushHistory = true) {
+    this.state.selectedEnvironmentId = envId;
+    this.state.environmentViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'env-detail', envId }, '', `#env-${envId}`);
+    }
+    this.notify(`Opened Environment Detail for ${envId}`);
+  }
+
+  public closeEnvironmentDetail(pushHistory = true) {
+    this.state.environmentViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history) {
+      window.history.pushState({ page: 'env-list' }, '', '#envs');
+    }
+    this.notify('Returned to Environment list');
+  }
+
+  public setEnvironmentFilter(filter: string) {
+    this.state.environmentFilter = filter;
+    this.notify(`Set environment filter to ${filter}`);
   }
 
   public selectAgent(agentId: string) {
@@ -2549,11 +2758,29 @@ class StateManager {
     }
 
     if (env) {
+      const unresolvedFacts = env.leaseRecovery?.unresolvedFacts ?? ['Unverified host cleanup'];
       delete env.activeLeaseHolder;
       delete env.leaseRecovery;
       env.workSafety = 'clear';
       env.trafficLight = 'green';
       env.trafficLightReason = `Force Released by Operator: "${reason}". Environment reassignable.`;
+      env.forcedReleaseRecord = {
+        actor: 'Operator (Human Emergency Force Release)',
+        timestamp: new Date().toISOString(),
+        reason,
+        unresolvedFacts,
+        risksAcknowledged: true,
+      };
+      env.probeHistory = env.probeHistory || [];
+      env.probeHistory.unshift({
+        id: `pr-fr-${Date.now()}`,
+        timestamp: 'Just now',
+        latencyMs: 0,
+        protocolOk: true,
+        enginesOk: true,
+        capabilitiesOk: true,
+        summary: `EMERGENCY FORCE RELEASE authorized: ${reason}`,
+      });
     }
 
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId && a.referenceId !== envId);
@@ -3240,7 +3467,7 @@ class StateManager {
     }
   }
 
-  // --- Environment Enrollment Actions (ADR-0008, ADR-0009) ---
+  // --- Environment Management & Recovery Actions (ADR-0008, ADR-0009) ---
 
   public approveEnvironmentEnrollment(envId: string) {
     const env = this.state.environments.find((e) => e.id === envId);
@@ -3252,7 +3479,77 @@ class StateManager {
     env.trafficLightReason = 'Enrollment approved by Operator · All capabilities ready';
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== envId);
 
+    env.probeHistory = env.probeHistory || [];
+    env.probeHistory.unshift({
+      id: `pr-appr-${Date.now()}`,
+      timestamp: 'Just now',
+      latencyMs: 15,
+      protocolOk: true,
+      enginesOk: true,
+      capabilitiesOk: true,
+      summary: 'Operator approved enrollment: Worker identity & transport verified',
+    });
+
     this.notify(`Approved Environment enrollment for ${env.displayName}. Worker identity verified.`);
+  }
+
+  public unenrollEnvironment(envId: string) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    // Refuse if active lease held or recovering
+    if (env.activeLeaseHolder || env.workSafety === 'recovery') {
+      this.notify(`Cannot unenroll ${env.displayName} while an active Task lease is held or recovering.`);
+      return;
+    }
+
+    env.enrollmentStatus = 'revoked';
+    env.trafficLight = 'red';
+    env.trafficLightReason = 'Worker enrollment revoked by Operator · Reconnection barred';
+    this.notify(`Revoked enrollment for ${env.displayName}. Identity barred from connecting.`);
+  }
+
+  public archiveEnvironment(envId: string) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    // Refuse if active lease held or recovering
+    if (env.activeLeaseHolder || env.workSafety === 'recovery') {
+      this.notify(`Cannot archive ${env.displayName} while an active Task lease is held or recovering.`);
+      return;
+    }
+
+    env.enrollmentStatus = 'archived';
+    env.trafficLight = 'yellow';
+    env.trafficLightReason = 'Archived instance · Enrollment preserved · No active work admitted';
+    this.notify(`Archived Environment ${env.displayName}. Work admission disabled.`);
+  }
+
+  public restoreEnvironment(envId: string) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    env.enrollmentStatus = 'approved';
+    env.trafficLight = env.connectionState === 'online' ? 'green' : 'yellow';
+    env.trafficLightReason = 'Restored instance · Enrollment approved';
+    this.notify(`Restored Environment ${env.displayName}.`);
+  }
+
+  public toggleCapabilityPermission(
+    envId: string,
+    capability: keyof EnvironmentInstance['capabilityPermissions']
+  ) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    const currentVal = env.capabilityPermissions[capability];
+    // Safety check: revoking while lease is held
+    if (currentVal && env.activeLeaseHolder) {
+      this.notify(`Notice: Changed permission '${capability}' on ${env.displayName} while lease is held. Applies to future runs.`);
+    }
+
+    env.capabilityPermissions[capability] = !currentVal;
+    this.notify(`Toggled ${capability} on ${env.displayName} to ${!currentVal ? 'Granted' : 'Refused'}.`);
   }
 
   public triggerReadinessProbe(envId: string) {
@@ -3261,7 +3558,152 @@ class StateManager {
 
     env.lastConfirmedTime = 'Just now';
     env.connectionAgeSec = 0;
-    this.notify(`Ran live readiness probe on ${env.displayName}. Engines & protocol confirmed.`);
+    if (env.connectionState !== 'offline' && env.enrollmentStatus === 'approved') {
+      env.connectionState = 'online';
+    }
+
+    const latency = Math.floor(Math.random() * 15) + 8;
+    env.probeHistory = env.probeHistory || [];
+    env.probeHistory.unshift({
+      id: `pr-${Date.now()}`,
+      timestamp: 'Just now',
+      latencyMs: latency,
+      protocolOk: env.protocolCompatibility === 'compatible',
+      enginesOk: Object.values(env.engineReadiness).every((s) => s === 'ready'),
+      capabilitiesOk: env.capabilityPermissions.fileReadWrite && env.capabilityPermissions.processExecution,
+      summary: `Live probe confirmed: latency ${latency}ms, protocol ${env.protocolVersion} ${env.protocolCompatibility}`,
+    });
+
+    this.notify(`Ran live readiness probe on ${env.displayName} (${latency}ms). Facts refreshed.`);
+  }
+
+  public triggerSimulatedWorkerReconnect(envId: string) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    env.connectionState = 'online';
+    env.lastConfirmedTime = 'Just now';
+    env.connectionAgeSec = 0;
+
+    if (env.workSafety === 'recovery') {
+      env.workSafety = 'reconciling';
+      env.trafficLight = 'yellow';
+      env.trafficLightReason = 'Worker reconnected · Carrier online · Reconciling settlement evidence';
+    }
+
+    this.notify(`Worker on ${env.displayName} reconnected over TLS/WSS. Starting evidence reconciliation.`);
+  }
+
+  public reconcileEnvironmentEvidence(envId: string) {
+    const env = this.state.environments.find((e) => e.id === envId);
+    if (!env) return;
+
+    if (env.leaseRecovery) {
+      env.leaseRecovery.reconciledEvidence = {
+        retainedEventsCount: 4,
+        turnSettlementObserved: true,
+        engineSessionStopped: true,
+        taskContextRecycled: false,
+        synchronizedAt: 'Just now',
+      };
+    }
+
+    env.workSafety = 'recovery';
+    env.trafficLight = 'red';
+    env.trafficLightReason = 'Reconciliation complete: evidence synced, engine stopped · Operator decision needed (Resume or Discard)';
+
+    this.notify(`Synchronized evidence for ${env.displayName}. Proved engine stopped; awaiting Human Resume or Discard.`);
+  }
+
+  public discardOrdinaryRecovery(taskId: string) {
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task) return;
+
+    task.lifecycle = 'cancelled';
+    task.agentRunLifecycle = 'none';
+    task.leaseLifecycle = 'released';
+    delete task.recoveryReason;
+
+    if (task.selectedEnvironmentId) {
+      const env = this.state.environments.find((e) => e.id === task.selectedEnvironmentId);
+      if (env) {
+        delete env.activeLeaseHolder;
+        delete env.leaseRecovery;
+        env.workSafety = 'clear';
+        env.trafficLight = 'green';
+        env.trafficLightReason = 'Task discarded cleanly · Scratch context recycled by worker · Lease released';
+      }
+    }
+
+    this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+    this.notify(`Discarded Task #${taskId}. Worker recycled scratch context; Project workspace preserved; Lease released.`);
+  }
+
+  public simulateRegisterNewPendingHost(platform: 'macos' | 'windows' | 'container' = 'macos') {
+    const newId = `host-node-${Date.now().toString().slice(-4)}`;
+    const newName = platform === 'windows' ? 'Windows Studio Host (RTX)' : platform === 'container' ? 'Edge Linux Node' : 'Mac Studio Max (Second)';
+    const newKey = `sprout-wk-${newId}`;
+
+    const newEnv: EnvironmentInstance = {
+      id: newId,
+      displayName: newName,
+      platform,
+      hostUser: platform === 'windows' ? 'win-operator' : 'mac-operator',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Pending enrollment approval by operator · Worker public key verified',
+      enrollmentStatus: 'pending',
+      workerIdentityKey: newKey,
+      connectionState: 'online',
+      lastConfirmedTime: 'Just now',
+      connectionAgeSec: 0,
+      protocolCompatibility: 'compatible',
+      protocolVersion: 'v2.1',
+      capabilityPermissions: {
+        fileReadWrite: true,
+        processExecution: true,
+        networkAccess: false,
+        guiAutomation: false,
+      },
+      engineReadiness: {
+        codex: 'ready',
+        pi: 'ready',
+        agy: 'unknown',
+        opencode: 'unknown',
+      },
+      engineDetails: {
+        codex: { version: 'v0.18.2', authStatus: 'authenticated', modelAvailability: 'gpt-4o' },
+        pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet' },
+        agy: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+        opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
+      },
+      workSafety: 'clear',
+      workspaceRoots: [platform === 'windows' ? 'C:\\SproutWorkspaces' : '~/workspace/sprout-projects'],
+      probeHistory: [
+        { id: `pr-${Date.now()}`, timestamp: 'Just now', latencyMs: 11, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'New host bootstrap connection: Key verified over TLS/WSS' },
+      ],
+    };
+
+    this.state.environments.push(newEnv);
+    this.state.selectedEnvironmentId = newId;
+
+    this.state.attentionItems.unshift({
+      id: `att-enroll-${newId}`,
+      severity: 'attention',
+      category: 'env_enrollment',
+      title: `Pending Worker Enrollment: ${newName}`,
+      summary: `Worker ${newKey} connected and is requesting operator capability approval.`,
+      referenceId: newId,
+      referenceType: 'environment',
+      actionLabel: 'Review Enrollment in Envs',
+      actionTargetView: 'environments',
+      targetNav: 'manage',
+      targetManageTab: 'environments',
+      timestamp: 'Just now',
+      lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
+      attribution: `${newKey} (Worker)`,
+    });
+
+    this.notify(`New host ${newName} connected in pending enrollment.`);
   }
 
   // --- Preset Scenario Jumpers for Owner Review ---
@@ -3421,6 +3863,49 @@ class StateManager {
       case 'primitives-showcase':
         this.setPrimaryNav('primitives');
         this.notify('Loaded Scenario: Shared Interaction Primitives & State Language Testbed');
+        break;
+      case 'env-healthy-macos':
+        this.selectEnvironment('mac-studio-primary');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: macOS Studio Host (Green: Ready · Lease Held)');
+        break;
+      case 'env-recovery-win':
+        this.selectEnvironment('win-dev-box');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: Windows Dev Host in Lease Recovery (Red: Action Required)');
+        break;
+      case 'env-pending-macair':
+        this.selectEnvironment('mac-laptop-pending');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: MacBook Air Pending Enrollment Approval (Yellow: Attention)');
+        break;
+      case 'env-degraded-login':
+        this.selectEnvironment('linux-container-ci');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: Linux Container Degraded Engine Login (Yellow: Attention)');
+        break;
+      case 'env-protocol-mismatch':
+        this.selectEnvironment('mac-mini-mismatch');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: Legacy Worker Protocol Mismatch (Red: Action Required)');
+        break;
+      case 'env-force-release-flow':
+        this.selectEnvironment('win-dev-box');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.openInspector('force-release', 'win-dev-box');
+        this.notify('Loaded Scenario: Emergency Force Release Flow (Typed Confirmation & Risk Checklist)');
+        break;
+      case 'env-reconnect-reconcile':
+        this.selectEnvironment('win-dev-box');
+        this.triggerSimulatedWorkerReconnect('win-dev-box');
+        this.reconcileEnvironmentEvidence('win-dev-box');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: Reconnect & Evidence Reconciliation Flow');
+        break;
+      case 'env-archived':
+        this.selectEnvironment('win-workstation-archived');
+        this.setPrimaryNav('manage', undefined, 'environments');
+        this.notify('Loaded Scenario: Archived Environment Instance (Read-Only State)');
         break;
       default:
         break;

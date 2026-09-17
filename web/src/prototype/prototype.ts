@@ -92,6 +92,16 @@ export function initPrototype(mountEl: HTMLElement): void {
         <!-- Scenario Jumpers Dropdown -->
         <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
           <option value="" disabled selected>Jump to Scenario...</option>
+          <optgroup label="Ticket #65: Environments & Recovery (ADR-0005, ADR-0008, ADR-0009)">
+            <option value="env-healthy-macos">Envs: macOS Studio Host (Green: Ready · Lease Held)</option>
+            <option value="env-recovery-win">Envs: Windows Dev Host in Lease Recovery (Red: Action Required)</option>
+            <option value="env-pending-macair">Envs: MacBook Air Pending Enrollment Approval (Yellow: Attention)</option>
+            <option value="env-degraded-login">Envs: Linux Container Degraded Engine Login (Yellow: Attention)</option>
+            <option value="env-protocol-mismatch">Envs: Legacy Worker Protocol Mismatch (Red: Action Required)</option>
+            <option value="env-force-release-flow">Envs: Emergency Force Release Flow (Typed Confirmation)</option>
+            <option value="env-reconnect-reconcile">Envs: Reconnect & Evidence Reconciliation Flow</option>
+            <option value="env-archived">Envs: Archived Environment Instance (Read-Only State)</option>
+          </optgroup>
           <optgroup label="Ticket #64: Chat Scopes & Wake Routing (ADR-0007, ADR-0008)">
             <option value="chat-project-broadcast">Chat: Project Broadcast Channel (#general)</option>
             <option value="chat-working-group">Chat: Working Group Channel (Core Mechanics WG)</option>
@@ -592,6 +602,12 @@ export function initPrototype(mountEl: HTMLElement): void {
         stateManager.openChatDetail(ev.state.scopeKind, ev.state.scopeId, false);
       } else if (ev.state?.page === 'chat-list') {
         stateManager.closeChatDetail(false);
+      } else if (ev.state?.page === 'env-detail' && ev.state.envId) {
+        stateManager.openEnvironmentDetail(ev.state.envId, false);
+      } else if (ev.state?.page === 'env-list') {
+        stateManager.closeEnvironmentDetail(false);
+      } else if (state.primaryNav === 'manage' && state.manageTab === 'environments' && state.environmentViewMode === 'detail') {
+        stateManager.closeEnvironmentDetail(false);
       } else if (state.primaryNav === 'project' && state.projectTab === 'tasks' && state.taskViewMode === 'detail') {
         stateManager.closeTaskDetail(false);
       } else if (state.primaryNav === 'project' && state.projectTab === 'chat' && state.chatViewMode === 'detail') {
