@@ -51,7 +51,6 @@ export interface PrototypeState {
   environmentFilter: string;
   agentViewMode: 'list' | 'detail';
   agentFilter: string;
-  agentSearchQuery?: string | undefined;
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -1960,7 +1959,6 @@ class StateManager {
       environmentFilter: 'all',
       agentViewMode: 'list',
       agentFilter: 'all',
-      agentSearchQuery: '',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -2686,11 +2684,6 @@ class StateManager {
   public setAgentFilter(filter: string) {
     this.state.agentFilter = filter;
     this.notify(`Set agent filter to ${filter}`);
-  }
-
-  public setAgentSearch(query: string) {
-    this.state.agentSearchQuery = query;
-    this.notify(`Filtered agents by search: "${query}"`);
   }
 
   public createAgent(agent: {

@@ -7,16 +7,15 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
   container.className = 'view-container agents-view';
 
   const filter = state.agentFilter || 'all';
-  const searchQuery = (state.agentSearchQuery || '').toLowerCase().trim();
 
   // Helper to determine agent traffic light status
   function getAgentTrafficLight(agent: AgentDefinition, envs: EnvironmentInstance[]): {
-    trafficLight: 'green' | 'yellow' | 'red' | 'neutral';
+    trafficLight: 'green' | 'yellow' | 'red' | 'gray';
     reason: string;
   } {
     if (agent.status === 'archived') {
       return {
-        trafficLight: 'neutral',
+        trafficLight: 'gray',
         reason: 'Archived Agent · Preserved attribution, private memory, and session slots (ADR-0008)',
       };
     }
@@ -102,19 +101,6 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       if (a.status !== 'archived') return false;
     }
 
-    // Search query match
-    if (searchQuery) {
-      const matchName = a.displayName.toLowerCase().includes(searchQuery);
-      const matchId = a.id.toLowerCase().includes(searchQuery);
-      const matchDesc = a.description.toLowerCase().includes(searchQuery);
-      const matchOpt = a.workOptions.some(
-        (o) =>
-          o.engine.toLowerCase().includes(searchQuery) ||
-          o.workModel.toLowerCase().includes(searchQuery)
-      );
-      if (!matchName && !matchId && !matchDesc && !matchOpt) return false;
-    }
-
     return true;
   });
 
@@ -161,28 +147,9 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
         <span class="agent-filter-box-bottom">Unavailable<span class="sr-only"> (${unavailableCount})</span></span>
       </button>
       <button class="agent-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" title="Archived (${archivedCount})">
-        <span class="agent-filter-box-top"><span class="status-dot neutral"></span> ${archivedCount}</span>
+        <span class="agent-filter-box-top"><span class="status-dot gray"></span> ${archivedCount}</span>
         <span class="agent-filter-box-bottom">Archived<span class="sr-only"> (${archivedCount})</span></span>
       </button>
-    </div>
-
-    <!-- Search Input -->
-    <div class="search-input-wrapper" style="width: 100%;">
-      <span style="color: var(--text-muted); display: flex; align-items: center; margin-left: 8px;">
-        ${renderIcon('search', 14)}
-      </span>
-      <input
-        type="text"
-        class="form-input agent-search-input"
-        placeholder="Filter agents by name, description, engine, or model..."
-        value="${state.agentSearchQuery || ''}"
-        style="padding-left: 30px; font-size: 13px; height: 34px;"
-      />
-      ${
-        state.agentSearchQuery
-          ? `<button class="clear-search-btn" style="position: absolute; right: 8px; background: none; border: none; color: var(--text-muted); cursor: pointer;">✕</button>`
-          : ''
-      }
     </div>
   `;
 
@@ -191,16 +158,6 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       const f = (ev.currentTarget as HTMLElement).getAttribute('data-filter')!;
       stateManager.setAgentFilter(f);
     });
-  });
-
-  const searchInput = headerCard.querySelector('.agent-search-input') as HTMLInputElement | null;
-  searchInput?.addEventListener('input', (ev) => {
-    const val = (ev.target as HTMLInputElement).value;
-    stateManager.setAgentSearch(val);
-  });
-
-  headerCard.querySelector('.clear-search-btn')?.addEventListener('click', () => {
-    stateManager.setAgentSearch('');
   });
 
   headerCard.querySelector('#btn-agent-guide')?.addEventListener('click', () => {
@@ -267,7 +224,6 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
     `;
     masterColumn.querySelector('#btn-reset-agent-filter')?.addEventListener('click', () => {
       stateManager.setAgentFilter('all');
-      stateManager.setAgentSearch('');
     });
   } else {
     const cardList = document.createElement('div');
@@ -363,7 +319,7 @@ function renderAgentDetailCard(
   getTrafficLight: (
     agent: AgentDefinition,
     envs: EnvironmentInstance[]
-  ) => { trafficLight: 'green' | 'yellow' | 'red' | 'neutral'; reason: string }
+  ) => { trafficLight: 'green' | 'yellow' | 'red' | 'gray'; reason: string }
 ): HTMLElement {
   const detailCard = document.createElement('div');
   detailCard.className = 'agent-detail-card';
@@ -378,14 +334,31 @@ function renderAgentDetailCard(
     })
     .filter((item): item is { project: (typeof state.projects)[0]; membership: (typeof state.projects)[0]['memberships'][0] } => item !== null);
 
+  const isGreen = st.trafficLight === 'green';
+  const isYellow = st.trafficLight === 'yellow';
+  const bannerBg = isGreen
+    ? 'var(--green-ready-bg)'
+    : isYellow
+      ? 'var(--yellow-attention-bg)'
+      : st.trafficLight === 'red'
+        ? 'var(--red-action-bg)'
+        : 'var(--bg-surface-elevated)';
+  const bannerBorder = isGreen
+    ? 'var(--green-ready)'
+    : isYellow
+      ? 'var(--yellow-attention)'
+      : st.trafficLight === 'red'
+        ? 'var(--red-action)'
+        : 'var(--border-subtle)';
+
   detailCard.innerHTML = `
     <!-- Top Summary Banner (Clean, no verbose paragraphs) -->
-    <div class="env-traffic-light-banner ${st.trafficLight}" style="margin-bottom: 2px;">
+    <div class="env-traffic-light-banner" style="margin-bottom: 2px; background: ${bannerBg}; border: 1px solid ${bannerBorder}; border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;">
       <div class="env-traffic-light-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span class="status-dot ${st.trafficLight}"></span>
-          <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">
-            ${st.trafficLight === 'green' ? 'Ready' : st.trafficLight === 'yellow' ? 'Attention / Degraded' : st.trafficLight === 'red' ? 'Action Required' : 'Archived'}
+          <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-primary);">
+            ${isGreen ? 'Ready' : isYellow ? 'Attention / Degraded' : st.trafficLight === 'red' ? 'Action Required' : 'Archived'}
           </strong>
         </div>
         <span style="font-size: 11px; color: var(--text-secondary);">
@@ -490,7 +463,7 @@ function renderAgentDetailCard(
                       : ''
                   }
                   <div class="agent-option-info">
-                    <span class="badge ${isFirst ? 'badge-primary' : 'badge-neutral'}" style="font-size: 10px; font-weight: 700;">
+                    <span class="badge ${isFirst ? 'badge-info' : 'badge'}" style="font-size: 10px; font-weight: 700;">
                       Priority ${idx + 1}${isFirst ? ' (Primary)' : ' (Fallback)'}
                     </span>
                     <strong style="font-size: 13px; color: var(--text-primary);">
@@ -502,7 +475,7 @@ function renderAgentDetailCard(
                     <span class="status-pill purple" style="font-size: 10px; padding: 2px 6px;">
                       Effort: ${opt.effort}
                     </span>
-                    <span class="badge ${isReadyOnAny ? 'badge-success' : 'badge-warning'}" style="font-size: 10px;">
+                    <span class="badge ${isReadyOnAny ? 'badge-green' : 'badge-yellow'}" style="font-size: 10px;">
                       ${isReadyOnAny ? `Ready on ${matchingReadyEnvs.length} host(s)` : 'Unavailable / Login Req'}
                     </span>
                   </div>
@@ -546,7 +519,7 @@ function renderAgentDetailCard(
           <span>Environment Compatibility & Admission Evaluation</span>
         </div>
         <div class="foldable-header-right">
-          <span class="badge badge-neutral" style="font-size: 10px;">${state.environments.length} Hosts</span>
+          <span class="badge badge" style="font-size: 10px;">${state.environments.length} Hosts</span>
           <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
         </div>
       </div>
@@ -570,10 +543,10 @@ function renderAgentDetailCard(
                   <div style="text-align: right; flex-shrink: 0;">
                     ${
                       isCompatible
-                        ? `<span class="badge badge-success" style="font-size: 10px;">
+                        ? `<span class="badge badge-green" style="font-size: 10px;">
                             Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
                           </span>`
-                        : `<span class="badge badge-warning" style="font-size: 10px;">
+                        : `<span class="badge badge-yellow" style="font-size: 10px;">
                             No compatible option ready
                           </span>`
                     }
@@ -610,7 +583,7 @@ function renderAgentDetailCard(
           <span>Project Memberships & Responsibilities</span>
         </div>
         <div class="foldable-header-right">
-          <span class="badge badge-neutral" style="font-size: 10px;">${activeMemberships.length} Projects</span>
+          <span class="badge badge" style="font-size: 10px;">${activeMemberships.length} Projects</span>
           <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
         </div>
       </div>
@@ -630,7 +603,7 @@ function renderAgentDetailCard(
                       <strong style="color: var(--text-primary); font-size: 13px;">${project.displayName}</strong>
                       <code style="font-size: 10px; color: var(--text-muted);">${project.id}</code>
                     </div>
-                    <span class="badge ${membership.status === 'active' ? 'badge-success' : 'badge-neutral'}" style="font-size: 10px;">
+                    <span class="badge ${membership.status === 'active' ? 'badge-green' : 'badge'}" style="font-size: 10px;">
                       ${membership.status.toUpperCase()}
                     </span>
                   </div>
@@ -661,7 +634,7 @@ function renderAgentDetailCard(
           <span>Configuration Version Changelog</span>
         </div>
         <div class="foldable-header-right">
-          <span class="badge badge-primary" style="font-size: 10px;">v${agent.version || 1}</span>
+          <span class="badge badge-info" style="font-size: 10px;">v${agent.version || 1}</span>
           <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
         </div>
       </div>
@@ -675,7 +648,7 @@ function renderAgentDetailCard(
                 <div class="agent-version-row">
                   <div class="agent-version-row-top">
                     <div style="display: flex; align-items: center; gap: 6px;">
-                      <span class="badge badge-primary" style="font-size: 10px; font-weight: 700;">v${v.version}</span>
+                      <span class="badge badge-info" style="font-size: 10px; font-weight: 700;">v${v.version}</span>
                       <strong style="font-size: 12px; color: var(--text-primary);">${v.changeSummary}</strong>
                     </div>
                     <span style="font-size: 10px; color: var(--text-muted);">${v.timestamp}</span>
@@ -689,7 +662,7 @@ function renderAgentDetailCard(
                   .join('')
               : `<div class="agent-version-row">
                   <div class="agent-version-row-top">
-                    <span class="badge badge-primary" style="font-size: 10px;">v1</span>
+                    <span class="badge badge-info" style="font-size: 10px;">v1</span>
                     <span style="font-size: 10px; color: var(--text-muted);">${agent.createdAt || 'Initial'}</span>
                   </div>
                   <div style="font-size: 11px; color: var(--text-muted);">Initial Agent definition created.</div>
@@ -707,7 +680,7 @@ function renderAgentDetailCard(
           <span>Historical Run Attribution & Provenance</span>
         </div>
         <div class="foldable-header-right">
-          <span class="badge badge-neutral" style="font-size: 10px;">${agent.attributionHistory?.length || 0} Facts</span>
+          <span class="badge badge" style="font-size: 10px;">${agent.attributionHistory?.length || 0} Facts</span>
           <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
         </div>
       </div>
@@ -717,7 +690,7 @@ function renderAgentDetailCard(
             Historical Messages, Task runs, and completion claims permanently retain the exact Agent configuration version, engine, model, and effort used at execution time (ADR-0008).
           </p>
           <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span class="badge badge-neutral" style="font-size: 10px;">
+            <span class="badge badge" style="font-size: 10px;">
               ${agent.attributionHistory?.length || 0} recorded execution facts · Attribution survives rename & archive
             </span>
             <button class="btn btn-ghost btn-sm" id="btn-view-attribution" style="font-size: 11px;">
@@ -856,7 +829,7 @@ function renderAgentDetailCard(
       <div class="agent-simulation-result">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <strong style="color: var(--text-primary); font-size: 12px;">Evaluation for ${res.environment.displayName}:</strong>
-          <span class="badge ${res.selectedOption ? 'badge-success' : 'badge-danger'}" style="font-size: 10px;">
+          <span class="badge ${res.selectedOption ? 'badge-green' : 'badge-red'}" style="font-size: 10px;">
             ${res.selectedOption ? `Admitted Option: ${res.selectedOption.engine.toUpperCase()}` : 'Admission Refused'}
           </span>
         </div>
@@ -865,7 +838,7 @@ function renderAgentDetailCard(
             .map(
               (step) => `
             <div class="agent-sim-step">
-              <span class="badge ${step.status === 'selected' ? 'badge-success' : 'badge-neutral'}" style="font-size: 10px; flex-shrink: 0;">
+              <span class="badge ${step.status === 'selected' ? 'badge-green' : 'badge'}" style="font-size: 10px; flex-shrink: 0;">
                 P${step.priority}: ${step.option.engine.toUpperCase()}
               </span>
               <span style="font-size: 11px; color: ${step.status === 'selected' ? 'var(--green-ready)' : 'var(--text-secondary)'};">
@@ -894,18 +867,18 @@ function openCreateAgentDialog() {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-create-agent';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 520px; width: 92%;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 520px; width: 92%;">
+      <div class="proto-modal-header">
         <div style="display: flex; align-items: center; gap: 8px;">
           ${renderIcon('bot', 18)}
           <strong style="font-size: 15px;">Create Global Agent Definition</strong>
         </div>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
         <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
           Agent identity is portable across Projects and Environments. An Agent requires a stable identity, non-empty display name, and at least one ordered work option (ADR-0008).
         </p>
@@ -955,7 +928,7 @@ function openCreateAgentDialog() {
           </div>
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
         <button class="btn btn-primary btn-sm" id="btn-confirm-create-agent">Create Agent</button>
       </div>
@@ -1013,15 +986,15 @@ function openEditAgentDialog(agent: AgentDefinition) {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-edit-agent';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 480px; width: 92%;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 480px; width: 92%;">
+      <div class="proto-modal-header">
         <strong style="font-size: 15px;">Edit Agent Identity (${agent.id})</strong>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
         <div style="display: flex; flex-direction: column; gap: 4px;">
           <label class="form-label" for="edit-agent-name">Display Name</label>
           <input type="text" id="edit-agent-name" class="form-input" value="${agent.displayName}" required />
@@ -1038,7 +1011,7 @@ function openEditAgentDialog(agent: AgentDefinition) {
           Editing agent facts creates version v${(agent.version || 1) + 1}. Past run attributions and active sessions retain their historical versions.
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
         <button class="btn btn-primary btn-sm" id="btn-confirm-save-agent">Save Changes</button>
       </div>
@@ -1081,21 +1054,21 @@ function openEditInstructionsDialog(agent: AgentDefinition) {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-edit-inst';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 480px; width: 92%;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 480px; width: 92%;">
+      <div class="proto-modal-header">
         <strong style="font-size: 15px;">Edit Standing Instructions</strong>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 8px;">
         <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
           Standing instructions are global to Agent <strong>${agent.displayName}</strong> and apply to all future runs across all Projects.
         </p>
         <textarea id="edit-standing-inst-textarea" class="form-textarea" rows="4" placeholder="Enter standing instructions...">${agent.standingInstructions || ''}</textarea>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
         <button class="btn btn-primary btn-sm" id="btn-save-instructions">Save Instructions</button>
       </div>
@@ -1123,15 +1096,15 @@ function openAddWorkOptionDialog(agent: AgentDefinition) {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-add-opt';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 440px; width: 92%;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 440px; width: 92%;">
+      <div class="proto-modal-header">
         <strong style="font-size: 15px;">Add Work Option (Priority ${agent.workOptions.length + 1})</strong>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
         <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
           Configure an execution fallback option. Sprout evaluates options in priority order at run admission (ADR-0008).
         </p>
@@ -1161,7 +1134,7 @@ function openAddWorkOptionDialog(agent: AgentDefinition) {
           </select>
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
         <button class="btn btn-primary btn-sm" id="btn-confirm-add-option">Add Option</button>
       </div>
@@ -1200,18 +1173,18 @@ function openArchiveConfirmDialog(agent: AgentDefinition) {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-archive-agent';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 460px; width: 92%;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 460px; width: 92%;">
+      <div class="proto-modal-header">
         <div style="display: flex; align-items: center; gap: 8px; color: var(--red-action);">
           ${renderIcon('archive', 18)}
           <strong style="font-size: 15px;">Archive Agent "${agent.displayName}"?</strong>
         </div>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 10px; font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px; font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
         <p style="margin: 0;">
           Archiving an Agent is a <strong>non-destructive</strong> operation (ADR-0008):
         </p>
@@ -1224,7 +1197,7 @@ function openArchiveConfirmDialog(agent: AgentDefinition) {
           Safety Guard: An Agent cannot be archived while it has an active run or remains the Task lead of an unfinished Task.
         </p>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
         <button class="btn btn-danger btn-sm" id="btn-confirm-archive">Archive Agent</button>
       </div>
@@ -1251,20 +1224,20 @@ function openAttributionHistoryDialog(agent: AgentDefinition) {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-attribution-trace';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   const history = agent.attributionHistory || [];
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 560px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 560px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="proto-modal-header">
         <div style="display: flex; align-items: center; gap: 8px;">
           ${renderIcon('history', 18)}
           <strong style="font-size: 15px;">Run Attribution Trace: ${agent.displayName}</strong>
         </div>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 10px; overflow-y: auto;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px; overflow-y: auto;">
         <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
           Every completed run, projected message, and validation claim preserves the exact Agent version, engine, model, and effort used at execution time (ADR-0008).
         </p>
@@ -1281,7 +1254,7 @@ function openAttributionHistoryDialog(agent: AgentDefinition) {
                 <div class="agent-attribution-row">
                   <div class="agent-attribution-row-top">
                     <div style="display: flex; align-items: center; gap: 6px;">
-                      <span class="badge ${attr.entityKind === 'task_run' ? 'badge-primary' : 'badge-neutral'}" style="font-size: 10px;">
+                      <span class="badge ${attr.entityKind === 'task_run' ? 'badge-info' : 'badge'}" style="font-size: 10px;">
                         ${attr.entityKind === 'task_run' ? 'Task Run' : 'Message'}
                       </span>
                       <strong style="color: var(--text-primary); font-size: 12px;">${attr.projectName}</strong>
@@ -1303,7 +1276,7 @@ function openAttributionHistoryDialog(agent: AgentDefinition) {
           }
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Close</button>
       </div>
     </div>
@@ -1322,18 +1295,18 @@ function openAgentGuideDialog() {
 
   const overlay = document.createElement('div');
   overlay.id = 'dialog-agent-guide';
-  overlay.className = 'modal-backdrop';
+  overlay.className = 'proto-modal-backdrop';
 
   overlay.innerHTML = `
-    <div class="modal-dialog" style="max-width: 580px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
-      <div class="modal-header">
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 580px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="proto-modal-header">
         <div style="display: flex; align-items: center; gap: 8px;">
           ${renderIcon('guide', 18)}
           <strong style="font-size: 15px;">Agent Identity & Work Options Architecture (ADR-0008)</strong>
         </div>
         <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
       </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px; font-size: 12px; color: var(--text-secondary); line-height: 1.4; overflow-y: auto;">
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px; font-size: 12px; color: var(--text-secondary); line-height: 1.4; overflow-y: auto;">
         <div>
           <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">1. Portable Identity Independent of Project & Environment</h4>
           <p style="margin: 0;">
@@ -1376,7 +1349,7 @@ function openAgentGuideDialog() {
           </p>
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end;">
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end;">
         <button class="btn btn-secondary btn-sm close-modal-btn">Close</button>
       </div>
     </div>

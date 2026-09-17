@@ -17,7 +17,6 @@ In Sprout M2, Agents represent persistent, portable worker identities with their
 │ MANAGE > GLOBAL AGENTS AREA                                                 │
 │ ├── Header: Title, Summary, [ + Create New Agent ], [ Architecture Guide ]  │
 │ ├── Filter Bar: [ All (7) | Active (6) | Attention (0) | Unavailable (0) | Archived (1) ] │
-│ ├── Search Bar: Fast fuzzy search by name, description, engine, or model   │
 │ ├───────────────────────────────────────────────────────────────────────────┤
 │ ├── DESKTOP SPLIT LAYOUT (Master / Detail)                                  │
 │ │   ├── Left Master Column (340px): Filterable Agent Cards List             │
@@ -181,9 +180,11 @@ The prototype demonstrates realistic data covering all 5 canonical states:
   5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, drag-and-drop reordering (using grip handles) with automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
   6. *Foldable Progressive Disclosure*: Environment Compatibility & Admission Evaluation, Project Memberships, Version Changelog, and Historical Run Attribution are presented as collapsed foldable boxes, expanding on demand to keep the default view focused on identity and next actions.
   7. *Pre-Acceptance Fallback Simulator*: Interactive tool allows testing how Sprout evaluates run admission across enrolled environments in real-time.
-  7. *Safety-Guarded Archiving*: Archiving validates that the agent is not leading active tasks; displays clear explanation of non-destructive attribution preservation.
-  8. *Top Control Bar Streamlining*: Zero space-occupying candidate select dropdowns; clean visual hierarchy following `design-taste-frontend` taste principles.
-  9. *Concise Status Banner*: Agent detail top banner shows only the status label and concise version/state chip; the verbose narrative fact paragraph was removed.
+  8. *Safety-Guarded Archiving*: Archiving validates that the agent is not leading active tasks; displays clear explanation of non-destructive attribution preservation.
+  9. *Top Control Bar Streamlining*: Zero space-occupying candidate select dropdowns; clean visual hierarchy following `design-taste-frontend` taste principles.
+  10. *Concise Status Banner*: Agent detail top banner shows only the status label and concise version/state chip; the verbose narrative fact paragraph was removed.
+  11. *No Search Box*: The Agents header has no search input; the 5 status filter pills are the only list-narrowing control, matching the Environments surface.
+  12. *Repo-Standard Modal Primitives*: Create Agent, Agent Architecture Guide, Edit Agent, Edit Standing Instructions, Add Work Option, Archive Agent, and Run Attribution Trace dialogs use the shared `proto-modal-*` overlay/dialog/header/body/footer primitives from the accepted #61 baseline, so they render as centered, dimmed-backdrop modals with a legible title, fields, and Cancel/Confirm actions on both phone and desktop.
 - **Verification Command**:
   ```bash
   npm run typecheck && node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'
