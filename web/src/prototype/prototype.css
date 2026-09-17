@@ -2221,14 +2221,14 @@ code {
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .project-top-bar {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
   margin: -10px -12px 10px -12px;
@@ -2240,19 +2240,26 @@ code {
 @media (min-width: 768px) {
   .viewport-stage.mode-desktop .project-top-bar,
   .viewport-stage.mode-fluid .project-top-bar {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
     margin: -16px -20px 14px -20px;
     padding: 10px 20px;
   }
 }
 
-.project-selector-group {
+.project-selector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: nowrap;
+}
+
+.project-selector-left {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .project-dropdown-select {
@@ -2265,7 +2272,19 @@ code {
   font-weight: 600;
   min-height: 36px;
   cursor: pointer;
-  max-width: 260px;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.project-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .project-info-btn,

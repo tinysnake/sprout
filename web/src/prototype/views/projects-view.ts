@@ -32,8 +32,8 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
   projectNav.innerHTML = `
     <!-- Top Project Selector & Actions Bar (App-Header style, flush with edge) -->
     <header class="project-top-bar">
-      <div class="project-selector-group">
-        <div style="display: flex; align-items: center; gap: 6px;">
+      <div class="project-selector-row">
+        <div class="project-selector-left">
           ${renderIcon('folder', 18)}
           <select class="project-dropdown-select" id="project-selector" aria-label="Select Project">
             ${state.projects
@@ -46,19 +46,20 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
               )
               .join('')}
           </select>
+          ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px; flex-shrink: 0;">Archived</span>` : ''}
         </div>
 
-        <!-- Info Button (Item 6) -->
-        <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
-          ${renderIcon('info', 16)}
-        </button>
+        <div class="project-header-actions">
+          <!-- Info Button (Item 6) -->
+          <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
+            ${renderIcon('info', 16)}
+          </button>
 
-        <!-- + New Project Button (Item 2: only +, tooltip) -->
-        <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
-          ${renderIcon('plus', 16)}
-        </button>
-
-        ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px;">Archived</span>` : ''}
+          <!-- + New Project Button (Item 2: only +, tooltip) -->
+          <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
+            ${renderIcon('plus', 16)}
+          </button>
+        </div>
       </div>
 
       <!-- Segmented Sub-Nav Tabs (Item 4 & 5: responsive icon+label, hidden on desktop sidebar) -->
