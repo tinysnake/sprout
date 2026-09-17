@@ -1,6 +1,11 @@
 import { renderIcon } from '../icons.js';
-import { stateManager, type PrototypeState } from '../state.js';
-import type { AgentDefinition, EngineKind, EnvironmentInstance } from '../types.js';
+import {
+  checkEngineModelAvailability,
+  checkEnvironmentEligibility,
+  stateManager,
+  type PrototypeState,
+} from '../state.js';
+import type { AgentDefinition, AgentWorkOption, EngineKind, EnvironmentInstance } from '../types.js';
 
 export function renderAgentsView(state: PrototypeState): HTMLElement {
   const container = document.createElement('div');
@@ -27,17 +32,22 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       };
     }
 
-    // Check availability of options across enrolled ready environments
-    const readyEnvs = envs.filter((e) => e.enrollmentStatus === 'approved' && e.connectionState === 'online');
-    if (readyEnvs.length === 0) {
+    // Check availability of options across enrolled eligible environments (ADR-0008)
+    const eligibleEnvs = envs.filter((e) => checkEnvironmentEligibility(e).isEligible);
+    if (eligibleEnvs.length === 0) {
       return {
         trafficLight: 'yellow',
-        reason: 'Attention: No enrolled online environments available for run admission evaluation.',
+        reason: 'Attention: No eligible online environments available for run admission evaluation.',
       };
     }
 
+    const isOptionAdmissibleOnAny = (opt: AgentWorkOption) => {
+      if (opt.isConfigured === false) return false;
+      return eligibleEnvs.some((e) => checkEngineModelAvailability(opt.engine, opt.workModel, e).isAvailable);
+    };
+
     const opt1 = agent.workOptions[0]!;
-    const opt1ReadyOnAny = readyEnvs.some((e) => e.engineReadiness[opt1.engine] === 'ready');
+    const opt1ReadyOnAny = isOptionAdmissibleOnAny(opt1);
 
     if (opt1ReadyOnAny) {
       const fallbackCount = agent.workOptions.length - 1;
@@ -50,9 +60,7 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
     }
 
     // Check if any secondary option is ready (pre-acceptance fallback available)
-    const anyFallbackReady = agent.workOptions.slice(1).some((opt) =>
-      readyEnvs.some((e) => e.engineReadiness[opt.engine] === 'ready')
-    );
+    const anyFallbackReady = agent.workOptions.slice(1).some((opt) => isOptionAdmissibleOnAny(opt));
 
     if (anyFallbackReady) {
       return {
@@ -65,7 +73,7 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       trafficLight: 'red',
       reason: `Action Required: All configured work options (${agent.workOptions
         .map((o) => o.engine.toUpperCase())
-        .join(', ')}) are unauthenticated or missing on current environments (ADR-0008).`,
+        .join(', ')}) are unconfigured, unauthenticated, or missing on current environments (ADR-0008).`,
     };
   }
 
@@ -173,7 +181,7 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
   const showSingleColumnDetail = isSingleColumn && state.agentViewMode === 'detail' && selectedAgent;
 
   if (showSingleColumnDetail) {
-    // Single Column Detail View: Replace Home Title Bar with Traditional Back Header
+    // Single Column Detail View: Dedicated level-2 view with top back header (omits list header/filter row)
     const mobileDetailWrapper = document.createElement('div');
     mobileDetailWrapper.className = 'agents-mobile-detail-wrapper';
 
@@ -189,10 +197,6 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
         <span class="status-dot ${st.trafficLight}"></span>
         <span class="mobile-detail-title-text">${selectedAgent.displayName}</span>
       </div>
-      <div class="sr-only">
-        Agents & Work Option Preferences
-        Active (${activeCount}) Attention (${attentionCount}) Unavailable (${unavailableCount}) Archived (${archivedCount})
-      </div>
     `;
 
     mobileBackNav.querySelector('#btn-back-to-agents')?.addEventListener('click', () => {
@@ -202,12 +206,13 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
     mobileDetailWrapper.appendChild(mobileBackNav);
     mobileDetailWrapper.appendChild(renderAgentDetailCard(selectedAgent, state, getAgentTrafficLight));
 
-    container.appendChild(headerCard);
     container.appendChild(mobileDetailWrapper);
     return container;
   }
 
   // Master / Detail Split for Desktop (or Master List for Mobile List Mode)
+  container.appendChild(headerCard);
+
   const splitLayout = document.createElement('div');
   splitLayout.className = 'agents-split-layout';
 
@@ -352,8 +357,8 @@ function renderAgentDetailCard(
         : 'var(--border-subtle)';
 
   detailCard.innerHTML = `
-    <!-- Top Summary Banner (Clean, no verbose paragraphs) -->
-    <div class="env-traffic-light-banner" style="margin-bottom: 2px; background: ${bannerBg}; border: 1px solid ${bannerBorder}; border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;">
+    <!-- Top Summary Banner (Clean, no verbose paragraphs, tooltip on demand) -->
+    <div class="env-traffic-light-banner" title="${st.reason}" style="margin-bottom: 2px; background: ${bannerBg}; border: 1px solid ${bannerBorder}; border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;">
       <div class="env-traffic-light-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span class="status-dot ${st.trafficLight}"></span>
@@ -441,10 +446,12 @@ function renderAgentDetailCard(
           .map((opt, idx) => {
             const isFirst = idx === 0;
 
-            // Check readiness across enrolled environments
-            const matchingReadyEnvs = state.environments.filter(
-              (e) => e.enrollmentStatus === 'approved' && e.engineReadiness[opt.engine] === 'ready'
-            );
+            // Check readiness across enrolled eligible environments (ADR-0008)
+            const matchingReadyEnvs = state.environments.filter((e) => {
+              if (!checkEnvironmentEligibility(e).isEligible) return false;
+              if (opt.isConfigured === false) return false;
+              return checkEngineModelAvailability(opt.engine, opt.workModel, e).isAvailable;
+            });
             const isReadyOnAny = matchingReadyEnvs.length > 0;
 
             return `
@@ -457,7 +464,7 @@ function renderAgentDetailCard(
                 <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
                   ${
                     agent.status === 'active'
-                      ? `<div class="drag-handle-wrap" title="Drag to reorder priority" aria-label="Drag to reorder priority">
+                      ? `<div class="drag-handle-wrap" tabindex="0" role="button" title="Drag or press Up/Down arrows to reorder priority" aria-label="Reorder priority for ${opt.engine.toUpperCase()} option">
                           ${renderIcon('grip-vertical', 14)}
                         </div>`
                       : ''
@@ -476,7 +483,13 @@ function renderAgentDetailCard(
                       Effort: ${opt.effort}
                     </span>
                     <span class="badge ${isReadyOnAny ? 'badge-green' : 'badge-yellow'}" style="font-size: 10px;">
-                      ${isReadyOnAny ? `Ready on ${matchingReadyEnvs.length} host(s)` : 'Unavailable / Login Req'}
+                      ${
+                        isReadyOnAny
+                          ? `Ready on ${matchingReadyEnvs.length} host(s)`
+                          : opt.isConfigured === false
+                          ? 'Unconfigured'
+                          : 'Unavailable / Login Req'
+                      }
                     </span>
                   </div>
                 </div>
@@ -484,6 +497,24 @@ function renderAgentDetailCard(
                 ${
                   agent.status === 'active'
                     ? `<div class="agent-option-actions">
+                        <button
+                          class="btn btn-ghost btn-sm move-opt-up-btn"
+                          data-index="${idx}"
+                          ${idx === 0 ? 'disabled' : ''}
+                          title="Move priority up"
+                          aria-label="Move ${opt.engine.toUpperCase()} priority up"
+                        >
+                          ${renderIcon('arrow-up', 12)}
+                        </button>
+                        <button
+                          class="btn btn-ghost btn-sm move-opt-down-btn"
+                          data-index="${idx}"
+                          ${idx === agent.workOptions.length - 1 ? 'disabled' : ''}
+                          title="Move priority down"
+                          aria-label="Move ${opt.engine.toUpperCase()} priority down"
+                        >
+                          ${renderIcon('arrow-down', 12)}
+                        </button>
                         <button class="btn btn-ghost btn-sm delete-opt-btn" data-opt="${opt.id}" ${agent.workOptions.length <= 1 ? 'disabled title="An Agent must have at least one work option (ADR-0008)"' : 'title="Remove Option"'} aria-label="Remove Option">
                           ${renderIcon('trash', 12)}
                         </button>
@@ -534,6 +565,29 @@ function renderAgentDetailCard(
               const matchedOpt = evalResult?.selectedOption;
               const isCompatible = Boolean(matchedOpt);
 
+              let badgeHtml = '';
+              if (isCompatible) {
+                badgeHtml = `<span class="badge badge-green" style="font-size: 10px;">
+                  Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
+                </span>`;
+              } else if (evalResult?.envIneligibilityReason) {
+                const envStatusLabel =
+                  env.enrollmentStatus !== 'approved'
+                    ? `Enrollment: ${env.enrollmentStatus}`
+                    : env.connectionState !== 'online'
+                    ? `${env.connectionState === 'offline' ? 'Offline' : 'Reconnecting'} (${env.workSafety})`
+                    : env.protocolCompatibility !== 'compatible'
+                    ? 'Protocol Incompatible'
+                    : `Safety: ${env.workSafety}`;
+                badgeHtml = `<span class="badge badge-red" style="font-size: 10px;" title="${evalResult.envIneligibilityReason}">
+                  Ineligible · ${envStatusLabel}
+                </span>`;
+              } else {
+                badgeHtml = `<span class="badge badge-yellow" style="font-size: 10px;">
+                  No compatible option ready
+                </span>`;
+              }
+
               return `
                 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; gap: 8px;">
                   <div style="min-width: 0;">
@@ -541,15 +595,7 @@ function renderAgentDetailCard(
                     <span style="color: var(--text-muted); font-size: 11px;"> (${env.platform} · ${env.connectionState})</span>
                   </div>
                   <div style="text-align: right; flex-shrink: 0;">
-                    ${
-                      isCompatible
-                        ? `<span class="badge badge-green" style="font-size: 10px;">
-                            Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
-                          </span>`
-                        : `<span class="badge badge-yellow" style="font-size: 10px;">
-                            No compatible option ready
-                          </span>`
-                    }
+                    ${badgeHtml}
                   </div>
                 </div>
               `;
@@ -754,6 +800,51 @@ function renderAgentDetailCard(
     btn.addEventListener('click', (ev) => {
       const optId = (ev.currentTarget as HTMLElement).getAttribute('data-opt')!;
       stateManager.removeAgentWorkOption(agent.id, optId);
+    });
+  });
+
+  // Reorder buttons for mobile touch and keyboard users (ADR-0008)
+  detailCard.querySelectorAll('.move-opt-up-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const idxStr = (ev.currentTarget as HTMLElement).getAttribute('data-index');
+      const idx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (idx > 0) {
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx - 1);
+      }
+    });
+  });
+
+  detailCard.querySelectorAll('.move-opt-down-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const idxStr = (ev.currentTarget as HTMLElement).getAttribute('data-index');
+      const idx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (idx >= 0 && idx < agent.workOptions.length - 1) {
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx + 1);
+      }
+    });
+  });
+
+  // Keyboard reordering on drag handles and option rows
+  detailCard.querySelectorAll('.agent-option-row[draggable="true"]').forEach((row) => {
+    const idxStr = row.getAttribute('data-index');
+    const idx = idxStr ? parseInt(idxStr, 10) : -1;
+    const handle = row.querySelector('.drag-handle-wrap');
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' && idx > 0) {
+        e.preventDefault();
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx - 1);
+      } else if (e.key === 'ArrowDown' && idx >= 0 && idx < agent.workOptions.length - 1) {
+        e.preventDefault();
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx + 1);
+      }
+    };
+
+    handle?.addEventListener('keydown', handleKeyDown as EventListener);
+    row.addEventListener('keydown', (e) => {
+      if (e.target === row) {
+        handleKeyDown(e as KeyboardEvent);
+      }
     });
   });
 

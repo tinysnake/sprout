@@ -67,8 +67,9 @@ test('Agents: renders Agent identity, standing instructions, ordered work option
     assert.ok(appMount);
     initPrototype(appMount);
 
-    // Navigate to Manage > Agents
+    // Navigate to Manage > Agents in desktop split mode
     stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.setViewportMode('desktop');
     stateManager.selectAgent('programmer');
 
     const document = dom.window.document;
@@ -182,6 +183,43 @@ test('Agents: managing work options (add, drag-and-drop reorder, delete, and min
     updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
     assert.equal(updatedAgent.workOptions[0]?.id, opt1Id);
 
+    // 3b. Test Mobile Touch and Keyboard Reorder Controls (F-66-07)
+    const document = dom.window.document;
+    const optionRows = document.querySelectorAll('.agent-option-row');
+    assert.ok(optionRows.length >= 2, 'Rendered at least 2 option rows');
+
+    const firstRowUpBtn = optionRows[0]!.querySelector('.move-opt-up-btn') as HTMLButtonElement;
+    const firstRowDownBtn = optionRows[0]!.querySelector('.move-opt-down-btn') as HTMLButtonElement;
+    assert.ok(firstRowUpBtn, 'First row has move up button');
+    assert.ok(firstRowDownBtn, 'First row has move down button');
+    assert.equal(firstRowUpBtn.disabled, true, 'Up button is disabled for Priority 1');
+    assert.equal(firstRowDownBtn.disabled, false, 'Down button is enabled for Priority 1');
+
+    // Tap move down button to reorder
+    firstRowDownBtn.click();
+    updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
+    assert.equal(updatedAgent.workOptions[0]?.id, opt2Id, 'Option moved down via touch/click button');
+
+    // Tap move up button on the second row to move it back
+    const secondRowUpBtn = dom.window.document.querySelectorAll('.agent-option-row')[1]!.querySelector('.move-opt-up-btn') as HTMLButtonElement;
+    assert.ok(secondRowUpBtn);
+    secondRowUpBtn.click();
+    updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
+    assert.equal(updatedAgent.workOptions[0]?.id, opt1Id, 'Option moved back up via touch/click button');
+
+    // Test Keyboard ArrowDown reordering on drag handle
+    const handle = dom.window.document.querySelectorAll('.agent-option-row')[0]!.querySelector('.drag-handle-wrap') as HTMLElement;
+    assert.ok(handle, 'Drag handle exists with keyboard accessibility');
+    handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
+    assert.equal(updatedAgent.workOptions[0]?.id, opt2Id, 'Option moved down via ArrowDown keyboard key');
+
+    // Move back via keyboard ArrowUp
+    const newHandle = dom.window.document.querySelectorAll('.agent-option-row')[1]!.querySelector('.drag-handle-wrap') as HTMLElement;
+    newHandle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
+    assert.equal(updatedAgent.workOptions[0]?.id, opt1Id, 'Option moved up via ArrowUp keyboard key');
+
     // 4. Remove Option
     const addedOptId = updatedAgent.workOptions[updatedAgent.workOptions.length - 1]!.id;
     stateManager.removeAgentWorkOption('programmer', addedOptId);
@@ -286,10 +324,48 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     assert.equal(containerResult.selectedOption?.engine, 'pi');
     assert.match(containerResult.guaranteeNote, /Pre-Acceptance Fallback Guarantee/);
 
-    // Test simulation on Sentinel (opencode missing/login-required)
+    // Test simulation on Sentinel (opencode with isConfigured: false must be skipped, F-66-01)
     const sentinelResult = stateManager.evaluateAdmissionFallback('sentinel', 'mac-studio-primary');
     assert.ok(sentinelResult);
-    assert.equal(sentinelResult.selectedOption?.engine, 'opencode');
+    assert.equal(sentinelResult.selectedOption, null, 'Unconfigured Sentinel option cannot be admitted');
+    assert.equal(sentinelResult.evaluationSteps[0]?.status, 'skipped_unconfigured');
+    assert.match(sentinelResult.evaluationSteps[0]?.reason ?? '', /unconfigured/);
+
+    // Test simulation with unavailable model (F-66-01)
+    stateManager.addAgentWorkOption('sentinel', {
+      engine: 'pi',
+      workModel: 'non-existent-model-xyz',
+      effort: 'medium',
+      isConfigured: true,
+    });
+    const sentinelModelResult = stateManager.evaluateAdmissionFallback('sentinel', 'mac-studio-primary');
+    assert.ok(sentinelModelResult);
+    assert.equal(sentinelModelResult.selectedOption, null, 'Unavailable model cannot be admitted');
+    assert.equal(sentinelModelResult.evaluationSteps[1]?.status, 'skipped_model_missing');
+    assert.match(sentinelModelResult.evaluationSteps[1]?.reason ?? '', /not available/);
+
+    // Test environment eligibility gating on offline/recovery host (win-dev-box, F-66-02)
+    const winResult = stateManager.evaluateAdmissionFallback('programmer', 'win-dev-box');
+    assert.ok(winResult);
+    assert.equal(winResult.selectedOption, null, 'Offline/recovery environment cannot admit runs');
+    assert.ok(winResult.envIneligibilityReason);
+    assert.match(winResult.envIneligibilityReason, /offline/i);
+    assert.equal(winResult.evaluationSteps[0]?.status, 'skipped_unsupported');
+    assert.match(winResult.evaluationSteps[0]?.reason ?? '', /ineligible/i);
+
+    // Test environment eligibility gating on protocol-incompatible host (mac-mini-mismatch, F-66-02)
+    const miniResult = stateManager.evaluateAdmissionFallback('programmer', 'mac-mini-mismatch');
+    assert.ok(miniResult);
+    assert.equal(miniResult.selectedOption, null, 'Protocol-incompatible environment cannot admit runs');
+    assert.ok(miniResult.envIneligibilityReason);
+    assert.match(miniResult.envIneligibilityReason, /protocol incompatible/i);
+
+    // Test environment eligibility gating on pending enrollment host (mac-laptop-pending, F-66-02)
+    const pendingResult = stateManager.evaluateAdmissionFallback('programmer', 'mac-laptop-pending');
+    assert.ok(pendingResult);
+    assert.equal(pendingResult.selectedOption, null, 'Pending enrollment host cannot admit runs');
+    assert.ok(pendingResult.envIneligibilityReason);
+    assert.match(pendingResult.envIneligibilityReason, /not approved/i);
   } finally {
     await cleanup();
   }
@@ -319,6 +395,19 @@ test('Agents: non-destructive archive safety guard and historical attribution pr
     const programmer = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
     assert.equal(programmer.status, 'active', 'Programmer remains active due to active task lead guard');
 
+    // 1b. Safety Guard (F-66-03): Attempting to archive Designer (active run in progress in task-102) must fail
+    const archiveDesignerRes = stateManager.archiveAgent('designer');
+    assert.equal(archiveDesignerRes.success, false);
+    assert.match(archiveDesignerRes.reason ?? '', /active run/i, 'Refused archive due to active run in task-102');
+
+    // Verify active run guard operates independently of Task lead ownership (F-66-03)
+    const task102 = stateManager.getSnapshot().tasks.find((t) => t.id === 'task-102')!;
+    task102.taskLeadId = 'unrelated-lead';
+    const archiveDesignerRes2 = stateManager.archiveAgent('designer');
+    assert.equal(archiveDesignerRes2.success, false, 'Still refuses archive because active run is running');
+    assert.match(archiveDesignerRes2.reason ?? '', /active run/i);
+    task102.taskLeadId = 'designer'; // Restore fixture
+
     // 2. Archive an unassigned/idle Agent (Researcher)
     const archiveResearcherRes = stateManager.archiveAgent('researcher');
     assert.equal(archiveResearcherRes.success, true);
@@ -326,9 +415,24 @@ test('Agents: non-destructive archive safety guard and historical attribution pr
     assert.equal(researcher.status, 'archived');
     assert.equal(researcher.privateMemoryEntriesCount, 7, 'Private memory entries preserved');
 
+    // 2b. Archiving blocks new Project memberships (F-66-04)
+    const addArchivedRes = stateManager.addProjectMembership('proj-minesweeper', 'researcher');
+    assert.equal(addArchivedRes.success, false, 'Archived agent cannot join project');
+    assert.match(addArchivedRes.reason ?? '', /archived/i);
+    const project = stateManager.getSnapshot().projects.find((p) => p.id === 'proj-minesweeper')!;
+    assert.equal(
+      project.memberships.some((m) => m.memberId === 'researcher' && m.status === 'active'),
+      false,
+      'Archived agent was not added to active memberships'
+    );
+
     // 3. Restore Researcher
     stateManager.restoreAgent('researcher');
     assert.equal(stateManager.getSnapshot().agents.find((a) => a.id === 'researcher')!.status, 'active');
+
+    // 3b. Active agent can now be added to Project
+    const addRestoredRes = stateManager.addProjectMembership('proj-minesweeper', 'researcher');
+    assert.equal(addRestoredRes.success, true, 'Restored agent can now join project');
 
     // 4. Verify Archived Agent Presentation (Legacy Coder)
     stateManager.selectAgent('legacy-coder');
@@ -359,19 +463,24 @@ test('Agents: phone and desktop responsive parity & drill-down navigation', asyn
 
     const document = dom.window.document;
 
-    // In Mobile list view, master cards render with full width
+    // In Mobile list view, master cards render with full width and list header is present
     stateManager.closeAgentDetail(false);
     assert.ok(document.querySelector('.agents-master-column'));
+    assert.ok(document.querySelector('.agents-header-card'), 'List header card rendered in list view');
 
-    // Tapping an agent opens single-column full panel with top back button
+    // Tapping an agent opens single-column full panel with top back button (omitting list header/filters, F-66-05)
     stateManager.selectAgent('programmer', false);
     assert.ok(document.querySelector('.agents-mobile-detail-wrapper'));
+    assert.equal(document.querySelector('.agents-header-card'), null, 'Mobile detail omits list header card');
+    assert.equal(document.querySelector('.agent-filter-box-btn'), null, 'Mobile detail omits list filter row');
     const backBtn = document.querySelector('#btn-back-to-agents');
     assert.ok(backBtn, 'Mobile back button rendered');
 
-    // Clicking back returns to list view
+    // Clicking back returns to list view and restores header card
     (backBtn as HTMLButtonElement).click();
     assert.equal(stateManager.getSnapshot().agentViewMode, 'list');
+    assert.ok(document.querySelector('.agents-header-card'), 'List header card restored in list view');
+    assert.equal(document.querySelector('.agents-mobile-detail-wrapper'), null);
   } finally {
     await cleanup();
   }
@@ -508,6 +617,139 @@ test('Agents: Edit Agent dialog opens, is styled, and persists identity changes 
     const updated = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
     assert.equal(updated.displayName, 'Programmer Prime');
     assert.equal(updated.version, versionBefore + 1, 'Editing identity increments the config version');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Agents: browser Back and Forward navigation restores agent list and detail views (F-66-06)', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+
+    // 1. Open agent detail (pushes 'agent-detail' state)
+    stateManager.openAgentDetail('programmer');
+    assert.equal(stateManager.getSnapshot().agentViewMode, 'detail');
+    assert.equal(stateManager.getSnapshot().selectedAgentId, 'programmer');
+
+    // 2. Dispatch recorded 'agent-list' popstate event (simulating Browser Back)
+    dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate', { state: { page: 'agent-list' } }));
+    assert.equal(stateManager.getSnapshot().agentViewMode, 'list', 'Restored to agent list mode via popstate');
+
+    // 3. Dispatch 'agent-detail' popstate event (simulating Browser Forward)
+    dom.window.dispatchEvent(
+      new dom.window.PopStateEvent('popstate', { state: { page: 'agent-detail', agentId: 'planner' } })
+    );
+    assert.equal(stateManager.getSnapshot().agentViewMode, 'detail');
+    assert.equal(stateManager.getSnapshot().selectedAgentId, 'planner', 'Restored to agent detail for planner via popstate');
+
+    // 4. Dispatch empty popstate fallback while in detail mode
+    dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate', { state: null }));
+    assert.equal(stateManager.getSnapshot().agentViewMode, 'list', 'Fallback restored to agent list mode');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Agents: unconfigured option or missing model sets Agent to Unavailable and blocks admission (F-66-01)', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.setViewportMode('desktop');
+
+    // 1. Sentinel has only option with isConfigured: false
+    // Must be classified as Unavailable (traffic light red)
+    const sentinel = stateManager.getSnapshot().agents.find((a) => a.id === 'sentinel')!;
+    assert.equal(sentinel.workOptions[0]?.isConfigured, false);
+
+    stateManager.selectAgent('sentinel');
+    const document = dom.window.document;
+
+    const banner = document.querySelector('.env-traffic-light-banner');
+    assert.ok(banner, 'Traffic light banner rendered');
+    assert.match(banner.textContent ?? '', /Action Required/i);
+    assert.match(banner.getAttribute('title') ?? '', /unconfigured, unauthenticated, or missing/i);
+
+    // Option row displays "Unconfigured" badge
+    const optionBadge = document.querySelector('.agent-option-row .badge-yellow');
+    assert.ok(optionBadge);
+    assert.equal(optionBadge.textContent?.trim(), 'Unconfigured');
+
+    // Filter pill count for Unavailable includes Sentinel
+    const unavailablePill = document.querySelector('.filter-pill[data-filter="unavailable"]') as HTMLElement;
+    assert.ok(unavailablePill);
+    assert.match(unavailablePill.textContent ?? '', /1/, 'Unavailable filter count is at least 1');
+
+    // Clicking Unavailable filter displays Sentinel in master column
+    unavailablePill.click();
+    assert.equal(stateManager.getSnapshot().agentFilter, 'unavailable');
+    const masterColumn = document.querySelector('.agents-master-column');
+    assert.match(masterColumn?.textContent ?? '', /Sentinel/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Agents: Environment Compatibility UI displays clear ineligibility reasons for offline and incompatible hosts (F-66-02)', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.selectAgent('programmer');
+
+    const document = dom.window.document;
+
+    // Expand Environment Compatibility section
+    const envFoldable = document.querySelector('#foldable-env-compat') as HTMLElement;
+    (envFoldable.querySelector('.foldable-header') as HTMLElement).click();
+
+    const text = envFoldable.textContent ?? '';
+
+    // Offline / recovery host (win-dev-box) must NOT show "Admitted via"; must show Ineligible / Offline
+    assert.doesNotMatch(text, /Admitted via.*Windows Dev Host/);
+    assert.match(text, /Ineligible · Offline/);
+
+    // Protocol incompatible host (mac-mini-mismatch) must NOT show "Admitted via"; must show Ineligible
+    assert.doesNotMatch(text, /Admitted via.*Mac mini/);
+    assert.match(text, /Ineligible · Protocol Incompatible/);
+
+    // Pending enrollment host (mac-laptop-pending) must show Ineligible · Enrollment
+    assert.match(text, /Ineligible · Enrollment: pending/);
+
+    // Healthy online host (Mac Studio Primary) admits Programmer via PI
+    assert.match(text, /Admitted via PI/);
   } finally {
     await cleanup();
   }

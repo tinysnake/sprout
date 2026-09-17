@@ -509,8 +509,14 @@ export function initPrototype(mountEl: HTMLElement): void {
         stateManager.openEnvironmentDetail(ev.state.envId, false);
       } else if (ev.state?.page === 'env-list') {
         stateManager.closeEnvironmentDetail(false);
+      } else if (ev.state?.page === 'agent-detail' && ev.state.agentId) {
+        stateManager.openAgentDetail(ev.state.agentId, false);
+      } else if (ev.state?.page === 'agent-list') {
+        stateManager.closeAgentDetail(false);
       } else if (state.primaryNav === 'manage' && state.manageTab === 'environments' && state.environmentViewMode === 'detail') {
         stateManager.closeEnvironmentDetail(false);
+      } else if (state.primaryNav === 'manage' && state.manageTab === 'agents' && state.agentViewMode === 'detail') {
+        stateManager.closeAgentDetail(false);
       } else if (state.primaryNav === 'project' && state.projectTab === 'tasks' && state.taskViewMode === 'detail') {
         stateManager.closeTaskDetail(false);
       } else if (state.primaryNav === 'project' && state.projectTab === 'chat' && state.chatViewMode === 'detail') {

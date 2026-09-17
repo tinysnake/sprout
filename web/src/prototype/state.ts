@@ -29,6 +29,92 @@ import type {
 export type { ViewportMode };
 export type ActiveTab = 'attention' | 'projects' | 'tasks' | 'environments' | 'agents' | 'usage' | 'onboarding' | 'primitives';
 
+export type EnvironmentEligibilityCheck = {
+  isEligible: boolean;
+  reason?: string;
+};
+
+export function checkEnvironmentEligibility(env: EnvironmentInstance): EnvironmentEligibilityCheck {
+  if (env.enrollmentStatus !== 'approved') {
+    return {
+      isEligible: false,
+      reason: `Host is not approved for work admission (enrollment status: ${env.enrollmentStatus}).`,
+    };
+  }
+  if (env.connectionState !== 'online') {
+    return {
+      isEligible: false,
+      reason: `Host is ${env.connectionState}; online connection required for admission.`,
+    };
+  }
+  if (env.protocolCompatibility !== 'compatible') {
+    return {
+      isEligible: false,
+      reason: `Protocol incompatible: ${env.protocolMismatchDetail || `worker protocol ${env.protocolVersion} is incompatible`}.`,
+    };
+  }
+  if (env.workSafety !== 'clear') {
+    return {
+      isEligible: false,
+      reason: `Work safety blocked: Environment is in ${env.workSafety} state (${env.leaseRecovery?.cause || 'lease recovery required'}).`,
+    };
+  }
+  if (env.capabilityPermissions && env.capabilityPermissions.processExecution === false) {
+    return {
+      isEligible: false,
+      reason: 'Host capability restriction: processExecution permission is disabled.',
+    };
+  }
+  return { isEligible: true };
+}
+
+export function checkEngineModelAvailability(
+  engine: EngineKind,
+  workModel: string,
+  env: EnvironmentInstance
+): { isAvailable: boolean; reason?: string } {
+  const readiness = env.engineReadiness[engine];
+  if (!readiness || readiness === 'missing') {
+    return {
+      isAvailable: false,
+      reason: `Engine "${engine}" is not installed or supported on host ${env.displayName}.`,
+    };
+  }
+  if (readiness === 'login-required') {
+    return {
+      isAvailable: false,
+      reason: `Engine "${engine}" requires login/authentication on host ${env.displayName}.`,
+    };
+  }
+  if (readiness !== 'ready') {
+    return {
+      isAvailable: false,
+      reason: `Engine "${engine}" readiness status is ${readiness} on host ${env.displayName}.`,
+    };
+  }
+
+  const detail = env.engineDetails?.[engine];
+  if (detail) {
+    const rawAvailability = detail.modelAvailability?.trim() || '';
+    if (rawAvailability === '' || rawAvailability === 'none' || rawAvailability === 'unknown') {
+      return {
+        isAvailable: false,
+        reason: `Model availability for engine "${engine}" on host ${env.displayName} is reported as ${rawAvailability || 'none'}.`,
+      };
+    }
+    const availableModels = rawAvailability.split(',').map((s) => s.trim().toLowerCase());
+    const requestedModel = workModel.trim().toLowerCase();
+    if (!availableModels.includes(requestedModel) && !rawAvailability.toLowerCase().includes(requestedModel)) {
+      return {
+        isAvailable: false,
+        reason: `Model "${workModel}" is not available for engine "${engine}" on host ${env.displayName} (available: ${rawAvailability}).`,
+      };
+    }
+  }
+
+  return { isAvailable: true };
+}
+
 export interface PrototypeState {
   viewportMode: ViewportMode;
   theme: ThemeMode;
@@ -2874,8 +2960,31 @@ class StateManager {
     if (!agent) return { success: false, reason: 'Agent not found' };
 
     // Invariant (ADR-0008): An Agent cannot be archived during an active run or while it remains Task lead of an unfinished Task.
+    // 1. Check for active runs by this agent (regardless of task lead ownership)
+    const taskWithActiveRun = this.state.tasks.find(
+      (t) =>
+        t.runs.some((r) => r.agentId === agentId && r.lifecycle === 'running') ||
+        (t.agentRunLifecycle === 'running' && t.activeRunId && t.runs.some((r) => r.id === t.activeRunId && r.agentId === agentId))
+    );
+    if (taskWithActiveRun) {
+      const activeRun = taskWithActiveRun.runs.find(
+        (r) => r.agentId === agentId && (r.lifecycle === 'running' || r.id === taskWithActiveRun.activeRunId)
+      );
+      const msg = `Cannot archive Agent "${agent.displayName}": Agent is currently executing active run #${activeRun?.id || 'in-progress'} in Task #${taskWithActiveRun.id.replace('task-', '')}. Wait for completion or interrupt run first (ADR-0008).`;
+      if (typeof window !== 'undefined' && window.alert) {
+        window.alert(msg);
+      }
+      return { success: false, reason: msg };
+    }
+
+    // 2. Check for unfinished task lead ownership
     const activeTasksWithLead = this.state.tasks.filter(
-      (t) => t.taskLeadId === agentId && t.lifecycle !== 'completed' && t.lifecycle !== 'cancelled' && t.lifecycle !== 'rejected' && t.lifecycle !== 'withdrawn'
+      (t) =>
+        t.taskLeadId === agentId &&
+        t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'cancelled' &&
+        t.lifecycle !== 'rejected' &&
+        t.lifecycle !== 'withdrawn'
     );
     if (activeTasksWithLead.length > 0) {
       const msg = `Cannot archive Agent "${agent.displayName}": Agent is currently Task lead for ${activeTasksWithLead.length} unfinished task(s) (e.g. Task #${activeTasksWithLead[0]!.id.replace('task-', '')}). Reassign or complete tasks first (ADR-0008).`;
@@ -2903,10 +3012,47 @@ class StateManager {
     const env = this.state.environments.find((e) => e.id === environmentId);
     if (!agent || !env) return null;
 
+    // Guard: Archived Agent cannot be admitted for new work (ADR-0008)
+    if (agent.status === 'archived') {
+      return {
+        agent,
+        environment: env,
+        envIneligibilityReason: `Agent "${agent.displayName}" is archived and cannot be admitted for new runs (ADR-0008).`,
+        evaluationSteps: agent.workOptions.map((opt, i) => ({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unsupported' as const,
+          reason: `Agent "${agent.displayName}" is archived. Restore agent before admission.`,
+        })),
+        selectedOption: null,
+        guaranteeNote:
+          'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
+      };
+    }
+
+    // 1. Evaluate Environment-level eligibility (enrollment, connection, protocol, work safety, capability)
+    const envCheck = checkEnvironmentEligibility(env);
+    if (!envCheck.isEligible) {
+      return {
+        agent,
+        environment: env,
+        envIneligibilityReason: envCheck.reason,
+        evaluationSteps: agent.workOptions.map((opt, i) => ({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unsupported' as const,
+          reason: `Host ${env.displayName} is ineligible: ${envCheck.reason}`,
+        })),
+        selectedOption: null,
+        guaranteeNote:
+          'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
+      };
+    }
+
     const evaluationSteps: {
       priority: number;
       option: AgentWorkOption;
-      status: 'selected' | 'skipped_unsupported' | 'skipped_unauthenticated' | 'skipped_model_missing';
+      status: 'selected' | 'skipped_unsupported' | 'skipped_unauthenticated' | 'skipped_model_missing' | 'skipped_unconfigured';
       reason: string;
     }[] = [];
 
@@ -2914,8 +3060,20 @@ class StateManager {
 
     for (let i = 0; i < agent.workOptions.length; i++) {
       const opt = agent.workOptions[i]!;
-      const engineReadiness = env.engineReadiness[opt.engine];
 
+      // Check Option configuration flag (ADR-0008)
+      if (opt.isConfigured === false) {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_unconfigured',
+          reason: `Option Priority ${i + 1} (${opt.engine.toUpperCase()} · ${opt.workModel}) is marked unconfigured (isConfigured: false).`,
+        });
+        continue;
+      }
+
+      // Check Engine Readiness
+      const engineReadiness = env.engineReadiness[opt.engine];
       if (engineReadiness === 'missing' || !engineReadiness) {
         evaluationSteps.push({
           priority: i + 1,
@@ -2923,30 +3081,50 @@ class StateManager {
           status: 'skipped_unsupported',
           reason: `Engine "${opt.engine}" is not installed or supported on host ${env.displayName}.`,
         });
-      } else if (engineReadiness === 'login-required') {
+        continue;
+      }
+
+      if (engineReadiness === 'login-required') {
         evaluationSteps.push({
           priority: i + 1,
           option: opt,
           status: 'skipped_unauthenticated',
           reason: `Engine "${opt.engine}" requires login/authentication on host ${env.displayName}.`,
         });
-      } else if (engineReadiness === 'ready') {
-        evaluationSteps.push({
-          priority: i + 1,
-          option: opt,
-          status: 'selected',
-          reason: `Engine "${opt.engine}" is permitted, authenticated, and model "${opt.workModel}" is available.`,
-        });
-        selectedOption = opt;
-        break; // Sprout selects the FIRST available option at run admission
-      } else {
+        continue;
+      }
+
+      if (engineReadiness !== 'ready') {
         evaluationSteps.push({
           priority: i + 1,
           option: opt,
           status: 'skipped_unsupported',
-          reason: `Engine readiness status is ${engineReadiness}.`,
+          reason: `Engine readiness status is ${engineReadiness} on host ${env.displayName}.`,
         });
+        continue;
       }
+
+      // Check Model Availability
+      const modelCheck = checkEngineModelAvailability(opt.engine, opt.workModel, env);
+      if (!modelCheck.isAvailable) {
+        evaluationSteps.push({
+          priority: i + 1,
+          option: opt,
+          status: 'skipped_model_missing',
+          reason: modelCheck.reason || `Model "${opt.workModel}" is not available on host ${env.displayName}.`,
+        });
+        continue;
+      }
+
+      // Option is configured, engine is ready, and model is available!
+      evaluationSteps.push({
+        priority: i + 1,
+        option: opt,
+        status: 'selected',
+        reason: `Engine "${opt.engine}" is permitted, authenticated, and model "${opt.workModel}" is available on ${env.displayName}.`,
+      });
+      selectedOption = opt;
+      break; // Pre-acceptance fallback selects the first admissible option
     }
 
     return {
@@ -2954,7 +3132,8 @@ class StateManager {
       environment: env,
       evaluationSteps,
       selectedOption,
-      guaranteeNote: 'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
+      guaranteeNote:
+        'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
     };
   }
 
@@ -3626,9 +3805,21 @@ class StateManager {
     agentId: string,
     responsibilities?: string,
     instructions?: string
-  ) {
+  ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+
+    const globalAgent = this.state.agents.find((a) => a.id === agentId);
+    if (!globalAgent) return { success: false, reason: 'Agent not found' };
+
+    // Invariant (ADR-0008): Archiving blocks new Project memberships and new work admission while preserving historical attribution.
+    if (globalAgent.status === 'archived') {
+      const msg = `Cannot add Agent "${globalAgent.displayName}" to Project: Agent is archived. Restore the Agent first to assign new Project memberships (ADR-0008).`;
+      if (typeof window !== 'undefined' && window.alert) {
+        window.alert(msg);
+      }
+      return { success: false, reason: msg };
+    }
 
     const existing = project.memberships.find((m) => m.memberId === agentId);
     if (existing) {
@@ -3636,11 +3827,8 @@ class StateManager {
       if (responsibilities) existing.responsibilities = responsibilities;
       if (instructions) existing.collaborationInstructions = instructions;
       this.notify(`Restored membership for ${existing.displayName} in Project "${project.displayName}".`);
-      return;
+      return { success: true };
     }
-
-    const globalAgent = this.state.agents.find((a) => a.id === agentId);
-    if (!globalAgent) return;
 
     project.memberships.push({
       memberId: globalAgent.id,
@@ -3654,6 +3842,7 @@ class StateManager {
     });
 
     this.notify(`Added Agent ${globalAgent.displayName} to Project "${project.displayName}".`);
+    return { success: true };
   }
 
   public editProjectMembership(

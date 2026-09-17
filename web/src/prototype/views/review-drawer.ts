@@ -333,6 +333,12 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           <li>
             <strong>Cross-Environment Task Migration:</strong> Moving an in-progress Task across environments is deferred post-M2; Task begin binds the Task to one Environment instance for its entire lifecycle.
           </li>
+          <li>
+            <strong>Feed Visibility for Degraded Agents (#66 Fog):</strong> When an engine or model is degraded across all enrolled environments, whether the Agent should surface in cross-project Feed attention or remain scoped to Manage &gt; Agents.
+          </li>
+          <li>
+            <strong>Private Memory Operator Management (#66 Fog):</strong> Whether the Local Operator should be able to inspect or clear Agent private-memory entries in M2, or whether memory lifecycle remains engine-native and read-only.
+          </li>
         </ul>
       </div>
 

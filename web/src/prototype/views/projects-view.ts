@@ -747,7 +747,7 @@ function renderAddMemberModal(parentEl: HTMLElement, state: PrototypeState, proj
   modal.className = 'proto-modal-backdrop';
 
   const unassignedAgents = state.agents.filter(
-    (a) => !project.memberships.some((m) => m.memberId === a.id && m.status === 'active')
+    (a) => a.status === 'active' && !project.memberships.some((m) => m.memberId === a.id && m.status === 'active')
   );
 
   modal.innerHTML = `

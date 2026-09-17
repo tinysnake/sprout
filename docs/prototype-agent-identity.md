@@ -4,7 +4,7 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Agent Identity, Standing Instructions, Ordered Work Option Preferences, Environment Compatibility, Pre-Acceptance Fallback, and Non-Destructive Archiving** in the Sprout M2 Local Operator product (Ticket #66, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), Multi-View Project baseline (#63), Chat Scopes baseline (#64), and Environment Management baseline (#65), strictly preserving the portable worker identity and management journey decisions settled in **ADR-0008** and **CONTEXT.md**.
 
-The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html` on `0.0.0.0:41000`), with full DOM test coverage in `web/src/prototype/agents.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html`), with full DOM test coverage in `web/src/prototype/agents.dom.test.ts`.
 
 ---
 
@@ -16,7 +16,7 @@ In Sprout M2, Agents represent persistent, portable worker identities with their
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ MANAGE > GLOBAL AGENTS AREA                                                 │
 │ ├── Header: Title, Summary, [ + Create New Agent ], [ Architecture Guide ]  │
-│ ├── Filter Bar: [ All (7) | Active (6) | Attention (0) | Unavailable (0) | Archived (1) ] │
+│ ├── Filter Bar: [ All (7) | Active (6) | Attention (0) | Unavailable (1) | Archived (1) ] │
 │ ├───────────────────────────────────────────────────────────────────────────┤
 │ ├── DESKTOP SPLIT LAYOUT (Master / Detail)                                  │
 │ │   ├── Left Master Column (340px): Filterable Agent Cards List             │
@@ -164,7 +164,7 @@ The prototype demonstrates realistic data covering all 5 canonical states:
 |---|---|---|
 | **Healthy / Ready** | `programmer` (v3), `planner` (v2) | Priority 1 option ready on macOS Studio & Windows Dev; active project memberships; rich private memory; version changelog. |
 | **Attention / Fallback** | `designer` (v2), `researcher` (v1) | Priority 1 option degraded on some hosts; pre-acceptance fallback to Priority 2 verified in simulation. |
-| **Unavailable** | `sentinel` (ST, v1) | Configured option (`opencode`) is unauthenticated on all current hosts; Agent identity remains intact while clearly explaining why runs cannot currently be admitted. |
+| **Unavailable** | `sentinel` (ST, v1) | Work option (`opencode` · `deepseek-coder-v2`) is unconfigured (`isConfigured: false`); Agent identity remains intact while clearly explaining why runs cannot currently be admitted. |
 | **Archived** | `legacy-coder` (LC, v1) | Archived status; read-only presentation; preserved attribution of past runs and messages; one-click restore. |
 | **Empty / Custom** | New Agent Creation Form | Clean validation with display name, description, optional standing instructions, and default Priority 1 work option. |
 
@@ -175,12 +175,12 @@ The prototype demonstrates realistic data covering all 5 canonical states:
 - **Owner Review Decision & Pattern Refinements**:
   1. *Streamlined Header & Filters*: Header styled seamlessly like Feed and Environments headers (transparent background, no top/left/right borders, subtle bottom border). Title row actions kept inline with icon-only Guide and Create buttons. Filters formatted into 5 discrete box buttons (icon/dot top, count top, label bottom, auto-fitting single row).
   2. *Top-Right Status Dot*: Agent master cards feature a colored status dot aligned to the top-right of the title row.
-  3. *Detail View Navigation*: In mobile/single-column view, selecting an agent navigates to a dedicated full-screen detail panel with a traditional non-floating back header (`[ ← Back ]` + status dot + truncated title) without retaining the list header or filter row.
+  3. *Detail View Navigation*: In mobile/single-column view, selecting an agent navigates to a focused, dedicated level-2 full-screen detail panel with a traditional non-floating back header (`[ ← Back ]` + status dot + title) without retaining the list header or filter row.
   4. *Unified Metadata Grid*: Agent metadata (Stable Identity, Private Memory) formatted as a matching 2x2 grid to prevent horizontal overflow on narrow screens; redundant Status & Version / Project count tiles removed in favor of the status banner and foldable sections.
-  5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, drag-and-drop reordering (using grip handles) with automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
+  5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, reordering across devices (desktop drag-and-drop, mobile touch move buttons, and keyboard ArrowUp/Down), automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
   6. *Foldable Progressive Disclosure*: Environment Compatibility & Admission Evaluation, Project Memberships, Version Changelog, and Historical Run Attribution are presented as collapsed foldable boxes, expanding on demand to keep the default view focused on identity and next actions.
   7. *Pre-Acceptance Fallback Simulator*: Interactive tool allows testing how Sprout evaluates run admission across enrolled environments in real-time.
-  8. *Safety-Guarded Archiving*: Archiving validates that the agent is not leading active tasks; displays clear explanation of non-destructive attribution preservation.
+  8. *Safety-Guarded Archiving*: Archiving independently validates that the agent is not executing active runs and is not leading unfinished tasks; displays clear explanation of non-destructive attribution preservation.
   9. *Top Control Bar Streamlining*: Zero space-occupying candidate select dropdowns; clean visual hierarchy following `design-taste-frontend` taste principles.
   10. *Concise Status Banner*: Agent detail top banner shows only the status label and concise version/state chip; the verbose narrative fact paragraph was removed.
   11. *No Search Box*: The Agents header has no search input; the 5 status filter pills are the only list-narrowing control, matching the Environments surface.
