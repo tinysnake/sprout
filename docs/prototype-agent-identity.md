@@ -28,20 +28,20 @@ In Sprout M2, Agents represent persistent, portable worker identities with their
 │ │   │   └── Compact Metric Chips (Priority 1 Option, Projects, Version, Mem)│
 │ │   │                                                                       │
 │ │   └── Right Detail Column (Flex 1): Rich Agent Detail Panel               │
-│ │       ├── Section 1: Traffic Light Summary Banner & Mandatory Reason      │
-│ │       ├── Section 2: Agent Identity & Core Metadata (2x2 Grid)            │
-│ │       ├── Section 3: Standing Instructions (Collapsible & Editable)       │
+│ │       ├── Section 2: Agent Identity & Core Metadata (Stable Identity, Private Memory) │
+│ │       ├── Section 3: Standing Instructions (Editable)                     │
 │ │       ├── Section 4: Ordered Work Options (Execution Preferences)         │
 │ │       │   ├── Priority Rows (Priority 1 Primary, Priority 2 Fallback...)  │
-│ │       │   ├── Reorder Controls (Move Up / Down), Delete (Min 1 Invariant) │
+│ │       │   ├── Drag-and-Drop Reorder Handles, Delete (Min 1 Invariant)     │
 │ │       │   └── Pre-Acceptance Fallback & No-Replay Guarantee Notice        │
-│ │       ├── Section 5: Environment Compatibility & Admission Simulator      │
+│ │       ├── Section 5: Foldable Environment Compatibility & Admission Simulator │
 │ │       │   ├── Enrolled Host Compatibility Evaluation                      │
 │ │       │   ├── Interactive Fallback Simulation Tool                        │
 │ │       │   └── Strict Privacy Boundary Notice (Zero host paths / secrets)  │
-│ │       ├── Section 6: Project Memberships & Responsibilities               │
-│ │       ├── Section 7: Version History & Attribution Trace                  │
-│ │       └── Section 8: Operations Toolbar (Edit, Archive / Restore)         │
+│ │       ├── Section 6: Foldable Project Memberships & Responsibilities      │
+│ │       ├── Section 7: Foldable Version Changelog                           │
+│ │       ├── Section 8: Foldable Historical Run Attribution & Provenance     │
+│ │       └── Section 9: Operations Toolbar (Edit, Archive / Restore)         │
 │ ├───────────────────────────────────────────────────────────────────────────┤
 │ └── MOBILE DRILL-DOWN LAYOUT (390px Phone)                                  │
 │     ├── Level 1 (Master List): Full-width cards with quick selection        │
@@ -177,11 +177,13 @@ The prototype demonstrates realistic data covering all 5 canonical states:
   1. *Streamlined Header & Filters*: Header styled seamlessly like Feed and Environments headers (transparent background, no top/left/right borders, subtle bottom border). Title row actions kept inline with icon-only Guide and Create buttons. Filters formatted into 5 discrete box buttons (icon/dot top, count top, label bottom, auto-fitting single row).
   2. *Top-Right Status Dot*: Agent master cards feature a colored status dot aligned to the top-right of the title row.
   3. *Detail View Navigation*: In mobile/single-column view, selecting an agent navigates to a dedicated full-screen detail panel with a traditional non-floating back header (`[ ← Back ]` + status dot + truncated title) without retaining the list header or filter row.
-  4. *Unified 2x2 Metadata Grid*: Agent metadata (Stable ID, Status/Version, Private Memory, Project Memberships) formatted as a matching 2x2 grid to prevent horizontal overflow on narrow screens.
-  5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, reordering options (Up/Down) with automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
-  6. *Pre-Acceptance Fallback Simulator*: Interactive tool allows testing how Sprout evaluates run admission across enrolled environments in real-time.
+  4. *Unified Metadata Grid*: Agent metadata (Stable Identity, Private Memory) formatted as a matching 2x2 grid to prevent horizontal overflow on narrow screens; redundant Status & Version / Project count tiles removed in favor of the status banner and foldable sections.
+  5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, drag-and-drop reordering (using grip handles) with automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
+  6. *Foldable Progressive Disclosure*: Environment Compatibility & Admission Evaluation, Project Memberships, Version Changelog, and Historical Run Attribution are presented as collapsed foldable boxes, expanding on demand to keep the default view focused on identity and next actions.
+  7. *Pre-Acceptance Fallback Simulator*: Interactive tool allows testing how Sprout evaluates run admission across enrolled environments in real-time.
   7. *Safety-Guarded Archiving*: Archiving validates that the agent is not leading active tasks; displays clear explanation of non-destructive attribution preservation.
   8. *Top Control Bar Streamlining*: Zero space-occupying candidate select dropdowns; clean visual hierarchy following `design-taste-frontend` taste principles.
+  9. *Concise Status Banner*: Agent detail top banner shows only the status label and concise version/state chip; the verbose narrative fact paragraph was removed.
 - **Verification Command**:
   ```bash
   npm run typecheck && node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'

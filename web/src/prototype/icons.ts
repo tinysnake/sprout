@@ -191,6 +191,10 @@ export function renderIcon(name: string, size = 18, className = 'proto-icon'): s
     case 'tag':
       return `<svg ${common}><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" /><line x1="7" y1="7" x2="7.01" y2="7" /></svg>`;
 
+    case 'grip':
+    case 'grip-vertical':
+      return `<svg ${common}><circle cx="9" cy="12" r="1" /><circle cx="9" cy="5" r="1" /><circle cx="9" cy="19" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="5" r="1" /><circle cx="15" cy="19" r="1" /></svg>`;
+
     default:
       return `<svg ${common}><circle cx="12" cy="12" r="10" /></svg>`;
   }

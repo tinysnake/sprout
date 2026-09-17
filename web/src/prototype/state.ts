@@ -2847,24 +2847,16 @@ class StateManager {
     return true;
   }
 
-  public moveAgentWorkOption(agentId: string, optionId: string, direction: 'up' | 'down') {
+  public reorderAgentWorkOptions(agentId: string, sourceIdx: number, targetIdx: number) {
     const agent = this.state.agents.find((a) => a.id === agentId);
     if (!agent) return;
+    if (sourceIdx < 0 || sourceIdx >= agent.workOptions.length) return;
+    if (targetIdx < 0 || targetIdx >= agent.workOptions.length) return;
+    if (sourceIdx === targetIdx) return;
 
-    const idx = agent.workOptions.findIndex((o) => o.id === optionId);
-    if (idx === -1) return;
-
-    if (direction === 'up' && idx > 0) {
-      const temp = agent.workOptions[idx]!;
-      agent.workOptions[idx] = agent.workOptions[idx - 1]!;
-      agent.workOptions[idx - 1] = temp;
-    } else if (direction === 'down' && idx < agent.workOptions.length - 1) {
-      const temp = agent.workOptions[idx]!;
-      agent.workOptions[idx] = agent.workOptions[idx + 1]!;
-      agent.workOptions[idx + 1] = temp;
-    } else {
-      return;
-    }
+    const [movedOpt] = agent.workOptions.splice(sourceIdx, 1);
+    if (!movedOpt) return;
+    agent.workOptions.splice(targetIdx, 0, movedOpt);
 
     const oldVersion = agent.version || 1;
     const newVersion = oldVersion + 1;
@@ -2876,7 +2868,7 @@ class StateManager {
       version: newVersion,
       timestamp: 'Just now',
       author: this.state.operator.name,
-      changeSummary: `Reordered execution preferences (Priority ${direction === 'up' ? idx + 1 : idx + 2} -> Priority ${direction === 'up' ? idx : idx + 1}).`,
+      changeSummary: `Reordered execution preferences (Priority ${sourceIdx + 1} -> Priority ${targetIdx + 1}).`,
       optionsCount: agent.workOptions.length,
       standingInstructions: agent.standingInstructions,
     });

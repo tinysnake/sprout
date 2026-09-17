@@ -3682,16 +3682,114 @@ code {
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: 8px 12px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.agent-option-row[draggable="true"] {
+  cursor: grab;
+}
+
+.agent-option-row[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.agent-option-row.dragging {
+  opacity: 0.35;
+  border: 1px dashed var(--accent-primary);
+  background: var(--bg-surface);
+}
+
+.agent-option-row.drag-over {
+  border-top: 2px solid var(--accent-primary);
+  background: var(--accent-bg);
+}
+
+.drag-handle-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: grab;
+  padding: 4px 2px;
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.agent-option-row:hover .drag-handle-wrap {
+  color: var(--text-primary);
+}
+
+.foldable-card {
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
   transition: border-color 0.15s ease;
 }
 
-.agent-option-row:hover {
+.foldable-card:hover {
   border-color: var(--border-strong);
+}
+
+.foldable-header {
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  background: var(--bg-surface-elevated);
+  transition: background-color 0.15s ease;
+}
+
+.foldable-header:hover {
+  background: var(--bg-surface);
+}
+
+.foldable-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.foldable-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.foldable-chevron {
+  transition: transform 0.2s ease;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+}
+
+.foldable-card.open .foldable-chevron {
+  transform: rotate(90deg);
+}
+
+.foldable-body {
+  display: none;
+  padding: 10px 12px 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+  flex-direction: column;
+  gap: 8px;
+}
+
+.foldable-card.open .foldable-body {
+  display: flex;
 }
 
 .agent-option-info {

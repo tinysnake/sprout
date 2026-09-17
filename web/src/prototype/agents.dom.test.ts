@@ -53,7 +53,7 @@ async function setupPrototypeDom() {
   };
 }
 
-test('Agents: renders Agent identity, standing instructions, ordered work options, and status reasons', async () => {
+test('Agents: renders Agent identity, standing instructions, ordered work options, and concise status banner', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -81,18 +81,15 @@ test('Agents: renders Agent identity, standing instructions, ordered work option
     assert.match(document.body.textContent ?? '', /Unavailable \(/);
     assert.match(document.body.textContent ?? '', /Archived \(/);
 
-    // 2. Verify Decisive Status Reason Banner
+    // 2. Verify Concise Status Reason Banner (without verbose fact paragraph)
     const banner = document.querySelector('.env-traffic-light-banner');
     assert.ok(banner, 'Traffic light banner rendered');
     assert.match(banner.textContent ?? '', /Ready/);
-    assert.match(banner.textContent ?? '', /Decisive Fact: Ready: Priority 1 option \(PI · claude-3-5-sonnet · high\) is ready/);
+    assert.doesNotMatch(banner.textContent ?? '', /Decisive Fact:/, 'Verbose fact paragraph removed');
 
-    // 3. Verify 2x2 Core Facts Grid
-    assert.match(document.body.textContent ?? '', /Agent Identity & Portability Metadata/);
+    // 3. Verify Non-redundant Identity Facts
     assert.match(document.body.textContent ?? '', /Stable Identity/);
     assert.match(document.body.textContent ?? '', /programmer/);
-    assert.match(document.body.textContent ?? '', /Status & Version/);
-    assert.match(document.body.textContent ?? '', /ACTIVE · v3/);
     assert.match(document.body.textContent ?? '', /Private Memory/);
     assert.match(document.body.textContent ?? '', /26 memory entries/);
 
@@ -100,7 +97,7 @@ test('Agents: renders Agent identity, standing instructions, ordered work option
     assert.match(document.body.textContent ?? '', /Standing Instructions/);
     assert.match(document.body.textContent ?? '', /Write pure functions where possible; ensure build and verification scripts pass/);
 
-    // 5. Verify Ordered Work Options
+    // 5. Verify Ordered Work Options with Drag Handles
     assert.match(document.body.textContent ?? '', /Ordered Execution Preferences/);
     assert.match(document.body.textContent ?? '', /Priority 1 \(Primary\)/);
     assert.match(document.body.textContent ?? '', /PI/);
@@ -109,15 +106,36 @@ test('Agents: renders Agent identity, standing instructions, ordered work option
     assert.match(document.body.textContent ?? '', /CODEX/);
     assert.match(document.body.textContent ?? '', /gpt-4o/);
 
+    // Verify draggable option rows
+    const draggableRows = document.querySelectorAll('.agent-option-row[draggable="true"]');
+    assert.ok(draggableRows.length >= 2, 'Work options are draggable for reordering');
+
     // 6. Verify Pre-Acceptance Fallback & No-Silent-Replay Guarantee Notice
     assert.match(document.body.textContent ?? '', /Pre-Acceptance Fallback & No-Silent-Replay Guarantee \(ADR-0008\)/);
     assert.match(document.body.textContent ?? /never silently replays work through lower-priority options/, /never silently replays work/);
+
+    // 7. Verify Foldable Boxes are Present and Collapsed by Default
+    const envCompatFoldable = document.querySelector('#foldable-env-compat');
+    assert.ok(envCompatFoldable, 'Environment compatibility foldable card rendered');
+    assert.equal(envCompatFoldable.classList.contains('open'), false, 'Collapsed by default');
+
+    const membershipsFoldable = document.querySelector('#foldable-project-memberships');
+    assert.ok(membershipsFoldable, 'Project memberships foldable card rendered');
+    assert.equal(membershipsFoldable.classList.contains('open'), false, 'Collapsed by default');
+
+    const changelogFoldable = document.querySelector('#foldable-version-changelog');
+    assert.ok(changelogFoldable, 'Changelog foldable card rendered');
+    assert.equal(changelogFoldable.classList.contains('open'), false, 'Collapsed by default');
+
+    const attributionFoldable = document.querySelector('#foldable-attribution-trace');
+    assert.ok(attributionFoldable, 'Attribution trace foldable card rendered');
+    assert.equal(attributionFoldable.classList.contains('open'), false, 'Collapsed by default');
   } finally {
     await cleanup();
   }
 });
 
-test('Agents: managing work options (add, reorder, delete, and minimum 1 option guard)', async () => {
+test('Agents: managing work options (add, drag-and-drop reorder, delete, and minimum 1 option guard)', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -149,18 +167,18 @@ test('Agents: managing work options (add, reorder, delete, and minimum 1 option 
     assert.equal(updatedAgent.version, initialVersion + 1);
     assert.equal(updatedAgent.workOptions[updatedAgent.workOptions.length - 1]?.engine, 'agy');
 
-    // 2. Reorder Options (Move Down Priority 1)
+    // 2. Drag & Drop Reorder Options (Move index 0 to index 1)
     const opt1Id = updatedAgent.workOptions[0]!.id;
     const opt2Id = updatedAgent.workOptions[1]!.id;
 
-    stateManager.moveAgentWorkOption('programmer', opt1Id, 'down');
+    stateManager.reorderAgentWorkOptions('programmer', 0, 1);
     updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
     assert.equal(updatedAgent.workOptions[0]?.id, opt2Id);
     assert.equal(updatedAgent.workOptions[1]?.id, opt1Id);
     assert.equal(updatedAgent.version, initialVersion + 2);
 
-    // 3. Move Up
-    stateManager.moveAgentWorkOption('programmer', opt1Id, 'up');
+    // 3. Move back (index 1 to index 0)
+    stateManager.reorderAgentWorkOptions('programmer', 1, 0);
     updatedAgent = stateManager.getSnapshot().agents.find((a) => a.id === 'programmer')!;
     assert.equal(updatedAgent.workOptions[0]?.id, opt1Id);
 
@@ -177,6 +195,61 @@ test('Agents: managing work options (add, reorder, delete, and minimum 1 option 
     const removeRes = stateManager.removeAgentWorkOption('sentinel', sentinel.workOptions[0]!.id);
     assert.equal(removeRes, false, 'Refused removal of the last work option');
     assert.equal(sentinel.workOptions.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Agents: foldable boxes expand on click to reveal environment, membership, changelog, and attribution details', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.selectAgent('programmer');
+
+    const document = dom.window.document;
+
+    // 1. Expand Environment Compatibility Foldable Card
+    const envFoldable = document.querySelector('#foldable-env-compat') as HTMLElement;
+    assert.ok(envFoldable);
+    assert.equal(envFoldable.classList.contains('open'), false);
+
+    const envHeader = envFoldable.querySelector('.foldable-header') as HTMLElement;
+    envHeader.click();
+    assert.equal(envFoldable.classList.contains('open'), true, 'Environment compatibility card expanded');
+
+    // 2. Expand Project Memberships Foldable Card
+    const memFoldable = document.querySelector('#foldable-project-memberships') as HTMLElement;
+    assert.ok(memFoldable);
+    const memHeader = memFoldable.querySelector('.foldable-header') as HTMLElement;
+    memHeader.click();
+    assert.equal(memFoldable.classList.contains('open'), true, 'Project memberships card expanded');
+    assert.match(memFoldable.textContent ?? '', /Three\.js Minesweeper Game/);
+
+    // 3. Expand Version Changelog Foldable Card
+    const changelogFoldable = document.querySelector('#foldable-version-changelog') as HTMLElement;
+    assert.ok(changelogFoldable);
+    const changelogHeader = changelogFoldable.querySelector('.foldable-header') as HTMLElement;
+    changelogHeader.click();
+    assert.equal(changelogFoldable.classList.contains('open'), true, 'Changelog card expanded');
+    assert.match(changelogFoldable.textContent ?? '', /v3/);
+
+    // 4. Expand Attribution Trace Foldable Card
+    const attrFoldable = document.querySelector('#foldable-attribution-trace') as HTMLElement;
+    assert.ok(attrFoldable);
+    const attrHeader = attrFoldable.querySelector('.foldable-header') as HTMLElement;
+    attrHeader.click();
+    assert.equal(attrFoldable.classList.contains('open'), true, 'Attribution trace card expanded');
   } finally {
     await cleanup();
   }
@@ -222,35 +295,6 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
   }
 });
 
-test('Agents: project memberships and collaboration instructions separation', async () => {
-  const { dom, vite, cleanup } = await setupPrototypeDom();
-  try {
-    const { initPrototype } = (await vite.ssrLoadModule(
-      '/src/prototype/prototype.ts'
-    )) as typeof import('./prototype.js');
-    const { stateManager } = (await vite.ssrLoadModule(
-      '/src/prototype/state.ts'
-    )) as typeof import('./state.js');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount);
-    initPrototype(appMount);
-
-    stateManager.setPrimaryNav('manage', undefined, 'agents');
-    stateManager.selectAgent('programmer');
-
-    const document = dom.window.document;
-
-    // Verify Project Memberships section
-    assert.match(document.body.textContent ?? '', /Project Memberships & Responsibilities/);
-    assert.match(document.body.textContent ?? '', /Three\.js Minesweeper Game/);
-    assert.match(document.body.textContent ?? '', /Unity Room Lighting Prototype/);
-    assert.match(document.body.textContent ?? '', /Responsibility:/);
-  } finally {
-    await cleanup();
-  }
-});
-
 test('Agents: non-destructive archive safety guard and historical attribution preservation', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
@@ -289,7 +333,7 @@ test('Agents: non-destructive archive safety guard and historical attribution pr
     // 4. Verify Archived Agent Presentation (Legacy Coder)
     stateManager.selectAgent('legacy-coder');
     const document = dom.window.document;
-    assert.match(document.body.textContent ?? '', /Archived Agent · Preserved attribution, private memory/);
+    assert.match(document.body.textContent ?? '', /Archived/);
     assert.match(document.body.textContent ?? '', /Restore Agent/);
   } finally {
     await cleanup();

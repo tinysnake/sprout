@@ -378,34 +378,24 @@ function renderAgentDetailCard(
     })
     .filter((item): item is { project: (typeof state.projects)[0]; membership: (typeof state.projects)[0]['memberships'][0] } => item !== null);
 
-  const activeProjectsCount = activeMemberships.filter((m) => m.membership.status === 'active').length;
-  const endedProjectsCount = activeMemberships.filter((m) => m.membership.status === 'ended').length;
-
   detailCard.innerHTML = `
-    <!-- Top Summary Banner & Mandatory Decisive Status -->
-    <div class="env-traffic-light-banner ${st.trafficLight}" style="margin-bottom: 4px;">
-      <div class="env-traffic-light-header">
-        <span class="status-dot ${st.trafficLight}"></span>
-        <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">
-          ${st.trafficLight === 'green' ? 'Ready' : st.trafficLight === 'yellow' ? 'Attention / Degraded' : st.trafficLight === 'red' ? 'Action Required' : 'Archived'}
-        </strong>
-      </div>
-      <div class="env-traffic-light-fact" style="font-size: 12px; line-height: 1.4; margin-top: 4px;">
-        <strong>Decisive Fact:</strong> ${st.reason}
+    <!-- Top Summary Banner (Clean, no verbose paragraphs) -->
+    <div class="env-traffic-light-banner ${st.trafficLight}" style="margin-bottom: 2px;">
+      <div class="env-traffic-light-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="status-dot ${st.trafficLight}"></span>
+          <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">
+            ${st.trafficLight === 'green' ? 'Ready' : st.trafficLight === 'yellow' ? 'Attention / Degraded' : st.trafficLight === 'red' ? 'Action Required' : 'Archived'}
+          </strong>
+        </div>
+        <span style="font-size: 11px; color: var(--text-secondary);">
+          ${agent.status === 'active' ? `v${agent.version || 1} · Active` : 'Archived'}
+        </span>
       </div>
     </div>
 
-    <!-- Section 1: Agent Identity & Core Facts (2x2 Grid) -->
+    <!-- Section 1: Agent Identity & Core Facts (Clean non-redundant items) -->
     <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
-          Agent Identity & Portability Metadata
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">
-          ADR-0008 Portable Boundary
-        </span>
-      </div>
-
       <div class="dimensions-2x2-grid">
         <div class="dimension-item">
           <div class="dimension-item-top">
@@ -421,36 +411,12 @@ function renderAgentDetailCard(
 
         <div class="dimension-item">
           <div class="dimension-item-top">
-            <span class="dimension-item-label">Status & Version</span>
-            <span class="dimension-item-sub">Updated ${agent.updatedAt || 'Recently'}</span>
-          </div>
-          <div class="dimension-item-action">
-            <span class="badge ${agent.status === 'active' ? 'badge-success' : 'badge-neutral'}" style="font-size: 10px;">
-              ${agent.status.toUpperCase()} · v${agent.version || 1}
-            </span>
-          </div>
-        </div>
-
-        <div class="dimension-item">
-          <div class="dimension-item-top">
             <span class="dimension-item-label">Private Memory</span>
             <span class="dimension-item-sub">Preserved across projects</span>
           </div>
           <div class="dimension-item-action">
             <span class="badge" style="background: var(--bg-surface-elevated); color: var(--text-secondary); font-size: 10px;">
               ${agent.privateMemoryEntriesCount} memory entries
-            </span>
-          </div>
-        </div>
-
-        <div class="dimension-item">
-          <div class="dimension-item-top">
-            <span class="dimension-item-label">Project Memberships</span>
-            <span class="dimension-item-sub">${activeProjectsCount} active / ${endedProjectsCount} ended</span>
-          </div>
-          <div class="dimension-item-action">
-            <span class="badge" style="background: var(--purple-agent-bg); color: var(--purple-agent); font-size: 10px;">
-              ${activeProjectsCount} active project(s)
             </span>
           </div>
         </div>
@@ -476,7 +442,7 @@ function renderAgentDetailCard(
       </p>
     </div>
 
-    <!-- Section 3: Ordered Work Options (Execution Preferences) -->
+    <!-- Section 3: Ordered Work Options (Execution Preferences) with Drag-and-Drop Reorder -->
     <div style="display: flex; flex-direction: column; gap: 10px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <div>
@@ -484,7 +450,7 @@ function renderAgentDetailCard(
             Ordered Execution Preferences (Work Options)
           </span>
           <p style="font-size: 11px; color: var(--text-muted); margin: 2px 0 0 0;">
-            Evaluated in priority order at run admission. Sprout chooses the first available option (ADR-0008).
+            Drag to reorder priority. Evaluated at run admission in top-to-bottom order (ADR-0008).
           </p>
         </div>
         ${
@@ -496,12 +462,11 @@ function renderAgentDetailCard(
         }
       </div>
 
-      <!-- Work Options List -->
-      <div style="display: flex; flex-direction: column; gap: 6px;">
+      <!-- Work Options List with Drag Handles -->
+      <div class="agent-options-drag-list" style="display: flex; flex-direction: column; gap: 6px;">
         ${agent.workOptions
           .map((opt, idx) => {
             const isFirst = idx === 0;
-            const isLast = idx === agent.workOptions.length - 1;
 
             // Check readiness across enrolled environments
             const matchingReadyEnvs = state.environments.filter(
@@ -510,34 +475,42 @@ function renderAgentDetailCard(
             const isReadyOnAny = matchingReadyEnvs.length > 0;
 
             return `
-              <div class="agent-option-row" data-option-id="${opt.id}">
-                <div class="agent-option-info">
-                  <span class="badge ${isFirst ? 'badge-primary' : 'badge-neutral'}" style="font-size: 10px; font-weight: 700;">
-                    Priority ${idx + 1}${isFirst ? ' (Primary)' : ' (Fallback)'}
-                  </span>
-                  <strong style="font-size: 13px; color: var(--text-primary);">
-                    ${opt.engine.toUpperCase()}
-                  </strong>
-                  <span style="font-size: 12px; color: var(--text-secondary);">
-                    Model: <code style="color: var(--accent-primary);">${opt.workModel}</code>
-                  </span>
-                  <span class="status-pill purple" style="font-size: 10px; padding: 2px 6px;">
-                    Effort: ${opt.effort}
-                  </span>
-                  <span class="badge ${isReadyOnAny ? 'badge-success' : 'badge-warning'}" style="font-size: 10px;">
-                    ${isReadyOnAny ? `Ready on ${matchingReadyEnvs.length} host(s)` : 'Unavailable / Login Req'}
-                  </span>
+              <div
+                class="agent-option-row"
+                data-option-id="${opt.id}"
+                data-index="${idx}"
+                ${agent.status === 'active' ? 'draggable="true"' : ''}
+              >
+                <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                  ${
+                    agent.status === 'active'
+                      ? `<div class="drag-handle-wrap" title="Drag to reorder priority" aria-label="Drag to reorder priority">
+                          ${renderIcon('grip-vertical', 14)}
+                        </div>`
+                      : ''
+                  }
+                  <div class="agent-option-info">
+                    <span class="badge ${isFirst ? 'badge-primary' : 'badge-neutral'}" style="font-size: 10px; font-weight: 700;">
+                      Priority ${idx + 1}${isFirst ? ' (Primary)' : ' (Fallback)'}
+                    </span>
+                    <strong style="font-size: 13px; color: var(--text-primary);">
+                      ${opt.engine.toUpperCase()}
+                    </strong>
+                    <span style="font-size: 12px; color: var(--text-secondary);">
+                      Model: <code style="color: var(--accent-primary);">${opt.workModel}</code>
+                    </span>
+                    <span class="status-pill purple" style="font-size: 10px; padding: 2px 6px;">
+                      Effort: ${opt.effort}
+                    </span>
+                    <span class="badge ${isReadyOnAny ? 'badge-success' : 'badge-warning'}" style="font-size: 10px;">
+                      ${isReadyOnAny ? `Ready on ${matchingReadyEnvs.length} host(s)` : 'Unavailable / Login Req'}
+                    </span>
+                  </div>
                 </div>
 
                 ${
                   agent.status === 'active'
                     ? `<div class="agent-option-actions">
-                        <button class="btn btn-ghost btn-sm move-up-btn" data-opt="${opt.id}" ${isFirst ? 'disabled' : ''} title="Move Up (Increase Priority)" aria-label="Move Up">
-                          ${renderIcon('arrow-up', 12)}
-                        </button>
-                        <button class="btn btn-ghost btn-sm move-down-btn" data-opt="${opt.id}" ${isLast ? 'disabled' : ''} title="Move Down (Decrease Priority)" aria-label="Move Down">
-                          ${renderIcon('arrow-down', 12)}
-                        </button>
                         <button class="btn btn-ghost btn-sm delete-opt-btn" data-opt="${opt.id}" ${agent.workOptions.length <= 1 ? 'disabled title="An Agent must have at least one work option (ADR-0008)"' : 'title="Remove Option"'} aria-label="Remove Option">
                           ${renderIcon('trash', 12)}
                         </button>
@@ -565,167 +538,193 @@ function renderAgentDetailCard(
       </div>
     </div>
 
-    <!-- Section 4: Environment Compatibility Matrix & Admission Simulator -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
-          Environment Compatibility & Admission Evaluation
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted);">Neutral Host Facts</span>
+    <!-- Section 4: Environment Compatibility & Admission Evaluation (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-env-compat">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('server', 14)}
+          <span>Environment Compatibility & Admission Evaluation</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge-neutral" style="font-size: 10px;">${state.environments.length} Hosts</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
       </div>
+      <div class="foldable-body">
+        <p style="font-size: 11px; color: var(--text-muted); margin: 0;">
+          Evaluated at run admission across enrolled worker hosts. Host credentials and local paths remain isolated (ADR-0008).
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 12px;">
+          ${state.environments
+            .map((env) => {
+              const evalResult = stateManager.evaluateAdmissionFallback(agent.id, env.id);
+              const matchedOpt = evalResult?.selectedOption;
+              const isCompatible = Boolean(matchedOpt);
 
-      <div style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px;">
-        ${state.environments
-          .map((env) => {
-            const evalResult = stateManager.evaluateAdmissionFallback(agent.id, env.id);
-            const matchedOpt = evalResult?.selectedOption;
-            const isCompatible = Boolean(matchedOpt);
-
-            return `
-              <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; gap: 8px;">
-                <div style="min-width: 0;">
-                  <strong style="color: var(--text-primary);">${env.displayName}</strong>
-                  <span style="color: var(--text-muted); font-size: 11px;"> (${env.platform} · ${env.connectionState})</span>
+              return `
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; gap: 8px;">
+                  <div style="min-width: 0;">
+                    <strong style="color: var(--text-primary);">${env.displayName}</strong>
+                    <span style="color: var(--text-muted); font-size: 11px;"> (${env.platform} · ${env.connectionState})</span>
+                  </div>
+                  <div style="text-align: right; flex-shrink: 0;">
+                    ${
+                      isCompatible
+                        ? `<span class="badge badge-success" style="font-size: 10px;">
+                            Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
+                          </span>`
+                        : `<span class="badge badge-warning" style="font-size: 10px;">
+                            No compatible option ready
+                          </span>`
+                    }
+                  </div>
                 </div>
-                <div style="text-align: right; flex-shrink: 0;">
+              `;
+            })
+            .join('')}
+
+          <!-- Interactive Admission Simulation Row -->
+          <div style="margin-top: 6px; padding-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <label for="sim-env-select" style="font-size: 11px; font-weight: 600; color: var(--text-secondary);">Simulate on:</label>
+              <select id="sim-env-select" class="form-select" style="font-size: 11px; padding: 2px 6px; height: 26px; width: auto;">
+                ${state.environments.map((e) => `<option value="${e.id}">${e.displayName}</option>`).join('')}
+              </select>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-run-simulation" style="font-size: 11px; padding: 3px 8px;">
+              ${renderIcon('play', 10)} Test Admission Fallback
+            </button>
+          </div>
+
+          <!-- Simulation Output Box (populated on test) -->
+          <div id="simulation-output-box" style="display: none; margin-top: 6px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 5: Project Memberships & Responsibilities (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-project-memberships">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('folder', 14)}
+          <span>Project Memberships & Responsibilities</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge-neutral" style="font-size: 10px;">${activeMemberships.length} Projects</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
+      </div>
+      <div class="foldable-body">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${
+            activeMemberships.length === 0
+              ? `<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">
+                  Agent has not been added to any Project memberships yet. (Add via Project Overview).
+                </div>`
+              : activeMemberships
+                  .map(
+                    ({ project, membership }) => `
+                <div class="agent-membership-row">
+                  <div class="agent-membership-row-top">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <strong style="color: var(--text-primary); font-size: 13px;">${project.displayName}</strong>
+                      <code style="font-size: 10px; color: var(--text-muted);">${project.id}</code>
+                    </div>
+                    <span class="badge ${membership.status === 'active' ? 'badge-success' : 'badge-neutral'}" style="font-size: 10px;">
+                      ${membership.status.toUpperCase()}
+                    </span>
+                  </div>
+                  <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    <strong>Responsibility:</strong> ${membership.responsibilities || 'General collaboration'}
+                  </div>
                   ${
-                    isCompatible
-                      ? `<span class="badge badge-success" style="font-size: 10px;">
-                          Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
-                        </span>`
-                      : `<span class="badge badge-warning" style="font-size: 10px;">
-                          No compatible option ready
-                        </span>`
+                    membership.collaborationInstructions
+                      ? `<div style="font-size: 11px; color: var(--text-muted);">
+                          <strong>Instructions:</strong> ${membership.collaborationInstructions}
+                        </div>`
+                      : ''
                   }
                 </div>
-              </div>
-            `;
-          })
-          .join('')}
-
-        <!-- Interactive Admission Simulation Row -->
-        <div style="margin-top: 6px; padding-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <label for="sim-env-select" style="font-size: 11px; font-weight: 600; color: var(--text-secondary);">Simulate on:</label>
-            <select id="sim-env-select" class="form-select" style="font-size: 11px; padding: 2px 6px; height: 26px; width: auto;">
-              ${state.environments.map((e) => `<option value="${e.id}">${e.displayName}</option>`).join('')}
-            </select>
-          </div>
-          <button class="btn btn-secondary btn-sm" id="btn-run-simulation" style="font-size: 11px; padding: 3px 8px;">
-            ${renderIcon('play', 10)} Test Admission Fallback
-          </button>
+              `
+                  )
+                  .join('')
+          }
         </div>
-
-        <!-- Simulation Output Box (populated on test) -->
-        <div id="simulation-output-box" style="display: none; margin-top: 6px;"></div>
       </div>
     </div>
 
-    <!-- Section 5: Project Memberships & Responsibilities -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
-          Project Memberships & Responsibilities
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted);">${activeMemberships.length} Total Binding(s)</span>
+    <!-- Section 6: Configuration Version Changelog (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-version-changelog">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('history', 14)}
+          <span>Configuration Version Changelog</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge-primary" style="font-size: 10px;">v${agent.version || 1}</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
       </div>
-
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        ${
-          activeMemberships.length === 0
-            ? `<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">
-                Agent has not been added to any Project memberships yet. (Add via Project Overview).
-              </div>`
-            : activeMemberships
-                .map(
-                  ({ project, membership }) => `
-              <div class="agent-membership-row">
-                <div class="agent-membership-row-top">
-                  <div style="display: flex; align-items: center; gap: 6px;">
-                    <strong style="color: var(--text-primary); font-size: 13px;">${project.displayName}</strong>
-                    <code style="font-size: 10px; color: var(--text-muted);">${project.id}</code>
+      <div class="foldable-body">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${
+            (agent.versionHistory && agent.versionHistory.length > 0)
+              ? agent.versionHistory
+                  .map(
+                    (v) => `
+                <div class="agent-version-row">
+                  <div class="agent-version-row-top">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span class="badge badge-primary" style="font-size: 10px; font-weight: 700;">v${v.version}</span>
+                      <strong style="font-size: 12px; color: var(--text-primary);">${v.changeSummary}</strong>
+                    </div>
+                    <span style="font-size: 10px; color: var(--text-muted);">${v.timestamp}</span>
                   </div>
-                  <span class="badge ${membership.status === 'active' ? 'badge-success' : 'badge-neutral'}" style="font-size: 10px;">
-                    ${membership.status.toUpperCase()}
-                  </span>
-                </div>
-                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-                  <strong>Responsibility:</strong> ${membership.responsibilities || 'General collaboration'}
-                </div>
-                ${
-                  membership.collaborationInstructions
-                    ? `<div style="font-size: 11px; color: var(--text-muted);">
-                        <strong>Instructions:</strong> ${membership.collaborationInstructions}
-                      </div>`
-                    : ''
-                }
-              </div>
-            `
-                )
-                .join('')
-        }
-      </div>
-    </div>
-
-    <!-- Section 6: Configuration History & Versioning -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
-          Configuration Version Changelog
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted);">Current: v${agent.version || 1}</span>
-      </div>
-
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        ${
-          (agent.versionHistory && agent.versionHistory.length > 0)
-            ? agent.versionHistory
-                .map(
-                  (v) => `
-              <div class="agent-version-row">
-                <div class="agent-version-row-top">
-                  <div style="display: flex; align-items: center; gap: 6px;">
-                    <span class="badge badge-primary" style="font-size: 10px; font-weight: 700;">v${v.version}</span>
-                    <strong style="font-size: 12px; color: var(--text-primary);">${v.changeSummary}</strong>
+                  <div style="font-size: 11px; color: var(--text-muted);">
+                    By ${v.author} · ${v.optionsCount} work option(s) configured
                   </div>
-                  <span style="font-size: 10px; color: var(--text-muted);">${v.timestamp}</span>
                 </div>
-                <div style="font-size: 11px; color: var(--text-muted);">
-                  By ${v.author} · ${v.optionsCount} work option(s) configured
-                </div>
-              </div>
-            `
-                )
-                .join('')
-            : `<div class="agent-version-row">
-                <div class="agent-version-row-top">
-                  <span class="badge badge-primary" style="font-size: 10px;">v1</span>
-                  <span style="font-size: 10px; color: var(--text-muted);">${agent.createdAt || 'Initial'}</span>
-                </div>
-                <div style="font-size: 11px; color: var(--text-muted);">Initial Agent definition created.</div>
-              </div>`
-        }
+              `
+                  )
+                  .join('')
+              : `<div class="agent-version-row">
+                  <div class="agent-version-row-top">
+                    <span class="badge badge-primary" style="font-size: 10px;">v1</span>
+                    <span style="font-size: 10px; color: var(--text-muted);">${agent.createdAt || 'Initial'}</span>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Initial Agent definition created.</div>
+                </div>`
+          }
+        </div>
       </div>
     </div>
 
-    <!-- Section 7: Attribution Trace & Historical Safety -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
-          Historical Run Attribution & Provenance
-        </span>
-        <button class="btn btn-ghost btn-sm" id="btn-view-attribution" style="font-size: 11px;">
-          ${renderIcon('history', 12)} Full Trace (${agent.attributionHistory?.length || 0})
-        </button>
+    <!-- Section 7: Historical Run Attribution & Provenance (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-attribution-trace">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('clipboard', 14)}
+          <span>Historical Run Attribution & Provenance</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge-neutral" style="font-size: 10px;">${agent.attributionHistory?.length || 0} Facts</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
       </div>
-
-      <div style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px; font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
-        <p style="margin: 0 0 6px 0;">
-          Historical Messages, Task runs, and completion claims permanently retain the exact Agent configuration version, engine, model, and effort used at execution time.
-        </p>
-        <span class="badge badge-neutral" style="font-size: 10px;">
-          ${agent.attributionHistory?.length || 0} recorded execution facts · Attribution survives rename & archive
-        </span>
+      <div class="foldable-body">
+        <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.4; display: flex; flex-direction: column; gap: 8px;">
+          <p style="margin: 0;">
+            Historical Messages, Task runs, and completion claims permanently retain the exact Agent configuration version, engine, model, and effort used at execution time (ADR-0008).
+          </p>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge-neutral" style="font-size: 10px;">
+              ${agent.attributionHistory?.length || 0} recorded execution facts · Attribution survives rename & archive
+            </span>
+            <button class="btn btn-ghost btn-sm" id="btn-view-attribution" style="font-size: 11px;">
+              ${renderIcon('history', 12)} Full Trace Details
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -754,6 +753,17 @@ function renderAgentDetailCard(
     </div>
   `;
 
+  // Foldable Accordion Headers Click Handler
+  detailCard.querySelectorAll('.foldable-header').forEach((header) => {
+    header.addEventListener('click', (ev) => {
+      const card = (ev.currentTarget as HTMLElement).closest('.foldable-card');
+      if (card) {
+        const isOpen = card.classList.toggle('open');
+        header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      }
+    });
+  });
+
   // Attach Event Listeners
   detailCard.querySelector('#btn-edit-instructions')?.addEventListener('click', () => {
     openEditInstructionsDialog(agent);
@@ -767,24 +777,54 @@ function renderAgentDetailCard(
     openAddWorkOptionDialog(agent);
   });
 
-  detailCard.querySelectorAll('.move-up-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const optId = (ev.currentTarget as HTMLElement).getAttribute('data-opt')!;
-      stateManager.moveAgentWorkOption(agent.id, optId, 'up');
-    });
-  });
-
-  detailCard.querySelectorAll('.move-down-btn').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const optId = (ev.currentTarget as HTMLElement).getAttribute('data-opt')!;
-      stateManager.moveAgentWorkOption(agent.id, optId, 'down');
-    });
-  });
-
   detailCard.querySelectorAll('.delete-opt-btn').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       const optId = (ev.currentTarget as HTMLElement).getAttribute('data-opt')!;
       stateManager.removeAgentWorkOption(agent.id, optId);
+    });
+  });
+
+  // Drag-and-drop Reordering on Work Option Rows
+  let draggedIdx = -1;
+  const optionRows = detailCard.querySelectorAll('.agent-option-row[draggable="true"]');
+  optionRows.forEach((row) => {
+    row.addEventListener('dragstart', (e) => {
+      const dragEvent = e as DragEvent;
+      const idxStr = row.getAttribute('data-index');
+      draggedIdx = idxStr ? parseInt(idxStr, 10) : -1;
+      row.classList.add('dragging');
+      if (dragEvent.dataTransfer) {
+        dragEvent.dataTransfer.effectAllowed = 'move';
+        dragEvent.dataTransfer.setData('text/plain', String(draggedIdx));
+      }
+    });
+
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const dragEvent = e as DragEvent;
+      if (dragEvent.dataTransfer) {
+        dragEvent.dataTransfer.dropEffect = 'move';
+      }
+      row.classList.add('drag-over');
+    });
+
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over');
+    });
+
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const idxStr = row.getAttribute('data-index');
+      const targetIdx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (draggedIdx !== -1 && targetIdx !== -1 && draggedIdx !== targetIdx) {
+        stateManager.reorderAgentWorkOptions(agent.id, draggedIdx, targetIdx);
+      }
+    });
+
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      optionRows.forEach((r) => r.classList.remove('drag-over'));
     });
   });
 
@@ -1311,7 +1351,7 @@ function openAgentGuideDialog() {
         <div>
           <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">3. Pre-Acceptance Fallback vs No-Silent-Replay</h4>
           <p style="margin: 0;">
-            At run admission, Sprout evaluates the selected Environment and takes the <em>first</em> configured option whose engine is permitted and authenticated and whose model is available. Fallback to a secondary option occurs <strong>strictly before</strong> an engine accepts the run. Once accepted, later failures are reported directly; Sprout <strong>never replays work silently</strong> through lower-priority options because tools may have already produced irreversible host side effects.
+            At run admission, Sprout evaluates the selected Environment and takes the <em>first</em> configured option whose engine is permitted and authenticated and whose model is available. Fallback to a secondary option occurs <strong>strictly before</strong> an engine accepts the run. Once accepted, later failures are reported directly; Sprout <strong>never replays work silently</strong> through lower-priority options because tools may have already produced irreversible host side-effects.
           </p>
         </div>
 
