@@ -89,6 +89,16 @@ export function initPrototype(mountEl: HTMLElement): void {
         <!-- Scenario Jumpers Dropdown -->
         <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
           <option value="" disabled selected>Jump to Scenario...</option>
+          <optgroup label="Ticket #63: Multi-View Project & Task Loop">
+            <option value="proj-overview">Project: Overview, Contract & Memberships</option>
+            <option value="proj-active-task">Project: Active Running Task (2-Stage Pause & Interrupt)</option>
+            <option value="proj-validation-claim">Project: Task Validation Claim Review</option>
+            <option value="proj-blocker">Project: Routable Blocker & Content Versioning</option>
+            <option value="proj-proposal">Project: Task Proposal (Approve & Begin)</option>
+            <option value="proj-recovery">Project: Interrupted Run & Lease Recovery</option>
+            <option value="proj-archived">Project: Archived Read-Only Project</option>
+            <option value="proj-chat">Project: Discussion & Working Groups Chat</option>
+          </optgroup>
           <optgroup label="Ticket #62: Feed & Attention States">
             <option value="feed-matrix-mixed">Feed: 1. Mixed Realistic Operations (Default)</option>
             <option value="feed-matrix-empty">Feed: 2. Empty State (All Systems Clear)</option>
@@ -99,10 +109,6 @@ export function initPrototype(mountEl: HTMLElement): void {
             <option value="feed-matrix-intervention">Feed: 7. Urgent Blockers & Claim Validation</option>
           </optgroup>
           <optgroup label="Cross-Module Scenarios (ADR-0006 - ADR-0010)">
-            <option value="active-task">Active Task (2-Stage Pause & Interrupt)</option>
-            <option value="validation-claim">Task Claim (Validation / Correction)</option>
-            <option value="blocker-versioning">Task Blocker & Content Versioning</option>
-            <option value="ordinary-recovery">Worker Disconnect & Lease Recovery</option>
             <option value="emergency-force-release">Emergency Override (Force Release)</option>
             <option value="wake-routing-batch">Wake-Model Assisted Routing Batch</option>
             <option value="usage-telemetry">Usage & Cost Observability (6 Views)</option>
@@ -558,6 +564,26 @@ export function initPrototype(mountEl: HTMLElement): void {
 
   // Subscribe to state changes
   stateManager.subscribe(render);
+
+  // Browser History Navigation (Back/Forward buttons)
+  if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', (ev) => {
+      const state = stateManager.getSnapshot();
+      if (ev.state?.page === 'task-detail' && ev.state.taskId) {
+        stateManager.openTaskDetail(ev.state.taskId, false);
+      } else if (ev.state?.page === 'task-list') {
+        stateManager.closeTaskDetail(false);
+      } else if (ev.state?.page === 'chat-detail') {
+        stateManager.openChatDetail(ev.state.scopeKind, ev.state.scopeId, false);
+      } else if (ev.state?.page === 'chat-list') {
+        stateManager.closeChatDetail(false);
+      } else if (state.primaryNav === 'project' && state.projectTab === 'tasks' && state.taskViewMode === 'detail') {
+        stateManager.closeTaskDetail(false);
+      } else if (state.primaryNav === 'project' && state.projectTab === 'chat' && state.chatViewMode === 'detail') {
+        stateManager.closeChatDetail(false);
+      }
+    });
+  }
 
   // Initial render
   render();

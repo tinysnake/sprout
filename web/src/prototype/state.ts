@@ -42,6 +42,9 @@ export interface PrototypeState {
   feedAttentionFilter: 'all' | AttentionCategory | AttentionSeverity;
   feedActivityFilter: 'all' | 'tasks' | 'messages' | 'envs' | 'usage';
   mobileFeedSplitTab: 'attention' | 'activity';
+  taskViewMode: 'list' | 'detail';
+  taskFilter: string;
+  chatViewMode: 'list' | 'detail';
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -347,6 +350,112 @@ const initialProjects: ProjectItem[] = [
       },
     ],
   },
+  {
+    id: 'proj-unity-sims',
+    displayName: 'Unity Room Lighting Prototype',
+    templateSource: 'General collaboration template v1.0',
+    createdAt: '3 days ago',
+    goal: 'Prototype dynamic ray-traced ambient lighting for mobile and desktop room scenes.',
+    rules: [
+      'Maintain stable 60fps on M2 Max and Core i9 platforms.',
+      'All lighting baking jobs execute on Windows Dev Host.',
+    ],
+    completionGuidance: 'Lightmap artifacts bakes cleanly with zero UV overlap warnings.',
+    wakePolicy: 'explicit-only',
+    batchCollectionIntervalSec: 30,
+    status: 'active',
+    memberships: [
+      {
+        memberId: 'op-primary',
+        memberKind: 'human',
+        displayName: 'Operator (Human)',
+        avatar: 'OP',
+        responsibilities: 'Overall direction and bake asset approval.',
+        joinedAt: '3 days ago',
+        status: 'active',
+      },
+      {
+        memberId: 'programmer',
+        memberKind: 'agent',
+        displayName: 'Programmer',
+        avatar: 'PG',
+        responsibilities: 'C# Unity Editor scripts and light probe placement automation.',
+        collaborationInstructions: 'Verify Unity Editor compilation before advancing.',
+        joinedAt: '3 days ago',
+        status: 'active',
+      },
+      {
+        memberId: 'reviewer',
+        memberKind: 'agent',
+        displayName: 'Reviewer',
+        avatar: 'RV',
+        responsibilities: 'Shader compilation tests and draw-call performance profiling.',
+        joinedAt: '3 days ago',
+        status: 'active',
+      },
+    ],
+    boundEnvironmentWorkspaces: [
+      {
+        environmentId: 'win-dev-box',
+        workspaceRoot: 'C:\\SproutWorkspaces',
+        relativeWorkspacePath: 'unity-lighting-system',
+        isPrepared: true,
+      },
+    ],
+    workingGroups: [
+      {
+        id: 'wg-raytracing',
+        projectId: 'proj-unity-sims',
+        displayName: 'Raytracing Shaders WG',
+        goal: 'Optimize compute shader dispatch grid.',
+        creatorId: 'op-primary',
+        memberIds: ['op-primary', 'programmer'],
+        status: 'active',
+        createdAt: '2 days ago',
+      },
+    ],
+  },
+  {
+    id: 'proj-docs-portal',
+    displayName: 'Operator Architecture Docs Portal',
+    templateSource: 'General collaboration template v1.0',
+    createdAt: '5 days ago',
+    goal: 'Author and verify static Markdown architecture guidelines for Sprout M2.',
+    rules: ['Adhere strictly to ADR decisions and CONTEXT.md definitions.'],
+    completionGuidance: 'All cross-references link to valid repository docs.',
+    wakePolicy: 'explicit-only',
+    batchCollectionIntervalSec: 30,
+    status: 'archived',
+    memberships: [
+      {
+        memberId: 'op-primary',
+        memberKind: 'human',
+        displayName: 'Operator (Human)',
+        avatar: 'OP',
+        responsibilities: 'Architecture review and final acceptance.',
+        joinedAt: '5 days ago',
+        status: 'active',
+      },
+      {
+        memberId: 'designer',
+        memberKind: 'agent',
+        displayName: 'Designer',
+        avatar: 'DS',
+        responsibilities: 'Mermaid diagram layout and document styling.',
+        joinedAt: '5 days ago',
+        status: 'active',
+      },
+    ],
+    boundEnvironmentWorkspaces: [
+      {
+        environmentId: 'mac-studio-primary',
+        workspaceRoot: '/Users/workspace/sprout-projects',
+        relativeWorkspacePath: 'docs-portal',
+        isPrepared: true,
+      },
+    ],
+    workingGroups: [],
+  },
 ];
 
 const initialTasks: TaskItem[] = [
@@ -597,7 +706,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'planner',
     proposerKind: 'agent',
     createdAt: '10m ago',
-    taskLeadId: 'planner',
+    taskLeadId: 'designer',
     lifecycle: 'proposed',
     agentRunLifecycle: 'none',
     leaseLifecycle: 'none',
@@ -609,6 +718,77 @@ const initialTasks: TaskItem[] = [
       goal: 'Spawn 500 celebratory 3D particles when all non-mine tiles are revealed.',
       constraints: ['Particle count must scale down smoothly on low-power mobile devices.'],
       validationCriteria: ['FPS stays above 55 during win animation.'],
+      taskLeadId: 'designer',
+    },
+    historyVersions: [],
+    runs: [],
+  },
+  {
+    id: 'task-106-prop',
+    projectId: 'proj-minesweeper',
+    proposerId: 'designer',
+    proposerKind: 'agent',
+    createdAt: '8m ago',
+    taskLeadId: 'programmer',
+    lifecycle: 'proposed',
+    agentRunLifecycle: 'none',
+    leaseLifecycle: 'none',
+    currentVersion: {
+      version: 1,
+      createdAt: '8m ago',
+      createdBy: 'Designer (Agent Proposal)',
+      title: 'Spatial Audio Reverb Engine Integration',
+      goal: 'Implement custom impulse response convolution filters for cavern sound ambiance.',
+      constraints: ['Fall back gracefully on devices without WebAudio convolution support.'],
+      validationCriteria: ['Impulse response loads asynchronously in under 50ms.'],
+      taskLeadId: 'programmer',
+    },
+    historyVersions: [],
+    runs: [],
+  },
+  {
+    id: 'task-201',
+    projectId: 'proj-unity-sims',
+    proposerId: 'op-primary',
+    proposerKind: 'human',
+    createdAt: '1 hour ago',
+    selectedEnvironmentId: 'win-dev-box',
+    taskLeadId: 'programmer',
+    lifecycle: 'proposed',
+    agentRunLifecycle: 'none',
+    leaseLifecycle: 'none',
+    currentVersion: {
+      version: 1,
+      createdAt: '1 hour ago',
+      createdBy: 'Operator (Human)',
+      title: 'Bake Progressive Lightmaps for Room Scene',
+      goal: 'Generate 2048x2048 progressive GPU lightmaps on Windows Dev Host.',
+      constraints: ['DirectX 12 backend with RTX acceleration.'],
+      validationCriteria: ['Zero dark spot artifacts in corner probe samples.'],
+      taskLeadId: 'programmer',
+    },
+    historyVersions: [],
+    runs: [],
+  },
+  {
+    id: 'task-301',
+    projectId: 'proj-docs-portal',
+    proposerId: 'op-primary',
+    proposerKind: 'human',
+    createdAt: '4 days ago',
+    selectedEnvironmentId: 'mac-studio-primary',
+    taskLeadId: 'designer',
+    lifecycle: 'completed',
+    agentRunLifecycle: 'completed',
+    leaseLifecycle: 'released',
+    currentVersion: {
+      version: 1,
+      createdAt: '4 days ago',
+      createdBy: 'Operator (Human)',
+      title: 'Publish Operator Architecture Guidelines v1.0',
+      goal: 'Compile all ADR decisions into searchable single-context documentation.',
+      constraints: ['100% accurate ADR cross-references.'],
+      validationCriteria: ['All internal markdown links verified.'],
       taskLeadId: 'designer',
     },
     historyVersions: [],
@@ -685,9 +865,20 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'working-group-channel', workingGroupId: 'wg-mechanics' },
     authorId: 'programmer',
     authorKind: 'agent',
-    authorDisplayName: "Programmer", authorAvatar: "OP",
+    authorDisplayName: "Programmer", authorAvatar: "AG",
     timestamp: '18m ago',
     content: 'Cascade recursion tested on 30x16 expert grid: depth 42 reached in under 1.2ms.',
+    disposition: 'informational',
+  },
+  {
+    id: 'msg-5b',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'working-group-channel', workingGroupId: 'wg-audio' },
+    authorId: 'designer',
+    authorKind: 'agent',
+    authorDisplayName: "Designer", authorAvatar: "AG",
+    timestamp: '12m ago',
+    content: 'Synthesizer oscillators hooked to user click gestures; audio buffer warm and latency under 5ms.',
     disposition: 'informational',
   },
   {
@@ -707,11 +898,44 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'op-primary' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: "Planner", authorAvatar: "OP",
+    authorDisplayName: "Planner", authorAvatar: "AG",
     timestamp: '9m ago',
     content: 'Yes, proposal Task #105 is ready for your Approve-and-Begin decision once Task #101 completes.',
     disposition: 'non-routing',
     isProjectedReply: true,
+  },
+  {
+    id: 'msg-8',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'programmer' },
+    authorId: 'programmer',
+    authorKind: 'agent',
+    authorDisplayName: "Programmer", authorAvatar: "AG",
+    timestamp: '6m ago',
+    content: 'Lease held on Task #101; awaiting operator review for 3D coordinate mapping verification.',
+    disposition: 'addressed',
+  },
+  {
+    id: 'msg-9',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'reviewer' },
+    authorId: 'reviewer',
+    authorKind: 'agent',
+    authorDisplayName: "Reviewer", authorAvatar: "AG",
+    timestamp: '4m ago',
+    content: 'All unit test suites passing with 100% assertions green on macOS and Ubuntu runners.',
+    disposition: 'informational',
+  },
+  {
+    id: 'msg-10',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'designer' },
+    authorId: 'designer',
+    authorKind: 'agent',
+    authorDisplayName: "Designer", authorAvatar: "AG",
+    timestamp: '2m ago',
+    content: 'Refined UI tokens and dark mode contrast ratios for high visibility.',
+    disposition: 'informational',
   },
 ];
 
@@ -1088,7 +1312,7 @@ class StateManager {
       theme: 'dark', // Default to dark theme
       density: 'comfortable', // Default to comfortable density
       primaryNav: 'feed', // 1st primary destination
-      projectTab: 'tasks',
+      projectTab: 'overview',
       manageTab: 'environments',
       activeTab: 'attention',
       feedLayoutVariant: 'unified',
@@ -1098,6 +1322,9 @@ class StateManager {
       feedAttentionFilter: 'all',
       feedActivityFilter: 'all',
       mobileFeedSplitTab: 'attention',
+      taskViewMode: 'list',
+      taskFilter: 'all',
+      chatViewMode: 'list',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -1160,7 +1387,15 @@ class StateManager {
     manageTab?: ManageTab
   ) {
     this.state.primaryNav = nav;
-    if (projectTab) this.state.projectTab = projectTab;
+    if (projectTab) {
+      this.state.projectTab = projectTab;
+      if (projectTab !== 'tasks') {
+        this.state.taskViewMode = 'list';
+      }
+    } else if (nav === 'project') {
+      this.state.projectTab = 'overview';
+      this.state.taskViewMode = 'list';
+    }
     if (manageTab) this.state.manageTab = manageTab;
 
     // Maintain backwards compatibility with activeTab
@@ -1244,7 +1479,10 @@ class StateManager {
       fromFeedScope: this.state.feedScopeFilter,
       fromFeedSeverity: this.state.feedAttentionSeverityFilter,
     };
-    if (target.taskId) this.state.selectedTaskId = target.taskId;
+    if (target.taskId) {
+      this.state.selectedTaskId = target.taskId;
+      this.state.taskViewMode = 'detail';
+    }
     if (target.envId) this.state.selectedEnvironmentId = target.envId;
     if (target.agentId) this.state.selectedAgentId = target.agentId;
     this.setPrimaryNav(target.nav, target.projectTab, target.manageTab);
@@ -1680,9 +1918,72 @@ class StateManager {
     this.notify(`Changed conversation scope to ${kind}`);
   }
 
+  public openChatDetail(
+    kind: 'project-channel' | 'working-group-channel' | 'direct-message',
+    id?: string,
+    pushHistory = true
+  ) {
+    this.state.selectedScopeKind = kind;
+    if (kind === 'working-group-channel') {
+      this.state.selectedWorkingGroupId = id;
+    } else if (kind === 'direct-message') {
+      this.state.selectedDirectMessagePeerId = id;
+    }
+    this.state.chatViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState(
+          { page: 'chat-detail', scopeKind: kind, scopeId: id },
+          '',
+          window.location.pathname + '#chat-' + (id || 'general')
+        );
+      } catch {}
+    }
+    this.notify(`Opened conversation detail for ${id || 'general'}`);
+  }
+
+  public closeChatDetail(pushHistory = true) {
+    this.state.chatViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState({ page: 'chat-list' }, '', window.location.pathname + '#chats');
+      } catch {}
+    }
+    this.notify('Closed chat detail and returned to chat list');
+  }
+
   public selectTask(taskId: string) {
+    this.openTaskDetail(taskId);
+  }
+
+  public openTaskDetail(taskId: string, pushHistory = true) {
+    this.state.taskViewMode = 'detail';
     this.state.selectedTaskId = taskId;
-    this.notify(`Selected Task #${taskId}`);
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState(
+          { page: 'task-detail', taskId },
+          '',
+          window.location.pathname + '#task-' + taskId
+        );
+      } catch {}
+    }
+    this.notify(`Opened Task Detail for #${taskId.replace('task-', '')}`);
+  }
+
+  public closeTaskDetail(pushHistory = true) {
+    this.state.taskViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState({ page: 'task-list' }, '', window.location.pathname + '#tasks');
+      } catch {}
+    }
+    this.notify('Returned to Task List view');
+  }
+
+  public setTaskFilter(filter: string) {
+    this.state.taskFilter = filter;
+    this.notify(`Set task filter to ${filter}`);
   }
 
   public selectEnvironment(envId: string) {
@@ -2198,6 +2499,517 @@ class StateManager {
     this.notify(`Disbanded Working group "${wg.displayName}". Channel is now read-only; history preserved.`);
   }
 
+  public restoreWorkingGroup(projectId: string, wgId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+    const wg = project.workingGroups.find((g) => g.id === wgId);
+    if (!wg) return;
+
+    wg.status = 'active';
+    this.notify(`Restored Working group "${wg.displayName}". Channel is active.`);
+  }
+
+  // --- Project Domain Actions (ADR-0006, ADR-0008) ---
+
+  public createProject(
+    displayName: string,
+    goal?: string,
+    rules?: string[],
+    selectedAgentIds: string[] = [],
+    boundEnvIds: string[] = []
+  ) {
+    if (!displayName || !displayName.trim()) {
+      this.notify('Project creation failed: Display name cannot be empty.');
+      return;
+    }
+
+    const projectId = `proj-${Date.now().toString().slice(-4)}`;
+    const memberships: ProjectItem['memberships'] = [
+      {
+        memberId: this.state.operator.id,
+        memberKind: 'human',
+        displayName: 'Operator (Human)',
+        avatar: 'OP',
+        responsibilities: 'Overall lead authority, Task begin/end, recovery, validation.',
+        joinedAt: 'Just now',
+        status: 'active',
+      },
+    ];
+
+    for (const agentId of selectedAgentIds) {
+      const globalAgent = this.state.agents.find((a) => a.id === agentId);
+      if (globalAgent) {
+        memberships.push({
+          memberId: globalAgent.id,
+          memberKind: 'agent',
+          displayName: globalAgent.displayName,
+          avatar: globalAgent.avatar,
+          responsibilities: globalAgent.description,
+          collaborationInstructions: globalAgent.standingInstructions,
+          joinedAt: 'Just now',
+          status: 'active',
+        });
+      }
+    }
+
+    const boundEnvironmentWorkspaces: ProjectItem['boundEnvironmentWorkspaces'] = [];
+    for (const envId of boundEnvIds) {
+      const env = this.state.environments.find((e) => e.id === envId);
+      if (env) {
+        const root = env.workspaceRoots[0] || (env.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
+        boundEnvironmentWorkspaces.push({
+          environmentId: env.id,
+          workspaceRoot: root,
+          relativeWorkspacePath: displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          isPrepared: true,
+        });
+      }
+    }
+
+    const newProject: ProjectItem = {
+      id: projectId,
+      displayName: displayName.trim(),
+      templateSource: 'General collaboration template v1.0',
+      createdAt: 'Just now',
+      goal: goal && goal.trim() ? goal.trim() : 'Collaborate effectively on project deliverables.',
+      rules: rules && rules.length > 0 ? rules : ['Follow modular boundaries', 'Validate work through tests'],
+      completionGuidance: 'All criteria validated with headless verification script before task completion claim.',
+      wakePolicy: 'wake-model-assisted',
+      batchCollectionIntervalSec: 30,
+      status: 'active',
+      memberships,
+      boundEnvironmentWorkspaces,
+      workingGroups: [],
+    };
+
+    this.state.projects.unshift(newProject);
+    this.selectProject(projectId);
+    this.setPrimaryNav('project', 'overview');
+    this.notify(`Created Project "${displayName}" atomically with General collaboration template v1.0.`);
+  }
+
+  public updateProjectContract(
+    projectId: string,
+    goal: string,
+    rules: string[],
+    completionGuidance?: string
+  ) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    project.goal = goal;
+    project.rules = rules;
+    if (completionGuidance !== undefined) {
+      project.completionGuidance = completionGuidance;
+    }
+    this.notify(`Updated Project contract for "${project.displayName}". Affects future tasks and runs.`);
+  }
+
+  public archiveProject(projectId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    // Safety check: Cannot archive project with active runs, held leases, or recovery
+    const projectTasks = this.state.tasks.filter((t) => t.projectId === projectId);
+    const activeTask = projectTasks.find(
+      (t) =>
+        t.agentRunLifecycle === 'running' ||
+        t.leaseLifecycle === 'held' ||
+        t.leaseLifecycle === 'recovering' ||
+        t.lifecycle === 'active' ||
+        t.lifecycle === 'awaiting validation' ||
+        t.lifecycle === 'recovery' ||
+        t.lifecycle === 'Task pause requested'
+    );
+
+    if (activeTask) {
+      this.notify(
+        `Cannot archive Project "${project.displayName}" while Task #${activeTask.id.replace('task-', '')} (${activeTask.lifecycle}, lease ${activeTask.leaseLifecycle}) is active. Settle or discard task first.`
+      );
+      return;
+    }
+
+    project.status = 'archived';
+    this.notify(`Archived Project "${project.displayName}". Channels are now read-only; history and workspaces preserved.`);
+  }
+
+  public restoreProject(projectId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    project.status = 'active';
+    this.notify(`Restored Project "${project.displayName}" to active status.`);
+  }
+
+  public addProjectMembership(
+    projectId: string,
+    agentId: string,
+    responsibilities?: string,
+    instructions?: string
+  ) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    const existing = project.memberships.find((m) => m.memberId === agentId);
+    if (existing) {
+      existing.status = 'active';
+      if (responsibilities) existing.responsibilities = responsibilities;
+      if (instructions) existing.collaborationInstructions = instructions;
+      this.notify(`Restored membership for ${existing.displayName} in Project "${project.displayName}".`);
+      return;
+    }
+
+    const globalAgent = this.state.agents.find((a) => a.id === agentId);
+    if (!globalAgent) return;
+
+    project.memberships.push({
+      memberId: globalAgent.id,
+      memberKind: 'agent',
+      displayName: globalAgent.displayName,
+      avatar: globalAgent.avatar,
+      responsibilities: responsibilities || globalAgent.description,
+      collaborationInstructions: instructions || globalAgent.standingInstructions,
+      joinedAt: 'Just now',
+      status: 'active',
+    });
+
+    this.notify(`Added Agent ${globalAgent.displayName} to Project "${project.displayName}".`);
+  }
+
+  public editProjectMembership(
+    projectId: string,
+    memberId: string,
+    responsibilities?: string,
+    instructions?: string
+  ) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+    const member = project.memberships.find((m) => m.memberId === memberId);
+    if (!member) return;
+
+    if (responsibilities !== undefined) member.responsibilities = responsibilities;
+    if (instructions !== undefined) member.collaborationInstructions = instructions;
+    this.notify(`Updated collaboration instructions for ${member.displayName} in Project "${project.displayName}".`);
+  }
+
+  public endProjectMembership(projectId: string, memberId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+    const member = project.memberships.find((m) => m.memberId === memberId);
+    if (!member || member.memberKind === 'human') return; // Cannot remove local operator
+
+    member.status = 'ended';
+
+    // Also remove from active working groups
+    for (const wg of project.workingGroups) {
+      if (wg.status === 'active') {
+        wg.memberIds = wg.memberIds.filter((id) => id !== memberId);
+      }
+    }
+
+    // Check if active tasks depend on this lead
+    const activeTasksWithLead = this.state.tasks.filter(
+      (t) => t.projectId === projectId && t.taskLeadId === memberId && t.lifecycle !== 'completed' && t.lifecycle !== 'cancelled'
+    );
+    if (activeTasksWithLead.length > 0) {
+      for (const t of activeTasksWithLead) {
+        t.lifecycle = 'blocked';
+        t.activeBlocker = {
+          id: `blocker-lead-${Date.now()}`,
+          reason: `Task lead ${member.displayName} membership ended in project.`,
+          requiredNextAction: 'Operator must assign an active Project Agent as replacement Task Lead.',
+          responsibleActor: 'Operator (Human)',
+          whoAdvancesWhenCleared: 'Replacement Task Lead',
+          createdAt: 'Just now',
+        };
+      }
+      this.notify(
+        `Ended membership for ${member.displayName}. Historical messages and run attribution preserved. Blocked ${activeTasksWithLead.length} tasks requiring lead replacement.`
+      );
+    } else {
+      this.notify(`Ended membership for ${member.displayName}. Historical messages and run attribution preserved.`);
+    }
+  }
+
+  public restoreProjectMembership(projectId: string, memberId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+    const member = project.memberships.find((m) => m.memberId === memberId);
+    if (!member) return;
+
+    member.status = 'active';
+    this.notify(`Restored membership for ${member.displayName} in Project "${project.displayName}".`);
+  }
+
+  public bindEnvironmentToProject(
+    projectId: string,
+    envId: string,
+    workspaceRoot: string,
+    relativePath: string
+  ) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    const existing = project.boundEnvironmentWorkspaces.find((b) => b.environmentId === envId);
+    if (existing) {
+      existing.workspaceRoot = workspaceRoot;
+      existing.relativeWorkspacePath = relativePath;
+      existing.isPrepared = true;
+      this.notify(`Updated workspace binding on ${envId} for Project "${project.displayName}".`);
+      return;
+    }
+
+    project.boundEnvironmentWorkspaces.push({
+      environmentId: envId,
+      workspaceRoot,
+      relativeWorkspacePath: relativePath,
+      isPrepared: true,
+    });
+    this.notify(`Bound Environment ${envId} (${relativePath}) to Project "${project.displayName}". Workspace prepared.`);
+  }
+
+  public switchProjectWorkspacePath(
+    projectId: string,
+    envId: string,
+    newRelativePath: string
+  ) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    // Safety check: Cannot change workspace while active run or held lease on this environment
+    const activeTask = this.state.tasks.find(
+      (t) =>
+        t.projectId === projectId &&
+        t.selectedEnvironmentId === envId &&
+        (t.agentRunLifecycle === 'running' || t.leaseLifecycle === 'held' || t.leaseLifecycle === 'recovering')
+    );
+    if (activeTask) {
+      this.notify(`Cannot change workspace path on ${envId} while Task #${activeTask.id} holds lease. Settle task first.`);
+      return;
+    }
+
+    const binding = project.boundEnvironmentWorkspaces.find((b) => b.environmentId === envId);
+    if (binding) {
+      binding.relativeWorkspacePath = newRelativePath;
+      binding.isPrepared = true;
+      this.notify(`Switched workspace relative path to "${newRelativePath}" on ${envId}. New native session slot will be created.`);
+    }
+  }
+
+  public unbindEnvironmentFromProject(projectId: string, envId: string) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    // Safety check
+    const activeTask = this.state.tasks.find(
+      (t) =>
+        t.projectId === projectId &&
+        t.selectedEnvironmentId === envId &&
+        (t.agentRunLifecycle === 'running' || t.leaseLifecycle === 'held' || t.leaseLifecycle === 'recovering')
+    );
+    if (activeTask) {
+      this.notify(`Cannot unbind Environment ${envId} while Task #${activeTask.id} holds active lease.`);
+      return;
+    }
+
+    project.boundEnvironmentWorkspaces = project.boundEnvironmentWorkspaces.filter((b) => b.environmentId !== envId);
+    this.notify(`Unbound Environment ${envId} from Project "${project.displayName}". Files on host are preserved.`);
+  }
+
+  public createTaskProposal(
+    projectId: string,
+    title: string,
+    goal: string,
+    constraints: string[],
+    validationCriteria: string[],
+    leadId: string,
+    proposerKind: 'human' | 'agent' = 'human',
+    proposerId?: string
+  ) {
+    const newId = `task-${Date.now().toString().slice(-3)}`;
+    const newProp: TaskItem = {
+      id: newId,
+      projectId,
+      proposerId: proposerId || (proposerKind === 'human' ? this.state.operator.id : 'planner'),
+      proposerKind,
+      createdAt: 'Just now',
+      taskLeadId: leadId,
+      lifecycle: 'proposed',
+      agentRunLifecycle: 'none',
+      leaseLifecycle: 'none',
+      currentVersion: {
+        version: 1,
+        createdAt: 'Just now',
+        createdBy: proposerKind === 'human' ? 'Operator (Human)' : `${leadId} (Agent)`,
+        title: title.trim(),
+        goal: goal.trim(),
+        constraints: constraints.length > 0 ? constraints : ['Follow project rules.'],
+        validationCriteria: validationCriteria.length > 0 ? validationCriteria : ['Verification script passes.'],
+        taskLeadId: leadId,
+      },
+      historyVersions: [],
+      runs: [],
+    };
+
+    this.state.tasks.unshift(newProp);
+    this.selectTask(newId);
+    this.notify(`Created Task Proposal #${newId.replace('task-', '')}: "${title}". Awaiting Human Approval to begin.`);
+  }
+
+  public rejectTaskProposal(taskId: string, reason: string) {
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task || task.lifecycle !== 'proposed') return;
+
+    task.lifecycle = 'rejected';
+    this.notify(`Rejected Task Proposal #${taskId.replace('task-', '')}: ${reason}`);
+  }
+
+  public simulateLeadAutonomousRun(taskId: string, agentId?: string) {
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task || task.lifecycle !== 'active' || task.leaseLifecycle !== 'held') return;
+
+    const targetAgentId = agentId || (task.runs.length % 2 === 0 ? 'reviewer' : task.taskLeadId);
+    const agent = this.state.agents.find((a) => a.id === targetAgentId);
+    const runId = `run-${Date.now().toString().slice(-3)}`;
+
+    const newRun: NestedAgentRun = {
+      id: runId,
+      taskId: task.id,
+      agentId: targetAgentId,
+      agentDisplayName: agent ? agent.displayName : targetAgentId,
+      engine: 'codex',
+      workModel: 'gpt-4o',
+      effort: 'high',
+      contentVersionUsed: task.currentVersion.version,
+      lifecycle: 'running',
+      startedAt: 'Just now',
+      tokenUsage: {
+        status: 'complete',
+        uncachedInput: 8400,
+        cachedReads: 14200,
+        cacheWrite: 0,
+        output: 3200,
+        reasoningOutput: 800,
+        total: 26600,
+      },
+      monetaryCost: {
+        attributableBilledCostStatus: 'unavailable',
+        apiEquivalentStatus: 'available',
+        estimatedUsdMicros: 64000,
+        provenance: 'provider_estimated',
+        billingBasis: 'metered_api',
+      },
+      events: [
+        { time: 'Just now', kind: 'status_change', summary: `Lead ${task.taskLeadId} initiated sequential run with ${targetAgentId}` },
+        { time: 'Just now', kind: 'tool_call', summary: 'read src/main.js' },
+        { time: 'Just now', kind: 'text_delta', summary: 'Validating implementation assertions.' },
+      ],
+      finalAssistantText: `Autonomous execution turn completed by ${agent ? agent.displayName : targetAgentId}. Ready for next step.`,
+    };
+
+    task.runs.unshift(newRun);
+    task.activeRunId = runId;
+    task.agentRunLifecycle = 'running';
+
+    this.notify(`Task lead ${task.taskLeadId} autonomously initiated Run ${runId} with ${agent ? agent.displayName : targetAgentId}.`);
+  }
+
+  public submitTaskCompletionClaim(
+    taskId: string,
+    outcomeSummary: string,
+    evidence: string,
+    changes: string[],
+    limitations = 'None identified.'
+  ) {
+    const task = this.state.tasks.find((t) => t.id === taskId);
+    if (!task || task.lifecycle !== 'active') return;
+
+    if (task.activeRunId) {
+      const run = task.runs.find((r) => r.id === task.activeRunId);
+      if (run) {
+        run.lifecycle = 'completed';
+        run.settledAt = 'Just now';
+      }
+      delete task.activeRunId;
+    }
+
+    task.lifecycle = 'awaiting validation';
+    task.agentRunLifecycle = 'completed';
+    task.pendingCompletionClaim = {
+      id: `claim-${Date.now().toString().slice(-3)}`,
+      submittedAt: 'Just now',
+      submittedByLeadId: task.taskLeadId,
+      contentVersion: task.currentVersion.version,
+      outcomeSummary,
+      validationEvidence: evidence,
+      durableChanges: changes,
+      knownLimitations: limitations,
+      recommendedDisposition: 'completed',
+    };
+
+    this.notify(`Lead ${task.taskLeadId} submitted Task Completion Claim for Task #${taskId}. Awaiting Human Validation.`);
+  }
+
+  public applyProjectStatePreset(preset: string) {
+    switch (preset) {
+      case 'project-active':
+      case 'active':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-102');
+        this.notify('Loaded Project Preset: Active Running Task (2-Stage Pause / Interrupt)');
+        break;
+      case 'project-validation':
+      case 'validation':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-101');
+        this.notify('Loaded Project Preset: Task Awaiting Human Validation Claim');
+        break;
+      case 'project-blocked':
+      case 'blocked':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-103');
+        this.notify('Loaded Project Preset: Routable Task Blocker');
+        break;
+      case 'project-proposal':
+      case 'proposal':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-105-prop');
+        this.notify('Loaded Project Preset: Task Proposal Awaiting Human Approve & Begin');
+        break;
+      case 'project-recovery':
+      case 'recovery':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-104');
+        this.notify('Loaded Project Preset: Interrupted Run & Ordinary Lease Recovery');
+        break;
+      case 'project-overview':
+      case 'overview':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'overview');
+        this.notify('Loaded Project Preset: Project Overview, Contract & Memberships');
+        break;
+      case 'project-archived':
+      case 'archived':
+        this.selectProject('proj-docs-portal');
+        this.setPrimaryNav('project', 'overview');
+        this.notify('Loaded Project Preset: Archived Read-Only Project');
+        break;
+      case 'project-chat':
+      case 'chat':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.notify('Loaded Project Preset: Project Discussion & Working Groups Chat');
+        break;
+      default:
+        break;
+    }
+  }
+
   // --- Environment Enrollment Actions (ADR-0008, ADR-0009) ---
 
   public approveEnvironmentEnrollment(envId: string) {
@@ -2262,25 +3074,54 @@ class StateManager {
         this.applyFeedPreset('intervention');
         this.notify('Loaded Scenario: Feed Intervention State (Blockers & Validation)');
         break;
+      case 'proj-overview':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'overview');
+        this.notify('Loaded Scenario: Project Overview, Contract & Memberships');
+        break;
+      case 'proj-active-task':
       case 'active-task':
+        this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'tasks');
-        this.state.selectedTaskId = 'task-102';
+        this.selectTask('task-102');
         this.notify('Loaded Scenario: Active Task with Live 2-Stage Pause & Interrupt');
         break;
+      case 'proj-validation-claim':
       case 'validation-claim':
+        this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'tasks');
-        this.state.selectedTaskId = 'task-101';
+        this.selectTask('task-101');
         this.notify('Loaded Scenario: Task Awaiting Validation (Review Claim & Evidence)');
         break;
+      case 'proj-blocker':
       case 'blocker-versioning':
+        this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'tasks');
-        this.state.selectedTaskId = 'task-103';
+        this.selectTask('task-103');
         this.notify('Loaded Scenario: Task Blocker & Content Versioning');
         break;
-      case 'ordinary-recovery':
+      case 'proj-proposal':
+        this.selectProject('proj-minesweeper');
         this.setPrimaryNav('project', 'tasks');
-        this.state.selectedTaskId = 'task-104';
+        this.selectTask('task-105-prop');
+        this.notify('Loaded Scenario: Task Proposal Awaiting Human Approve & Begin');
+        break;
+      case 'proj-recovery':
+      case 'ordinary-recovery':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'tasks');
+        this.selectTask('task-104');
         this.notify('Loaded Scenario: Worker Disconnect & Ordinary Lease Recovery');
+        break;
+      case 'proj-archived':
+        this.selectProject('proj-docs-portal');
+        this.setPrimaryNav('project', 'overview');
+        this.notify('Loaded Scenario: Archived Read-Only Project');
+        break;
+      case 'proj-chat':
+        this.selectProject('proj-minesweeper');
+        this.setPrimaryNav('project', 'chat');
+        this.notify('Loaded Scenario: Project Discussion & Working Groups Chat');
         break;
       case 'emergency-force-release':
         this.setPrimaryNav('manage', undefined, 'environments');

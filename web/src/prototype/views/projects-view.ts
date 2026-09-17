@@ -1,5 +1,6 @@
 import { renderIcon } from '../icons.js';
 import { stateManager, type PrototypeState } from '../state.js';
+import type { ProjectItem } from '../types.js';
 import { renderTasksView } from './tasks-view.js';
 
 export function renderProjectsView(state: PrototypeState): HTMLElement {
@@ -13,44 +14,156 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
     return container;
   }
 
-  // Top Project Selector Header
-  const projectNav = document.createElement('header');
-  projectNav.className = 'project-nav-bar';
-  projectNav.innerHTML = `
-    <div class="project-selector-row">
-      <div class="project-select-wrapper">
-        ${renderIcon('folder', 16)}
-        <select class="project-dropdown-select" id="project-selector" aria-label="Select Project">
-          ${state.projects
-            .map(
-              (p) => `
-            <option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>
-              ${p.displayName} (${p.status})
-            </option>
-          `
-            )
-            .join('')}
-        </select>
-      </div>
-      <span class="status-pill green">${project.status}</span>
-    </div>
-  `;
+  // Calculate project statistics for metadata snapshot
+  const projectTasks = state.tasks.filter((t) => t.projectId === project.id);
+  const activeTasks = projectTasks.filter(
+    (t) => t.lifecycle === 'active' || t.lifecycle === 'Task pause requested'
+  );
+  const validationTasks = projectTasks.filter((t) => t.lifecycle === 'awaiting validation');
+  const blockedTasks = projectTasks.filter((t) => t.lifecycle === 'blocked');
+  const recoveryTasks = projectTasks.filter((t) => t.lifecycle === 'recovery');
+  const proposedTasks = projectTasks.filter((t) => t.lifecycle === 'proposed');
+  const activeMembers = project.memberships.filter((m) => m.status === 'active');
 
-  projectNav.querySelector('#project-selector')?.addEventListener('change', (ev) => {
-    const selectedId = (ev.target as HTMLSelectElement).value;
-    stateManager.selectProject(selectedId);
-  });
+  const isTaskDetailPage =
+    state.projectTab === 'tasks' && state.taskViewMode === 'detail' && Boolean(state.selectedTaskId);
+  const selectedTask = isTaskDetailPage
+    ? projectTasks.find((t) => t.id === state.selectedTaskId) ??
+      state.tasks.find((t) => t.id === state.selectedTaskId)
+    : undefined;
+
+  const isChatDetailPage =
+    state.projectTab === 'chat' && state.chatViewMode === 'detail';
+
+  let activeChatTitle = '#general';
+  if (state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId) {
+    const wg = project.workingGroups.find((w) => w.id === state.selectedWorkingGroupId);
+    activeChatTitle = wg?.displayName || 'Working Group';
+  } else if (state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId) {
+    const peer = project.memberships.find((m) => m.memberId === state.selectedDirectMessagePeerId);
+    activeChatTitle = `@${peer?.displayName || state.selectedDirectMessagePeerId}`;
+  }
+
+  // Top Project Navigation Bar (App Header Style)
+  const projectNav = document.createElement('div');
+  projectNav.className = 'project-nav-container';
+
+  if (isTaskDetailPage && selectedTask) {
+    // Focused Task Detail App-Header: Only Back Button & Task Title
+    projectNav.innerHTML = `
+      <header class="project-top-bar">
+        <div class="project-selector-row">
+          <button class="btn btn-secondary btn-sm back-to-tasks-btn task-select-btn" id="btn-header-back-to-tasks" title="Return to Tasks List">
+            ${renderIcon('chevron-left', 16)} Back to Tasks
+          </button>
+          <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+            <span>Task #${selectedTask.id.replace('task-', '')}</span>
+            <span class="status-pill neutral" style="font-size: 10px;">v${selectedTask.currentVersion.version}</span>
+          </div>
+        </div>
+      </header>
+    `;
+
+    projectNav.querySelector('#btn-header-back-to-tasks')?.addEventListener('click', () => {
+      stateManager.closeTaskDetail();
+    });
+  } else {
+    // Standard Project App-Header + Responsive Mobile Chat Back Header
+    projectNav.innerHTML = `
+      <header class="project-top-bar">
+        ${
+          isChatDetailPage
+            ? `
+          <!-- Mobile-only Chat Back Header (Hidden on Wide/Desktop) -->
+          <div class="project-selector-row mobile-chat-back-header">
+            <button class="btn btn-secondary btn-sm back-to-chats-btn" id="btn-header-back-to-chats" title="Return to Chats List">
+              ${renderIcon('chevron-left', 16)} Back to Chats
+            </button>
+            <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+              <span>${activeChatTitle}</span>
+              <span class="status-pill neutral" style="font-size: 10px;">Chat</span>
+            </div>
+          </div>
+        `
+            : ''
+        }
+
+        <!-- Standard Project Selector Header (Always visible on Desktop, visible on Mobile when in list mode) -->
+        <div class="project-selector-row desktop-project-selector-header ${isChatDetailPage ? 'chat-detail-desktop-row' : ''}">
+          <div class="project-selector-left">
+            ${renderIcon('folder', 18)}
+            <select class="project-dropdown-select" id="project-selector" aria-label="Select Project">
+              ${state.projects
+                .map(
+                  (p) => `
+                <option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>
+                  ${p.displayName} ${p.status === 'archived' ? '(Archived)' : ''}
+                </option>
+              `
+                )
+                .join('')}
+            </select>
+            ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px; flex-shrink: 0;">Archived</span>` : ''}
+          </div>
+
+          <div class="project-header-actions">
+            <!-- Info Button -->
+            <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
+              ${renderIcon('info', 16)}
+            </button>
+
+            <!-- + New Project Button -->
+            <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
+              ${renderIcon('plus', 16)}
+            </button>
+          </div>
+        </div>
+      </header>
+    `;
+
+    // Mobile back-to-chats listener
+    projectNav.querySelector('#btn-header-back-to-chats')?.addEventListener('click', () => {
+      stateManager.closeChatDetail();
+    });
+
+    // Project selector switch listener
+    projectNav.querySelector('#project-selector')?.addEventListener('change', (ev) => {
+      const selectedId = (ev.target as HTMLSelectElement).value;
+      stateManager.selectProject(selectedId);
+    });
+
+    // Project info modal listener
+    projectNav.querySelector('#project-info-btn')?.addEventListener('click', () => {
+      renderProjectInfoModal(
+        container,
+        state,
+        project,
+        projectTasks,
+        activeTasks,
+        validationTasks,
+        blockedTasks,
+        proposedTasks,
+        recoveryTasks,
+        activeMembers
+      );
+    });
+
+    // New Project modal listener
+    projectNav.querySelector('.new-project-btn')?.addEventListener('click', () => {
+      renderNewProjectModal(container);
+    });
+  }
 
   container.appendChild(projectNav);
 
-  // Content Area according to projectTab
+  // Sub-View Content Area
   const contentEl = document.createElement('div');
   contentEl.className = 'project-content-area';
 
   if (state.projectTab === 'tasks') {
     contentEl.appendChild(renderTasksView(state));
   } else if (state.projectTab === 'chat') {
-    contentEl.appendChild(renderProjectChat(state, project));
+    contentEl.appendChild(renderProjectChat(state, project, container));
   } else {
     contentEl.appendChild(renderProjectOverview(state, project));
   }
@@ -60,76 +173,157 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
   return container;
 }
 
-function renderProjectOverview(_state: PrototypeState, project: any): HTMLElement {
+/**
+ * Renders the Project Overview Sub-View (Contract, Memberships, Bound Workspaces)
+ */
+function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTMLElement {
   const overviewEl = document.createElement('div');
-  overviewEl.className = 'project-overview-container';
+  overviewEl.className = 'project-overview-grid';
+
+  // Check if project has active work preventing archive
+  const projectTasks = state.tasks.filter((t) => t.projectId === project.id);
+  const activeTask = projectTasks.find(
+    (t) =>
+      t.agentRunLifecycle === 'running' ||
+      t.leaseLifecycle === 'held' ||
+      t.leaseLifecycle === 'recovering' ||
+      t.lifecycle === 'active' ||
+      t.lifecycle === 'awaiting validation' ||
+      t.lifecycle === 'recovery' ||
+      t.lifecycle === 'Task pause requested'
+  );
 
   overviewEl.innerHTML = `
-    <!-- Project Contract Card -->
-    <div class="card">
+    <!-- 1. Project Contract & Purpose Card -->
+    <div class="card grid-col-full">
       <div class="card-header">
-        <div>
-          <span class="card-title">Project Contract & Purpose</span>
-          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
-            Derived from template: <code>${project.templateSource}</code>
-          </div>
+        <span class="card-title">Project Contract & Purpose</span>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">
+            ${project.status === 'active' ? 'Active' : 'Archived'}
+          </span>
+          <button class="btn btn-secondary btn-sm edit-contract-btn" title="Edit Project Contract" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+            ${renderIcon('edit', 14)}
+          </button>
         </div>
-        <span class="status-pill green">Active</span>
       </div>
-      <div class="card-body" style="display: flex; flex-direction: column; gap: 10px;">
+
+      <div class="card-body" style="display: flex; flex-direction: column; gap: 12px;">
         <div>
-          <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">GOAL</div>
-          <div style="font-size: 13px; font-weight: 500; margin-top: 2px;">${project.goal ?? 'Ship reliable multi-agent implementation'}</div>
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">Project Goal</div>
+          <div style="font-size: 13px; font-weight: 500; margin-top: 4px; line-height: 1.45; color: var(--text-primary);">
+            ${project.goal ?? 'No explicit goal defined.'}
+          </div>
         </div>
 
         <div>
-          <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">PROJECT RULES</div>
-          <ul style="margin-left: 18px; margin-top: 4px; font-size: 12px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 2px;">
-            ${(project.rules ?? ['Preserve modular seams', 'Verify cross-platform compatibility'])
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">Project Rules (${(project.rules || []).length})</div>
+          <ul style="margin-left: 18px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 4px;">
+            ${(project.rules && project.rules.length > 0
+              ? project.rules
+              : ['Preserve modular boundaries and single-context documentation', 'Verify cross-platform compatibility before task completion']
+            )
               .map((r: string) => `<li>${r}</li>`)
               .join('')}
           </ul>
         </div>
 
-        <div style="padding-top: 8px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">Completion & Validation Guidance</div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.4;">
+            ${project.completionGuidance ?? 'All completion claims must present checkable verification evidence prior to Human validation.'}
+          </div>
+        </div>
+
+        <!-- Wake Policy & Archive Section -->
+        <div style="padding-top: 10px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
           <div>
-            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">WAKE ROUTING POLICY</div>
-            <div style="font-size: 12px; margin-top: 2px;">
+            <div style="font-size: 11px; color: var(--text-muted); font-weight: 700;">WAKE ROUTING POLICY</div>
+            <div style="font-size: 12px; margin-top: 2px; display: flex; align-items: center; gap: 6px;">
               <span class="status-pill purple" style="font-size: 11px;">
                 ${project.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (30s batch window)' : 'Explicit Mentions Only'}
               </span>
+              <span style="font-size: 11px; color: var(--text-muted);">(Affects future incoming messages only)</span>
             </div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-policy-btn">
-            Switch to ${project.wakePolicy === 'wake-model-assisted' ? 'Explicit-only' : 'Wake-Model Assisted'}
-          </button>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button class="btn btn-secondary btn-sm toggle-policy-btn" ${project.status === 'archived' ? 'disabled' : ''}>
+              Switch to ${project.wakePolicy === 'wake-model-assisted' ? 'Explicit-only' : 'Wake-Model Assisted'}
+            </button>
+            ${
+              project.status === 'active'
+                ? `<button class="btn ${activeTask ? 'btn-secondary' : 'btn-danger'} btn-sm archive-project-btn" ${activeTask ? 'title="Cannot archive while tasks hold leases or runs"' : ''}>
+                    ${renderIcon('archive', 14)} Archive Project
+                  </button>`
+                : `<button class="btn btn-primary btn-sm restore-project-btn">
+                    ${renderIcon('refresh', 14)} Restore Project
+                  </button>`
+            }
+          </div>
         </div>
+
+        ${
+          activeTask && project.status === 'active'
+            ? `<div style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--yellow-attention); font-size: 11px; color: var(--yellow-attention); display: flex; align-items: center; gap: 6px;">
+                ${renderIcon('alert', 14)}
+                <span><strong>Archive Safely Blocked:</strong> Task #${activeTask.id.replace('task-', '')} (${activeTask.lifecycle}, lease ${activeTask.leaseLifecycle}) is currently active. Settle or discard active work before archiving.</span>
+              </div>`
+            : ''
+        }
       </div>
     </div>
 
-    <!-- Bound Workspaces & Environments -->
+    <!-- 2. Project Memberships & Collaboration Roles Card -->
     <div class="card">
       <div class="card-header">
-        <span class="card-title">Bound Workspaces & Host Environments</span>
-        <span class="badge badge-info">${project.boundEnvironmentWorkspaces.length} Bound</span>
+        <div>
+          <span class="card-title">Project Memberships</span>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+            ${project.memberships.filter((m) => m.status === 'active').length} Active · ${project.memberships.filter((m) => m.status === 'ended').length} Ended
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-sm add-member-btn" title="Add Global Agent to Project" aria-label="Add Global Agent to Project" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)}
+        </button>
       </div>
-      <div class="card-body" style="display: flex; flex-direction: column; gap: 8px;">
-        ${project.boundEnvironmentWorkspaces
+
+      <div class="list-group">
+        ${project.memberships
           .map(
-            (ws: any) => `
-          <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-            <div>
-              <div style="font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-                ${renderIcon('server', 14)}
-                <span>${ws.environmentId}</span>
-              </div>
-              <div style="font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); margin-top: 2px;">
-                ${ws.workspaceRoot}/${ws.relativeWorkspacePath}
+            (m) => `
+          <div class="list-item" style="${m.status === 'ended' ? 'opacity: 0.65; background: var(--bg-surface-elevated);' : ''}">
+            <div class="list-item-leading">
+              <div style="width: 34px; height: 34px; border-radius: var(--radius-sm); background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px; color: var(--accent-primary);">
+                ${m.avatar || (m.memberKind === 'human' ? 'OP' : 'AG')}
               </div>
             </div>
-            <span class="status-pill ${ws.isPrepared ? 'green' : 'yellow'}">
-              ${ws.isPrepared ? 'Prepared' : 'Pending Preparation'}
-            </span>
+            <div class="list-item-body">
+              <div class="list-item-title" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                <span>${m.displayName}</span>
+                <span class="status-pill neutral" style="font-size: 10px;">${m.memberKind === 'human' ? 'Human Lead' : 'Agent'}</span>
+                <span class="status-pill ${m.status === 'active' ? 'green' : 'gray'}" style="font-size: 10px;">${m.status}</span>
+              </div>
+              <div class="list-item-subtitle" style="margin-top: 2px;">
+                <strong>Role:</strong> ${m.responsibilities ?? 'General collaboration'}
+              </div>
+              ${
+                m.collaborationInstructions
+                  ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 2px; font-style: italic;">
+                      "${m.collaborationInstructions}"
+                    </div>`
+                  : ''
+              }
+            </div>
+            <div class="list-item-trailing" style="display: flex; gap: 4px; align-items: center;">
+              ${
+                m.memberKind === 'agent' && project.status === 'active'
+                  ? m.status === 'active'
+                    ? `<button class="btn btn-ghost btn-sm edit-member-btn" data-member="${m.memberId}" title="Edit collaboration instructions">${renderIcon('edit', 12)}</button>
+                       <button class="btn btn-ghost btn-sm end-member-btn" data-member="${m.memberId}" title="End Project membership (preserves history)">${renderIcon('close', 12)}</button>`
+                    : `<button class="btn btn-secondary btn-sm restore-member-btn" data-member="${m.memberId}" title="Restore Agent membership">${renderIcon('refresh', 12)}</button>`
+                  : ''
+              }
+            </div>
           </div>
         `
           )
@@ -137,132 +331,1142 @@ function renderProjectOverview(_state: PrototypeState, project: any): HTMLElemen
       </div>
     </div>
 
-    <!-- Project Memberships -->
+    <!-- 3. Bound Workspaces & Host Environments Card -->
     <div class="card">
       <div class="card-header">
-        <span class="card-title">Project Memberships</span>
-        <span class="badge badge-purple">${project.memberships.length} Members</span>
+        <div>
+          <span class="card-title">Bound Workspaces & Host Environments</span>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+            ${project.boundEnvironmentWorkspaces.length} Host Binding(s)
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-sm bind-env-btn" title="Bind Host Environment" aria-label="Bind Host Environment" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)}
+        </button>
       </div>
-      <div class="list-group">
-        ${project.memberships
-          .map(
-            (m: any) => `
-          <div class="list-item">
-            <div class="list-item-leading">
-              <div style="width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: center;">
-                ${m.memberKind === 'human' ? renderIcon('user', 16) : renderIcon('bot', 16)}
+
+      <div class="card-body" style="display: flex; flex-direction: column; gap: 8px;">
+        ${project.boundEnvironmentWorkspaces
+          .map((ws) => {
+            const env = state.environments.find((e) => e.id === ws.environmentId);
+            return `
+          <div style="background: var(--bg-surface-elevated); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <div style="font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
+                ${renderIcon(env?.platform === 'windows' ? 'desktop' : 'server', 14)}
+                <span>${env?.displayName || ws.environmentId}</span>
+                <span class="status-dot ${env?.trafficLight === 'green' ? 'green' : env?.trafficLight === 'yellow' ? 'yellow' : 'red'}"></span>
+              </div>
+              <div style="font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); margin-top: 3px;">
+                ${ws.workspaceRoot}/${ws.relativeWorkspacePath}
+              </div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+                ${env?.trafficLightReason || 'Ready'}
               </div>
             </div>
-            <div class="list-item-body">
-              <div class="list-item-title">${m.displayName} <span style="font-size: 11px; color: var(--text-muted);">(${m.memberKind})</span></div>
-              <div class="list-item-subtitle">${m.responsibilities ?? 'General collaboration'}</div>
-            </div>
-            <div class="list-item-trailing">
-              <span class="status-pill ${m.status === 'active' ? 'green' : 'gray'}">${m.status}</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="status-pill ${ws.isPrepared ? 'green' : 'yellow'}" style="font-size: 11px;">
+                ${ws.isPrepared ? 'Prepared' : 'Pending Prep'}
+              </span>
+              ${
+                project.status === 'active'
+                  ? `<button class="btn btn-ghost btn-sm switch-ws-btn" data-env="${ws.environmentId}" title="Switch Workspace relative path">${renderIcon('edit', 12)}</button>
+                     <button class="btn btn-ghost btn-sm unbind-env-btn" data-env="${ws.environmentId}" title="Unbind Environment">${renderIcon('trash', 12)}</button>`
+                  : ''
+              }
             </div>
           </div>
-        `
-          )
+        `;
+          })
           .join('')}
       </div>
     </div>
   `;
 
+  // --- Event Listeners for Overview ---
+
+  // Contract Editing
+  overviewEl.querySelector('.edit-contract-btn')?.addEventListener('click', () => {
+    renderEditContractModal(overviewEl, project);
+  });
+
+  // Wake policy toggle
   overviewEl.querySelector('.toggle-policy-btn')?.addEventListener('click', () => {
-    const nextPolicy = project.wakePolicy === 'wake-model-assisted' ? 'explicit-only' : 'wake-model-assisted';
+    const nextPolicy =
+      project.wakePolicy === 'wake-model-assisted' ? 'explicit-only' : 'wake-model-assisted';
     stateManager.setProjectWakePolicy(project.id, nextPolicy);
+  });
+
+  // Archive Project
+  overviewEl.querySelector('.archive-project-btn')?.addEventListener('click', () => {
+    if (activeTask) {
+      alert(
+        `Cannot archive project while Task #${activeTask.id.replace('task-', '')} (${activeTask.lifecycle}, lease ${activeTask.leaseLifecycle}) is active.`
+      );
+      return;
+    }
+    if (
+      confirm(
+        `Are you sure you want to archive "${project.displayName}"? Channels will become read-only and tasks paused. Files on disk will be preserved.`
+      )
+    ) {
+      stateManager.archiveProject(project.id);
+    }
+  });
+
+  // Restore Project
+  overviewEl.querySelector('.restore-project-btn')?.addEventListener('click', () => {
+    stateManager.restoreProject(project.id);
+  });
+
+  // Add Member
+  overviewEl.querySelector('.add-member-btn')?.addEventListener('click', () => {
+    renderAddMemberModal(overviewEl, state, project);
+  });
+
+  // End Membership
+  overviewEl.querySelectorAll('.end-member-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const memberId = (ev.currentTarget as HTMLElement).getAttribute('data-member')!;
+      if (
+        confirm(
+          `End membership for ${memberId}? Historical messages and run attribution will be preserved. Active tasks with this lead will be blocked until reassigned.`
+        )
+      ) {
+        stateManager.endProjectMembership(project.id, memberId);
+      }
+    });
+  });
+
+  // Restore Membership
+  overviewEl.querySelectorAll('.restore-member-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const memberId = (ev.currentTarget as HTMLElement).getAttribute('data-member')!;
+      stateManager.restoreProjectMembership(project.id, memberId);
+    });
+  });
+
+  // Edit Member Instructions
+  overviewEl.querySelectorAll('.edit-member-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const memberId = (ev.currentTarget as HTMLElement).getAttribute('data-member')!;
+      const member = project.memberships.find((m) => m.memberId === memberId);
+      if (member) {
+        const newInstructions = prompt(
+          `Update collaboration instructions for ${member.displayName}:`,
+          member.collaborationInstructions ?? ''
+        );
+        if (newInstructions !== null) {
+          stateManager.editProjectMembership(
+            project.id,
+            memberId,
+            member.responsibilities,
+            newInstructions.trim()
+          );
+        }
+      }
+    });
+  });
+
+  // Bind Environment
+  overviewEl.querySelector('.bind-env-btn')?.addEventListener('click', () => {
+    renderBindEnvironmentModal(overviewEl, state, project);
+  });
+
+  // Switch Workspace Path
+  overviewEl.querySelectorAll('.switch-ws-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const envId = (ev.currentTarget as HTMLElement).getAttribute('data-env')!;
+      const ws = project.boundEnvironmentWorkspaces.find((b) => b.environmentId === envId);
+      if (ws) {
+        const newPath = prompt(
+          `Enter new relative workspace path for ${envId}:`,
+          ws.relativeWorkspacePath
+        );
+        if (newPath && newPath.trim()) {
+          stateManager.switchProjectWorkspacePath(project.id, envId, newPath.trim());
+        }
+      }
+    });
+  });
+
+  // Unbind Environment
+  overviewEl.querySelectorAll('.unbind-env-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const envId = (ev.currentTarget as HTMLElement).getAttribute('data-env')!;
+      if (
+        confirm(
+          `Unbind Environment ${envId} from this Project? Files on host will not be deleted.`
+        )
+      ) {
+        stateManager.unbindEnvironmentFromProject(project.id, envId);
+      }
+    });
   });
 
   return overviewEl;
 }
 
-function renderProjectChat(state: PrototypeState, project: any): HTMLElement {
-  const chatEl = document.createElement('div');
-  chatEl.className = 'project-chat-container';
+/**
+ * Renders the Project Chat View (Split-Pane on Desktop / Hierarchical on Mobile)
+ */
+function renderProjectChat(
+  state: PrototypeState,
+  project: ProjectItem,
+  rootContainer: HTMLElement
+): HTMLElement {
+  const chatViewEl = document.createElement('div');
+  chatViewEl.className = `project-chat-view ${state.chatViewMode === 'detail' ? 'chat-mode-detail' : 'chat-mode-list'}`;
 
+  let currentScopeTitle = '#general';
+  let currentScopeTypeBadge = 'Project Channel';
+  let filteredMessages = (state.messages || []).filter((m) => m.projectId === project.id);
+
+  if (state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId) {
+    const wg = project.workingGroups.find((w) => w.id === state.selectedWorkingGroupId);
+    currentScopeTitle = wg?.displayName || state.selectedWorkingGroupId;
+    currentScopeTypeBadge = 'Working Group';
+    filteredMessages = filteredMessages.filter(
+      (m) =>
+        m.scope.kind === 'working-group-channel' &&
+        m.scope.workingGroupId === state.selectedWorkingGroupId
+    );
+  } else if (state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId) {
+    const peer = project.memberships.find((m) => m.memberId === state.selectedDirectMessagePeerId);
+    currentScopeTitle = `@${peer?.displayName || state.selectedDirectMessagePeerId}`;
+    currentScopeTypeBadge = 'Direct Message';
+    filteredMessages = filteredMessages.filter(
+      (m) =>
+        m.scope.kind === 'direct-message' &&
+        (m.scope.recipientId === state.selectedDirectMessagePeerId ||
+          m.authorId === state.selectedDirectMessagePeerId)
+    );
+  } else {
+    filteredMessages = filteredMessages.filter((m) => m.scope.kind === 'project-channel');
+  }
+
+  // Simulated unread message counts per scope
+  const unreadMap: Record<string, number> = {
+    'project-channel': 2,
+    'wg-mechanics': 1,
+    'wg-audio': 0,
+    programmer: 1,
+    reviewer: 0,
+    designer: 0,
+    planner: 1,
+  };
+
+  // Helper to find last message for any scope
   const projectMessages = (state.messages || []).filter((m) => m.projectId === project.id);
+  const getLastMessage = (kind: string, id?: string) => {
+    let msgs: any[] = [];
+    if (kind === 'project-channel') {
+      msgs = projectMessages.filter((m) => m.scope.kind === 'project-channel');
+    } else if (kind === 'working-group-channel') {
+      msgs = projectMessages.filter(
+        (m) => m.scope.kind === 'working-group-channel' && m.scope.workingGroupId === id
+      );
+    } else if (kind === 'direct-message') {
+      msgs = projectMessages.filter(
+        (m) =>
+          m.scope.kind === 'direct-message' &&
+          (m.scope.recipientId === id || m.authorId === id)
+      );
+    }
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  };
 
-  chatEl.innerHTML = `
-    <div class="card" style="display: flex; flex-direction: column; min-height: 480px;">
-      <div class="card-header">
-        <div>
-          <span class="card-title">Project Discussion & Channel Timeline</span>
-          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
-            Channel: <code>#general</code> · Scope: <code>${project.id}</code>
+  const generalLastMsg = getLastMessage('project-channel');
+  const isGeneralActive = state.selectedScopeKind === 'project-channel';
+
+  const activeWorkingGroups = project.workingGroups.filter((w) => w.status === 'active');
+  const activeAgentMembers = project.memberships.filter(
+    (m) => m.memberKind === 'agent' && m.status === 'active'
+  );
+
+  chatViewEl.innerHTML = `
+    <!-- Left Pane: Categorized Chat Cards List -->
+    <aside class="chat-list-pane" role="tablist" aria-label="Conversation Scopes">
+      
+      <!-- 1. Project Channel Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Project Channels</span>
+        </div>
+        <div class="chat-cards-list">
+          <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
+            <div class="chat-card-avatar-wrap">
+              <div class="chat-card-avatar icon-avatar">
+                ${renderIcon('chat', 16)}
+              </div>
+            </div>
+            <div class="chat-card-main">
+              <div class="chat-card-header-row">
+                <span class="chat-card-title">#general</span>
+                <div class="chat-card-meta-right">
+                  ${generalLastMsg?.timestamp ? `<span class="chat-card-timestamp">${generalLastMsg.timestamp}</span>` : ''}
+                  ${unreadMap['project-channel'] ? `<span class="unread-badge-dot">${unreadMap['project-channel']}</span>` : ''}
+                </div>
+              </div>
+              <div class="chat-card-preview" title="${generalLastMsg?.content || 'No messages yet'}">
+                ${generalLastMsg?.content || 'No messages yet in project channel.'}
+              </div>
+            </div>
           </div>
         </div>
-        <button class="btn btn-secondary btn-sm open-inspector-btn" title="Inspect Causal Chain">
-          ${renderIcon('lightning', 14)} Inspect Routing
-        </button>
       </div>
 
-      <!-- Chat Timeline Messages -->
-      <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 380px;">
-        ${projectMessages
-          .map(
-            (msg) => `
-          <div class="chat-msg ${msg.authorKind === 'human' ? 'msg-me' : 'msg-them'}">
-            <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 3px;">
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <span style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName ?? msg.authorId}</span>
-                <span class="status-pill neutral" style="font-size: 9px; padding: 1px 5px;">${msg.authorKind}</span>
-                ${
-                  msg.isProjectedReply
-                    ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;">Projected Reply</span>`
-                    : ''
-                }
-              </div>
-              <span style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
-            </div>
-            <div class="msg-text" style="font-size: 13px; line-height: 1.45;">${msg.content}</div>
+      <!-- Divider -->
+      <div class="chat-section-divider"></div>
+
+      <!-- 2. Working Groups Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Working Groups (${activeWorkingGroups.length})</span>
+        </div>
+        <div class="chat-cards-list">
+          ${activeWorkingGroups
+            .map((w) => {
+              const isActive =
+                state.selectedScopeKind === 'working-group-channel' &&
+                state.selectedWorkingGroupId === w.id;
+              const lastMsg = getLastMessage('working-group-channel', w.id);
+              const unreadCount = unreadMap[w.id] || 0;
+              return `
+                <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" aria-selected="${isActive}">
+                  <div class="chat-card-avatar-wrap">
+                    <div class="chat-card-avatar icon-avatar">
+                      ${renderIcon('users', 16)}
+                    </div>
+                  </div>
+                  <div class="chat-card-main">
+                    <div class="chat-card-header-row">
+                      <span class="chat-card-title">${w.displayName}</span>
+                      <div class="chat-card-meta-right">
+                        ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
+                        ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+                      </div>
+                    </div>
+                    <div class="chat-card-preview" title="${lastMsg?.content || 'No messages yet'}">
+                      ${lastMsg?.content || 'No messages yet in working group.'}
+                    </div>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div class="chat-section-divider"></div>
+
+      <!-- 3. Direct Messages Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Direct Messages (${activeAgentMembers.length})</span>
+        </div>
+        <div class="chat-cards-list">
+          ${activeAgentMembers
+            .map((m) => {
+              const isActive =
+                state.selectedScopeKind === 'direct-message' &&
+                state.selectedDirectMessagePeerId === m.memberId;
+              const lastMsg = getLastMessage('direct-message', m.memberId);
+              const unreadCount = unreadMap[m.memberId] || 0;
+              return `
+                <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
+                  <div class="chat-card-avatar-wrap">
+                    <div class="chat-card-avatar agent-avatar">
+                      ${m.avatar || renderIcon('bot', 16)}
+                    </div>
+                  </div>
+                  <div class="chat-card-main">
+                    <div class="chat-card-header-row">
+                      <span class="chat-card-title">@${m.displayName}</span>
+                      <div class="chat-card-meta-right">
+                        ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
+                        ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+                      </div>
+                    </div>
+                    <div class="chat-card-preview" title="${lastMsg?.content || 'No messages yet'}">
+                      ${lastMsg?.content || 'No messages yet with agent.'}
+                    </div>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Right Pane: Active Conversation Detail -->
+    <section class="chat-detail-pane">
+      <div class="card" style="display: flex; flex-direction: column; min-height: 480px; height: 100%;">
+        <!-- Clean Card Header: Title on Left, Info Button on Right (Subtitle & Inspector Button moved to Info Modal) -->
+        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="card-title" style="margin: 0;">${currentScopeTitle}</span>
+            <span class="status-pill neutral" style="font-size: 10px;">${currentScopeTypeBadge}</span>
           </div>
-        `
-          )
-          .join('')}
+          <button class="btn btn-secondary btn-sm chat-info-btn" id="chat-scope-info-btn" title="Conversation Details & Routing Info" aria-label="Conversation Details & Routing Info" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
+            ${renderIcon('info', 16)}
+          </button>
+        </div>
+
+        <!-- Chat Timeline Messages -->
+        <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 420px;">
+          ${
+            filteredMessages.length === 0
+              ? `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 0;">
+                  No messages yet in this conversation scope. Send a message to start collaboration.
+                </div>`
+              : filteredMessages
+                  .map(
+                    (msg) => `
+                <div class="chat-msg ${msg.authorKind === 'human' ? 'msg-me' : 'msg-them'}">
+                  <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 3px;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName ?? msg.authorId}</span>
+                      <span class="status-pill neutral" style="font-size: 9px; padding: 1px 5px;">${msg.authorKind}</span>
+                      ${
+                        msg.isProjectedReply
+                          ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;">Projected Reply</span>`
+                          : ''
+                      }
+                    </div>
+                    <span style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
+                  </div>
+                  <div class="msg-text" style="font-size: 13px; line-height: 1.45;">${msg.content}</div>
+                  ${
+                    msg.routingCausalChainId
+                      ? `<div class="msg-routing-tag" data-batch="${msg.routingCausalChainId}" style="margin-top: 4px; font-size: 10px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; background: var(--bg-surface-elevated); padding: 2px 6px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);" title="Click to inspect causal wake routing chain">
+                          ${renderIcon('lightning', 10)}
+                          <span>Batch: <code>${msg.routingCausalChainId}</code> (${msg.disposition})</span>
+                        </div>`
+                      : ''
+                  }
+                </div>
+              `
+                  )
+                  .join('')
+          }
+        </div>
+
+        <!-- Chat Composer -->
+        <div class="chat-composer" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; gap: 8px; align-items: center;">
+          <input type="text" class="form-input chat-input-text" placeholder="Type message or @mention..." style="flex: 1; min-height: 38px;" ${project.status === 'archived' ? 'disabled placeholder="Project is archived (read-only)"' : ''} />
+          <button class="btn btn-primary send-msg-btn" style="min-height: 38px;" ${project.status === 'archived' ? 'disabled' : ''}>
+            ${renderIcon('send', 14)} Send
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+
+  // Scope Card Click Listeners (Select Scope / Open Detail)
+  chatViewEl.querySelectorAll('.chat-scope-card').forEach((card) => {
+    card.addEventListener('click', (ev) => {
+      const target = ev.currentTarget as HTMLElement;
+      const kind = target.getAttribute('data-kind') as any;
+      const id = target.getAttribute('data-id') || undefined;
+      stateManager.openChatDetail(kind, id);
+    });
+  });
+
+  // Chat Info Modal Opener
+  chatViewEl.querySelector('#chat-scope-info-btn')?.addEventListener('click', () => {
+    renderChatInfoModal(
+      rootContainer,
+      state,
+      project,
+      state.selectedScopeKind,
+      state.selectedScopeKind === 'working-group-channel'
+        ? state.selectedWorkingGroupId
+        : state.selectedScopeKind === 'direct-message'
+          ? state.selectedDirectMessagePeerId
+          : undefined
+    );
+  });
+
+  // Message routing tag click listener -> Open Inspector Modal
+  chatViewEl.querySelectorAll('.msg-routing-tag').forEach((tag) => {
+    tag.addEventListener('click', (ev) => {
+      const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-002';
+      renderRoutingInspectorModal(rootContainer, state, batchId);
+    });
+  });
+
+  // Send message handler
+  const inputEl = chatViewEl.querySelector('.chat-input-text') as HTMLInputElement;
+  const sendBtn = chatViewEl.querySelector('.send-msg-btn') as HTMLButtonElement;
+
+  const handleSend = () => {
+    if (!inputEl || !inputEl.value.trim() || project.status === 'archived') return;
+    const text = inputEl.value.trim();
+
+    let scope: any = { kind: 'project-channel' };
+    if (state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId) {
+      scope = { kind: 'working-group-channel', workingGroupId: state.selectedWorkingGroupId };
+    } else if (state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId) {
+      scope = { kind: 'direct-message', recipientId: state.selectedDirectMessagePeerId };
+    }
+
+    stateManager.sendMessage(project.id, scope, text);
+    inputEl.value = '';
+  };
+
+  sendBtn?.addEventListener('click', handleSend);
+  inputEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSend();
+  });
+
+  return chatViewEl;
+}
+
+// --- Modals for Project, Chat & Routing Inspection ---
+
+/**
+ * Renders the Chat Information Modal with scope details, group/agent links, and routing inspector entry
+ */
+export function renderChatInfoModal(
+  parentEl: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem,
+  scopeKind: 'project-channel' | 'working-group-channel' | 'direct-message',
+  scopeId?: string
+) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  let title = '#general';
+  let typeLabel = 'Project Channel';
+  let desc = 'Main broadcast and coordination channel for all project agents and human operator.';
+  let targetAgent: any = null;
+  let targetWg: any = null;
+
+  if (scopeKind === 'working-group-channel' && scopeId) {
+    targetWg = project.workingGroups.find((w) => w.id === scopeId);
+    title = targetWg?.displayName || scopeId;
+    typeLabel = 'Working Group';
+    desc = targetWg?.purpose || 'Focused sub-team working group collaboration.';
+  } else if (scopeKind === 'direct-message' && scopeId) {
+    const member = project.memberships.find((m) => m.memberId === scopeId);
+    targetAgent = state.agents.find((a) => a.id === scopeId);
+    title = `@${member?.displayName || targetAgent?.displayName || scopeId}`;
+    typeLabel = 'Direct Message';
+    desc = member?.responsibilities || targetAgent?.description || '1-on-1 direct agent collaboration.';
+  }
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="chat-info-title" style="max-width: 540px;">
+      <div class="proto-modal-header">
+        <strong id="chat-info-title" style="font-size: 15px; display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('info', 16)} Conversation Information
+        </strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close modal">${renderIcon('close', 12)}</button>
       </div>
 
-      <!-- Chat Input Composer -->
-      <div class="chat-composer" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; gap: 8px; align-items: center;">
-        <select class="form-select chat-scope-select" style="font-size: 12px; width: 110px; min-height: 36px;">
-          <option value="project">Project #general</option>
-          <option value="dm-programmer">DM @programmer</option>
-          <option value="dm-reviewer">DM @reviewer</option>
-        </select>
-        <input type="text" class="form-input chat-input-text" placeholder="Send project message or @agent mention..." style="flex: 1; min-height: 36px;" />
-        <button class="btn btn-primary send-msg-btn" style="min-height: 36px;">
-          Send
-        </button>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- 1. Scope Identity -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 15px; font-weight: 700;">${title}</span>
+            <span class="status-pill neutral" style="font-size: 10px;">${typeLabel}</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px;">
+            Project: <code>${project.displayName}</code> (${project.id})
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.45;">
+            ${desc}
+          </div>
+        </div>
+
+        <!-- 2. Specific Scope Details -->
+        ${
+          targetWg
+            ? `<div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+                <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+                  Working Group Members (${targetWg.memberIds.length})
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                  ${targetWg.memberIds
+                    .map((id: string) => {
+                      const m = project.memberships.find((mb) => mb.memberId === id);
+                      return `<strong>${m?.displayName || id}</strong>`;
+                    })
+                    .join(', ')}
+                </div>
+              </div>`
+            : ''
+        }
+
+        ${
+          targetAgent
+            ? `<div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+                <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+                  Agent Specifications
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; display: flex; flex-direction: column; gap: 4px;">
+                  <div><strong>Engine:</strong> <code>${targetAgent.primaryEngine}</code> · <strong>Default Model:</strong> <code>${targetAgent.defaultModel}</code></div>
+                  <div><strong>System Role:</strong> <em>"${targetAgent.systemPromptSummary}"</em></div>
+                </div>
+              </div>`
+            : ''
+        }
+
+        <!-- 3. Wake Routing Policy & Causal Inspector Entry -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+              Wake Routing Policy
+            </div>
+            <span class="status-pill purple" style="font-size: 10px;">
+              ${project.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (30s batch window)' : 'Explicit Mentions Only'}
+            </span>
+          </div>
+          <div style="margin-top: 8px;">
+            <button class="btn btn-secondary btn-sm inspect-routing-btn" style="width: 100%; justify-content: center; gap: 6px;">
+              ${renderIcon('lightning', 14)} Inspect Causal Wake Routing Chain (ADR-0007)
+            </button>
+          </div>
+        </div>
+
+        <!-- 4. Direct Navigation / Management Actions -->
+        ${
+          targetAgent
+            ? `<div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-primary btn-sm jump-agent-btn" style="flex: 1; justify-content: center; gap: 6px;">
+                  ${renderIcon('bot', 14)} Manage Agent (@${targetAgent.displayName})
+                </button>
+              </div>`
+            : ''
+        }
       </div>
     </div>
   `;
 
-  chatEl.querySelector('.open-inspector-btn')?.addEventListener('click', () => {
-    stateManager.openInspector('routing', 'batch-001');
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
   });
 
-  const textInput = chatEl.querySelector('.chat-input-text') as HTMLInputElement;
-  const scopeSelect = chatEl.querySelector('.chat-scope-select') as HTMLSelectElement;
-  const sendBtn = chatEl.querySelector('.send-msg-btn') as HTMLButtonElement;
+  // Inspect Routing modal opener
+  modal.querySelector('.inspect-routing-btn')?.addEventListener('click', () => {
+    renderRoutingInspectorModal(parentEl, state, 'batch-002');
+  });
 
-  const handleSend = () => {
-    if (!textInput || !textInput.value.trim()) return;
-    const text = textInput.value.trim();
-    let scope: any = { kind: 'project-channel', channel: 'general' };
+  // Direct Agent Management jumper
+  modal.querySelector('.jump-agent-btn')?.addEventListener('click', () => {
+    modal.remove();
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.selectAgent(targetAgent.id);
+  });
 
-    if (scopeSelect.value === 'dm-programmer') {
-      scope = { kind: 'direct-message', recipientId: 'programmer' };
-    } else if (scopeSelect.value === 'dm-reviewer') {
-      scope = { kind: 'direct-message', recipientId: 'reviewer' };
+  parentEl.appendChild(modal);
+}
+
+/**
+ * Renders the Causal Wake Routing Inspector Modal Dialog
+ */
+export function renderRoutingInspectorModal(
+  parentEl: HTMLElement,
+  state: PrototypeState,
+  batchId = 'batch-002'
+) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  const batch =
+    state.routingBatches.find((b) => b.id === batchId) ??
+    state.routingBatches[0] ?? {
+      id: 'batch-002',
+      projectId: 'proj-minesweeper',
+      openedAt: '25m 00s ago',
+      closedAt: '24m 30s ago',
+      inputMessageIds: ['msg-3'],
+      status: 'settled',
+      attemptsCount: 1,
+      wakeModel: 'gpt-4o-mini',
+      frozenContextSummary: {
+        tokenCount: 1840,
+        projectRulesIncluded: true,
+        recentMessagesCount: 4,
+        tasksSummariesCount: 2,
+        truncated: false,
+      },
+      decisions: [
+        {
+          messageId: 'msg-3',
+          targetAgentId: 'designer',
+          status: 'selected',
+          rationale:
+            'Message discusses sRGB shader lighting aesthetics which maps directly to Designer responsibility slot.',
+        },
+      ],
+      resultingWakeRequestIds: ['wake-02'],
+    };
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="routing-modal-title" style="max-width: 580px;">
+      <div class="proto-modal-header">
+        <strong id="routing-modal-title" style="font-size: 15px; display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('lightning', 16)} Causal Wake Routing Inspector
+        </strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close modal">${renderIcon('close', 12)}</button>
+      </div>
+
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- 1. Batch Execution Summary -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 6px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 700; font-size: 13px;">Batch: <code>${batch.id}</code></span>
+            <span class="status-pill ${batch.status === 'settled' ? 'green' : 'yellow'}" style="font-size: 10px;">${batch.status}</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary);">
+            <strong>Collection Window:</strong> ${batch.openedAt} → ${batch.closedAt} (30s batch window)
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary);">
+            <strong>Wake Evaluation Model:</strong> <code>${batch.wakeModel}</code> (Attempt ${batch.attemptsCount} of 2)
+          </div>
+        </div>
+
+        <!-- 2. Frozen Context Summary -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Frozen Context Bounds (ADR-0007)
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.45;">
+            Token Count: <strong>${batch.frozenContextSummary.tokenCount}</strong> · Project Rules: <strong>${batch.frozenContextSummary.projectRulesIncluded ? 'Included' : 'Excluded'}</strong> · Recent Messages: <strong>${batch.frozenContextSummary.recentMessagesCount}</strong> · Task Summaries: <strong>${batch.frozenContextSummary.tasksSummariesCount}</strong>
+          </div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 3px; font-style: italic;">
+            Private reasoning chains, engine sessions, and credentials strictly excluded.
+          </div>
+        </div>
+
+        <!-- 3. Causal Decisions -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Wake Decisions & Causal Rationale (${batch.decisions.length})
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+            ${batch.decisions
+              .map(
+                (d) => `
+              <div style="background: var(--bg-surface); padding: 8px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); border-left: 3px solid var(--purple-agent);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-size: 12px; font-weight: 700;">Target Agent: <code>@${d.targetAgentId ?? 'none'}</code></span>
+                  <span class="status-pill ${d.status === 'selected' ? 'green' : 'neutral'}" style="font-size: 10px;">${d.status}</span>
+                </div>
+                <div style="font-size: 12px; color: var(--text-primary); margin-top: 4px; line-height: 1.4;">
+                  "${d.rationale}"
+                </div>
+                <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+                  Input Message: <code>${d.messageId}</code> · Model judgment under frozen project context
+                </div>
+              </div>
+            `
+              )
+              .join('')}
+          </div>
+        </div>
+
+        <!-- 4. Resulting Wake Request -->
+        ${
+          batch.resultingWakeRequestIds && batch.resultingWakeRequestIds.length > 0
+            ? `<div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+                <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+                  Resulting Wake Requests
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                  Wake Request IDs: <code>${batch.resultingWakeRequestIds.join(', ')}</code> → Dispatched to Agent worker
+                </div>
+              </div>`
+            : ''
+        }
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+  parentEl.appendChild(modal);
+}
+
+function renderProjectInfoModal(
+  parentEl: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem,
+  projectTasks: any[],
+  activeTasks: any[],
+  validationTasks: any[],
+  blockedTasks: any[],
+  proposedTasks: any[],
+  recoveryTasks: any[],
+  activeMembers: any[]
+) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="info-modal-title">
+      <div class="proto-modal-header">
+        <strong id="info-modal-title" style="font-size: 15px; display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('info', 16)} Project Information & Metadata
+        </strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close modal">${renderIcon('close', 12)}</button>
+      </div>
+
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px;">
+        <!-- 1. Identity & Template -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 14px; font-weight: 700;">${project.displayName}</span>
+            <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">${project.status}</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px;">
+            ID: <code>${project.id}</code> · Created: ${project.createdAt}
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+            <strong>Template Origin:</strong> <code>${project.templateSource}</code>
+          </div>
+        </div>
+
+        <!-- 2. Bound Host Workspaces -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Bound Workspaces & Host Environments (${project.boundEnvironmentWorkspaces.length})
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
+            ${project.boundEnvironmentWorkspaces
+              .map((ws) => {
+                const env = state.environments.find((e) => e.id === ws.environmentId);
+                return `
+              <div style="font-size: 12px; display: flex; justify-content: space-between; align-items: center; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
+                <span style="display: inline-flex; align-items: center; gap: 5px;">
+                  ${renderIcon(env?.platform === 'windows' ? 'desktop' : 'server', 13)}
+                  <strong>${ws.environmentId}</strong>
+                </span>
+                <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">${ws.relativeWorkspacePath}</span>
+              </div>
+            `;
+              })
+              .join('')}
+          </div>
+        </div>
+
+        <!-- 3. Memberships -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Active Project Members (${activeMembers.length})
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.4;">
+            ${activeMembers.map((m) => `<strong>${m.displayName}</strong> (${m.memberKind})`).join(', ')}
+          </div>
+        </div>
+
+        <!-- 4. Tasks Operating Breakdown -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Task Operating Status (${projectTasks.length} Total)
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
+            <span class="status-pill green" style="font-size: 10px;">${activeTasks.length} Active</span>
+            <span class="status-pill yellow" style="font-size: 10px;">${validationTasks.length} Validation</span>
+            <span class="status-pill red" style="font-size: 10px;">${blockedTasks.length} Blocked</span>
+            <span class="status-pill yellow" style="font-size: 10px;">${proposedTasks.length} Proposed</span>
+            <span class="status-pill red" style="font-size: 10px;">${recoveryTasks.length} Recovery</span>
+          </div>
+        </div>
+
+        <!-- 5. Wake Routing Policy -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Wake Routing Policy
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+            <span class="status-pill purple" style="font-size: 11px;">
+              ${project.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (30s batch window)' : 'Explicit Mentions Only'}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+  parentEl.appendChild(modal);
+}
+
+function renderNewProjectModal(parentEl: HTMLElement) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="proto-modal-header">
+        <strong id="modal-title" style="font-size: 15px; display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('folder', 16)} Create New Project
+        </strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close modal">${renderIcon('close', 12)}</button>
+      </div>
+      <div class="proto-modal-body">
+        <div style="background: var(--bg-surface-elevated); padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary);">
+          Derived from immutable built-in: <strong>General collaboration template v1.0</strong>.
+        </div>
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Project Display Name *</label>
+          <input type="text" class="form-input new-proj-name" placeholder="e.g. Vulkan Renderer Engine" style="width: 100%; margin-top: 4px;" />
+        </div>
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Project Goal</label>
+          <textarea class="form-textarea new-proj-goal" rows="2" placeholder="State high-level goal..." style="width: 100%; margin-top: 4px;">Deliver verified high-performance implementation.</textarea>
+        </div>
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Initial Project Rules (one per line)</label>
+          <textarea class="form-textarea new-proj-rules" rows="2" style="width: 100%; margin-top: 4px;">Preserve modular boundaries\nVerify all completion claims with tests</textarea>
+        </div>
+      </div>
+      <div class="proto-modal-footer">
+        <button class="btn btn-secondary close-modal-btn">Cancel</button>
+        <button class="btn btn-primary create-confirm-btn">Create Project</button>
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => {
+    b.addEventListener('click', () => modal.remove());
+  });
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  modal.querySelector('.create-confirm-btn')?.addEventListener('click', () => {
+    const nameInput = modal.querySelector('.new-proj-name') as HTMLInputElement;
+    const goalInput = modal.querySelector('.new-proj-goal') as HTMLTextAreaElement;
+    const rulesInput = modal.querySelector('.new-proj-rules') as HTMLTextAreaElement;
+
+    if (!nameInput.value.trim()) {
+      alert('Project display name is required.');
+      return;
     }
 
-    stateManager.sendMessage(project.id, scope, text);
-    textInput.value = '';
-  };
-
-  sendBtn?.addEventListener('click', handleSend);
-  textInput?.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') handleSend();
+    const rules = rulesInput.value
+      .split('\n')
+      .map((r) => r.trim())
+      .filter(Boolean);
+    stateManager.createProject(
+      nameInput.value.trim(),
+      goalInput.value.trim(),
+      rules,
+      ['programmer', 'reviewer'],
+      ['mac-studio-primary']
+    );
+    modal.remove();
   });
 
-  return chatEl;
+  parentEl.appendChild(modal);
+}
+
+function renderEditContractModal(parentEl: HTMLElement, project: ProjectItem) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-contract-title">
+      <div class="proto-modal-header">
+        <strong id="edit-contract-title" style="font-size: 15px;">Edit Project Contract (${project.displayName})</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close">${renderIcon('close', 12)}</button>
+      </div>
+      <div class="proto-modal-body">
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Project Goal</label>
+          <textarea class="form-textarea edit-goal-input" rows="3" style="width: 100%; margin-top: 4px;">${project.goal || ''}</textarea>
+        </div>
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Project Rules (one per line)</label>
+          <textarea class="form-textarea edit-rules-input" rows="4" style="width: 100%; margin-top: 4px;">${(project.rules || []).join('\n')}</textarea>
+        </div>
+        <div>
+          <label style="font-size: 12px; font-weight: 700;">Completion Guidance</label>
+          <textarea class="form-textarea edit-guidance-input" rows="2" style="width: 100%; margin-top: 4px;">${project.completionGuidance || ''}</textarea>
+        </div>
+      </div>
+      <div class="proto-modal-footer">
+        <button class="btn btn-secondary close-modal-btn">Cancel</button>
+        <button class="btn btn-primary save-contract-btn">Save Contract</button>
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  modal.querySelector('.save-contract-btn')?.addEventListener('click', () => {
+    const goal = (modal.querySelector('.edit-goal-input') as HTMLTextAreaElement).value.trim();
+    const rules = (modal.querySelector('.edit-rules-input') as HTMLTextAreaElement).value
+      .split('\n')
+      .map((r) => r.trim())
+      .filter(Boolean);
+    const guidance = (modal.querySelector('.edit-guidance-input') as HTMLTextAreaElement).value.trim();
+
+    stateManager.updateProjectContract(project.id, goal, rules, guidance);
+    modal.remove();
+  });
+
+  parentEl.appendChild(modal);
+}
+
+function renderAddMemberModal(parentEl: HTMLElement, state: PrototypeState, project: ProjectItem) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  const unassignedAgents = state.agents.filter(
+    (a) => !project.memberships.some((m) => m.memberId === a.id && m.status === 'active')
+  );
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="add-member-title">
+      <div class="proto-modal-header">
+        <strong id="add-member-title" style="font-size: 15px;">Add Global Agent to Project</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn">${renderIcon('close', 12)}</button>
+      </div>
+      <div class="proto-modal-body">
+        ${
+          unassignedAgents.length === 0
+            ? `<p style="color: var(--text-muted);">All registered global agents are already active members of this project.</p>`
+            : `
+          <div>
+            <label style="font-size: 12px; font-weight: 700;">Select Global Agent *</label>
+            <select class="form-select select-agent-input" style="width: 100%; margin-top: 4px;">
+              ${unassignedAgents
+                .map((a) => `<option value="${a.id}">${a.displayName} (${a.description})</option>`)
+                .join('')}
+            </select>
+          </div>
+          <div>
+            <label style="font-size: 12px; font-weight: 700;">Project Assigned Responsibilities</label>
+            <input type="text" class="form-input member-resp-input" placeholder="e.g. Lead implementation of graphics shader modules" style="width: 100%; margin-top: 4px;" />
+          </div>
+          <div>
+            <label style="font-size: 12px; font-weight: 700;">Collaboration Instructions</label>
+            <textarea class="form-textarea member-instr-input" rows="2" placeholder="e.g. Ensure all shader passes compile without warnings" style="width: 100%; margin-top: 4px;"></textarea>
+          </div>
+        `
+        }
+      </div>
+      <div class="proto-modal-footer">
+        <button class="btn btn-secondary close-modal-btn">Cancel</button>
+        ${
+          unassignedAgents.length > 0
+            ? `<button class="btn btn-primary confirm-add-member-btn">Add to Project</button>`
+            : ''
+        }
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  modal.querySelector('.confirm-add-member-btn')?.addEventListener('click', () => {
+    const agentSelect = modal.querySelector('.select-agent-input') as HTMLSelectElement;
+    const respInput = modal.querySelector('.member-resp-input') as HTMLInputElement;
+    const instrInput = modal.querySelector('.member-instr-input') as HTMLTextAreaElement;
+
+    if (agentSelect) {
+      stateManager.addProjectMembership(
+        project.id,
+        agentSelect.value,
+        respInput.value.trim() || undefined,
+        instrInput.value.trim() || undefined
+      );
+      modal.remove();
+    }
+  });
+
+  parentEl.appendChild(modal);
+}
+
+function renderBindEnvironmentModal(
+  parentEl: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem
+) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  const unassignedEnvs = state.environments.filter(
+    (e) => !project.boundEnvironmentWorkspaces.some((b) => b.environmentId === e.id)
+  );
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="bind-env-title">
+      <div class="proto-modal-header">
+        <strong id="bind-env-title" style="font-size: 15px;">Bind Environment to Project</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn">${renderIcon('close', 12)}</button>
+      </div>
+      <div class="proto-modal-body">
+        ${
+          unassignedEnvs.length === 0
+            ? `<p style="color: var(--text-muted);">All enrolled host environments are already bound to this project.</p>`
+            : `
+          <div>
+            <label style="font-size: 12px; font-weight: 700;">Select Enrolled Environment *</label>
+            <select class="form-select select-env-input" style="width: 100%; margin-top: 4px;">
+              ${unassignedEnvs
+                .map((e) => `<option value="${e.id}">${e.displayName} (${e.platform}) · ${e.trafficLightReason}</option>`)
+                .join('')}
+            </select>
+          </div>
+          <div>
+            <label style="font-size: 12px; font-weight: 700;">Relative Workspace Directory Path *</label>
+            <input type="text" class="form-input relative-path-input" value="${project.displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}" style="width: 100%; margin-top: 4px;" />
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 2px; display: block;">Relative to host worker workspace root directory.</span>
+          </div>
+        `
+        }
+      </div>
+      <div class="proto-modal-footer">
+        <button class="btn btn-secondary close-modal-btn">Cancel</button>
+        ${
+          unassignedEnvs.length > 0
+            ? `<button class="btn btn-primary confirm-bind-env-btn">Bind & Prepare Workspace</button>`
+            : ''
+        }
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  modal.querySelector('.confirm-bind-env-btn')?.addEventListener('click', () => {
+    const envSelect = modal.querySelector('.select-env-input') as HTMLSelectElement;
+    const pathInput = modal.querySelector('.relative-path-input') as HTMLInputElement;
+
+    if (envSelect && pathInput.value.trim()) {
+      const env = state.environments.find((e) => e.id === envSelect.value);
+      const root =
+        env?.workspaceRoots[0] ||
+        (env?.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
+      stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
+      modal.remove();
+    }
+  });
+
+  parentEl.appendChild(modal);
 }
