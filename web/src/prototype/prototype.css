@@ -1729,20 +1729,21 @@ code {
   outline: none;
 }
 
-/* 4 Streamlined Urgency Pills */
+/* 4 Streamlined Urgency Pills (Responsive Grid on Mobile, Flex on Desktop) */
 .attention-urgency-pills {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  width: 100%;
   margin-top: 8px;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
 }
 
-.attention-urgency-pills::-webkit-scrollbar {
-  display: none;
+@media (min-width: 600px) {
+  .attention-urgency-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
 }
 
 .urgency-pill-btn {
@@ -1751,12 +1752,16 @@ code {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
-  padding: 6px 12px;
+  padding: 6px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s ease;
-  min-height: 32px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 .urgency-pill-btn:hover {

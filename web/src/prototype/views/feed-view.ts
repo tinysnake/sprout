@@ -450,16 +450,16 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
     <!-- 4 Streamlined Urgency Pills (Dynamic Counter AND Intersection) -->
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
       <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
-        全部 / All (${scopedItems.length})
+        <span>全部 (${scopedItems.length})</span>
       </button>
       <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
-        🔴 需人工干预 (${redItems.length})
+        <span>🔴 需干预 (${redItems.length})</span>
       </button>
       <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention">
-        🟡 待审批验证 (${yellowItems.length})
+        <span>🟡 待审批 (${yellowItems.length})</span>
       </button>
       <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info">
-        🔵 提案与通知 (${blueItems.length})
+        <span>🔵 提案/通知 (${blueItems.length})</span>
       </button>
     </div>
 
