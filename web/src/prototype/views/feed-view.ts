@@ -4,15 +4,13 @@ import type {
   ActivityFeedItem,
   AttentionItem,
   AttentionSeverity,
-  FeedLayoutVariant,
-  FeedStatePreset,
 } from '../types.js';
 
 export function renderFeedView(state: PrototypeState): HTMLElement {
   const container = document.createElement('div');
   container.className = 'feed-view';
 
-  // 1. Top Header with Title, State Matrix Controls, and Layout Variant Switcher
+  // 1. Top Header (Clean Authentic Production UI)
   const headerEl = document.createElement('div');
   headerEl.className = 'view-header feed-header';
   headerEl.innerHTML = `
@@ -27,75 +25,38 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
       Central surface for cross-project discovery, urgent Human interventions, active work telemetry, and background collaboration history.
     </p>
 
-    <!-- State Matrix Preset Quick Bar -->
-    <div class="feed-control-strip">
-      <div class="feed-control-label">
-        ${renderIcon('sliders', 12)}
-        <span>State Matrix:</span>
+    <!-- Top Scope Filter Bar (Dropdown + Dynamic Urgent Chips) -->
+    <div class="feed-scope-filter-bar">
+      <div class="feed-scope-dropdown-wrapper">
+        <label for="feed-scope-select" class="visually-hidden">Filter Scope</label>
+        <select id="feed-scope-select" class="form-select feed-scope-select" aria-label="Select Project Scope">
+          ${renderScopeSelectOptions(state)}
+        </select>
       </div>
-      <div class="feed-preset-pills" role="group" aria-label="Feed state presets">
-        <button class="feed-pill-btn ${state.feedStatePreset === 'mixed' ? 'active' : ''}" data-preset="mixed" title="Default realistic multi-agent operational state">
-          Mixed (Default)
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'empty' ? 'active' : ''}" data-preset="empty" title="All attention cleared and no active work">
-          Empty (All Clear)
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'healthy' ? 'active' : ''}" data-preset="healthy" title="Active work progressing with zero blockers">
-          Healthy Active
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'stale' ? 'active' : ''}" data-preset="stale" title="Stale telemetry and unconfirmed lease">
-          Stale Telemetry
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'pending' ? 'active' : ''}" data-preset="pending" title="Proposed tasks awaiting authorization & pending enrollment">
-          Pending Approvals
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'degraded' ? 'active' : ''}" data-preset="degraded" title="Offline worker holding lease & degraded engine">
-          Degraded Host
-        </button>
-        <button class="feed-pill-btn ${state.feedStatePreset === 'intervention' ? 'active' : ''}" data-preset="intervention" title="Active blockers and completion claim validation">
-          Intervention
-        </button>
-      </div>
-    </div>
 
-    <!-- Layout Variant Switcher -->
-    <div class="feed-variant-strip">
-      <div class="feed-control-label">
-        ${renderIcon('grid', 12)}
-        <span>Layout Paradigm:</span>
-      </div>
-      <div class="segmented-control" role="group" aria-label="Feed layout variants">
-        <button class="segmented-btn ${state.feedLayoutVariant === 'unified' ? 'active' : ''}" data-variant="unified">
-          ${renderIcon('layers', 13)} Variant A: Unified Stream
-        </button>
-        <button class="segmented-btn ${state.feedLayoutVariant === 'split-board' ? 'active' : ''}" data-variant="split-board">
-          ${renderIcon('split', 13)} Variant B: Split Board
-        </button>
-        <button class="segmented-btn ${state.feedLayoutVariant === 'project-grouped' ? 'active' : ''}" data-variant="project-grouped">
-          ${renderIcon('project', 13)} Variant C: Project Grouped
-        </button>
+      <div class="feed-scope-chips" role="group" aria-label="Quick Project Filter Chips">
+        ${renderDynamicScopeChips(state)}
       </div>
     </div>
   `;
 
-  // Attach Header Preset & Variant listeners
-  headerEl.querySelectorAll('.feed-pill-btn[data-preset]').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const preset = (ev.currentTarget as HTMLElement).getAttribute('data-preset') as FeedStatePreset;
-      stateManager.setFeedStatePreset(preset);
-    });
+  // Attach Scope select & chip listeners
+  const scopeSelect = headerEl.querySelector('#feed-scope-select') as HTMLSelectElement;
+  scopeSelect?.addEventListener('change', (ev) => {
+    const val = (ev.target as HTMLSelectElement).value;
+    stateManager.setFeedScopeFilter(val);
   });
 
-  headerEl.querySelectorAll('.segmented-btn[data-variant]').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const variant = (ev.currentTarget as HTMLElement).getAttribute('data-variant') as FeedLayoutVariant;
-      stateManager.setFeedLayoutVariant(variant);
+  headerEl.querySelectorAll('.scope-chip-btn[data-scope]').forEach((chip) => {
+    chip.addEventListener('click', (ev) => {
+      const scope = (ev.currentTarget as HTMLElement).getAttribute('data-scope') || 'all';
+      stateManager.setFeedScopeFilter(scope);
     });
   });
 
   container.appendChild(headerEl);
 
-  // Render appropriate Layout Variant
+  // Render active layout variant
   if (state.feedLayoutVariant === 'split-board') {
     container.appendChild(renderSplitBoardLayout(state));
   } else if (state.feedLayoutVariant === 'project-grouped') {
@@ -105,6 +66,131 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
   }
 
   return container;
+}
+
+// ---------------------------------------------------------------------------
+// Scope Selection & Filter Helpers
+// ---------------------------------------------------------------------------
+
+function getScopedAttentionItems(state: PrototypeState): AttentionItem[] {
+  const scope = state.feedScopeFilter;
+  if (scope === 'all') {
+    return state.attentionItems;
+  }
+  if (scope === 'infrastructure') {
+    return state.attentionItems.filter(
+      (item) => item.projectName === 'Infrastructure' || item.category.startsWith('env_') || !item.projectId
+    );
+  }
+  // Filter for specific project, including infrastructure items directly blocking/affecting this project (Transcolation rule)
+  return state.attentionItems.filter((item) => {
+    if (item.projectId === scope) return true;
+    if (item.referenceType === 'task') {
+      const task = state.tasks.find((t) => t.id === item.referenceId);
+      if (task?.projectId === scope) return true;
+    }
+    return false;
+  });
+}
+
+function getScopedActiveTasks(state: PrototypeState) {
+  const scope = state.feedScopeFilter;
+  const activeTasks = state.tasks.filter(
+    (t) => t.lifecycle === 'active' || t.agentRunLifecycle === 'running'
+  );
+  if (scope === 'all') return activeTasks;
+  if (scope === 'infrastructure') return [];
+  return activeTasks.filter((t) => t.projectId === scope);
+}
+
+function getScopedActivities(state: PrototypeState): ActivityFeedItem[] {
+  const scope = state.feedScopeFilter;
+  if (scope === 'all') return state.activityFeedItems;
+  if (scope === 'infrastructure') {
+    return state.activityFeedItems.filter(
+      (a) => a.projectName === 'Infrastructure' || a.kind === 'env_heartbeat' || !a.projectId
+    );
+  }
+  return state.activityFeedItems.filter((a) => a.projectId === scope);
+}
+
+function renderScopeSelectOptions(state: PrototypeState): string {
+  const currentScope = state.feedScopeFilter;
+  const allAttCount = state.attentionItems.length;
+
+  let optionsHtml = `
+    <option value="all" ${currentScope === 'all' ? 'selected' : ''}>
+      📂 全部项目 / All Projects (${allAttCount} 待办)
+    </option>
+  `;
+
+  for (const proj of state.projects) {
+    const projItems = state.attentionItems.filter(
+      (i) => i.projectId === proj.id || (i.referenceType === 'task' && state.tasks.find((t) => t.id === i.referenceId)?.projectId === proj.id)
+    );
+    optionsHtml += `
+      <option value="${proj.id}" ${currentScope === proj.id ? 'selected' : ''}>
+        🎮 ${proj.displayName} (${projItems.length} 待办)
+      </option>
+    `;
+  }
+
+  const infraItems = state.attentionItems.filter(
+    (i) => i.projectName === 'Infrastructure' || i.category.startsWith('env_') || !i.projectId
+  );
+  optionsHtml += `
+    <option value="infrastructure" ${currentScope === 'infrastructure' ? 'selected' : ''}>
+      🖥️ 基础设施 / Infrastructure (${infraItems.length} 待办)
+    </option>
+  `;
+
+  return optionsHtml;
+}
+
+function renderDynamicScopeChips(state: PrototypeState): string {
+  const currentScope = state.feedScopeFilter;
+  const allAttCount = state.attentionItems.length;
+
+  let chipsHtml = `
+    <button class="scope-chip-btn ${currentScope === 'all' ? 'active' : ''}" data-scope="all">
+      <span>全部 (${allAttCount})</span>
+    </button>
+  `;
+
+  // Render chips ONLY for projects/scopes that have active attention items (Q1 & Q2 settled)
+  for (const proj of state.projects) {
+    const projItems = state.attentionItems.filter(
+      (i) => i.projectId === proj.id || (i.referenceType === 'task' && state.tasks.find((t) => t.id === i.referenceId)?.projectId === proj.id)
+    );
+    if (projItems.length > 0) {
+      const redCount = projItems.filter((i) => i.severity === 'action_required').length;
+      const yellowCount = projItems.filter((i) => i.severity === 'attention').length;
+      chipsHtml += `
+        <button class="scope-chip-btn ${currentScope === proj.id ? 'active' : ''}" data-scope="${proj.id}">
+          <span>${proj.displayName}</span>
+          ${redCount > 0 ? `<span class="badge-dot-count red">${redCount}</span>` : ''}
+          ${yellowCount > 0 ? `<span class="badge-dot-count yellow">${yellowCount}</span>` : ''}
+        </button>
+      `;
+    }
+  }
+
+  const infraItems = state.attentionItems.filter(
+    (i) => i.projectName === 'Infrastructure' || i.category.startsWith('env_') || !i.projectId
+  );
+  if (infraItems.length > 0) {
+    const redCount = infraItems.filter((i) => i.severity === 'action_required').length;
+    const yellowCount = infraItems.filter((i) => i.severity === 'attention').length;
+    chipsHtml += `
+      <button class="scope-chip-btn ${currentScope === 'infrastructure' ? 'active' : ''}" data-scope="infrastructure">
+        <span>基础设施</span>
+        ${redCount > 0 ? `<span class="badge-dot-count red">${redCount}</span>` : ''}
+        ${yellowCount > 0 ? `<span class="badge-dot-count yellow">${yellowCount}</span>` : ''}
+      </button>
+    `;
+  }
+
+  return chipsHtml;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,8 +214,8 @@ function renderSplitBoardLayout(state: PrototypeState): HTMLElement {
   const wrapper = document.createElement('div');
   wrapper.className = 'feed-layout-split-board';
 
-  const attentionCount = state.attentionItems.length;
-  const activityCount = state.activityFeedItems.length;
+  const scopedAttentions = getScopedAttentionItems(state);
+  const scopedActivities = getScopedActivities(state);
 
   // Mobile Top Tab Switcher for Split Board
   const mobileTabSwitch = document.createElement('div');
@@ -137,10 +223,10 @@ function renderSplitBoardLayout(state: PrototypeState): HTMLElement {
   mobileTabSwitch.innerHTML = `
     <div class="segmented-control" style="width: 100%; margin-bottom: 12px;">
       <button class="segmented-btn ${state.mobileFeedSplitTab === 'attention' ? 'active' : ''}" id="split-tab-att">
-        ${renderIcon('lightning', 14)} Attention Queue (${attentionCount})
+        ${renderIcon('lightning', 14)} Attention Queue (${scopedAttentions.length})
       </button>
       <button class="segmented-btn ${state.mobileFeedSplitTab === 'activity' ? 'active' : ''}" id="split-tab-act">
-        ${renderIcon('usage', 14)} Live Activity (${activityCount})
+        ${renderIcon('usage', 14)} Live Activity (${scopedActivities.length})
       </button>
     </div>
   `;
@@ -182,16 +268,16 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
   const wrapper = document.createElement('div');
   wrapper.className = 'feed-layout-project-grouped';
 
-  const attentionCount = state.attentionItems.length;
+  const scopedAttentions = getScopedAttentionItems(state);
 
-  // Global Urgent Alert Banner if attention items exist
-  if (attentionCount > 0) {
+  // Global Alert Banner if attention items exist
+  if (scopedAttentions.length > 0) {
     const alertBanner = document.createElement('div');
     alertBanner.className = 'feed-global-attention-banner';
     alertBanner.innerHTML = `
       <div style="display: flex; align-items: center; gap: 8px;">
         ${renderIcon('lightning', 18)}
-        <strong>${attentionCount} Cross-Project Attention Items Active</strong>
+        <strong>${scopedAttentions.length} Attention Items Active in Scope</strong>
       </div>
       <span style="font-size: 11px; color: var(--text-secondary);">Review items within project cards below</span>
     `;
@@ -200,12 +286,18 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
 
   // Render per-project container cards
   for (const project of state.projects) {
+    if (state.feedScopeFilter !== 'all' && state.feedScopeFilter !== project.id) {
+      continue;
+    }
+
     const projectCard = document.createElement('div');
     projectCard.className = 'feed-project-card card';
 
     const projectAttentions = state.attentionItems.filter((a) => a.projectId === project.id);
     const projectTasks = state.tasks.filter((t) => t.projectId === project.id);
-    const activeTask = projectTasks.find((t) => t.lifecycle === 'active' || t.lifecycle === 'awaiting validation' || t.lifecycle === 'blocked');
+    const activeTask = projectTasks.find(
+      (t) => t.lifecycle === 'active' || t.lifecycle === 'awaiting validation' || t.lifecycle === 'blocked'
+    );
     const projectActivities = state.activityFeedItems.filter((a) => a.projectId === project.id);
 
     projectCard.innerHTML = `
@@ -238,7 +330,12 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
           </div>
         </div>
       `
-          : ''
+          : `
+        <div class="project-clear-banner" style="margin-top: 8px;">
+          <span class="status-dot green"></span>
+          <span>${project.displayName}: 当前无待办事项，系统自主运行中。</span>
+        </div>
+      `
       }
 
       <!-- Project Active Task Snapshot -->
@@ -266,10 +363,14 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
       <div style="margin-top: 12px;">
         <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">RECENT PROJECT ACTIVITY</div>
         <div style="display: flex; flex-direction: column; gap: 6px;">
-          ${projectActivities
-            .slice(0, 3)
-            .map((act) => renderActivityRowHtml(act))
-            .join('')}
+          ${
+            projectActivities.length === 0
+              ? '<div style="font-size: 12px; color: var(--text-muted); padding: 6px 0;">No recent activity in this project.</div>'
+              : projectActivities
+                  .slice(0, 3)
+                  .map((act) => renderActivityRowHtml(act))
+                  .join('')
+          }
         </div>
       </div>
     `;
@@ -292,50 +393,55 @@ function renderProjectGroupedLayout(state: PrototypeState): HTMLElement {
     wrapper.appendChild(projectCard);
   }
 
-  // Global Infrastructure Card
-  const infraAttentions = state.attentionItems.filter((a) => !a.projectId || a.projectName === 'Infrastructure');
-  const infraCard = document.createElement('div');
-  infraCard.className = 'feed-project-card card';
-  infraCard.innerHTML = `
-    <div class="card-header" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
-      <div style="display: flex; align-items: center; gap: 8px;">
-        ${renderIcon('environments', 18)}
-        <div>
-          <h3 style="font-size: 15px; font-weight: 700;">Infrastructure & Environments</h3>
-          <span style="font-size: 11px; color: var(--text-muted);">${state.environments.length} Connected Workers · macOS & Windows</span>
+  // Global Infrastructure Card (if all or infrastructure scope)
+  if (state.feedScopeFilter === 'all' || state.feedScopeFilter === 'infrastructure') {
+    const infraAttentions = state.attentionItems.filter(
+      (a) => !a.projectId || a.projectName === 'Infrastructure' || a.category.startsWith('env_')
+    );
+    const infraCard = document.createElement('div');
+    infraCard.className = 'feed-project-card card';
+    infraCard.innerHTML = `
+      <div class="card-header" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('environments', 18)}
+          <div>
+            <h3 style="font-size: 15px; font-weight: 700;">Infrastructure & Environments</h3>
+            <span style="font-size: 11px; color: var(--text-muted);">${state.environments.length} Connected Workers · macOS & Windows</span>
+          </div>
         </div>
+        <button class="btn btn-outline btn-sm btn-open-envs">
+          Manage Envs →
+        </button>
       </div>
-      <button class="btn btn-outline btn-sm btn-open-envs">
-        Manage Envs →
-      </button>
-    </div>
 
-    ${
-      infraAttentions.length > 0
-        ? `
-      <div style="margin-top: 10px;">
-        <div style="font-size: 12px; font-weight: 700; color: var(--yellow-attention); margin-bottom: 6px;">
-          Infrastructure Interventions:
+      ${
+        infraAttentions.length > 0
+          ? `
+        <div style="margin-top: 10px;">
+          <div style="font-size: 12px; font-weight: 700; color: var(--yellow-attention); margin-bottom: 6px;">
+            Infrastructure Interventions:
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            ${infraAttentions.map((item) => renderAttentionCardHtml(item)).join('')}
+          </div>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 8px;">
-          ${infraAttentions.map((item) => renderAttentionCardHtml(item)).join('')}
+      `
+          : `
+        <div class="project-clear-banner" style="margin-top: 8px;">
+          <span class="status-dot green"></span>
+          <span>Infrastructure: All connected workers and engine readiness probes healthy.</span>
         </div>
-      </div>
-    `
-        : `
-      <div style="padding: 12px 0; font-size: 12px; color: var(--green-ready); display: flex; align-items: center; gap: 6px;">
-        ${renderIcon('check', 14)} All connected workers and engine readiness probes healthy.
-      </div>
-    `
-    }
-  `;
+      `
+      }
+    `;
 
-  infraCard.querySelector('.btn-open-envs')?.addEventListener('click', () => {
-    stateManager.navigateWithReturn({ nav: 'manage', manageTab: 'environments' }, 'Feed');
-  });
+    infraCard.querySelector('.btn-open-envs')?.addEventListener('click', () => {
+      stateManager.navigateWithReturn({ nav: 'manage', manageTab: 'environments' }, 'Feed');
+    });
 
-  attachAttentionCardHandlers(infraCard, state);
-  wrapper.appendChild(infraCard);
+    attachAttentionCardHandlers(infraCard, state);
+    wrapper.appendChild(infraCard);
+  }
 
   return wrapper;
 }
@@ -347,35 +453,33 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
   const section = document.createElement('section');
   section.className = 'feed-section attention-section';
 
-  const allItems = state.attentionItems;
-  const actionReqItems = allItems.filter((i) => i.severity === 'action_required');
-  const valItems = allItems.filter((i) => i.category === 'task_validation');
-  const blockItems = allItems.filter((i) => i.category === 'task_blocker');
-  const recItems = allItems.filter((i) => i.category === 'task_recovery');
-  const envItems = allItems.filter((i) => i.category === 'env_enrollment' || i.category === 'env_unhealthy');
-  const propItems = allItems.filter((i) => i.category === 'task_proposed');
+  const scopedItems = getScopedAttentionItems(state);
+  const redItems = scopedItems.filter((i) => i.severity === 'action_required');
+  const yellowItems = scopedItems.filter((i) => i.severity === 'attention');
+  const blueItems = scopedItems.filter((i) => i.severity === 'info');
 
-  // Filter items based on active attention filter
-  let displayedItems = allItems;
-  if (state.feedAttentionFilter === 'action_required') {
-    displayedItems = actionReqItems;
-  } else if (state.feedAttentionFilter === 'task_validation') {
-    displayedItems = valItems;
-  } else if (state.feedAttentionFilter === 'task_blocker') {
-    displayedItems = blockItems;
-  } else if (state.feedAttentionFilter === 'task_recovery') {
-    displayedItems = recItems;
-  } else if (state.feedAttentionFilter === 'env_enrollment' || state.feedAttentionFilter === 'env_unhealthy') {
-    displayedItems = envItems;
-  } else if (state.feedAttentionFilter === 'task_proposed') {
-    displayedItems = propItems;
+  // Multi-dimensional filtering: Filter scoped items by selected severity
+  let displayedItems = scopedItems;
+  if (state.feedAttentionSeverityFilter === 'action_required') {
+    displayedItems = redItems;
+  } else if (state.feedAttentionSeverityFilter === 'attention') {
+    displayedItems = yellowItems;
+  } else if (state.feedAttentionSeverityFilter === 'info') {
+    displayedItems = blueItems;
   }
 
-  // Sort displayed items: action_required first, then attention, then info
+  // Sort displayed items: Red (Action Required) first, then Yellow (Attention), then Blue (Info)
   displayedItems.sort((a, b) => {
     const score = (s: AttentionSeverity) => (s === 'action_required' ? 3 : s === 'attention' ? 2 : 1);
     return score(b.severity) - score(a.severity);
   });
+
+  const scopeLabel =
+    state.feedScopeFilter === 'all'
+      ? 'All Projects'
+      : state.feedScopeFilter === 'infrastructure'
+        ? 'Infrastructure'
+        : state.projects.find((p) => p.id === state.feedScopeFilter)?.displayName ?? 'Project';
 
   section.innerHTML = `
     <!-- Section Header -->
@@ -384,53 +488,51 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
         ${renderIcon('lightning', 18)}
         <h3 style="font-size: 15px; font-weight: 700;">Human Attention Required</h3>
         ${
-          allItems.length > 0
-            ? `<span class="badge ${actionReqItems.length > 0 ? 'badge-red' : 'badge-yellow'}">${allItems.length} Pending</span>`
+          scopedItems.length > 0
+            ? `<span class="badge ${redItems.length > 0 ? 'badge-red' : 'badge-yellow'}">${scopedItems.length} Pending</span>`
             : `<span class="badge badge-green">0 Pending</span>`
         }
       </div>
-      <span style="font-size: 11px; color: var(--text-muted); display: none; @media (min-width: 600px) { display: inline; }">
-        Prioritized by urgency · ADR-0006/0008/0009
+      <span style="font-size: 11px; color: var(--text-muted);">
+        Urgency prioritized (Red → Yellow → Blue)
       </span>
     </div>
 
-    <!-- Category Filter Chips -->
-    <div class="attention-filter-chips" role="group" aria-label="Filter attention items by category">
-      <button class="chip-btn ${state.feedAttentionFilter === 'all' ? 'active' : ''}" data-att-filter="all">
-        All (${allItems.length})
+    <!-- 4 Streamlined Urgency Pills (Dynamic Counter AND Intersection) -->
+    <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
+      <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
+        全部 / All (${scopedItems.length})
       </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'action_required' ? 'active' : ''} ${actionReqItems.length > 0 ? 'chip-danger' : ''}" data-att-filter="action_required">
-        Action Required (${actionReqItems.length})
+      <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
+        🔴 需人工干预 (${redItems.length})
       </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'task_validation' ? 'active' : ''}" data-att-filter="task_validation">
-        Validation (${valItems.length})
+      <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention">
+        🟡 待审批验证 (${yellowItems.length})
       </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'task_blocker' ? 'active' : ''}" data-att-filter="task_blocker">
-        Blockers (${blockItems.length})
-      </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'task_recovery' ? 'active' : ''}" data-att-filter="task_recovery">
-        Recovery (${recItems.length})
-      </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'env_enrollment' ? 'active' : ''}" data-att-filter="env_enrollment">
-        Envs (${envItems.length})
-      </button>
-      <button class="chip-btn ${state.feedAttentionFilter === 'task_proposed' ? 'active' : ''}" data-att-filter="task_proposed">
-        Proposed (${propItems.length})
+      <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info">
+        🔵 提案与通知 (${blueItems.length})
       </button>
     </div>
 
-    <!-- Attention Cards List or Empty State -->
+    <!-- Attention Cards List or Lightweight Clear Banner -->
     ${
       displayedItems.length === 0
-        ? `
-      <div class="empty-state-box attention-empty-box" style="padding: 24px 16px; margin-top: 10px;">
-        <div style="color: var(--green-ready); margin-bottom: 4px;">${renderIcon('check', 28)}</div>
-        <h4 style="font-size: 14px; font-weight: 700; margin-top: 6px;">All Attention Items Cleared</h4>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px; max-width: 480px; margin-inline: auto;">
-          No active blockers, unvalidated completion claims, recovering leases, or degraded workers requiring operator intervention.
-        </p>
-      </div>
-    `
+        ? state.feedScopeFilter === 'all'
+          ? `
+        <div class="empty-state-box attention-empty-box" style="padding: 24px 16px; margin-top: 10px;">
+          <div style="color: var(--green-ready); margin-bottom: 4px;">${renderIcon('check', 28)}</div>
+          <h4 style="font-size: 14px; font-weight: 700; margin-top: 6px;">All Attention Items Cleared</h4>
+          <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px; max-width: 480px; margin-inline: auto;">
+            No active blockers, unvalidated completion claims, recovering leases, or degraded workers requiring operator intervention.
+          </p>
+        </div>
+      `
+          : `
+        <div class="project-clear-banner" style="margin-top: 10px;">
+          <span class="status-dot green"></span>
+          <span><strong>${scopeLabel}</strong>: 当前分类无待办事项，系统自主运行中。</span>
+        </div>
+      `
         : `
       <div class="attention-items-list" style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
         ${displayedItems.map((item) => renderAttentionCardHtml(item)).join('')}
@@ -439,11 +541,11 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
     }
   `;
 
-  // Attach Attention Filter listeners
-  section.querySelectorAll('.chip-btn[data-att-filter]').forEach((chip) => {
-    chip.addEventListener('click', (ev) => {
-      const filter = (ev.currentTarget as HTMLElement).getAttribute('data-att-filter') as any;
-      stateManager.setFeedAttentionFilter(filter);
+  // Attach Urgency Pill listeners
+  section.querySelectorAll('.urgency-pill-btn[data-severity]').forEach((pill) => {
+    pill.addEventListener('click', (ev) => {
+      const sev = (ev.currentTarget as HTMLElement).getAttribute('data-severity') as any;
+      stateManager.setFeedAttentionSeverityFilter(sev);
     });
   });
 
@@ -460,7 +562,7 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
   section.className = 'feed-section active-work-section';
   section.style.marginTop = '20px';
 
-  const activeTasks = state.tasks.filter((t) => t.lifecycle === 'active' || t.agentRunLifecycle === 'running');
+  const activeTasks = getScopedActiveTasks(state);
 
   section.innerHTML = `
     <div class="section-title-bar">
@@ -475,8 +577,8 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
     ${
       activeTasks.length === 0
         ? `
-      <div class="card" style="padding: 14px 16px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); text-align: center;">
-        No active tasks currently executing. Work is idle or completed.
+      <div class="card" style="padding: 12px 14px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); text-align: center;">
+        No active tasks currently executing in this scope. Work is idle or completed.
       </div>
     `
         : `
@@ -557,13 +659,13 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
   section.className = 'feed-section activity-section';
   section.style.marginTop = '20px';
 
-  const allActivities = state.activityFeedItems;
-  const tasksActivities = allActivities.filter((a) => a.kind === 'task_lifecycle' || a.kind === 'agent_turn');
-  const msgActivities = allActivities.filter((a) => a.kind === 'chat_message' || a.kind === 'routing_batch');
-  const envActivities = allActivities.filter((a) => a.kind === 'env_heartbeat');
-  const costActivities = allActivities.filter((a) => a.kind === 'usage_milestone');
+  const scopedActivities = getScopedActivities(state);
+  const tasksActivities = scopedActivities.filter((a) => a.kind === 'task_lifecycle' || a.kind === 'agent_turn');
+  const msgActivities = scopedActivities.filter((a) => a.kind === 'chat_message' || a.kind === 'routing_batch');
+  const envActivities = scopedActivities.filter((a) => a.kind === 'env_heartbeat');
+  const costActivities = scopedActivities.filter((a) => a.kind === 'usage_milestone');
 
-  let displayed = allActivities;
+  let displayed = scopedActivities;
   if (state.feedActivityFilter === 'tasks') displayed = tasksActivities;
   else if (state.feedActivityFilter === 'messages') displayed = msgActivities;
   else if (state.feedActivityFilter === 'envs') displayed = envActivities;
@@ -577,7 +679,7 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
       </div>
       <div class="segmented-control" style="font-size: 11px;" role="group" aria-label="Filter activity stream">
         <button class="segmented-btn ${state.feedActivityFilter === 'all' ? 'active' : ''}" data-act-filter="all">
-          All (${allActivities.length})
+          All (${scopedActivities.length})
         </button>
         <button class="segmented-btn ${state.feedActivityFilter === 'tasks' ? 'active' : ''}" data-act-filter="tasks">
           Tasks (${tasksActivities.length})
@@ -599,7 +701,7 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
         displayed.length === 0
           ? `
         <div class="empty-state-box" style="padding: 20px;">
-          <p style="font-size: 12px; color: var(--text-secondary);">No activity records matching this filter.</p>
+          <p style="font-size: 12px; color: var(--text-secondary);">No activity records matching this scope and filter.</p>
         </div>
       `
           : displayed.map((item) => renderActivityRowHtml(item)).join('')
@@ -739,7 +841,12 @@ function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
       const item = state.attentionItems.find((a) => a.id === attId);
       if (!item) return;
 
-      if (item.category === 'task_validation' || item.category === 'task_blocker' || item.category === 'task_recovery' || item.category === 'task_proposed') {
+      if (
+        item.category === 'task_validation' ||
+        item.category === 'task_blocker' ||
+        item.category === 'task_recovery' ||
+        item.category === 'task_proposed'
+      ) {
         stateManager.navigateWithReturn(
           {
             nav: 'project',
@@ -775,7 +882,12 @@ function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
       const item = state.attentionItems.find((a) => a.id === attId);
       if (!item) return;
 
-      if (item.category === 'task_validation' || item.category === 'task_blocker' || item.category === 'task_recovery' || item.category === 'task_proposed') {
+      if (
+        item.category === 'task_validation' ||
+        item.category === 'task_blocker' ||
+        item.category === 'task_recovery' ||
+        item.category === 'task_proposed'
+      ) {
         stateManager.navigateWithReturn(
           {
             nav: 'project',

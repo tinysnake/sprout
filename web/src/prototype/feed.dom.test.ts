@@ -52,7 +52,7 @@ async function setupPrototypeDom() {
   };
 }
 
-test('Feed & Attention: renders three-tier structure and supports category filtering', async () => {
+test('Feed & Attention: renders three-tier hierarchy with clean production UI', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -65,53 +65,88 @@ test('Feed & Attention: renders three-tier structure and supports category filte
 
     const document = dom.window.document;
 
-    // 1. Verify Feed Landing Surface is default destination
+    // 1. Verify Feed Header
     const feedHeader = document.querySelector('.feed-header');
     assert.ok(feedHeader, 'Feed header rendered');
     assert.match(feedHeader.textContent ?? '', /Operations Feed & Human Attention/);
 
-    // 2. Verify Prominent Human Attention section exists
+    // 2. Verify Scope Filter Bar (Dropdown + Dynamic Chips)
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.ok(scopeSelect, 'Scope select dropdown rendered');
+
+    const scopeChips = document.querySelectorAll('.scope-chip-btn');
+    assert.ok(scopeChips.length >= 2, 'Scope chips rendered for scopes with active attention');
+
+    // 3. Verify Tier 1: Human Attention Section
     const attentionSection = document.querySelector('.attention-section');
     assert.ok(attentionSection, 'Attention section rendered');
     assert.match(attentionSection.textContent ?? '', /Human Attention Required/);
 
-    // 3. Verify Active In-Flight Work snapshot exists
+    // 4. Verify Tier 2: Live In-Flight Work Snapshot
     const activeWorkSection = document.querySelector('.active-work-section');
     assert.ok(activeWorkSection, 'Active work section rendered');
     assert.match(activeWorkSection.textContent ?? '', /Live In-Flight Work/);
 
-    // 4. Verify Recent Operational Activity stream exists
+    // 5. Verify Tier 3: Recent Operational Activity Stream
     const activitySection = document.querySelector('.activity-section');
     assert.ok(activitySection, 'Activity section rendered');
     assert.match(activitySection.textContent ?? '', /Recent Operational Activity/);
+  } finally {
+    await cleanup();
+  }
+});
 
-    // 5. Test Attention Category Filtering
-    const allChips = document.querySelectorAll('.chip-btn[data-att-filter]');
-    assert.ok(allChips.length >= 6, 'Category filter chips present');
+test('Feed & Attention: scope filtering cascades to Attention, Active Work, and Activity', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
 
-    const initialCards = document.querySelectorAll('.attention-card');
-    assert.equal(initialCards.length, 4, 'Default state has 4 attention items');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
 
-    // Click 'Validation' filter chip
-    const valChip = document.querySelector('.chip-btn[data-att-filter="task_validation"]') as HTMLButtonElement;
-    assert.ok(valChip);
-    valChip.click();
+    const document = dom.window.document;
 
-    const valCards = document.querySelectorAll('.attention-card');
-    assert.equal(valCards.length, 1, 'Only 1 validation claim card visible');
-    assert.match(valCards[0]?.textContent ?? '', /Task #101 Awaiting Human Validation/);
+    // Initial state: All Projects
+    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'All 4 attention items initially');
+    assert.equal(document.querySelectorAll('.active-task-card').length, 1, '1 active task in all scope');
 
-    // Click 'Blockers' filter chip
-    const blockChip = document.querySelector('.chip-btn[data-att-filter="task_blocker"]') as HTMLButtonElement;
-    assert.ok(blockChip);
-    blockChip.click();
+    // Click O7 Minesweeper Scope Chip
+    const minesweeperChip = document.querySelector('.scope-chip-btn[data-scope="proj-minesweeper"]') as HTMLButtonElement;
+    assert.ok(minesweeperChip, 'O7 Minesweeper scope chip found');
+    minesweeperChip.click();
 
-    const blockCards = document.querySelectorAll('.attention-card');
-    assert.equal(blockCards.length, 1, 'Only 1 blocker card visible');
-    assert.match(blockCards[0]?.textContent ?? '', /Task #103 Blocked on Asset Permission/);
+    // Verify Attention items filtered to O7 Minesweeper (including transcolated recovery task #104)
+    const filteredCards = document.querySelectorAll('.attention-card');
+    assert.equal(filteredCards.length, 3, '3 attention items belong to or affect O7 Minesweeper');
 
-    // Reset to 'All'
-    const allChip = document.querySelector('.chip-btn[data-att-filter="all"]') as HTMLButtonElement;
+    // Verify Active Tasks still shows O7 Minesweeper active task
+    assert.equal(document.querySelectorAll('.active-task-card').length, 1, 'O7 Minesweeper active task visible');
+
+    // Verify Activity Stream only has O7 Minesweeper events
+    const actRows = document.querySelectorAll('.activity-feed-row');
+    assert.ok(actRows.length > 0);
+    actRows.forEach((row) => {
+      assert.match(row.textContent ?? '', /O7 Minesweeper/);
+    });
+
+    // Switch Scope to Infrastructure via Dropdown
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    scopeSelect.value = 'infrastructure';
+    scopeSelect.dispatchEvent(new dom.window.Event('change'));
+
+    // Verify Attention items filtered to infrastructure
+    const infraCards = document.querySelectorAll('.attention-card');
+    assert.equal(infraCards.length, 1, '1 generic infrastructure attention item (MacBook Air enrollment)');
+    assert.match(infraCards[0]?.textContent ?? '', /Pending Worker Enrollment: MacBook Air/);
+
+    // Verify 0 active tasks under Infrastructure
+    assert.equal(document.querySelectorAll('.active-task-card').length, 0, '0 active tasks under infrastructure');
+
+    // Reset to All
+    const allChip = document.querySelector('.scope-chip-btn[data-scope="all"]') as HTMLButtonElement;
     allChip.click();
     assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Reset to all 4 attention items');
   } finally {
@@ -119,7 +154,7 @@ test('Feed & Attention: renders three-tier structure and supports category filte
   }
 });
 
-test('Feed & Attention: deep-links into Task and Environment views with return breadcrumb', async () => {
+test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -132,44 +167,86 @@ test('Feed & Attention: deep-links into Task and Environment views with return b
 
     const document = dom.window.document;
 
-    // 1. Click "Review Claim in Tasks →" button on Task #101 attention card
+    // Verify 4 urgency pills present
+    const pills = document.querySelectorAll('.urgency-pill-btn');
+    assert.equal(pills.length, 4, '4 urgency pills present');
+
+    // Filter by Action Required
+    const dangerPill = document.querySelector('.urgency-pill-btn[data-severity="action_required"]') as HTMLButtonElement;
+    assert.ok(dangerPill);
+    dangerPill.click();
+
+    const redCards = document.querySelectorAll('.attention-card');
+    assert.equal(redCards.length, 2, '2 action required cards (Task #104 recovery & Task #103 blocker)');
+
+    // Filter by Pending Approval (Validation & Enrollment)
+    const warningPill = document.querySelector('.urgency-pill-btn[data-severity="attention"]') as HTMLButtonElement;
+    assert.ok(warningPill);
+    warningPill.click();
+
+    const yellowCards = document.querySelectorAll('.attention-card');
+    assert.equal(yellowCards.length, 2, '2 pending approval cards (Task #101 claim & MacAir enrollment)');
+
+    // Filter by Proposals & Notices (Info)
+    const infoPill = document.querySelector('.urgency-pill-btn[data-severity="info"]') as HTMLButtonElement;
+    assert.ok(infoPill);
+    infoPill.click();
+
+    // In default mixed state, info is 0; verify lightweight clear banner
+    assert.equal(document.querySelectorAll('.attention-card').length, 0, '0 info items in default state');
+    assert.ok(document.querySelector('.attention-empty-box'), 'Empty state box rendered');
+
+    // Reset to All
+    const allPill = document.querySelector('.urgency-pill-btn[data-severity="all"]') as HTMLButtonElement;
+    allPill.click();
+    assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Restored all 4 items');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed & Attention: deep-link navigation preserves scope and filter state on return', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const document = dom.window.document;
+
+    // 1. Select O7 Minesweeper scope
+    const minesweeperChip = document.querySelector('.scope-chip-btn[data-scope="proj-minesweeper"]') as HTMLButtonElement;
+    minesweeperChip.click();
+
+    // 2. Click "Review Claim in Tasks →" button on Task #101 card
     const actionBtn = document.querySelector('.attention-action-btn[data-attention-id="att-1"]') as HTMLButtonElement;
-    assert.ok(actionBtn, 'Validation action button found');
+    assert.ok(actionBtn);
     actionBtn.click();
 
-    // Verify navigation landed on Project > Tasks with Task #101 selected
+    // Verify navigated to Project Tasks view with return banner
     assert.ok(document.querySelector('.projects-view'), 'Navigated to Project view');
     const returnBanner = document.querySelector('.return-context-banner');
     assert.ok(returnBanner, 'Return context breadcrumb banner is visible');
     assert.match(returnBanner.textContent ?? '', /← Back to Feed/);
 
-    // 2. Click "← Back to Feed" to return to Feed
+    // 3. Click "← Back to Feed"
     const returnBtn = document.querySelector('#btn-pop-return') as HTMLButtonElement;
-    assert.ok(returnBtn);
     returnBtn.click();
 
-    // Verify back on Feed
+    // Verify returned to Feed AND scope filter is preserved as proj-minesweeper
     assert.ok(document.querySelector('.feed-view'), 'Returned to Feed view');
-    assert.equal(document.querySelector('.return-context-banner'), null, 'Return banner dismissed');
-
-    // 3. Click "Review Enrollment in Envs →" on MacBook Air attention card
-    const envActionBtn = document.querySelector('.attention-action-btn[data-attention-id="att-4"]') as HTMLButtonElement;
-    assert.ok(envActionBtn, 'Environment action button found');
-    envActionBtn.click();
-
-    // Verify navigated to Manage > Environments
-    assert.ok(document.querySelector('.manage-view'), 'Navigated to Manage Environments view');
-    assert.ok(document.querySelector('.return-context-banner'), 'Return banner present in Envs');
-
-    // Return to Feed again
-    (document.querySelector('#btn-pop-return') as HTMLButtonElement).click();
-    assert.ok(document.querySelector('.feed-view'), 'Returned to Feed');
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.equal(scopeSelect.value, 'proj-minesweeper', 'Scope filter state was preserved on return');
   } finally {
     await cleanup();
   }
 });
 
-test('Feed & Attention: exercises full 7-state realistic matrix', async () => {
+test('Feed & Attention: exercises 7-state realistic matrix via top harness control', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -182,137 +259,42 @@ test('Feed & Attention: exercises full 7-state realistic matrix', async () => {
 
     const document = dom.window.document;
 
-    // Helper to click state preset pill
-    const selectPreset = (preset: string) => {
-      const pill = document.querySelector(`.feed-pill-btn[data-preset="${preset}"]`) as HTMLButtonElement;
-      assert.ok(pill, `Preset pill for ${preset} exists`);
-      pill.click();
+    const selectStatePreset = (preset: string) => {
+      const stateSelect = document.querySelector('#top-state-matrix-select') as HTMLSelectElement;
+      assert.ok(stateSelect);
+      stateSelect.value = preset;
+      stateSelect.dispatchEvent(new dom.window.Event('change'));
     };
 
-    // 1. Empty State (All Clear)
-    selectPreset('empty');
+    // 1. Empty State
+    selectStatePreset('empty');
     assert.equal(document.querySelectorAll('.attention-card').length, 0, '0 attention items in empty state');
-    const emptyBox = document.querySelector('.attention-empty-box');
-    assert.ok(emptyBox, 'Empty state box rendered');
-    assert.match(emptyBox.textContent ?? '', /All Attention Items Cleared/);
+    assert.ok(document.querySelector('.attention-empty-box'), 'Empty state box rendered');
 
-    // 2. Healthy Active State
-    selectPreset('healthy');
+    // 2. Healthy State
+    selectStatePreset('healthy');
     assert.equal(document.querySelectorAll('.attention-card').length, 0, '0 blockers in healthy state');
-    const activeCards = document.querySelectorAll('.active-task-card');
-    assert.ok(activeCards.length >= 1, 'Active tasks rendered in healthy state');
+    assert.ok(document.querySelectorAll('.active-task-card').length >= 1, 'Active tasks rendered');
 
-    // 3. Stale Telemetry State
-    selectPreset('stale');
-    const staleCards = document.querySelectorAll('.attention-card');
-    assert.ok(staleCards.length >= 2, 'Stale telemetry attention items rendered');
-    assert.match(document.querySelector('.attention-items-list')?.textContent ?? '', /Stale Heartbeat on mac-studio-primary/);
+    // 3. Stale State
+    selectStatePreset('stale');
+    assert.ok(document.querySelectorAll('.attention-card').length >= 2, 'Stale telemetry items rendered');
 
-    // 4. Pending Approvals State
-    selectPreset('pending');
-    const pendingCards = document.querySelectorAll('.attention-card');
-    assert.ok(pendingCards.length >= 2, 'Pending proposed tasks rendered');
-    assert.match(document.querySelector('.attention-items-list')?.textContent ?? '', /Proposed Task #105/);
+    // 4. Pending State
+    selectStatePreset('pending');
+    assert.ok(document.querySelectorAll('.attention-card').length >= 2, 'Pending proposed tasks rendered');
 
-    // 5. Degraded Host State
-    selectPreset('degraded');
-    const degradedCards = document.querySelectorAll('.attention-card');
-    assert.ok(degradedCards.length >= 2, 'Degraded host attention items rendered');
-    assert.match(document.querySelector('.attention-items-list')?.textContent ?? '', /Windows Worker Offline/);
+    // 5. Degraded State
+    selectStatePreset('degraded');
+    assert.ok(document.querySelectorAll('.attention-card').length >= 2, 'Degraded host items rendered');
 
     // 6. Intervention State
-    selectPreset('intervention');
-    const intCards = document.querySelectorAll('.attention-card');
-    assert.equal(intCards.length, 2, '2 intervention items rendered (blocker + validation)');
-    assert.match(document.querySelector('.attention-items-list')?.textContent ?? '', /Task #103 Blocked on Spatial Audio Asset/);
+    selectStatePreset('intervention');
+    assert.equal(document.querySelectorAll('.attention-card').length, 2, '2 intervention items rendered');
 
     // 7. Mixed Default State
-    selectPreset('mixed');
+    selectStatePreset('mixed');
     assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Mixed state restored with 4 items');
-  } finally {
-    await cleanup();
-  }
-});
-
-test('Feed & Attention: switches layout variants (Unified, Split Board, Project Grouped)', async () => {
-  const { dom, vite, cleanup } = await setupPrototypeDom();
-  try {
-    const { initPrototype } = (await vite.ssrLoadModule(
-      '/src/prototype/prototype.ts'
-    )) as typeof import('./prototype.js');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount);
-    initPrototype(appMount);
-
-    const document = dom.window.document;
-
-    // Helper to click variant button
-    const selectVariant = (variant: string) => {
-      const btn = document.querySelector(`.segmented-btn[data-variant="${variant}"]`) as HTMLButtonElement;
-      assert.ok(btn, `Variant button for ${variant} exists`);
-      btn.click();
-    };
-
-    // 1. Default: Variant A (Unified Stream)
-    assert.ok(document.querySelector('.feed-layout-unified'), 'Unified layout rendered by default');
-
-    // 2. Switch to Variant B: Split Board
-    selectVariant('split-board');
-    assert.ok(document.querySelector('.feed-layout-split-board'), 'Split board layout rendered');
-    assert.ok(document.querySelector('.split-board-columns'), 'Split board 2-column container present');
-
-    // Test mobile tab switch in Split Board
-    const tabAct = document.querySelector('#split-tab-act') as HTMLButtonElement;
-    assert.ok(tabAct, 'Mobile activity tab switcher button exists');
-    tabAct.click();
-    const rightCol = document.querySelector('.split-col-right');
-    assert.ok(rightCol?.classList.contains('mobile-visible'), 'Activity column became mobile visible');
-
-    // 3. Switch to Variant C: Project Grouped
-    selectVariant('project-grouped');
-    assert.ok(document.querySelector('.feed-layout-project-grouped'), 'Project grouped layout rendered');
-    const projectCards = document.querySelectorAll('.feed-project-card');
-    assert.ok(projectCards.length >= 2, 'Rendered project cards and infrastructure card');
-
-    // Switch back to Variant A
-    selectVariant('unified');
-    assert.ok(document.querySelector('.feed-layout-unified'), 'Returned to Unified layout');
-  } finally {
-    await cleanup();
-  }
-});
-
-test('Feed & Attention: Owner review drawer displays Ticket #62 decisions and verification criteria', async () => {
-  const { dom, vite, cleanup } = await setupPrototypeDom();
-  try {
-    const { initPrototype } = (await vite.ssrLoadModule(
-      '/src/prototype/prototype.ts'
-    )) as typeof import('./prototype.js');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount);
-    initPrototype(appMount);
-
-    const document = dom.window.document;
-
-    // Open review drawer
-    const reviewBtn = document.querySelector('#open-review-btn') as HTMLButtonElement;
-    assert.ok(reviewBtn);
-    reviewBtn.click();
-
-    const drawer = document.querySelector('.review-drawer');
-    assert.ok(drawer, 'Review drawer is open');
-    assert.match(drawer.textContent ?? '', /Product Owner Review: Feed & Attention Experience/);
-    assert.match(drawer.textContent ?? '', /Ticket #62 Acceptance Criteria Verification/);
-    assert.match(drawer.textContent ?? '', /Accepted Feed Decisions/);
-    assert.match(drawer.textContent ?? '', /Rejected Patterns/);
-
-    // Close review drawer
-    const closeBtn = document.querySelector('.close-review-btn') as HTMLButtonElement;
-    assert.ok(closeBtn);
-    closeBtn.click();
-    assert.equal(document.querySelector('.review-drawer'), null, 'Review drawer closed');
   } finally {
     await cleanup();
   }

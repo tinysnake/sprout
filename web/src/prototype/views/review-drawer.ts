@@ -71,7 +71,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- 1. Accepted Decisions -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--green-ready);">
-          <span>✓</span> Accepted Baseline & Feed Decisions
+          <span>✓</span> Accepted Baseline Decisions (#61) & Feed Decisions (#62)
         </h4>
         <ul class="review-list">
           <li>

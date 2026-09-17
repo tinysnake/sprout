@@ -2,7 +2,7 @@
 
 ## Summary
 
-This retained artifact documents the design, interaction models, decision evidence, and architectural boundaries for the **Feed & Attention Experience** in the Sprout M2 Local Operator product (Ticket #62, part of Scope #44). It builds upon the shared mobile-first shell baseline settled in Ticket #61 and ADR-0006 through ADR-0010.
+This retained artifact documents the design, interaction models, decision evidence, and architectural boundaries for the **Feed & Attention Experience** in the Sprout M2 Local Operator product (Ticket #62, part of Scope #44). It builds upon the shared mobile-first shell baseline settled in Ticket #61 and ADR-0006 through ADR-0010, refined through owner grilling.
 
 The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html` on `0.0.0.0:41000`), with full DOM test coverage in `web/src/prototype/feed.dom.test.ts`.
 
@@ -14,21 +14,27 @@ The interactive prototype artifact is executable via `npm run prototype` (servin
 |---|---|
 | **Feed Landing Surface:** Primary cross-project entry point for discovery and situational awareness. | **Task Authority & Run Workflows (#63):** Authorizing task begin, 2-stage pause/interrupt, versioning edits, completing or rejecting validation claims. |
 | **Human Attention Section:** Concrete separation of urgent, actionable human interventions from routine background logs. | **Chat & Communication Workflows (#64):** Authoring project messages, creating working groups, causal routing batch inspector. |
-| **Prioritization & Grouping:** Urgency tiers (`Action Required` [Red], `Attention Needed` [Yellow], `Info Notice` [Blue]) with category filters. | **Environment Lifecycle Workflows (#65):** Approving worker enrollment, editing permissions, triggering emergency Force Release. |
-| **Contextual Discovery:** Disambiguated lifecycle sentences (`Task · Run · Lease`), actor attribution, and explicit "Why attention is needed" explanations. | **Global Agent Definitions (#66):** Configuring work options, editing standing instructions, memory management. |
-| **Deep-Link Delegation:** Navigating directly to authoritative domain surfaces with sticky `← Back to Feed` return breadcrumbs. | **Usage & Cost Analysis (#67):** 6-view telemetry filtering, billing rates, token reconciliation. |
-| **Live In-Flight Work Snapshot:** Real-time visibility into active tasks and running agent turns across projects. | **Settings & Operator Identity (#68):** Overlay network settings, diagnostics, fourth tab naming. |
-| **Recent Operational Activity Stream:** Chronological background audit stream with category filters (Tasks, Chat, Envs, Cost). | |
+| **Scope & Project Filtering:** Scalable Scope Dropdown (`[ 全部项目 (4) ▾ ]`) plus dynamic urgent Project quick-chips that only surface projects with active attention. | **Environment Lifecycle Workflows (#65):** Approving worker enrollment, editing permissions, triggering emergency Force Release. |
+| **Prioritization & Multi-Modal Tiers:** 4 streamlined urgency tiers (`全部`, `🔴 需人工干预`, `🟡 待审批验证`, `🔵 提案与通知`) with dynamic counters. | **Global Agent Definitions (#66):** Configuring work options, editing standing instructions, memory management. |
+| **Contextual Discovery & Transcolation:** Disambiguated lifecycle sentences (`Task · Run · Lease`), actor attribution, why attention is needed, and transcolation of infrastructure issues blocking project tasks. | **Usage & Cost Analysis (#67):** 6-view telemetry filtering, billing rates, token reconciliation. |
+| **Deep-Link Delegation:** Navigating directly to authoritative domain surfaces with sticky `← Back to Feed` return breadcrumbs and filter state preservation. | **Settings & Operator Identity (#68):** Overlay network settings, diagnostics, fourth tab naming. |
+| **Live In-Flight Work Snapshot:** Real-time visibility into active tasks and running agent turns across environments. | |
+| **Recent Operational Activity Stream:** Chronological background audit stream strictly scoped to selected project with category filters. | |
 
 ---
 
 ## 2. Mental Model: Human Attention vs. Ordinary Feed Content
 
-The Feed experience establishes an explicit, concrete distinction between **Human Attention Items** and **Operational Activity Events**:
+The Feed experience establishes an explicit, concrete distinction between **Human Attention Items**, **In-Flight Work**, and **Operational Activity Events**:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│ 0. PROJECT / SCOPE FILTER BAR (Dropdown + Dynamic Urgent Chips)             │
+│    ├── Dropdown: [ 📂 全部项目 (4 待办) ▾ | 🎮 O7 扫雷 (3) | 🖥️ 基础设施 (1) ]   │
+│    └── Dynamic Chips: [ 全部 (4) ] [ 🎮 O7 扫雷 🔴2 🟡1 ] [ 🖥️ 基础设施 🟡1 ]    │
+├─────────────────────────────────────────────────────────────────────────────┤
 │ 1. PROMINENT HUMAN ATTENTION QUEUE (Urgent, Actionable, Sorted by Urgency)   │
+│    ├── 4 Urgency Pills: [ 全部 (4) | 🔴 需干预 (2) | 🟡 待审批 (2) | 🔵 提案 (0) ] │
 │    ├── 🔴 Action Required: Blocker permissions, Lease recovery, Host offline │
 │    ├── 🟡 Attention Needed: Validation claims, Pending worker enrollment    │
 │    └── 🔵 Info / Pending Notice: Proposed tasks awaiting begin authority     │
@@ -46,29 +52,31 @@ The Feed experience establishes an explicit, concrete distinction between **Huma
 Under ADR-0006, ADR-0008, and ADR-0009:
 - The Feed **discovers and contextualizes work**; it **never executes domain actions inline**.
 - Attention cards present the full causal reason why operator intervention is needed, along with attribution and lifecycle state.
-- Clicking an Attention card or its action button (e.g. `Review Claim in Tasks →`, `Inspect Recovery in Tasks →`, `Review Enrollment in Envs →`) deep-links directly to the authoritative domain surface (`Project > Tasks` or `Manage > Environments`), pre-selecting the entity and mounting the `← Back to Feed` return banner.
+- Clicking an Attention card or its action button (e.g. `Review Claim in Tasks →`, `Inspect Recovery in Tasks →`, `Review Enrollment in Envs →`) deep-links directly to the authoritative domain surface (`Project > Tasks` or `Manage > Environments`), pre-selecting the entity, preserving Feed filter state, and mounting the `← Back to Feed` return banner.
 - **Why this boundary is critical:** Embedding validation claim approval buttons or Force Release triggers directly on Feed cards risks accidental execution without reviewing detailed Playwright test transcripts, diffs, or environment logs.
 
 ---
 
-## 3. Layout Exploration Paradigms
+## 3. Scope Filtering & Multi-Dimensional Convergence
 
-The prototype implements an interactive Layout Paradigm Switcher to evaluate three competing structural models:
+During interactive grilling, the filtering architecture was unified into a three-tiered model:
 
-1. **Variant A: Unified Urgency-First Stream (Primary / Default)**
-   - Single vertical stream with three clearly tiered sections: Attention Queue at top, Active In-Flight Work in the middle, Filterable Activity Stream below.
-   - Recommended for mobile-first scanning and consistent top-to-bottom reading on both phone and desktop.
-2. **Variant B: Split Operator Board (Dual-Stream Desktop / Tabbed Mobile)**
-   - *Desktop:* Two balanced side-by-side columns: Left column = Attention Queue + Active Work; Right column = Live Activity Stream.
-   - *Mobile (390px):* Segmented top switcher `[ Attention (4) | Live Activity (8) ]` providing single-column focus without vertical crowding.
-3. **Variant C: Project-Grouped Feed (Per-Project Containers)**
-   - Aggregates the feed into Project Cards (e.g. `O7 Minesweeper`, `Sprout Core Framework`), grouping project-specific attention, active tasks, and latest messages, with a shared Infrastructure card at bottom.
+1. **Top Scope Filter (Dropdown + Dynamic Urgent Chips):**
+   - **Scope Dropdown (`<select>`):** Accommodates arbitrary project counts (5–50+ projects) without horizontal wrapping or clutter.
+   - **Dynamic Urgent Quick-Chips:** Surfaces horizontal chips **only for projects that currently have active attention items** (e.g. `[ 全部 ]`, `[ O7 扫雷 🔴2 🟡1 ]`, `[ 基础设施 🟡1 ]`). Projects with 0 attention items remain in the dropdown and do not clutter the quick-chip bar.
+   - **Infrastructure Event Transcolation Rule:** Infrastructure issues directly blocking or recovering a project's task (e.g. Windows worker offline holding Task #104 lease) transcolate into that project's filtered Attention view, ensuring the operator sees the root cause. Generic host enrollments appear only under `All` and `Infrastructure`.
+   - **Lightweight Project Clear Banner:** Selecting a project with 0 attention items displays a clean green banner (`✓ <Project>: 当前无待办事项，系统自主运行中`), without hiding its active in-flight tasks or scoped activity stream.
+2. **Attention Urgency Pills (Dynamic Counter AND Intersection):**
+   - Streamlined into 4 distinct pills: `全部`, `🔴 需人工干预`, `🟡 待审批验证`, `🔵 提案与通知`.
+   - Counters dynamically recalculate based on the active Project Scope.
+3. **Activity Event Stream Scoping:**
+   - When a project is selected, the operational activity stream strictly scopes to events belonging to that project.
 
 ---
 
 ## 4. Realistic 7-State Matrix Verification
 
-The prototype provides 1-click state matrix switching to verify that the Feed renders truthfully and robustly across all representative operational conditions:
+The prototype provides 1-click state matrix switching (housed in the top Prototype Harness bar and Review Drawer) to verify that the Feed renders truthfully and robustly across all representative operational conditions:
 
 | State Preset | Operational Condition | Attention Items | In-Flight Work | Primary Visual Cue |
 |---|---|---|---|---|
@@ -85,14 +93,15 @@ The prototype provides 1-click state matrix switching to verify that the Feed re
 ## 5. Phone & Desktop Capability Parity
 
 1. **Phone Viewport (390px simulated):**
-   - Horizontal category filter chips (`All`, `Action Required`, `Validation`, `Blockers`, `Recovery`, `Envs`, `Proposed`) with smooth touch scrolling.
+   - Compact Scope Dropdown + Dynamic Urgent Chips scrollable horizontally with touch inertia.
+   - 4 Streamlined Urgency Pills with dynamic counters.
    - Bottom navigation bar with live attention badge counter (`4`).
-   - Deep linking preserves context and renders a sticky `← Back to Feed` return banner at top of destination view.
+   - Deep linking preserves context and renders a sticky `← Back to Feed` return banner at top of destination view, returning to exact project scope.
    - All interactive touch targets meet or exceed the 44px accessibility floor.
 2. **Desktop Viewport:**
    - Left navigation sidebar with live attention counter and status dots.
-   - Rich multi-column split board and wide activity streams.
-   - Keyboard navigation and instant scenario jumping.
+   - Layout options: Variant A (Unified Stream), Variant B (Split Board), Variant C (Project Grouped).
+   - Top Prototype Harness bar housing State Matrix and Layout selectors cleanly outside the product canvas.
 
 ---
 
@@ -100,14 +109,16 @@ The prototype provides 1-click state matrix switching to verify that the Feed re
 
 ### Accepted Decisions (Ticket #62)
 
-1. **Strict Discovery & Context Boundary:** Feed is discovery/context only; all domain actions are delegated to authoritative domain surfaces via deep links with `← Back to Feed` return breadcrumbs.
-2. **Three-Tier Feed Structure:**
-   - *Prominent Attention Section* (Top): Prioritized by urgency (`Action Required` → `Attention` → `Info`), with category filter chips.
+1. **Strict Discovery & Context Boundary:** Feed is discovery/context only; all domain actions are delegated to authoritative domain surfaces via deep links with `← Back to Feed` return breadcrumbs and filter state preservation.
+2. **Scalable Scope Filter Bar:** Hybrid Scope Dropdown + Dynamic Urgent Chips that only surface projects with active attention.
+3. **Three-Tier Feed Structure:**
+   - *Prominent Attention Section* (Top): Prioritized by urgency (`Action Required` → `Attention` → `Info`), with 4 streamlined urgency pills.
    - *Live In-Flight Work Snapshot* (Middle): Pulsing live status of executing tasks and agent runs across environments.
-   - *Recent Operational Activity Stream* (Bottom): Chronological background audit stream with category filters (Tasks, Chat, Envs, Cost).
-3. **Multi-Modal Attention Cues:** High-contrast severity borders (Red `--red-action`, Yellow `--yellow-attention`, Blue `--accent-primary`), category icons, disambiguated lifecycle sentences (`Task · Run · Lease`), and textual "Why attention is needed" reasons.
-4. **7-State Realistic Matrix:** Instantaneous preview of Mixed, Empty, Healthy, Stale, Pending, Degraded, and Intervention states.
-5. **Default Feed Layout Variant:** *Variant A: Unified Stream* is accepted as the primary default; *Variant B (Split Board)* is accepted for widescreen desktop environments.
+   - *Recent Operational Activity Stream* (Bottom): Chronological background audit stream strictly scoped to selected project.
+4. **Multi-Modal Attention Cues:** High-contrast severity borders (Red `--red-action`, Yellow `--yellow-attention`, Blue `--accent-primary`), category icons, disambiguated lifecycle sentences (`Task · Run · Lease`), and textual "Why attention is needed" reasons.
+5. **Infrastructure Transcolation:** Project-blocking host issues transcolate into that project's view.
+6. **7-State Realistic Matrix:** Instantaneous preview of Mixed, Empty, Healthy, Stale, Pending, Degraded, and Intervention states via top harness bar.
+7. **Clean Production Canvas Separation:** Prototype review controls (State Matrix & Layout switcher) are moved to the top Harness Bar and Review Drawer.
 
 ### Rejected Patterns
 
@@ -115,6 +126,7 @@ The prototype provides 1-click state matrix switching to verify that the Feed re
 2. **Single Flat Timeline without Attention Isolation:** Rejected; mixing critical blockers with routine heartbeat logs risks missing human-action-required events.
 3. **Color-Only Urgency Signals:** Rejected; attention items must pair color with distinctive category icons, severity badges, and textual reasons.
 4. **Standalone Disjoint Attention Destination:** Rejected in #60 & #61; attention belongs prominently within the Feed cross-project landing surface.
+5. **Static Flattened Horizontal Project Chip List for All Projects:** Rejected in #62 grilling; flat chip lists overflow and clutter when project counts grow.
 
 ### Unresolved Questions & Implementation Notes
 

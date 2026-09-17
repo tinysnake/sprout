@@ -1622,60 +1622,100 @@ code {
   padding-bottom: 14px;
 }
 
-.feed-control-strip,
-.feed-variant-strip {
+/* Scope Filter Bar (Dropdown + Dynamic Urgent Chips) */
+.feed-scope-filter-bar {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 10px;
+  margin-top: 12px;
   flex-wrap: wrap;
 }
 
-.feed-control-label {
+.feed-scope-dropdown-wrapper {
+  flex-shrink: 0;
+}
+
+.feed-scope-select {
+  font-size: 12px;
+  font-weight: 600;
+  min-height: 36px;
+  padding: 4px 12px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.feed-scope-chips {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-}
-
-.feed-preset-pills {
-  display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
 }
 
-.feed-pill-btn {
+.scope-chip-btn {
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 4px 10px;
+  padding: 6px 12px;
   border-radius: var(--radius-full);
   cursor: pointer;
-  transition: all 0.15s ease;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+  min-height: 34px;
 }
 
-.feed-pill-btn:hover {
+.scope-chip-btn:hover {
   border-color: var(--accent-primary);
   color: var(--text-primary);
   background: var(--accent-bg);
 }
 
-.feed-pill-btn.active {
+.scope-chip-btn.active {
   background: var(--accent-primary);
   color: #ffffff;
   border-color: var(--accent-primary);
+  font-weight: 700;
 }
 
-/* Attention Filter Chips */
-.attention-filter-chips {
+.badge-dot-count {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  line-height: 1;
+}
+
+.badge-dot-count.red {
+  background: var(--red-action);
+  color: #ffffff;
+}
+
+.badge-dot-count.yellow {
+  background: var(--yellow-attention);
+  color: #000000;
+}
+
+.scope-chip-btn.active .badge-dot-count.red {
+  background: #ffffff;
+  color: var(--red-action);
+}
+
+.scope-chip-btn.active .badge-dot-count.yellow {
+  background: #ffffff;
+  color: #b45309;
+}
+
+/* 4 Streamlined Urgency Pills */
+.attention-urgency-pills {
   display: flex;
   gap: 6px;
   overflow-x: auto;
@@ -1684,35 +1724,62 @@ code {
   -webkit-overflow-scrolling: touch;
 }
 
-.chip-btn {
+.urgency-pill-btn {
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
-  padding: 5px 10px;
+  padding: 6px 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s ease;
+  min-height: 32px;
 }
 
-.chip-btn:hover {
+.urgency-pill-btn:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
-.chip-btn.active {
+.urgency-pill-btn.active {
   background: var(--accent-bg);
   border-color: var(--accent-primary);
   color: var(--accent-primary);
   font-weight: 700;
 }
 
-.chip-btn.chip-danger.active {
+.urgency-pill-btn.pill-danger.active {
   background: var(--red-action-bg);
   border-color: var(--red-action);
   color: var(--red-action);
+}
+
+.urgency-pill-btn.pill-warning.active {
+  background: var(--yellow-attention-bg);
+  border-color: var(--yellow-attention);
+  color: var(--yellow-attention);
+}
+
+.urgency-pill-btn.pill-info.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+/* Lightweight Project Clear Banner */
+.project-clear-banner {
+  background: var(--green-ready-bg);
+  border: 1px solid var(--green-ready-border);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 /* Attention Cards */

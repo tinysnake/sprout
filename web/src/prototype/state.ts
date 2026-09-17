@@ -37,6 +37,8 @@ export interface PrototypeState {
   activeTab: ActiveTab;
   feedLayoutVariant: FeedLayoutVariant;
   feedStatePreset: FeedStatePreset;
+  feedScopeFilter: string;
+  feedAttentionSeverityFilter: 'all' | AttentionSeverity;
   feedAttentionFilter: 'all' | AttentionCategory | AttentionSeverity;
   feedActivityFilter: 'all' | 'tasks' | 'messages' | 'envs' | 'usage';
   mobileFeedSplitTab: 'attention' | 'activity';
@@ -1106,6 +1108,8 @@ class StateManager {
       activeTab: 'attention',
       feedLayoutVariant: 'unified',
       feedStatePreset: 'mixed',
+      feedScopeFilter: 'all',
+      feedAttentionSeverityFilter: 'all',
       feedAttentionFilter: 'all',
       feedActivityFilter: 'all',
       mobileFeedSplitTab: 'attention',
@@ -1252,6 +1256,8 @@ class StateManager {
       fromLabel,
       fromProjectTab: this.state.projectTab,
       fromManageTab: this.state.manageTab,
+      fromFeedScope: this.state.feedScopeFilter,
+      fromFeedSeverity: this.state.feedAttentionSeverityFilter,
     };
     if (target.taskId) this.state.selectedTaskId = target.taskId;
     if (target.envId) this.state.selectedEnvironmentId = target.envId;
@@ -1262,8 +1268,11 @@ class StateManager {
 
   public popReturnContext() {
     if (this.state.returnContext) {
-      const { fromNav, fromProjectTab, fromManageTab, fromLabel } = this.state.returnContext;
+      const { fromNav, fromProjectTab, fromManageTab, fromLabel, fromFeedScope, fromFeedSeverity } =
+        this.state.returnContext;
       this.state.returnContext = null;
+      if (fromFeedScope) this.state.feedScopeFilter = fromFeedScope;
+      if (fromFeedSeverity) this.state.feedAttentionSeverityFilter = fromFeedSeverity as any;
       this.setPrimaryNav(fromNav, fromProjectTab, fromManageTab);
       this.notify(`Returned back to ${fromLabel}`);
     }
@@ -1311,6 +1320,16 @@ class StateManager {
   public setFeedStatePreset(preset: FeedStatePreset) {
     this.state.feedStatePreset = preset;
     this.applyFeedPreset(preset);
+  }
+
+  public setFeedScopeFilter(scope: string) {
+    this.state.feedScopeFilter = scope;
+    this.notify(`Feed scope filter set to ${scope}`);
+  }
+
+  public setFeedAttentionSeverityFilter(severity: 'all' | AttentionSeverity) {
+    this.state.feedAttentionSeverityFilter = severity;
+    this.notify(`Feed attention severity filter set to ${severity}`);
   }
 
   public setFeedAttentionFilter(filter: 'all' | AttentionCategory | AttentionSeverity) {

@@ -380,6 +380,8 @@ export type ReturnContext = {
   fromLabel: string;
   fromProjectTab?: ProjectTab | undefined;
   fromManageTab?: ManageTab | undefined;
+  fromFeedScope?: string | undefined;
+  fromFeedSeverity?: string | undefined;
 };
 
 export type ActiveDialogKind =

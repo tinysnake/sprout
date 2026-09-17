@@ -68,6 +68,24 @@ export function initPrototype(mountEl: HTMLElement): void {
           ${renderIcon('palette', 14)} Style Baseline
         </button>
 
+        <!-- State Matrix Quick Preset -->
+        <select class="scenario-select" id="top-state-matrix-select" aria-label="State Matrix Preset" title="State Matrix (7 Realistic Operational States)">
+          <option value="mixed" ${state.feedStatePreset === 'mixed' ? 'selected' : ''}>State: 1. Mixed (Default)</option>
+          <option value="empty" ${state.feedStatePreset === 'empty' ? 'selected' : ''}>State: 2. Empty (All Clear)</option>
+          <option value="healthy" ${state.feedStatePreset === 'healthy' ? 'selected' : ''}>State: 3. Healthy Active</option>
+          <option value="stale" ${state.feedStatePreset === 'stale' ? 'selected' : ''}>State: 4. Stale Telemetry</option>
+          <option value="pending" ${state.feedStatePreset === 'pending' ? 'selected' : ''}>State: 5. Pending Approvals</option>
+          <option value="degraded" ${state.feedStatePreset === 'degraded' ? 'selected' : ''}>State: 6. Degraded Host</option>
+          <option value="intervention" ${state.feedStatePreset === 'intervention' ? 'selected' : ''}>State: 7. Intervention</option>
+        </select>
+
+        <!-- Layout Paradigm Selector -->
+        <select class="scenario-select" id="top-layout-select" aria-label="Layout Paradigm" title="Feed Layout Paradigm">
+          <option value="unified" ${state.feedLayoutVariant === 'unified' ? 'selected' : ''}>Layout: A. Unified Stream</option>
+          <option value="split-board" ${state.feedLayoutVariant === 'split-board' ? 'selected' : ''}>Layout: B. Split Board</option>
+          <option value="project-grouped" ${state.feedLayoutVariant === 'project-grouped' ? 'selected' : ''}>Layout: C. Project Grouped</option>
+        </select>
+
         <!-- Scenario Jumpers Dropdown -->
         <select class="scenario-select" id="scenario-jumper" aria-label="Jump to scenario">
           <option value="" disabled selected>Jump to Scenario...</option>
@@ -116,6 +134,24 @@ export function initPrototype(mountEl: HTMLElement): void {
 
     controlBar.querySelector('#top-primitives-btn')?.addEventListener('click', () => {
       stateManager.setPrimaryNav('primitives');
+    });
+
+    const stateMatrixSelect = controlBar.querySelector('#top-state-matrix-select') as HTMLSelectElement;
+    stateMatrixSelect?.addEventListener('change', (ev) => {
+      const val = (ev.target as HTMLSelectElement).value as any;
+      if (val) {
+        stateManager.setPrimaryNav('feed');
+        stateManager.setFeedStatePreset(val);
+      }
+    });
+
+    const layoutSelect = controlBar.querySelector('#top-layout-select') as HTMLSelectElement;
+    layoutSelect?.addEventListener('change', (ev) => {
+      const val = (ev.target as HTMLSelectElement).value as any;
+      if (val) {
+        stateManager.setPrimaryNav('feed');
+        stateManager.setFeedLayoutVariant(val);
+      }
     });
 
     const scenarioSelect = controlBar.querySelector('#scenario-jumper') as HTMLSelectElement;
