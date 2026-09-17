@@ -3355,6 +3355,14 @@ code {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  padding: 14px;
+}
+
+@media (min-width: 768px) {
+  .env-detail-card {
+    padding: 16px;
+    gap: 16px;
+  }
 }
 
 .perm-toggle-btn {
