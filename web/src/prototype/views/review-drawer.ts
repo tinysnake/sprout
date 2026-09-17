@@ -14,8 +14,8 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <div style="display: flex; align-items: center; gap: 8px;">
         ${renderIcon('clipboard', 20)}
         <div>
-          <strong style="font-size: 14px;">Product Owner Review: Environment Management & Recovery</strong>
-          <div style="font-size: 11px; color: var(--text-muted);">Ticket #65 Acceptance Evidence · M2 Operator Experience (ADR-0005, ADR-0008, ADR-0009)</div>
+          <strong style="font-size: 14px;">Product Owner Review: Chat Scopes, Environments & Operating Baseline</strong>
+          <div style="font-size: 11px; color: var(--text-muted);">M2 Interactive Prototype Acceptance Evidence (Tickets #61–#65 · ADR-0005, ADR-0007, ADR-0008, ADR-0009)</div>
         </div>
       </div>
       <button class="btn btn-secondary btn-sm close-review-btn" aria-label="Close review drawer">${renderIcon('close', 12)} Close</button>
@@ -67,7 +67,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         <div class="review-checklist">
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
-            <span><strong>Three Conversation Scopes:</strong> Complete interactive support for Project Broadcast (<code>#general</code>), Working Groups (e.g. <code>Core Mechanics WG</code>, <code>WebAudio Effects WG</code>), and Project-Scoped Direct Messages (<code>@agent</code>), with navigation, composition, mention picker, <code>@all</code> quick insert, and recipient rendering.</span>
+            <span><strong>Three Conversation Scopes & Navigation:</strong> Complete interactive support for Project Broadcast (<code>#general</code>), Working Groups (e.g. <code>Core Mechanics WG</code>, <code>WebAudio Effects WG</code>), and Project-Scoped Direct Messages (<code>@agent</code>), with navigation, composition, mention picker, <code>@all</code> quick insert, and recipient rendering.</span>
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
@@ -76,6 +76,14 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
             <span><strong>Strict Privacy Boundary Guarantee:</strong> Direct DMs, Agent private memory, engine-native sessions, raw transcripts/tool outputs, credentials, host paths, and transient Environment capacity are strictly excluded from the routing context manifest and presentation.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Phone & Desktop Parity & State Matrix:</strong> 100% interactive parity across 390px mobile viewport (drill-down & header back button) and desktop split-pane layout, covering normal, empty, pending/batching, deliberate suppression, fail-closed, and projected-reply states.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Retained Artifact & Owner Review:</strong> Documented in <code>docs/prototype-chat-routing.md</code> and verified with DOM tests in <code>web/src/prototype/chat.dom.test.ts</code>, recording accepted/rejected/unresolved Chat patterns.</span>
           </label>
         </div>
       </div>
@@ -138,6 +146,27 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         </h4>
         <ul class="review-list">
           <li>
+            <strong>Three Distinct Conversation Scopes (ADR-0008):</strong> Project Broadcast (<code>#general</code> for all project members), Working Groups (temporary focused sub-teams), and Direct Messages (strictly project-scoped 1-on-1 between operator and agent).
+          </li>
+          <li>
+            <strong>Deterministic Addressing Precedence (ADR-0007):</strong> Direct DMs, exact whole-token <code>@agent</code> mentions, <code>@all</code> broadcasts, and assigned project events wake recipients immediately, bypassing wake policy and collection windows.
+          </li>
+          <li>
+            <strong>Fixed 30s Collection Window & Coalescing (ADR-0007):</strong> Under wake-model-assisted policy, unaddressed messages enter a fixed 30s window (avoiding debounce starvation). Evaluation invokes the wake model once per batch and produces at most one <code>WakeRequest</code> per selected agent.
+          </li>
+          <li>
+            <strong>Non-Routing Projected Replies & Loop Prevention (ADR-0007):</strong> Sprout projects only completed runs' final assistant text with non-routing disposition; mentions inside projected text cannot open collection windows or trigger wake evaluations.
+          </li>
+          <li>
+            <strong>Automatic Retry & Fail-Closed Fallback (ADR-0007):</strong> Transient model failures retry once with identical frozen context; a 2nd failure fails closed (zero agents woken, durable error record, original inputs intact, preventing uncontrolled fan-out).
+          </li>
+          <li>
+            <strong>Observational Causal Evidence (No Manual Route-Now Buttons):</strong> Complete 6-section evidence manifest inspectable in detail without manual "Route now" or "Retry" overrides.
+          </li>
+          <li>
+            <strong>Strict Routing Privacy Boundary Guarantee:</strong> Direct DMs, private memory, sessions, tool transcripts, credentials, host paths, and transient capacity are strictly excluded from routing context.
+          </li>
+          <li>
             <strong>Independent Health Dimensions:</strong> Health is never collapsed into a single boolean. Web exposes enrollment, connection state, protocol compatibility, work safety/lease status, capability permissions, and engine harness readiness independently, with a textual traffic light summary.
           </li>
           <li>
@@ -168,6 +197,24 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         </h4>
         <ul class="review-list">
           <li>
+            <strong>Manual "Route Now" or "Retry Routing" Buttons:</strong> Rejected in ADR-0007; invites operator micro-management into deterministic scheduling.
+          </li>
+          <li>
+            <strong>Fail-Open Fan-Out to All Agents on Routing Failure:</strong> Rejected in ADR-0007; model failure must fail closed to prevent massive agent fan-out and token burn.
+          </li>
+          <li>
+            <strong>Global Cross-Project Direct Messages:</strong> Rejected in ADR-0008; violates project contract and audit boundaries.
+          </li>
+          <li>
+            <strong>Automatic Wake Routing of Projected Replies:</strong> Rejected in ADR-0007; causes infinite wake loops.
+          </li>
+          <li>
+            <strong>Debounce Reset-on-Message Window:</strong> Rejected in ADR-0007; starves active channels indefinitely.
+          </li>
+          <li>
+            <strong>Hard Deletion of Groups or DMs:</strong> Rejected in ADR-0008; damages historical traceability.
+          </li>
+          <li>
             <strong>Automatic Timeout-Driven Lease Release:</strong> Rejected in ADR-0005; silently releasing an idle or blocked Task's environment causes catastrophic loss of uncommitted state in scarce host environments.
           </li>
           <li>
@@ -197,6 +244,12 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           ${renderIcon('alert', 16)} Unresolved Questions & Implementation Notes
         </h4>
         <ul class="review-list">
+          <li>
+            <strong>Working Group Creation Authority:</strong> In M2, any Project member can create a Working Group; the creator is automatically added as its initial member.
+          </li>
+          <li>
+            <strong>Collection Window Duration Tuning:</strong> Defaulted to 30 seconds per ADR-0007; configurable per project template.
+          </li>
           <li>
             <strong>Multi-Task Concurrency Limit per Environment:</strong> ADR-0005 strictly enforces one active Task lease per Environment instance. Multiple proposals may be queued, but only one can begin on a given Environment at a time.
           </li>
