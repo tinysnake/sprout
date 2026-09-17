@@ -448,7 +448,10 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
   overviewEl.querySelectorAll('.restore-member-btn').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       const memberId = (ev.currentTarget as HTMLElement).getAttribute('data-member')!;
-      stateManager.restoreProjectMembership(project.id, memberId);
+      const result = stateManager.restoreProjectMembership(project.id, memberId);
+      if (!result.success && result.reason) {
+        window.alert(result.reason);
+      }
     });
   });
 

@@ -17,6 +17,7 @@ import type {
   OperatorIdentity,
   PrimaryNav,
   ProjectItem,
+  ProjectMembership,
   ProjectTab,
   ReturnContext,
   RoutingBatch,
@@ -3963,22 +3964,28 @@ class StateManager {
     memberId: string,
     responsibilities?: string,
     instructions?: string
-  ) {
+  ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
     const member = project.memberships.find((m) => m.memberId === memberId);
-    if (!member) return;
+    if (!member) return { success: false, reason: 'Project membership not found' };
+    const mutationCheck = this.checkProjectMembershipMutation(project, member, 'edit');
+    if (!mutationCheck.success) return mutationCheck;
 
     if (responsibilities !== undefined) member.responsibilities = responsibilities;
     if (instructions !== undefined) member.collaborationInstructions = instructions;
     this.notify(`Updated collaboration instructions for ${member.displayName} in Project "${project.displayName}".`);
+    return { success: true };
   }
 
-  public endProjectMembership(projectId: string, memberId: string) {
+  public endProjectMembership(projectId: string, memberId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
     const member = project.memberships.find((m) => m.memberId === memberId);
-    if (!member || member.memberKind === 'human') return; // Cannot remove local operator
+    if (!member) return { success: false, reason: 'Project membership not found' };
+    if (member.memberKind === 'human') return { success: false, reason: 'Cannot end local operator membership' };
+    const mutationCheck = this.checkProjectMembershipMutation(project, member, 'end');
+    if (!mutationCheck.success) return mutationCheck;
 
     member.status = 'ended';
 
@@ -4011,16 +4018,41 @@ class StateManager {
     } else {
       this.notify(`Ended membership for ${member.displayName}. Historical messages and run attribution preserved.`);
     }
+    return { success: true };
   }
 
-  public restoreProjectMembership(projectId: string, memberId: string) {
+  public restoreProjectMembership(projectId: string, memberId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
     const member = project.memberships.find((m) => m.memberId === memberId);
-    if (!member) return;
+    if (!member) return { success: false, reason: 'Project membership not found' };
+    const mutationCheck = this.checkProjectMembershipMutation(project, member, 'restore');
+    if (!mutationCheck.success) return mutationCheck;
 
     member.status = 'active';
     this.notify(`Restored membership for ${member.displayName} in Project "${project.displayName}".`);
+    return { success: true };
+  }
+
+  private checkProjectMembershipMutation(
+    project: ProjectItem,
+    member: ProjectMembership,
+    action: 'edit' | 'end' | 'restore'
+  ): { success: boolean; reason?: string } {
+    if (member.memberKind !== 'agent') return { success: true };
+
+    const globalAgent = this.state.agents.find((agent) => agent.id === member.memberId);
+    if (!globalAgent) {
+      const reason = `Cannot ${action} membership for Agent "${member.displayName}" in Project "${project.displayName}": global Agent record not found.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (globalAgent.status === 'archived') {
+      const reason = `Cannot ${action} membership for Agent "${globalAgent.displayName}" in Project "${project.displayName}": Agent is archived. Restore the Agent first; historical membership and attribution remain preserved (ADR-0008).`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    return { success: true };
   }
 
   public bindEnvironmentToProject(

@@ -418,33 +418,76 @@ test('Agents: non-destructive archive safety guard and historical attribution pr
     assert.match(archiveDesignerRes2.reason ?? '', /active run/i);
     task102.taskLeadId = 'designer'; // Restore fixture
 
-    // 2. Archive an unassigned/idle Agent (Researcher)
+    // 2. End Researcher's historical membership, then archive the idle Agent.
+    stateManager.setPrimaryNav('project', 'overview');
+    const project = stateManager.getSnapshot().projects.find((p) => p.id === 'proj-minesweeper')!;
+    const researcherMembership = project.memberships.find((m) => m.memberId === 'researcher')!;
+    const historicalMembership = {
+      joinedAt: researcherMembership.joinedAt,
+      responsibilities: researcherMembership.responsibilities,
+      collaborationInstructions: researcherMembership.collaborationInstructions,
+    };
+    const historicalMessageIds = stateManager
+      .getSnapshot()
+      .messages.filter((message) => message.authorId === 'researcher')
+      .map((message) => message.id);
+    assert.ok(historicalMessageIds.length > 0, 'Fixture retains Researcher message attribution');
+    assert.equal(stateManager.endProjectMembership(project.id, 'researcher').success, true);
+    assert.equal(researcherMembership.status, 'ended');
+
     const archiveResearcherRes = stateManager.archiveAgent('researcher');
     assert.equal(archiveResearcherRes.success, true);
     const researcher = stateManager.getSnapshot().agents.find((a) => a.id === 'researcher')!;
     assert.equal(researcher.status, 'archived');
     assert.equal(researcher.privateMemoryEntriesCount, 7, 'Private memory entries preserved');
 
-    // 2b. Archiving blocks new Project memberships (F-66-04)
-    const addArchivedRes = stateManager.addProjectMembership('proj-minesweeper', 'researcher');
-    assert.equal(addArchivedRes.success, false, 'Archived agent cannot join project');
-    assert.match(addArchivedRes.reason ?? '', /archived/i);
-    const project = stateManager.getSnapshot().projects.find((p) => p.id === 'proj-minesweeper')!;
-    assert.equal(
-      project.memberships.some((m) => m.memberId === 'researcher' && m.status === 'active'),
-      false,
-      'Archived agent was not added to active memberships'
+    // 2b. F-66-04: the Project restore control and direct state mutation both reject an archived Agent.
+    const restoreButton = dom.window.document.querySelector<HTMLButtonElement>(
+      '.restore-member-btn[data-member="researcher"]'
     );
+    assert.ok(restoreButton, 'Ended membership exposes the Project restore control');
+    const restoreAlerts: string[] = [];
+    dom.window.alert = (message?: string) => restoreAlerts.push(String(message));
+    restoreButton.click();
+    assert.match(restoreAlerts[0] ?? '', /archived.*restore the agent first/i, 'Project UI exposes the rejection');
+    const restoreArchivedRes = stateManager.restoreProjectMembership(project.id, 'researcher');
+    assert.equal(restoreArchivedRes.success, false, 'Archived Agent cannot reactivate an ended membership');
+    assert.match(restoreArchivedRes.reason ?? '', /archived.*restore the agent first/i);
+    assert.equal(
+      researcherMembership.status,
+      'ended',
+      'Rejected restore leaves the historical membership ended'
+    );
+    assert.deepEqual(
+      {
+        joinedAt: researcherMembership.joinedAt,
+        responsibilities: researcherMembership.responsibilities,
+        collaborationInstructions: researcherMembership.collaborationInstructions,
+      },
+      historicalMembership,
+      'Rejected restore preserves historical membership facts'
+    );
+    assert.deepEqual(
+      stateManager
+        .getSnapshot()
+        .messages.filter((message) => message.authorId === 'researcher')
+        .map((message) => message.id),
+      historicalMessageIds,
+      'Rejected restore preserves historical message attribution'
+    );
+    assert.match(stateManager.getSnapshot().scenarioLog[0] ?? '', /archived.*restore the agent first/i);
 
     // 3. Restore Researcher
     stateManager.restoreAgent('researcher');
     assert.equal(stateManager.getSnapshot().agents.find((a) => a.id === 'researcher')!.status, 'active');
 
-    // 3b. Active agent can now be added to Project
-    const addRestoredRes = stateManager.addProjectMembership('proj-minesweeper', 'researcher');
-    assert.equal(addRestoredRes.success, true, 'Restored agent can now join project');
+    // 3b. Once the global Agent is restored, the normal membership restore path is available again.
+    const restoreActiveRes = stateManager.restoreProjectMembership(project.id, 'researcher');
+    assert.equal(restoreActiveRes.success, true, 'Restored Agent can reactivate its historical membership');
+    assert.equal(researcherMembership.status, 'active');
 
     // 4. Verify Archived Agent Presentation (Legacy Coder)
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
     stateManager.selectAgent('legacy-coder');
     const document = dom.window.document;
     assert.match(document.body.textContent ?? '', /Archived/);
