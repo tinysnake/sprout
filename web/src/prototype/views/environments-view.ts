@@ -28,44 +28,46 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
 
   // --- 1. Header Area with Filter Bar and Actions ---
   const headerCard = document.createElement('div');
-  headerCard.className = 'card envs-header-card';
+  headerCard.className = 'envs-header-card';
   headerCard.innerHTML = `
-    <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
-      <div>
-        <h2 style="font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+    <div class="envs-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
+      <div style="flex: 1; min-width: 0;">
+        <h2 style="font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${renderIcon('environments', 18)}
           <span>Environments & Host Infrastructure</span>
         </h2>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-          Multi-dimension health facts, task-held lease safety, reconciliation, and recovery (ADR-0005, ADR-0008, ADR-0009).
-        </p>
       </div>
-      <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
-        <button class="btn btn-primary btn-sm register-host-btn" id="btn-register-host">
-          ${renderIcon('plus', 13)} Register New Host
+      <div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0; margin-left: auto;">
+        <button class="btn btn-primary btn-sm register-host-btn icon-only-btn" id="btn-register-host" title="Register New Host" aria-label="Register New Host">
+          ${renderIcon('plus', 14)}
         </button>
-        <button class="btn btn-secondary btn-sm host-guide-btn" id="btn-host-guide">
-          ${renderIcon('terminal', 13)} Host Bootstrap Guide
+        <button class="btn btn-secondary btn-sm host-guide-btn icon-only-btn" id="btn-host-guide" title="Host Bootstrap Guide" aria-label="Host Bootstrap Guide">
+          ${renderIcon('guide', 14)}
         </button>
       </div>
     </div>
 
-    <!-- Filter Pills / Segmented Controls -->
-    <div class="envs-filter-row" style="display: flex; gap: 6px; overflow-x: auto; padding-top: 4px; border-top: 1px solid var(--border-subtle);">
-      <button class="btn btn-sm filter-pill ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}" data-filter="all">
-        All (${allEnvs.length})
+    <!-- Filter Row: Modeled after Attention Urgency Pills (Discrete Boxes, Icon Top, Text Bottom, Auto-Fitting Single Row) -->
+    <div class="env-filter-boxes" role="group" aria-label="Filter environments by health status">
+      <button class="env-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" title="All (${allEnvs.length})">
+        <span class="env-filter-box-top"><span class="status-dot purple"></span> ${allEnvs.length}</span>
+        <span class="env-filter-box-bottom">All<span class="sr-only"> (${allEnvs.length})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'ready' ? 'btn-primary' : 'btn-secondary'}" data-filter="ready">
-        <span class="status-dot green"></span> Ready (${readyCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'ready' ? 'active' : ''}" data-filter="ready" title="Ready (${readyCount})">
+        <span class="env-filter-box-top"><span class="status-dot green"></span> ${readyCount}</span>
+        <span class="env-filter-box-bottom">Ready<span class="sr-only"> (${readyCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'attention' ? 'btn-primary' : 'btn-secondary'}" data-filter="attention">
-        <span class="status-dot yellow"></span> Attention (${attentionCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'attention' ? 'active' : ''}" data-filter="attention" title="Attention (${attentionCount})">
+        <span class="env-filter-box-top"><span class="status-dot yellow"></span> ${attentionCount}</span>
+        <span class="env-filter-box-bottom">Attention<span class="sr-only"> (${attentionCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'action-required' ? 'btn-primary' : 'btn-secondary'}" data-filter="action-required">
-        <span class="status-dot red"></span> Action Required (${actionRequiredCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'action-required' ? 'active' : ''}" data-filter="action-required" title="Action Required (${actionRequiredCount})">
+        <span class="env-filter-box-top"><span class="status-dot red"></span> ${actionRequiredCount}</span>
+        <span class="env-filter-box-bottom">Action Required<span class="sr-only"> (${actionRequiredCount})</span></span>
       </button>
-      <button class="btn btn-sm filter-pill ${filter === 'archived' ? 'btn-primary' : 'btn-secondary'}" data-filter="archived">
-        <span class="status-dot neutral"></span> Archived (${archivedCount})
+      <button class="env-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" title="Archived (${archivedCount})">
+        <span class="env-filter-box-top"><span class="status-dot neutral"></span> ${archivedCount}</span>
+        <span class="env-filter-box-bottom">Archived<span class="sr-only"> (${archivedCount})</span></span>
       </button>
     </div>
   `;
@@ -85,71 +87,76 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
     openRegisterHostDialog();
   });
 
-  container.appendChild(headerCard);
+  // --- 2. Master / Detail Layout Construction (Phone & Fluid Parity / Desktop Split) ---
+  const isSingleColumn = state.viewportMode === 'mobile' || state.viewportMode === 'fluid';
+  const showSingleColumnDetail = isSingleColumn && state.environmentViewMode === 'detail' && selectedEnv;
 
-  // --- 2. Master / Detail Layout Construction (Phone / Desktop Parity) ---
-  const isMobile = state.viewportMode === 'mobile';
-  const showMobileDetail = isMobile && state.environmentViewMode === 'detail' && selectedEnv;
+  if (showSingleColumnDetail) {
+    // Single Column Detail View: Replace Home Title Bar with Traditional Back Header (Like Chat / Project Detail)
+    const mobileDetailWrapper = document.createElement('div');
+    mobileDetailWrapper.className = 'envs-mobile-detail-wrapper';
 
-  if (isMobile) {
-    if (showMobileDetail) {
-      // Mobile Detail View with Sticky Back Header
-      const mobileDetailWrapper = document.createElement('div');
-      mobileDetailWrapper.className = 'envs-mobile-detail-wrapper';
+    const mobileBackNav = document.createElement('div');
+    mobileBackNav.className = 'mobile-detail-nav-header';
+    mobileBackNav.innerHTML = `
+      <button class="btn btn-secondary btn-sm back-to-envs-btn" id="btn-back-to-envs" title="Back to Environments" aria-label="Back to environments list">
+        ${renderIcon('chevron-left', 14)} <span class="back-btn-text">Back</span>
+      </button>
+      <div class="mobile-detail-title-wrap">
+        <span class="status-dot ${selectedEnv.trafficLight}"></span>
+        <span class="mobile-detail-title-text">${selectedEnv.displayName}</span>
+      </div>
+      <div class="sr-only">
+        Environments & Host Infrastructure
+        Ready (${readyCount}) Attention (${attentionCount}) Action Required (${actionRequiredCount}) Archived (${archivedCount})
+      </div>
+    `;
 
-      const mobileBackNav = document.createElement('div');
-      mobileBackNav.className = 'mobile-detail-nav-header';
-      mobileBackNav.innerHTML = `
-        <button class="btn btn-secondary btn-sm back-to-envs-btn" id="btn-back-to-envs" aria-label="Back to environments list">
-          ${renderIcon('chevron-left', 14)} Back to Environments
-        </button>
-        <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px;">
-          <span class="status-dot ${selectedEnv.trafficLight}"></span>
-          <span style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${selectedEnv.displayName}</span>
-        </div>
-      `;
+    mobileBackNav.querySelector('#btn-back-to-envs')?.addEventListener('click', () => {
+      stateManager.closeEnvironmentDetail();
+    });
 
-      mobileBackNav.querySelector('#btn-back-to-envs')?.addEventListener('click', () => {
-        stateManager.closeEnvironmentDetail();
-      });
+    mobileDetailWrapper.appendChild(mobileBackNav);
+    mobileDetailWrapper.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
+    container.appendChild(mobileDetailWrapper);
+  } else {
+    // Standard List or Desktop View: Include Header Card with Title and Filter Row
+    container.appendChild(headerCard);
 
-      mobileDetailWrapper.appendChild(mobileBackNav);
-      mobileDetailWrapper.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
-      container.appendChild(mobileDetailWrapper);
-    } else {
-      // Mobile Master List View
+    if (isSingleColumn) {
+      // Single Column Master List View
       const listContainer = document.createElement('div');
       listContainer.className = 'envs-master-list mobile-full';
       listContainer.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
       container.appendChild(listContainer);
-    }
-  } else {
-    // Desktop / Wide Fluid Split Layout
-    const splitLayout = document.createElement('div');
-    splitLayout.className = 'envs-split-layout';
-
-    // Left Column: Master List
-    const leftCol = document.createElement('div');
-    leftCol.className = 'envs-master-column';
-    leftCol.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
-    splitLayout.appendChild(leftCol);
-
-    // Right Column: Detail Panel
-    const rightCol = document.createElement('div');
-    rightCol.className = 'envs-detail-column';
-    if (selectedEnv) {
-      rightCol.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
     } else {
-      rightCol.innerHTML = `
-        <div class="card" style="padding: 30px; text-align: center; color: var(--text-muted);">
-          ${renderIcon('environments', 32)}
-          <p style="margin-top: 10px; font-size: 14px;">No environment matches the active filter.</p>
-        </div>
-      `;
-    }
-    splitLayout.appendChild(rightCol);
+      // Desktop 2-Column Split Layout
+      const splitLayout = document.createElement('div');
+      splitLayout.className = 'envs-split-layout';
 
-    container.appendChild(splitLayout);
+      // Left Column: Master List
+      const leftCol = document.createElement('div');
+      leftCol.className = 'envs-master-column';
+      leftCol.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
+      splitLayout.appendChild(leftCol);
+
+      // Right Column: Detail Panel
+      const rightCol = document.createElement('div');
+      rightCol.className = 'envs-detail-column';
+      if (selectedEnv) {
+        rightCol.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
+      } else {
+        rightCol.innerHTML = `
+          <div class="card" style="padding: 30px; text-align: center; color: var(--text-muted);">
+            ${renderIcon('environments', 32)}
+            <p style="margin-top: 10px; font-size: 14px;">No environment matches the active filter.</p>
+          </div>
+        `;
+      }
+      splitLayout.appendChild(rightCol);
+
+      container.appendChild(splitLayout);
+    }
   }
 
   return container;
@@ -201,9 +208,7 @@ function renderEnvironmentMasterList(
             <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${env.hostUser} · ${env.workerIdentityKey.slice(0, 16)}</span>
           </div>
         </div>
-        <span class="status-pill ${env.trafficLight === 'green' ? 'green' : env.trafficLight === 'yellow' ? 'yellow' : 'red'}" style="font-size: 10px; font-weight: 700;">
-          <span class="status-dot ${env.trafficLight}"></span> ${trafficLightLabel}
-        </span>
+        <span class="status-dot ${env.trafficLight}" title="${trafficLightLabel}" aria-label="${trafficLightLabel}"></span>
       </div>
 
       <div class="env-reason-snippet" style="font-size: 12px; color: var(--text-secondary); line-height: 1.35; margin: 6px 0 8px 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
@@ -318,54 +323,72 @@ function renderEnvironmentDetailCard(
         <span style="font-size: 11px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
       </div>
 
-      <div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;">
-        <!-- 1. Enrollment -->
-        <div class="metric-tile">
-          <span class="metric-label">1. Enrollment</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.enrollmentStatus === 'approved' ? 'var(--green-ready)' : env.enrollmentStatus === 'pending' ? 'var(--yellow-attention)' : 'var(--red-action)'};">
-            ${env.enrollmentStatus.toUpperCase()}
-          </span>
-          <span class="metric-sub" style="font-family: var(--font-mono); font-size: 10px;">
-            ${env.workerIdentityKey.slice(0, 16)}...
-          </span>
-          ${
-            env.enrollmentStatus === 'pending'
-              ? `<button class="btn btn-primary btn-xs approve-enroll-btn" style="margin-top: 4px; width: 100%;">Approve</button>`
-              : ''
-          }
+      <!-- 1–4. Core Operational Status & Safety Dimensions (Unified with Capability Permissions Style) -->
+      <div class="health-dimensions-box" style="background: var(--bg-surface-elevated); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 12px; text-transform: uppercase; color: var(--text-muted); font-weight: 700;">
+            1–4. Core Operational Status & Safety Dimensions
+          </strong>
+          <span style="font-size: 10px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
         </div>
 
-        <!-- 2. Connection -->
-        <div class="metric-tile">
-          <span class="metric-label">2. Connection</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.connectionState === 'online' ? 'var(--green-ready)' : env.connectionState === 'offline' ? 'var(--red-action)' : 'var(--yellow-attention)'};">
-            ${env.connectionState.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            Confirmed: ${env.lastConfirmedTime}
-          </span>
-        </div>
+        <div class="dimensions-2x2-grid">
+          <!-- 1. Enrollment -->
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">1. Enrollment</span>
+              <span class="dimension-item-sub">${env.workerIdentityKey.slice(0, 14)}...</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}">
+                ${env.enrollmentStatus.toUpperCase()}
+              </span>
+              ${
+                env.enrollmentStatus === 'pending'
+                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn">Approve</button>`
+                  : ''
+              }
+            </div>
+          </div>
 
-        <!-- 3. Protocol Compatibility -->
-        <div class="metric-tile">
-          <span class="metric-label">3. Protocol</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.protocolCompatibility === 'compatible' ? 'var(--green-ready)' : 'var(--red-action)'};">
-            ${env.protocolCompatibility.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            Version: ${env.protocolVersion} (Req: v2.x)
-          </span>
-        </div>
+          <!-- 2. Connection -->
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">2. Connection</span>
+              <span class="dimension-item-sub">Confirmed: ${env.lastConfirmedTime}</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}">
+                ${env.connectionState.toUpperCase()}
+              </span>
+            </div>
+          </div>
 
-        <!-- 4. Work Safety & Lease -->
-        <div class="metric-tile">
-          <span class="metric-label">4. Work Safety</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.workSafety === 'clear' ? 'var(--green-ready)' : env.workSafety === 'reconciling' ? 'var(--yellow-attention)' : 'var(--red-action)'};">
-            ${env.workSafety.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}
-          </span>
+          <!-- 3. Protocol Compatibility -->
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">3. Protocol</span>
+              <span class="dimension-item-sub">Version: ${env.protocolVersion} (Req: v2.x)</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}">
+                ${env.protocolCompatibility.toUpperCase()}
+              </span>
+            </div>
+          </div>
+
+          <!-- 4. Work Safety & Lease -->
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">4. Work Safety</span>
+              <span class="dimension-item-sub">${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}">
+                ${env.workSafety.toUpperCase()}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -378,34 +401,34 @@ function renderEnvironmentDetailCard(
           <span style="font-size: 10px; color: var(--text-muted);">ADR-0008</span>
         </div>
 
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px;">
+        <div class="permissions-2x2-grid">
           <!-- File Read/Write -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">File R/W</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">File R/W</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.fileReadWrite ? 'btn-success' : 'btn-secondary'}" data-cap="fileReadWrite">
               ${env.capabilityPermissions.fileReadWrite ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- Process Execution -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">Process Exec</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">Process Exec</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.processExecution ? 'btn-success' : 'btn-secondary'}" data-cap="processExecution">
               ${env.capabilityPermissions.processExecution ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- Network Access -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">Network</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">Network</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.networkAccess ? 'btn-success' : 'btn-secondary'}" data-cap="networkAccess">
               ${env.capabilityPermissions.networkAccess ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- GUI Automation -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">GUI Auto</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">GUI Auto</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.guiAutomation ? 'btn-success' : 'btn-secondary'}" data-cap="guiAutomation">
               ${env.capabilityPermissions.guiAutomation ? 'Granted' : 'Refused'}
             </button>
@@ -508,14 +531,6 @@ function renderEnvironmentDetailCard(
       }
 
       ${
-        env.workSafety === 'recovery'
-          ? `<button class="btn btn-danger btn-sm force-release-btn">
-              ${renderIcon('warning', 13)} Emergency Force Release
-            </button>`
-          : ''
-      }
-
-      ${
         env.enrollmentStatus === 'approved' && !env.activeLeaseHolder && env.workSafety === 'clear'
           ? `<button class="btn btn-secondary btn-sm archive-env-btn">
               ${renderIcon('archive', 13)} Archive Instance
@@ -583,8 +598,10 @@ function renderEnvironmentDetailCard(
     stateManager.triggerSimulatedWorkerReconnect(env.id);
   });
 
-  detailEl.querySelector('.force-release-btn')?.addEventListener('click', () => {
-    stateManager.openInspector('force-release', env.id);
+  detailEl.querySelectorAll('.force-release-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      stateManager.openInspector('force-release', env.id);
+    });
   });
 
   detailEl.querySelector('.archive-env-btn')?.addEventListener('click', () => {

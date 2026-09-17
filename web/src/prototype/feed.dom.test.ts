@@ -251,6 +251,9 @@ test('Feed & Attention: exercises 7-state realistic matrix via top harness contr
     const { initPrototype } = (await vite.ssrLoadModule(
       '/src/prototype/prototype.ts'
     )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
 
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
@@ -258,11 +261,14 @@ test('Feed & Attention: exercises 7-state realistic matrix via top harness contr
 
     const document = dom.window.document;
 
+    // Verify top dropdowns are cleanly removed from DOM per owner review
+    assert.equal(document.querySelector('#top-state-matrix-select'), null, 'top-state-matrix-select removed');
+    assert.equal(document.querySelector('#top-layout-select'), null, 'top-layout-select removed');
+    assert.equal(document.querySelector('#scenario-jumper'), null, 'scenario-jumper removed');
+
     const selectStatePreset = (preset: string) => {
-      const stateSelect = document.querySelector('#top-state-matrix-select') as HTMLSelectElement;
-      assert.ok(stateSelect);
-      stateSelect.value = preset;
-      stateSelect.dispatchEvent(new dom.window.Event('change'));
+      stateManager.setPrimaryNav('feed');
+      stateManager.setFeedStatePreset(preset as any);
     };
 
     // 1. Empty State

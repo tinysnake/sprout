@@ -203,10 +203,18 @@ The prototype provides 100% interactive parity across 390px mobile screens and w
 
 ## 8. Verification & Review Drawer Recording
 
-- **DOM Test Suite**: `web/src/prototype/environments.dom.test.ts` (10 extensive tests covering health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries).
+- **DOM Test Suite**: `web/src/prototype/environments.dom.test.ts` (extensive tests covering health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries).
+- **Owner Review Decision & Pattern Refinements**:
+  1. *Streamlined Header & Filters*: Header card styled seamlessly like the Feed header (transparent background, no top/left/right borders, subtle bottom border). Title row buttons kept strictly inline on a single row (nowrap, right aligned), with Host and Guide buttons streamlined to icon-only (using standard manual/book icon). Filters restyled into 5 discrete box buttons (icon top, label bottom, auto-fitting single row) modeled after Attention urgency pills.
+  2. *Top-Right Status Dot*: Environment card top-right badge/pill simplified to a small colored status dot aligned to the top-right of the title row.
+  3. *Detail View Navigation*: In single-column/mobile view, entering environment detail replaces the home title bar with a traditional non-floating back header (`[ ← Back ]` + truncated environment title) without retaining the home title bar or filter row.
+  4. *Unified 2x2 Grids & Anti-Overflow*: Core operational status dimensions (1–4) and capability permissions (5) unified into matching 2x2 grids, structured vertically (title/subtext top, full-width badge/button bottom) to prevent horizontal overflow on narrow mobile screens (320px–390px).
+  5. *Detail Card Padding*: Added comfortable padding (14px mobile, 16px desktop) to `.env-detail-card` to eliminate unpadded border collisions.
+  6. *Operations Toolbar De-duplication*: Removed redundant "Emergency Force Release" button from operations toolbar since the recovery alert box already provides it.
+  7. *Harness Bar Streamlining*: Candidate select dropdowns (`top-state-matrix-select`, `top-layout-select`, `scenario-jumper`) cleanly removed from the prototype top harness. Crucially, removing these UI controls does not remove underlying state matrices, scenario data models, or backend requirements, which are strictly preserved for downstream production specification and implementation.
 - **Owner Review Drawer**: Integrated into `web/src/prototype/views/review-drawer.ts` with complete checklist, accepted decisions, rejected alternatives, and unresolved notes.
 - **Verification Command**:
   ```bash
   npm test && npm run typecheck
   ```
-  Result: 188 unit & integration tests passing with 0 errors.
+  Result: 188+ unit & integration tests passing with 0 errors.

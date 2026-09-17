@@ -3124,12 +3124,129 @@ code {
   animation: fadeIn 0.2s ease-out;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.icon-only-btn {
+  padding: 6px 9px;
+  min-width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* 26. Environment Management & Recovery Styles (Ticket #65) */
+.envs-header-card {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0 0 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.env-filter-boxes {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  width: 100%;
+}
+
+.env-filter-box-btn {
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 6px 3px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  min-height: 46px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 3px;
+  overflow: hidden;
+  font-family: inherit;
+}
+
+.env-filter-box-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.env-filter-box-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.env-filter-box-btn.active .env-filter-box-top {
+  color: var(--accent-primary);
+}
+
+.env-filter-box-btn.active .env-filter-box-bottom {
+  color: var(--accent-primary);
+  font-weight: 700;
+}
+
+.env-filter-box-top {
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.env-filter-box-bottom {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  line-height: 1.1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .envs-split-layout {
   display: flex;
   gap: 12px;
   width: 100%;
   align-items: flex-start;
+}
+
+@media (max-width: 859px) {
+  .envs-split-layout {
+    flex-direction: column;
+  }
+  .envs-master-column {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .envs-detail-column {
+    width: 100%;
+    min-width: 0;
+  }
 }
 
 .envs-master-column {
@@ -3183,9 +3300,14 @@ code {
 
 .env-master-card-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.env-master-card-header .status-dot {
+  margin-top: 3px;
+  flex-shrink: 0;
 }
 
 .env-platform-icon {
@@ -3227,20 +3349,130 @@ code {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  box-shadow: var(--shadow-sm);
+  margin-bottom: 8px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.mobile-detail-nav-header .back-to-envs-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobile-detail-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.mobile-detail-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.dimensions-2x2-grid,
+.permissions-2x2-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  width: 100%;
+}
+
+.dimension-item,
+.permission-toggle-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--bg-surface);
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.dimension-item-top {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dimension-item-label,
+.permission-item-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.dimension-item-sub {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.dimension-item-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+
+.dimension-item-action .badge,
+.permission-toggle-item .perm-toggle-btn {
+  width: 100%;
+  text-align: center;
+  justify-content: center;
+  display: inline-flex;
+  box-sizing: border-box;
+  font-size: 10px;
+  padding: 3px 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .env-detail-card {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  padding: 14px;
+}
+
+@media (min-width: 768px) {
+  .env-detail-card {
+    padding: 16px;
+    gap: 16px;
+  }
 }
 
 .perm-toggle-btn {
