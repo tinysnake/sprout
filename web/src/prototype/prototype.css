@@ -3349,11 +3349,116 @@ code {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   margin-bottom: 8px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.mobile-detail-nav-header .back-to-envs-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobile-detail-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.mobile-detail-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.dimensions-2x2-grid,
+.permissions-2x2-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  width: 100%;
+}
+
+.dimension-item,
+.permission-toggle-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--bg-surface);
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  min-width: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.dimension-item-top {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dimension-item-label,
+.permission-item-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.dimension-item-sub {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.dimension-item-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+
+.dimension-item-action .badge,
+.permission-toggle-item .perm-toggle-btn {
+  width: 100%;
+  text-align: center;
+  justify-content: center;
+  display: inline-flex;
+  box-sizing: border-box;
+  font-size: 10px;
+  padding: 3px 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .env-detail-card {

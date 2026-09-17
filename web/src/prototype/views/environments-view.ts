@@ -100,11 +100,11 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
     mobileBackNav.className = 'mobile-detail-nav-header';
     mobileBackNav.innerHTML = `
       <button class="btn btn-secondary btn-sm back-to-envs-btn" id="btn-back-to-envs" title="Back to Environments" aria-label="Back to environments list">
-        ${renderIcon('chevron-left', 14)} Back to Environments
+        ${renderIcon('chevron-left', 14)} <span class="back-btn-text">Back</span>
       </button>
-      <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px;">
+      <div class="mobile-detail-title-wrap">
         <span class="status-dot ${selectedEnv.trafficLight}"></span>
-        <span style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${selectedEnv.displayName}</span>
+        <span class="mobile-detail-title-text">${selectedEnv.displayName}</span>
       </div>
       <div class="sr-only">
         Environments & Host Infrastructure
@@ -332,64 +332,62 @@ function renderEnvironmentDetailCard(
           <span style="font-size: 10px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
         </div>
 
-        <div class="dimensions-2x2-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+        <div class="dimensions-2x2-grid">
           <!-- 1. Enrollment -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
-            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
-              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">1. Enrollment</span>
-              <span style="font-size: 9px; color: var(--text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.workerIdentityKey.slice(0, 12)}...
-              </span>
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">1. Enrollment</span>
+              <span class="dimension-item-sub">${env.workerIdentityKey.slice(0, 14)}...</span>
             </div>
-            <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px;">
+            <div class="dimension-item-action">
+              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}">
                 ${env.enrollmentStatus.toUpperCase()}
               </span>
               ${
                 env.enrollmentStatus === 'pending'
-                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn" style="padding: 2px 5px; font-size: 9px;">Approve</button>`
+                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn">Approve</button>`
                   : ''
               }
             </div>
           </div>
 
           <!-- 2. Connection -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
-            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
-              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">2. Connection</span>
-              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.lastConfirmedTime}
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">2. Connection</span>
+              <span class="dimension-item-sub">Confirmed: ${env.lastConfirmedTime}</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}">
+                ${env.connectionState.toUpperCase()}
               </span>
             </div>
-            <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
-              ${env.connectionState.toUpperCase()}
-            </span>
           </div>
 
           <!-- 3. Protocol Compatibility -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
-            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
-              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">3. Protocol</span>
-              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.protocolVersion}
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">3. Protocol</span>
+              <span class="dimension-item-sub">Version: ${env.protocolVersion} (Req: v2.x)</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}">
+                ${env.protocolCompatibility.toUpperCase()}
               </span>
             </div>
-            <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
-              ${env.protocolCompatibility.toUpperCase()}
-            </span>
           </div>
 
           <!-- 4. Work Safety & Lease -->
-          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 6px; min-height: 36px;">
-            <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
-              <span style="font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">4. Work Safety</span>
-              <span style="font-size: 9px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'Clear'}
+          <div class="dimension-item">
+            <div class="dimension-item-top">
+              <span class="dimension-item-label">4. Work Safety</span>
+              <span class="dimension-item-sub">${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}</span>
+            </div>
+            <div class="dimension-item-action">
+              <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}">
+                ${env.workSafety.toUpperCase()}
               </span>
             </div>
-            <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}" style="font-size: 9px; padding: 2px 5px; flex-shrink: 0;">
-              ${env.workSafety.toUpperCase()}
-            </span>
           </div>
         </div>
       </div>
@@ -403,34 +401,34 @@ function renderEnvironmentDetailCard(
           <span style="font-size: 10px; color: var(--text-muted);">ADR-0008</span>
         </div>
 
-        <div class="permissions-2x2-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+        <div class="permissions-2x2-grid">
           <!-- File Read/Write -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">File R/W</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">File R/W</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.fileReadWrite ? 'btn-success' : 'btn-secondary'}" data-cap="fileReadWrite">
               ${env.capabilityPermissions.fileReadWrite ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- Process Execution -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">Process Exec</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">Process Exec</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.processExecution ? 'btn-success' : 'btn-secondary'}" data-cap="processExecution">
               ${env.capabilityPermissions.processExecution ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- Network Access -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">Network</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">Network</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.networkAccess ? 'btn-success' : 'btn-secondary'}" data-cap="networkAccess">
               ${env.capabilityPermissions.networkAccess ? 'Granted' : 'Refused'}
             </button>
           </div>
 
           <!-- GUI Automation -->
-          <div class="permission-toggle-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
-            <span style="font-size: 12px;">GUI Auto</span>
+          <div class="permission-toggle-item">
+            <span class="permission-item-label">GUI Auto</span>
             <button class="btn btn-xs perm-toggle-btn ${env.capabilityPermissions.guiAutomation ? 'btn-success' : 'btn-secondary'}" data-cap="guiAutomation">
               ${env.capabilityPermissions.guiAutomation ? 'Granted' : 'Refused'}
             </button>
