@@ -15,7 +15,6 @@ export function renderProjectChat(
 
   // Resolve current active scope identity
   let currentScopeTitle = '#general';
-  let currentScopeTypeBadge = 'Project Broadcast';
   let isReadOnly = project.status === 'archived';
   let readOnlyReason = project.status === 'archived' ? 'Project is archived. All communication is read-only.' : '';
   let activeWorkingGroup: WorkingGroup | undefined = undefined;
@@ -26,7 +25,6 @@ export function renderProjectChat(
   if (state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId) {
     activeWorkingGroup = project.workingGroups.find((w) => w.id === state.selectedWorkingGroupId);
     currentScopeTitle = activeWorkingGroup?.displayName || state.selectedWorkingGroupId;
-    currentScopeTypeBadge = activeWorkingGroup?.status === 'disbanded' ? 'Working Group (Disbanded)' : 'Working Group';
     if (activeWorkingGroup?.status === 'disbanded') {
       isReadOnly = true;
       readOnlyReason = 'This Working Group has been disbanded. Conversation history is preserved as read-only.';
@@ -40,7 +38,6 @@ export function renderProjectChat(
     activeDirectPeer = project.memberships.find((m) => m.memberId === state.selectedDirectMessagePeerId);
     const agentDef = state.agents.find((a) => a.id === state.selectedDirectMessagePeerId);
     currentScopeTitle = `@${activeDirectPeer?.displayName || agentDef?.displayName || state.selectedDirectMessagePeerId}`;
-    currentScopeTypeBadge = activeDirectPeer?.status === 'ended' ? 'Direct Message (Ended)' : 'Direct Message';
     if (activeDirectPeer?.status === 'ended') {
       isReadOnly = true;
       readOnlyReason = `Agent membership for @${activeDirectPeer.displayName} has ended in this project. History is preserved; new messages cannot be sent.`;
@@ -107,7 +104,6 @@ export function renderProjectChat(
       <div class="chat-section">
         <div class="chat-section-header">
           <span>Project Channels</span>
-          <span class="badge badge-info" style="font-size: 9px; padding: 1px 5px;">Broadcast</span>
         </div>
         <div class="chat-cards-list">
           <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
@@ -190,7 +186,6 @@ export function renderProjectChat(
       <div class="chat-section">
         <div class="chat-section-header">
           <span>Direct Messages (${agentMembers.length})</span>
-          <span class="badge badge-info" style="font-size: 9px; padding: 1px 5px;">1-on-1</span>
         </div>
         <div class="chat-cards-list">
           ${agentMembers
@@ -235,32 +230,12 @@ export function renderProjectChat(
       <div class="card" style="display: flex; flex-direction: column; min-height: 520px; height: 100%; position: relative;">
         
         <!-- Conversation Header -->
-        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
-            <span class="status-pill ${activeWorkingGroup?.status === 'disbanded' || activeDirectPeer?.status === 'ended' ? 'neutral' : 'purple'}" style="font-size: 10px;">
-              ${currentScopeTypeBadge}
-            </span>
-            ${
-              state.selectedScopeKind === 'project-channel'
-                ? `<span class="status-pill ${project.wakePolicy === 'wake-model-assisted' ? 'blue' : 'neutral'}" style="font-size: 10px;" title="Project Wake Policy (ADR-0007)">
-                    ${project.wakePolicy === 'wake-model-assisted' ? '⚡ Wake-Model Assisted (30s window)' : 'ℹ️ Explicit-Only'}
-                  </span>`
-                : ''
-            }
           </div>
           
           <div style="display: flex; align-items: center; gap: 6px;">
-            <button class="btn btn-secondary btn-sm" id="chat-inspect-routing-btn" title="Inspect Causal Wake Routing Evidence (ADR-0007)" style="gap: 5px; font-size: 11px;">
-              ${renderIcon('lightning', 13)} Causal Inspector
-            </button>
-            ${
-              activeWorkingGroup
-                ? `<button class="btn btn-secondary btn-sm" id="chat-manage-wg-btn" title="Manage Working Group Goal & Members" style="gap: 5px; font-size: 11px;">
-                    ${renderIcon('users', 13)} Manage WG
-                  </button>`
-                : ''
-            }
             <button class="btn btn-secondary btn-sm chat-info-btn" id="chat-scope-info-btn" title="Conversation Details & Routing Policy" aria-label="Conversation Details & Routing Policy" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
               ${renderIcon('info', 16)}
             </button>
@@ -323,7 +298,6 @@ export function renderProjectChat(
                         <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px;">
                           <div style="display: flex; align-items: center; gap: 6px;">
                             <span class="msg-author-name" style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName || msg.authorId}</span>
-                            <span class="status-pill neutral" style="font-size: 9px; padding: 1px 5px;">${msg.authorKind}</span>
                             ${
                               isProjected
                                 ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;" title="Non-routing projected reply (ADR-0007 loop prevention)">
@@ -377,18 +351,8 @@ export function renderProjectChat(
         <!-- Chat Composer Area -->
         <div class="chat-composer-wrap" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; flex-direction: column; gap: 8px;">
           
-          <!-- Mentions Helper & Quick Insert Chips -->
-          <div class="composer-mentions-bar" style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">
-            <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted);">
-              <span>Quick Mention:</span>
-              <button class="mention-chip-btn" data-mention="@all" title="Broadcast to all project members">@all</button>
-              ${agentMembers
-                .filter((m) => m.status === 'active')
-                .map((m) => `<button class="mention-chip-btn" data-mention="@${m.displayName}" title="Mention @${m.displayName}">@${m.displayName}</button>`)
-                .join('')}
-            </div>
-
-            <!-- Live Addressing Feedback Pill -->
+          <!-- Live Addressing Feedback Pill -->
+          <div class="composer-meta-bar" style="display: flex; align-items: center; justify-content: flex-end; min-height: 18px;">
             <div class="addressing-feedback-pill" id="composer-addressing-pill" style="font-size: 10px; color: var(--text-secondary); display: flex; align-items: center; gap: 4px;">
               ${
                 state.selectedScopeKind === 'direct-message'
@@ -479,11 +443,6 @@ export function renderProjectChat(
     );
   });
 
-  // Inspect Routing Button in Header
-  chatViewEl.querySelector('#chat-inspect-routing-btn')?.addEventListener('click', () => {
-    renderRoutingInspectorModal(rootContainer, state, 'batch-002');
-  });
-
   // Open Batch Button in Window Banner
   chatViewEl.querySelector('.inspect-open-batch-btn')?.addEventListener('click', (ev) => {
     const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-005';
@@ -498,23 +457,8 @@ export function renderProjectChat(
     });
   });
 
-  // Mention quick chips click handler
   const inputEl = chatViewEl.querySelector('#chat-main-input') as HTMLInputElement;
   const addressingPill = chatViewEl.querySelector('#composer-addressing-pill') as HTMLElement;
-
-  chatViewEl.querySelectorAll('.mention-chip-btn').forEach((chip) => {
-    chip.addEventListener('click', (ev) => {
-      if (!inputEl || isReadOnly) return;
-      const mention = (ev.currentTarget as HTMLElement).getAttribute('data-mention') || '';
-      if (inputEl.value.trim().length === 0) {
-        inputEl.value = `${mention} `;
-      } else {
-        inputEl.value = `${inputEl.value.trim()} ${mention} `;
-      }
-      inputEl.focus();
-      updateAddressingFeedback(inputEl.value);
-    });
-  });
 
   // Live input feedback handler
   const updateAddressingFeedback = (val: string) => {
@@ -724,6 +668,7 @@ export function renderChatInfoModal(
 
   // Inspect Routing modal opener
   modal.querySelector('.inspect-routing-btn')?.addEventListener('click', () => {
+    modal.remove();
     renderRoutingInspectorModal(parentEl, state, 'batch-002');
   });
 

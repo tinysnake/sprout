@@ -159,10 +159,9 @@ test('Chat Composition: quick mention insertion, live addressing feedback, and s
     assert.ok(input);
     assert.ok(sendBtn);
 
-    // 1. Quick Mention Click
-    const mentionChipAll = document.querySelector('.mention-chip-btn[data-mention="@all"]') as HTMLButtonElement;
-    assert.ok(mentionChipAll);
-    mentionChipAll.click();
+    // 1. Enter message with mention
+    input.value = '@all';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
 
     assert.equal(input.value.trim(), '@all');
 
@@ -258,7 +257,7 @@ test('Ended Agent Membership in DM: existing messages readable, composer disable
 
     // 1. Verify Scope Title & Ended status
     assert.match(document.body.textContent ?? '', /@Researcher/);
-    assert.match(document.body.textContent ?? '', /Direct Message \(Ended\)/);
+    assert.match(document.body.textContent ?? '', /Ended/);
 
     // 2. Verify Historical Messages are preserved and visible
     assert.match(document.body.textContent ?? '', /Baseline WebGL benchmarks completed/);
@@ -360,8 +359,12 @@ test('Causal Wake Routing Inspector: settles, suppresses, fails-closed, verifies
     stateManager.openChatDetail('project-channel');
     const document = dom.window.document;
 
-    // 1. Open Inspector via Header Button
-    const inspectBtn = document.querySelector('#chat-inspect-routing-btn') as HTMLButtonElement;
+    // 1. Open Inspector via Header Info Button -> Inspect Routing
+    const infoBtn = document.querySelector('#chat-scope-info-btn') as HTMLButtonElement;
+    assert.ok(infoBtn);
+    infoBtn.click();
+
+    const inspectBtn = document.querySelector('.inspect-routing-btn') as HTMLButtonElement;
     assert.ok(inspectBtn);
     inspectBtn.click();
 
