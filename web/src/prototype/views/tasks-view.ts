@@ -853,6 +853,9 @@ function renderNewProposalModal(
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   modal.querySelector('.create-prop-confirm-btn')?.addEventListener('click', () => {
     const titleInput = modal.querySelector('.new-task-title') as HTMLInputElement;
@@ -931,6 +934,9 @@ function renderEditTaskVersionModal(parentEl: HTMLElement, task: TaskItem) {
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   modal.querySelector('.save-version-btn')?.addEventListener('click', () => {
     const title = (modal.querySelector('.edit-task-title') as HTMLInputElement).value.trim();

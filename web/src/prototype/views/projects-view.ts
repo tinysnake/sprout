@@ -945,14 +945,13 @@ export function renderChatInfoModal(
             : ''
         }
       </div>
-
-      <div class="proto-modal-footer">
-        <button class="btn btn-secondary close-modal-btn">Close</button>
-      </div>
     </div>
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   // Inspect Routing modal opener
   modal.querySelector('.inspect-routing-btn')?.addEventListener('click', () => {
@@ -1088,14 +1087,13 @@ export function renderRoutingInspectorModal(
             : ''
         }
       </div>
-
-      <div class="proto-modal-footer">
-        <button class="btn btn-secondary close-modal-btn">Close</button>
-      </div>
     </div>
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
   parentEl.appendChild(modal);
 }
 
@@ -1197,14 +1195,13 @@ function renderProjectInfoModal(
           </div>
         </div>
       </div>
-
-      <div class="proto-modal-footer">
-        <button class="btn btn-secondary close-modal-btn">Close</button>
-      </div>
     </div>
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
   parentEl.appendChild(modal);
 }
 
@@ -1246,6 +1243,9 @@ function renderNewProjectModal(parentEl: HTMLElement) {
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => {
     b.addEventListener('click', () => modal.remove());
+  });
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
   });
 
   modal.querySelector('.create-confirm-btn')?.addEventListener('click', () => {
@@ -1307,6 +1307,9 @@ function renderEditContractModal(parentEl: HTMLElement, project: ProjectItem) {
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   modal.querySelector('.save-contract-btn')?.addEventListener('click', () => {
     const goal = (modal.querySelector('.edit-goal-input') as HTMLTextAreaElement).value.trim();
@@ -1373,6 +1376,9 @@ function renderAddMemberModal(parentEl: HTMLElement, state: PrototypeState, proj
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   modal.querySelector('.confirm-add-member-btn')?.addEventListener('click', () => {
     const agentSelect = modal.querySelector('.select-agent-input') as HTMLSelectElement;
@@ -1444,6 +1450,9 @@ function renderBindEnvironmentModal(
   `;
 
   modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
 
   modal.querySelector('.confirm-bind-env-btn')?.addEventListener('click', () => {
     const envSelect = modal.querySelector('.select-env-input') as HTMLSelectElement;
