@@ -420,21 +420,6 @@ export function renderProjectChat(
     }
   });
 
-  // Chat Info Modal Opener
-  chatViewEl.querySelector('#chat-scope-info-btn')?.addEventListener('click', () => {
-    renderChatInfoModal(
-      rootContainer,
-      state,
-      project,
-      state.selectedScopeKind,
-      state.selectedScopeKind === 'working-group-channel'
-        ? state.selectedWorkingGroupId
-        : state.selectedScopeKind === 'direct-message'
-          ? state.selectedDirectMessagePeerId
-          : undefined
-    );
-  });
-
   // Open Batch Button in Window Banner
   chatViewEl.querySelector('.inspect-open-batch-btn')?.addEventListener('click', (ev) => {
     const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-005';
