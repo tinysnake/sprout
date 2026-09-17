@@ -89,10 +89,27 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         </div>
       </div>
 
+      <!-- Ticket #61 Baseline Checklist -->
+      <div class="review-card">
+        <h4 class="review-section-title" style="color: var(--accent-primary);">
+          ${renderIcon('check', 16)} Ticket #61 Acceptance Criteria Verification (Inherited Shared Baseline)
+        </h4>
+        <div class="review-checklist">
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Visual Language & Responsive Framing:</strong> Color roles, 4px grid, dark/light theme, mobile bottom nav, desktop sidebar, and return/deep-link navigation.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Shared Interaction Primitives & State Language:</strong> Buttons, forms with validation error states, interactive lists, KPI cards, bottom sheets, modals, danger confirmation.</span>
+          </label>
+        </div>
+      </div>
+
       <!-- 1. Accepted Decisions (#64, #63, #62, ADR-0007, ADR-0008) -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--green-ready);">
-          ${renderIcon('check', 16)} Accepted Chat & Wake-Routing Decisions (#64, ADR-0007, ADR-0008)
+          ${renderIcon('check', 16)} Accepted Baseline Decisions & Module Decisions (#61, #62, #63, #64, ADR-0006, ADR-0007, ADR-0008)
         </h4>
         <ul class="review-list">
           <li>
@@ -119,13 +136,19 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           <li>
             <strong>Non-Destructive Working Group & Membership Lifecycles:</strong> Disbanding a Working Group or ending an agent membership marks the channel/DM read-only and preserves full message history.
           </li>
+          <li>
+            <strong>Multi-View Navigation Hierarchy:</strong> Rather than a monolithic single screen, Project organizes its concerns into three focused sub-views: <code>Overview</code>, <code>Tasks</code>, and <code>Chat</code>.
+          </li>
+          <li>
+            <strong>Human Authority Boundary for Task Begin & End:</strong> Proposing a Task holds NO Environment lease and executes NO agent run. Human <strong>Approve & Begin</strong> atomically binds an Environment, acquires its exclusive Task lease, prepares scratch context, and begins execution.
+          </li>
         </ul>
       </div>
 
       <!-- 2. Rejected Patterns -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--red-action);">
-          ${renderIcon('close', 16)} Rejected Patterns (#64, ADR-0007, ADR-0008)
+          ${renderIcon('close', 16)} Rejected Patterns
         </h4>
         <ul class="review-list">
           <li>
@@ -148,6 +171,33 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           </li>
           <li>
             <strong>Hard-Deleting Disbanded Working Groups or Ended DMs:</strong> Rejected; non-destructive preservation is required for audit integrity.
+          </li>
+        </ul>
+      </div>
+
+      <!-- 3. Unresolved Questions & Implementation Notes -->
+      <div class="review-card">
+        <h4 class="review-section-title" style="color: var(--yellow-attention);">
+          ${renderIcon('alert', 16)} Unresolved Questions & Implementation Notes
+        </h4>
+        <ul class="review-list">
+          <li>
+            <strong>Multi-Task Concurrency Limit per Environment:</strong> ADR-0005 strictly enforces one active Task lease per Environment instance. Multiple proposals may be queued, but only one can begin on a given Environment at a time.
+          </li>
+          <li>
+            <strong>Working Group Creation Rules:</strong> In M2, any Project member can create a Working Group; the creator is automatically added as its initial member.
+          </li>
+        </ul>
+      </div>
+
+      <!-- 4. Downstream Reuse & Revision Rules -->
+      <div class="review-card">
+        <h4 class="review-section-title" style="color: var(--purple-agent);">
+          ${renderIcon('check', 16)} Reuse & Revision Rules for Later Module Tickets (#65–#68)
+        </h4>
+        <ul class="review-list">
+          <li>
+            <strong>Tickets #65–#68 (Environments, Agents, Usage, Settings):</strong> Mount inside <code>Manage</code> tabs; reuse the accepted health indicators, danger confirmation dialog, routing inspector patterns, and telemetry tables.
           </li>
         </ul>
       </div>
