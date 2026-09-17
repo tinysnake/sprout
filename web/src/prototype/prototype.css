@@ -2478,6 +2478,12 @@ code {
 
 /* Responsive & Harness Viewport Modes for Chat */
 @media (max-width: 859px) {
+  .mobile-chat-back-header {
+    display: flex !important;
+  }
+  .chat-detail-desktop-row {
+    display: none !important;
+  }
   .project-chat-view {
     display: flex;
     flex-direction: column;
@@ -2503,6 +2509,21 @@ code {
   }
 }
 
+@media (min-width: 860px) {
+  .viewport-stage:not(.mode-mobile) .mobile-chat-back-header {
+    display: none !important;
+  }
+  .viewport-stage:not(.mode-mobile) .chat-detail-desktop-row {
+    display: flex !important;
+  }
+}
+
+.viewport-stage.mode-mobile .mobile-chat-back-header {
+  display: flex !important;
+}
+.viewport-stage.mode-mobile .chat-detail-desktop-row {
+  display: none !important;
+}
 .viewport-stage.mode-mobile .project-chat-view {
   display: flex !important;
   flex-direction: column !important;
@@ -2527,6 +2548,12 @@ code {
   width: 100% !important;
 }
 
+.viewport-stage.mode-desktop .mobile-chat-back-header {
+  display: none !important;
+}
+.viewport-stage.mode-desktop .chat-detail-desktop-row {
+  display: flex !important;
+}
 .viewport-stage.mode-desktop .project-chat-view {
   display: grid !important;
   grid-template-columns: 310px 1fr !important;
