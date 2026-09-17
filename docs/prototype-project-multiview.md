@@ -88,6 +88,17 @@ Rather than forcing all Project concerns into a single monolithic tab or scrollv
 
 The prototype implements the complete 7-stage Task operating loop governed by ADR-0006:
 
+### Task List (Grid View) & Task Detail Page Drill-Down
+- **Single Status Filter Dropdown:** Replaces horizontal pill clutter with a clean `<select>` displaying counts for `All`, `Active / Running`, `Validation Claims`, `Blocked`, `Proposals`, `Recovery`, and `Completed`.
+- **Responsive Tasks Grid:**
+  - Phone / Narrow: 1 column card list with high-contrast status borders.
+  - Wide / Desktop: 3–4 column responsive grid view (`repeat(auto-fill, minmax(280px, 1fr))`).
+  - Cards display Task ID, Lifecycle pill, Title (2-line clamp), Goal snippet, 3-part sentence pill, Lead agent, Bound host environment, and click chevron.
+- **Drill-Down Detail Page & Native Browser Back Support:**
+  - Clicking any task card opens its dedicated **Task Detail Page** containing the complete operating controls, version editor, and run execution timeline.
+  - Top-left `← Back to Tasks` button returns to the Task List View.
+  - Full `window.history.pushState` and `popstate` integration enables native browser Back and Forward navigation without full page reloads.
+
 ### 3-Part Disambiguated Lifecycle Sentence
 Every task presents its operational state through a unified sentence and color-coded badge row:
 $$\text{Task State} \cdot \text{Agent Run State} \cdot \text{Task Lease State}$$
