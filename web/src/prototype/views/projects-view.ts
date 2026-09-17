@@ -191,18 +191,13 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
     <!-- 1. Project Contract & Purpose Card -->
     <div class="card grid-col-full">
       <div class="card-header">
-        <div>
-          <span class="card-title">Project Contract & Purpose</span>
-          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
-            ID: <code>${project.id}</code> · Template: <code>${project.templateSource}</code> · Created: ${project.createdAt}
-          </div>
-        </div>
+        <span class="card-title">Project Contract & Purpose</span>
         <div style="display: flex; gap: 8px; align-items: center;">
           <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">
             ${project.status === 'active' ? 'Active' : 'Archived'}
           </span>
-          <button class="btn btn-secondary btn-sm edit-contract-btn" ${project.status === 'archived' ? 'disabled' : ''}>
-            ${renderIcon('edit', 14)} Edit Contract
+          <button class="btn btn-secondary btn-sm edit-contract-btn" title="Edit Project Contract" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+            ${renderIcon('edit', 14)}
           </button>
         </div>
       </div>
@@ -281,8 +276,8 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             ${project.memberships.filter((m) => m.status === 'active').length} Active · ${project.memberships.filter((m) => m.status === 'ended').length} Ended
           </div>
         </div>
-        <button class="btn btn-secondary btn-sm add-member-btn" ${project.status === 'archived' ? 'disabled' : ''}>
-          ${renderIcon('plus', 14)} Add Agent
+        <button class="btn btn-secondary btn-sm add-member-btn" title="Add Global Agent to Project" aria-label="Add Global Agent to Project" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)}
         </button>
       </div>
 
@@ -339,8 +334,8 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             ${project.boundEnvironmentWorkspaces.length} Host Binding(s)
           </div>
         </div>
-        <button class="btn btn-secondary btn-sm bind-env-btn" ${project.status === 'archived' ? 'disabled' : ''}>
-          ${renderIcon('plus', 14)} Bind Environment
+        <button class="btn btn-secondary btn-sm bind-env-btn" title="Bind Host Environment" aria-label="Bind Host Environment" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)}
         </button>
       </div>
 
@@ -390,19 +385,14 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             Project Channel (<code>#general</code>) · ${project.workingGroups.filter((w) => w.status === 'active').length} Active Working Groups
           </div>
         </div>
-        <div style="display: flex; gap: 8px;">
-          <button class="btn btn-secondary btn-sm create-wg-btn" ${project.status === 'archived' ? 'disabled' : ''}>
-            ${renderIcon('plus', 14)} New Working Group
-          </button>
-          <button class="btn btn-primary btn-sm jump-chat-btn">
-            ${renderIcon('chat', 14)} Open Project Channel →
-          </button>
-        </div>
+        <button class="btn btn-secondary btn-sm create-wg-btn" title="Create Focused Working Group" aria-label="Create Focused Working Group" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)}
+        </button>
       </div>
 
       <div class="card-body" style="display: flex; flex-direction: column; gap: 10px;">
         <!-- Project Channel Preview -->
-        <div style="background: var(--bg-surface-elevated); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div style="background: var(--bg-surface-elevated); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; cursor: pointer;" class="jump-chat-btn" title="Open Project Channel">
           <div>
             <div style="font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
               ${renderIcon('chat', 14)}
@@ -413,9 +403,9 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
               Primary project channel for multi-agent coordination and broadcast instructions.
             </div>
           </div>
-          <button class="btn btn-secondary btn-sm jump-chat-btn">
-            Open Channel
-          </button>
+          <span style="color: var(--accent-primary); display: inline-flex; align-items: center; gap: 4px; font-size: 12px;">
+            ${renderIcon('chevron-right', 14)}
+          </span>
         </div>
 
         <!-- Working Groups Sub-List -->
