@@ -267,7 +267,11 @@ export function renderProjectChat(
                   .map((msg) => {
                     const isMe = msg.authorKind === 'human';
                     const isProjected = msg.isProjectedReply;
-                    const batch = state.routingBatches.find((b) => b.id === msg.routingCausalChainId);
+
+                    const hasMeta =
+                      (isProjected && !!msg.projectedReplyMeta) ||
+                      !!msg.routingCausalChainId ||
+                      msg.disposition === 'addressed';
 
                     return `
                       <div class="chat-msg ${isMe ? 'msg-me' : 'msg-them'} ${isProjected ? 'msg-projected' : ''}" data-msg-id="${msg.id}">
@@ -279,8 +283,8 @@ export function renderProjectChat(
                           </div>
                           <div class="msg-meta-actions" style="display: flex; align-items: center; gap: 6px; position: relative;">
                             ${
-                              isProjected && msg.projectedReplyMeta
-                                ? `<button class="btn btn-ghost btn-sm msg-projected-info-btn" data-msg-id="${msg.id}" title="Projected Reply Information" aria-label="Projected Reply Information" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); border-radius: 50%; cursor: pointer;">
+                              hasMeta
+                                ? `<button class="btn btn-ghost btn-sm msg-info-trigger-btn msg-projected-info-btn" data-msg-id="${msg.id}" title="${isProjected ? 'Projected Reply Information' : 'Routing & Delivery Evidence'}" aria-label="${isProjected ? 'Projected Reply Information' : 'Routing & Delivery Evidence'}" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); border-radius: 50%; cursor: pointer;">
                                     ${renderIcon('info', 13)}
                                   </button>`
                                 : ''
@@ -293,21 +297,6 @@ export function renderProjectChat(
                         <div class="msg-text" style="font-size: 13px; line-height: 1.45; word-break: break-word;">
                           ${renderMessageTextWithMentions(msg.content)}
                         </div>
-
-                        <!-- Causal Routing Tag / Evidence Badge -->
-                        ${
-                          msg.routingCausalChainId
-                            ? `<div class="msg-routing-tag" data-batch="${msg.routingCausalChainId}" style="margin-top: 5px; font-size: 10px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; background: var(--bg-surface-elevated); padding: 2px 7px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); width: fit-content;" title="Click to inspect causal wake routing chain (ADR-0007)">
-                                ${renderIcon('lightning', 11)}
-                                <span>Batch: <code>${msg.routingCausalChainId}</code> (${batch?.status ?? msg.disposition})</span>
-                              </div>`
-                            : msg.disposition === 'addressed'
-                              ? `<div style="margin-top: 4px; font-size: 10px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px;">
-                                  ${renderIcon('lightning', 10)}
-                                  <span>Deterministic addressing (bypassed model & window)</span>
-                                </div>`
-                              : ''
-                        }
                       </div>
                     `;
                   })
@@ -396,21 +385,13 @@ export function renderProjectChat(
     );
   });
 
-  // Message Routing Tag click listener -> Open Inspector Modal
-  chatViewEl.querySelectorAll('.msg-routing-tag').forEach((tag) => {
-    tag.addEventListener('click', (ev) => {
-      const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-002';
-      renderRoutingInspectorModal(rootContainer, state, batchId);
-    });
-  });
-
-  // Projected Reply Info popup opener
-  chatViewEl.querySelectorAll('.msg-projected-info-btn').forEach((btn) => {
+  // Message Info popup opener (Agent Projected Reply or Human Routing Evidence)
+  chatViewEl.querySelectorAll('.msg-info-trigger-btn').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const msgId = (ev.currentTarget as HTMLElement).getAttribute('data-msg-id');
       const msg = filteredMessages.find((m) => m.id === msgId);
-      if (!msg || !msg.projectedReplyMeta) return;
+      if (!msg) return;
 
       const parentMeta = (ev.currentTarget as HTMLElement).closest('.msg-meta-actions');
       if (!parentMeta) return;
@@ -423,23 +404,75 @@ export function renderProjectChat(
       popup.style.cssText =
         'position: absolute; right: 0; top: 22px; z-index: 60; width: 280px; max-width: 85vw; padding: 10px 12px; background: var(--bg-surface-elevated); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); font-size: 11px; display: flex; flex-direction: column; gap: 6px;';
 
-      popup.innerHTML = `
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px;">
-          <span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;" title="Non-routing projected reply (ADR-0007 loop prevention)">
-            ${renderIcon('check', 10)} Projected Reply · Non-Routing
-          </span>
-          <button class="btn btn-ghost btn-sm close-projected-popup-btn" aria-label="Close details" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer;">
-            ${renderIcon('close', 10)}
-          </button>
-        </div>
-        <div class="projected-reply-meta-content" style="display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); line-height: 1.45;">
-          <div><strong>Run:</strong> <code>${msg.projectedReplyMeta.runId}</code> · <strong>Wake:</strong> <code>${msg.projectedReplyMeta.wakeRequestId}</code></div>
-          <div><strong>Triggered by:</strong> <code>${msg.projectedReplyMeta.triggeringMessageIds.join(', ')}</code></div>
-          <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
-            Non-routing boundary: Assistant output projected upon completion cannot trigger downstream wake evaluations.
+      if (msg.isProjectedReply && msg.projectedReplyMeta) {
+        popup.innerHTML = `
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px;">
+            <span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;" title="Non-routing projected reply (ADR-0007 loop prevention)">
+              ${renderIcon('check', 10)} Projected Reply · Non-Routing
+            </span>
+            <button class="btn btn-ghost btn-sm close-projected-popup-btn" aria-label="Close details" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer;">
+              ${renderIcon('close', 10)}
+            </button>
           </div>
-        </div>
-      `;
+          <div class="projected-reply-meta-content" style="display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); line-height: 1.45;">
+            <div><strong>Run:</strong> <code>${msg.projectedReplyMeta.runId}</code> · <strong>Wake:</strong> <code>${msg.projectedReplyMeta.wakeRequestId}</code></div>
+            <div><strong>Triggered by:</strong> <code>${msg.projectedReplyMeta.triggeringMessageIds.join(', ')}</code></div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+              Non-routing boundary: Assistant output projected upon completion cannot trigger downstream wake evaluations.
+            </div>
+          </div>
+        `;
+      } else {
+        const batch = state.routingBatches.find((b) => b.id === msg.routingCausalChainId);
+        popup.innerHTML = `
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px;">
+            <span style="font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 5px;">
+              ${renderIcon('lightning', 12)} Routing & Delivery Evidence
+            </span>
+            <button class="btn btn-ghost btn-sm close-projected-popup-btn" aria-label="Close details" style="padding: 0; width: 18px; height: 18px; min-height: 18px; display: flex; align-items: center; justify-content: center; color: var(--text-muted); cursor: pointer;">
+              ${renderIcon('close', 10)}
+            </button>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); line-height: 1.45;">
+            ${
+              msg.routingCausalChainId
+                ? `
+                  <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Batch: <code>${msg.routingCausalChainId}</code></span>
+                    <span class="status-pill ${batch?.status === 'settled' ? 'green' : batch?.status === 'failed-closed' ? 'red' : 'neutral'}" style="font-size: 9px;">${batch?.status ?? msg.disposition}</span>
+                  </div>
+                  <div style="font-size: 10px; color: var(--text-muted);">
+                    Unaddressed input evaluated under wake-model-assisted policy (30s collection window).
+                  </div>
+                  <button class="btn btn-secondary btn-sm msg-popup-inspect-btn msg-routing-tag" data-batch="${msg.routingCausalChainId}" style="width: 100%; justify-content: center; gap: 6px; font-size: 11px; margin-top: 2px; cursor: pointer;">
+                    ${renderIcon('lightning', 12)} Inspect Causal Routing Chain
+                  </button>
+                `
+                : msg.disposition === 'addressed'
+                  ? `
+                    <div style="display: flex; align-items: center; gap: 5px; color: var(--green-ready); font-weight: 600;">
+                      ${renderIcon('check', 12)} Deterministic Addressing
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-muted);">
+                      Direct DM, exact @mention, or @all broadcast admitted immediately, bypassing wake policy and collection windows.
+                    </div>
+                  `
+                  : `
+                    <div style="font-size: 10px; color: var(--text-muted);">
+                      Informational message persisted without wake under explicit-only policy.
+                    </div>
+                  `
+            }
+          </div>
+        `;
+
+        popup.querySelector('.msg-popup-inspect-btn')?.addEventListener('click', (inspEv) => {
+          inspEv.stopPropagation();
+          const batchId = (inspEv.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-002';
+          popup.remove();
+          renderRoutingInspectorModal(rootContainer, state, batchId);
+        });
+      }
 
       popup.querySelector('.close-projected-popup-btn')?.addEventListener('click', (closeEv) => {
         closeEv.stopPropagation();

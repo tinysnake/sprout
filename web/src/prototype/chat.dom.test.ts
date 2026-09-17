@@ -292,8 +292,8 @@ test('Durable Projected Replies: loop-prevention badge, provenance metadata, and
     assert.equal(document.querySelector('.projected-reply-meta-card'), null, 'Meta card not displayed in chat body');
     assert.equal(document.querySelector('.msg-author-row .badge-purple'), null, 'Badge not displayed permanently in author row');
 
-    // 2. Verify trigger 'i' button exists to the left of msg-time
-    const infoTrigger = document.querySelector('.msg-projected-info-btn') as HTMLButtonElement;
+    // 2. Verify trigger 'i' button exists to the left of msg-time for projected replies
+    const infoTrigger = document.querySelector('.msg-projected .msg-projected-info-btn') as HTMLButtonElement;
     assert.ok(infoTrigger, 'Projected reply info trigger button exists next to timestamp');
 
     // 3. Click trigger 'i' button to open popup
@@ -316,6 +316,21 @@ test('Durable Projected Replies: loop-prevention badge, provenance metadata, and
     assert.ok(closeBtn);
     closeBtn.click();
     assert.equal(document.querySelector('.projected-reply-popup'), null, 'Popup closed on dismiss');
+
+    // 5. Also verify human message routing evidence trigger button and popup
+    const humanInfoTrigger = document.querySelector('.msg-me .msg-info-trigger-btn') as HTMLButtonElement;
+    assert.ok(humanInfoTrigger, 'Human message routing evidence trigger button exists next to timestamp');
+    humanInfoTrigger.click();
+
+    const humanPopup = document.querySelector('.projected-reply-popup');
+    assert.ok(humanPopup, 'Human message routing popup opened');
+    assert.match(humanPopup.textContent ?? '', /Routing & Delivery Evidence/);
+    assert.match(humanPopup.textContent ?? '', /Batch:|Deterministic Addressing/);
+
+    const closeHumanBtn = humanPopup.querySelector('.close-projected-popup-btn') as HTMLButtonElement;
+    assert.ok(closeHumanBtn);
+    closeHumanBtn.click();
+    assert.equal(document.querySelector('.projected-reply-popup'), null, 'Human popup closed');
   } finally {
     await cleanup();
   }

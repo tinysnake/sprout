@@ -221,7 +221,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Intrusive In-Chat Collection Window Countdown Banners:</strong> Rejected per owner review in favor of a clean conversation flow; routing batches remain inspectable via message tags and conversation details without interrupting active chat.
           </li>
           <li>
-            <strong>Permanent In-Message Display of Projected Reply Badges & Provenance Cards:</strong> Rejected per owner review in favor of an on-demand popup triggered by an <code>i</code> button to the left of the message timestamp, avoiding visual clutter in conversation flow.
+            <strong>Permanent In-Message Display of Routing Tags, Badges & Provenance Cards:</strong> Rejected per owner review in favor of an on-demand popup triggered by an <code>i</code> button to the left of the message timestamp on both human and agent messages, avoiding visual clutter in conversation flow.
           </li>
           <li>
             <strong>Automatic Timeout-Driven Lease Release:</strong> Rejected in ADR-0005; silently releasing an idle or blocked Task's environment causes catastrophic loss of uncommitted state in scarce host environments.

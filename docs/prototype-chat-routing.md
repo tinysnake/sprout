@@ -155,8 +155,9 @@ When an Agent completes a run triggered by a message or wake request:
 
 In accordance with ADR-0007:
 - The Local Operator MVP provides **no routing-specific manual controls** (no manual "Route now" or "Retry routing" buttons, and no manual pending-wake override buttons).
+- **Unobtrusive On-Demand Inspection**: In routine conversation, neither human message routing tags nor agent projected reply provenance cards clutter the message bubble. Instead, any message with routing or provenance metadata features an unobtrusive `i` info trigger button to the left of the message timestamp (`msg-time`).
+- Clicking `i` on a human message reveals its routing batch ID, status, and an action to inspect the deep Causal Wake-Routing Inspector modal. Clicking `i` on an agent reply reveals its loop-prevention badge, run provenance, and triggering inputs.
 - All routing evidence is **purely observational and inspectable**, providing complete causal visibility from input message $\rightarrow$ collection window $\rightarrow$ context manifest $\rightarrow$ model attempt $\rightarrow$ model rationale $\rightarrow$ WakeRequest admission $\rightarrow$ linked Agent run $\rightarrow$ projected reply.
-- Operators can communicate naturally via standard composition (e.g. sending a direct message or explicit mention if immediate attention is desired).
 
 ---
 
@@ -207,7 +208,7 @@ In accordance with ADR-0007:
 6. **Hard Deletion of Groups or DMs**: Rejected; damages historical traceability.
 7. **Permanent Quick-Mention Chips & In-Composer Addressing Feedback Pills**: Rejected per owner review in favor of a clean, uncluttered composer; deterministic addressing and collection windows remain governed by ADR-0007 invariants.
 8. **Intrusive In-Chat Collection Window Countdown Banners**: Rejected per owner review in favor of a clean conversation flow; routing batches remain inspectable via message tags and conversation details without interrupting chat view.
-9. **Permanent In-Message Display of Projected Reply Badges & Provenance Cards**: Rejected per owner review in favor of an on-demand popup triggered by an `i` button to the left of the message timestamp, avoiding visual clutter in conversation flow.
+9. **Permanent In-Message Display of Routing Tags, Badges & Provenance Cards**: Rejected per owner review in favor of an on-demand popup triggered by an `i` button to the left of the message timestamp on both human and agent messages, eliminating visual clutter from the conversational stream.
 
 ### Unresolved Questions
 1. **Working Group Creation Authority**: In M2, any Project member can create a Working Group; creator is automatically enrolled.
