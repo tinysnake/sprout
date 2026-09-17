@@ -565,6 +565,20 @@ export function initPrototype(mountEl: HTMLElement): void {
   // Subscribe to state changes
   stateManager.subscribe(render);
 
+  // Browser History Navigation (Back/Forward buttons)
+  if (typeof window !== 'undefined') {
+    window.addEventListener('popstate', (ev) => {
+      const state = stateManager.getSnapshot();
+      if (ev.state?.page === 'task-detail' && ev.state.taskId) {
+        stateManager.openTaskDetail(ev.state.taskId, false);
+      } else if (ev.state?.page === 'task-list') {
+        stateManager.closeTaskDetail(false);
+      } else if (state.primaryNav === 'project' && state.projectTab === 'tasks' && state.taskViewMode === 'detail') {
+        stateManager.closeTaskDetail(false);
+      }
+    });
+  }
+
   // Initial render
   render();
 }

@@ -42,6 +42,8 @@ export interface PrototypeState {
   feedAttentionFilter: 'all' | AttentionCategory | AttentionSeverity;
   feedActivityFilter: 'all' | 'tasks' | 'messages' | 'envs' | 'usage';
   mobileFeedSplitTab: 'attention' | 'activity';
+  taskViewMode: 'list' | 'detail';
+  taskFilter: string;
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -1275,6 +1277,8 @@ class StateManager {
       feedAttentionFilter: 'all',
       feedActivityFilter: 'all',
       mobileFeedSplitTab: 'attention',
+      taskViewMode: 'list',
+      taskFilter: 'all',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -1421,7 +1425,10 @@ class StateManager {
       fromFeedScope: this.state.feedScopeFilter,
       fromFeedSeverity: this.state.feedAttentionSeverityFilter,
     };
-    if (target.taskId) this.state.selectedTaskId = target.taskId;
+    if (target.taskId) {
+      this.state.selectedTaskId = target.taskId;
+      this.state.taskViewMode = 'detail';
+    }
     if (target.envId) this.state.selectedEnvironmentId = target.envId;
     if (target.agentId) this.state.selectedAgentId = target.agentId;
     this.setPrimaryNav(target.nav, target.projectTab, target.manageTab);
@@ -1858,8 +1865,37 @@ class StateManager {
   }
 
   public selectTask(taskId: string) {
+    this.openTaskDetail(taskId);
+  }
+
+  public openTaskDetail(taskId: string, pushHistory = true) {
+    this.state.taskViewMode = 'detail';
     this.state.selectedTaskId = taskId;
-    this.notify(`Selected Task #${taskId}`);
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState(
+          { page: 'task-detail', taskId },
+          '',
+          window.location.pathname + '#task-' + taskId
+        );
+      } catch {}
+    }
+    this.notify(`Opened Task Detail for #${taskId.replace('task-', '')}`);
+  }
+
+  public closeTaskDetail(pushHistory = true) {
+    this.state.taskViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState({ page: 'task-list' }, '', window.location.pathname + '#tasks');
+      } catch {}
+    }
+    this.notify('Returned to Task List view');
+  }
+
+  public setTaskFilter(filter: string) {
+    this.state.taskFilter = filter;
+    this.notify(`Set task filter to ${filter}`);
   }
 
   public selectEnvironment(envId: string) {

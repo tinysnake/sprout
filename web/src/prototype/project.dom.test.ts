@@ -364,3 +364,63 @@ test('Project Archiving: safely disabled when active task runs exist, enabled wh
     await cleanup();
   }
 });
+
+test('Task Operating Loop: filter dropdown, grid view, page drill-down, and back navigation', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    // Navigate to Tasks (List Mode)
+    stateManager.setPrimaryNav('project', 'tasks');
+    stateManager.closeTaskDetail(false);
+
+    const document = dom.window.document;
+
+    // 1. Verify Single Filter Dropdown
+    const filterSelect = document.querySelector('#task-filter-select') as HTMLSelectElement;
+    assert.ok(filterSelect, 'Task filter dropdown rendered');
+    assert.match(filterSelect.textContent ?? '', /All Tasks/);
+    assert.match(filterSelect.textContent ?? '', /Active \/ Running/);
+
+    // 2. Verify Responsive Tasks Grid
+    const tasksGrid = document.querySelector('.tasks-grid');
+    assert.ok(tasksGrid, 'Tasks responsive grid view rendered');
+
+    const cards = document.querySelectorAll('.task-grid-card');
+    assert.ok(cards.length >= 5, 'Grid contains task cards');
+
+    // 3. Test Filter Dropdown Change
+    filterSelect.value = 'active';
+    filterSelect.dispatchEvent(new dom.window.Event('change'));
+
+    const filteredCards = document.querySelectorAll('.task-grid-card');
+    assert.equal(filteredCards.length, 1, 'Filtered to active task only');
+    assert.match(filteredCards[0].textContent ?? '', /#102/);
+
+    // 4. Test Page Drill-down by clicking card
+    (filteredCards[0] as HTMLElement).click();
+
+    // Verify we switched to Task Detail Page
+    assert.ok(document.querySelector('.task-detail-top-nav'), 'Task Detail Page rendered');
+    const backBtn = document.querySelector('#btn-back-to-tasks') as HTMLButtonElement;
+    assert.ok(backBtn, 'Back to Tasks button rendered');
+
+    // Verify Detail Page has lifecycle sentence & operating controls
+    assert.match(document.body.textContent ?? '', /Task active · Agent running · Lease held/);
+
+    // 5. Test Back Button navigation back to List Page
+    backBtn.click();
+    assert.ok(document.querySelector('.tasks-grid'), 'Returned to Tasks Grid view');
+  } finally {
+    await cleanup();
+  }
+});

@@ -10,146 +10,223 @@ export function renderTasksView(state: PrototypeState): HTMLElement {
     state.projects.find((p) => p.id === state.selectedProjectId) ?? state.projects[0];
   const projectTasks = state.tasks.filter((t) => t.projectId === (project?.id || state.selectedProjectId));
 
-  // Determine current active filter
-  const currentFilter = (state as any).taskFilter || 'all';
+  const selectedTask =
+    projectTasks.find((t) => t.id === state.selectedTaskId) ??
+    state.tasks.find((t) => t.id === state.selectedTaskId);
 
-  // Section 1: Tasks Navigation & Filter Carousel Header
-  const tasksHeader = document.createElement('div');
-  tasksHeader.className = 'card';
-  tasksHeader.innerHTML = `
-    <div class="card-header">
+  // If in Detail mode and a task is selected, render the dedicated Task Detail Page
+  if (state.taskViewMode === 'detail' && selectedTask) {
+    return renderTaskDetailPage(container, state, project, selectedTask);
+  }
+
+  // Otherwise, render the Task List Page (Grid View with Dropdown Filter)
+  return renderTaskListPage(container, state, project, projectTasks);
+}
+
+/**
+ * Renders the Task List Page with Filter Dropdown and Responsive Grid View
+ */
+function renderTaskListPage(
+  container: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem | undefined,
+  projectTasks: TaskItem[]
+): HTMLElement {
+  const currentFilter = state.taskFilter || 'all';
+
+  const activeCount = projectTasks.filter(
+    (t) => t.lifecycle === 'active' || t.lifecycle === 'Task pause requested'
+  ).length;
+  const validationCount = projectTasks.filter((t) => t.lifecycle === 'awaiting validation').length;
+  const blockedCount = projectTasks.filter((t) => t.lifecycle === 'blocked').length;
+  const proposedCount = projectTasks.filter((t) => t.lifecycle === 'proposed').length;
+  const recoveryCount = projectTasks.filter((t) => t.lifecycle === 'recovery').length;
+  const completedCount = projectTasks.filter(
+    (t) => t.lifecycle === 'completed' || t.lifecycle === 'cancelled'
+  ).length;
+
+  const filteredTasks = projectTasks.filter((t) => {
+    if (currentFilter === 'active') return t.lifecycle === 'active' || t.lifecycle === 'Task pause requested';
+    if (currentFilter === 'validation') return t.lifecycle === 'awaiting validation';
+    if (currentFilter === 'blocked') return t.lifecycle === 'blocked';
+    if (currentFilter === 'proposed') return t.lifecycle === 'proposed';
+    if (currentFilter === 'recovery') return t.lifecycle === 'recovery';
+    if (currentFilter === 'completed') return t.lifecycle === 'completed' || t.lifecycle === 'cancelled';
+    return true;
+  });
+
+  const listCard = document.createElement('div');
+  listCard.className = 'card';
+
+  listCard.innerHTML = `
+    <!-- Top Header: Title, Filter Dropdown, Propose Button (Item 1 & 2) -->
+    <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
       <div>
         <h2 style="font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
           ${renderIcon('tasks', 18)}
-          <span>Project Task Operating Loop</span>
+          <span>Project Tasks & Operating Loop</span>
         </h2>
         <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-          Human authority governs Task begin/end; Task lead coordinates multi-run autonomous execution under Task-held lease (ADR-0006).
+          Click any task card to drill down into its full operating controls and run execution timeline.
         </p>
       </div>
-      <button class="btn btn-primary btn-sm new-proposal-btn" ${project?.status === 'archived' ? 'disabled' : ''}>
-        ${renderIcon('plus', 14)} Propose Task
-      </button>
+
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <!-- Single Filter Dropdown (Item 1) -->
+        <select class="form-select task-filter-select" id="task-filter-select" aria-label="Filter tasks by status">
+          <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>All Tasks (${projectTasks.length})</option>
+          <option value="active" ${currentFilter === 'active' ? 'selected' : ''}>Active / Running (${activeCount})</option>
+          <option value="validation" ${currentFilter === 'validation' ? 'selected' : ''}>Validation Claims (${validationCount})</option>
+          <option value="blocked" ${currentFilter === 'blocked' ? 'selected' : ''}>Blocked (${blockedCount})</option>
+          <option value="proposed" ${currentFilter === 'proposed' ? 'selected' : ''}>Proposals (${proposedCount})</option>
+          <option value="recovery" ${currentFilter === 'recovery' ? 'selected' : ''}>Recovery (${recoveryCount})</option>
+          <option value="completed" ${currentFilter === 'completed' ? 'selected' : ''}>Completed (${completedCount})</option>
+        </select>
+
+        <button class="btn btn-primary btn-sm new-proposal-btn" ${project?.status === 'archived' ? 'disabled' : ''}>
+          ${renderIcon('plus', 14)} Propose Task
+        </button>
+      </div>
     </div>
 
-    <!-- Task Filter Pills -->
-    <div class="task-filter-bar" role="group" aria-label="Filter tasks by lifecycle">
-      <button class="task-filter-pill ${currentFilter === 'all' ? 'active' : ''}" data-filter="all">
-        All <span class="pill-count">${projectTasks.length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'active' ? 'active' : ''}" data-filter="active">
-        Active / Running <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'active' || t.lifecycle === 'Task pause requested').length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'validation' ? 'active' : ''}" data-filter="validation">
-        Validation Claims <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'awaiting validation').length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'blocked' ? 'active' : ''}" data-filter="blocked">
-        Blocked <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'blocked').length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'proposed' ? 'active' : ''}" data-filter="proposed">
-        Proposals <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'proposed').length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'recovery' ? 'active' : ''}" data-filter="recovery">
-        Recovery <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'recovery').length}</span>
-      </button>
-      <button class="task-filter-pill ${currentFilter === 'completed' ? 'active' : ''}" data-filter="completed">
-        Completed <span class="pill-count">${projectTasks.filter((t) => t.lifecycle === 'completed' || t.lifecycle === 'cancelled').length}</span>
-      </button>
-    </div>
-
-    <!-- Task Selection Carousel Cards -->
-    <div class="task-carousel" role="listbox" aria-label="Select Task">
+    <!-- Responsive Grid View: 1-col on mobile, 3-4 col on desktop (Item 2) -->
+    <div class="card-body">
       ${
-        projectTasks.length === 0
-          ? `<div style="font-size: 12px; color: var(--text-muted); padding: 10px 0;">No tasks found in this project. Propose a new task to get started.</div>`
-          : projectTasks
-              .filter((t) => {
-                if (currentFilter === 'active') return t.lifecycle === 'active' || t.lifecycle === 'Task pause requested';
-                if (currentFilter === 'validation') return t.lifecycle === 'awaiting validation';
-                if (currentFilter === 'blocked') return t.lifecycle === 'blocked';
-                if (currentFilter === 'proposed') return t.lifecycle === 'proposed';
-                if (currentFilter === 'recovery') return t.lifecycle === 'recovery';
-                if (currentFilter === 'completed') return t.lifecycle === 'completed' || t.lifecycle === 'cancelled';
-                return true;
-              })
-              .map((t) => {
-                const isSelected = state.selectedTaskId === t.id;
-                let statusColor = 'green';
-                if (t.lifecycle === 'awaiting validation' || t.lifecycle === 'Task pause requested' || t.lifecycle === 'proposed') {
-                  statusColor = 'yellow';
-                } else if (t.lifecycle === 'blocked' || t.lifecycle === 'recovery') {
-                  statusColor = 'red';
-                } else if (t.lifecycle === 'completed' || t.lifecycle === 'cancelled' || t.lifecycle === 'rejected') {
-                  statusColor = 'neutral';
-                }
+        filteredTasks.length === 0
+          ? `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 0;">
+              No tasks match the selected filter.
+            </div>`
+          : `<div class="tasks-grid" role="listbox" aria-label="Tasks List">
+              ${filteredTasks
+                .map((t) => {
+                  let statusColor = 'green';
+                  let borderClass = 'border-green';
+                  if (
+                    t.lifecycle === 'awaiting validation' ||
+                    t.lifecycle === 'Task pause requested' ||
+                    t.lifecycle === 'proposed'
+                  ) {
+                    statusColor = 'yellow';
+                    borderClass = 'border-yellow';
+                  } else if (t.lifecycle === 'blocked' || t.lifecycle === 'recovery') {
+                    statusColor = 'red';
+                    borderClass = 'border-red';
+                  } else if (
+                    t.lifecycle === 'completed' ||
+                    t.lifecycle === 'cancelled' ||
+                    t.lifecycle === 'rejected'
+                  ) {
+                    statusColor = 'neutral';
+                    borderClass = 'border-neutral';
+                  }
 
-                return `
-              <div class="task-carousel-card task-select-btn ${isSelected ? 'active' : ''}" data-task="${t.id}" role="option" aria-selected="${isSelected}">
-                <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px;">
-                  <span style="font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--accent-primary);">
-                    #${t.id.replace('task-', '')}
-                  </span>
-                  <span class="status-pill ${statusColor}" style="font-size: 9px; padding: 1px 5px;">
-                    ${t.lifecycle}
-                  </span>
+                  let lifecycleSentence = `Task ${t.lifecycle} · Run ${t.agentRunLifecycle} · Lease ${t.leaseLifecycle}`;
+                  if (t.lifecycle === 'proposed') {
+                    lifecycleSentence = `Task proposed · Executes NO run · Holds NO lease`;
+                  } else if (t.agentRunLifecycle === 'running') {
+                    lifecycleSentence = `Task ${t.lifecycle} · Agent running · Lease ${t.leaseLifecycle}`;
+                  }
+
+                  return `
+                <div class="task-grid-card task-select-btn ${borderClass}" data-task="${t.id}" role="option" tabindex="0">
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                    <span style="font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--accent-primary);">
+                      #${t.id.replace('task-', '')}
+                    </span>
+                    <span class="status-pill ${statusColor}" style="font-size: 10px; padding: 2px 6px;">
+                      ${t.lifecycle}
+                    </span>
+                  </div>
+
+                  <div class="task-grid-card-title" title="${t.currentVersion.title}">
+                    ${t.currentVersion.title}
+                  </div>
+
+                  <div class="task-grid-card-goal">
+                    ${t.currentVersion.goal}
+                  </div>
+
+                  <div class="lifecycle-sentence" style="font-size: 10px; margin-top: 2px;">
+                    ${lifecycleSentence}
+                  </div>
+
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-secondary);">
+                    <span>Lead: <strong>${t.taskLeadId}</strong></span>
+                    <span style="display: inline-flex; align-items: center; gap: 4px; color: var(--accent-primary);">
+                      <span>Inspect</span>
+                      ${renderIcon('chevron-right', 12)}
+                    </span>
+                  </div>
                 </div>
-                <div class="task-carousel-card-title" title="${t.currentVersion.title}">
-                  ${t.currentVersion.title}
-                </div>
-                <div style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px;">
-                  ${t.agentRunLifecycle === 'running' ? 'Agent running' : `Run ${t.agentRunLifecycle}`} · Lease ${t.leaseLifecycle}
-                </div>
-                <div style="font-size: 10px; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
-                  <span>Lead: <strong>${t.taskLeadId}</strong></span>
-                  <span>${t.selectedEnvironmentId ? t.selectedEnvironmentId.split('-')[0] : 'No lease'}</span>
-                </div>
-              </div>
-            `;
-              })
-              .join('')
+              `;
+                })
+                .join('')}
+            </div>`
       }
     </div>
   `;
 
-  // Filter click handlers
-  tasksHeader.querySelectorAll('.task-filter-pill').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      const filter = (e.currentTarget as HTMLElement).getAttribute('data-filter')!;
-      (state as any).taskFilter = filter;
-      if (project) {
-        stateManager.selectProject(project.id);
+  // Filter dropdown listener
+  listCard.querySelector('#task-filter-select')?.addEventListener('change', (ev) => {
+    const val = (ev.target as HTMLSelectElement).value;
+    stateManager.setTaskFilter(val);
+  });
+
+  // Task grid card click listeners (Drill-down to Detail Page)
+  listCard.querySelectorAll('.task-grid-card').forEach((card) => {
+    card.addEventListener('click', (ev) => {
+      const taskId = (ev.currentTarget as HTMLElement).getAttribute('data-task')!;
+      stateManager.openTaskDetail(taskId);
+    });
+
+    card.addEventListener('keydown', (ev: any) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        const taskId = (ev.currentTarget as HTMLElement).getAttribute('data-task')!;
+        stateManager.openTaskDetail(taskId);
       }
     });
   });
 
-  // Task selection click handlers
-  tasksHeader.querySelectorAll('.task-carousel-card').forEach((card) => {
-    card.addEventListener('click', (e) => {
-      const taskId = (e.currentTarget as HTMLElement).getAttribute('data-task')!;
-      stateManager.selectTask(taskId);
-    });
-  });
-
-  // New Proposal button
-  tasksHeader.querySelector('.new-proposal-btn')?.addEventListener('click', () => {
+  // Propose task button listener
+  listCard.querySelector('.new-proposal-btn')?.addEventListener('click', () => {
     if (project) {
       renderNewProposalModal(container, state, project);
     }
   });
 
-  container.appendChild(tasksHeader);
+  container.appendChild(listCard);
+  return container;
+}
 
-  // Section 2: Selected Task Detail View
-  const selectedTask =
-    projectTasks.find((t) => t.id === state.selectedTaskId) ??
-    projectTasks[0] ??
-    state.tasks.find((t) => t.id === state.selectedTaskId) ??
-    state.tasks[0];
+/**
+ * Renders the Dedicated Task Detail Page (Drill-down with Back navigation)
+ */
+function renderTaskDetailPage(
+  container: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem | undefined,
+  selectedTask: TaskItem
+): HTMLElement {
+  // Top Navigation Bar: Back button (Item 3)
+  const topNav = document.createElement('div');
+  topNav.className = 'task-detail-top-nav';
 
-  if (!selectedTask) {
-    container.innerHTML += `<div class="card"><p style="color: var(--text-muted); text-align: center; padding: 20px 0;">No tasks found in this project.</p></div>`;
-    return container;
-  }
+  topNav.innerHTML = `
+    <button class="btn btn-secondary btn-sm back-to-tasks-btn task-select-btn" id="btn-back-to-tasks" title="Return to Task List">
+      ${renderIcon('chevron-left', 16)} Back to Tasks
+    </button>
+    <div style="font-size: 13px; font-weight: 700; color: var(--text-secondary); display: flex; align-items: center; gap: 6px;">
+      <span>Task #${selectedTask.id.replace('task-', '')}</span>
+      <span class="status-pill neutral" style="font-size: 10px;">v${selectedTask.currentVersion.version}</span>
+    </div>
+  `;
+
+  topNav.querySelector('#btn-back-to-tasks')?.addEventListener('click', () => {
+    stateManager.closeTaskDetail();
+  });
+
+  container.appendChild(topNav);
 
   // 3-Lifecycle Disambiguation Banner
   const lifecycleCard = document.createElement('div');
@@ -210,8 +287,6 @@ export function renderTasksView(state: PrototypeState): HTMLElement {
     </div>
   `;
   container.appendChild(lifecycleCard);
-
-  // Section 3: Operating Loop Stage Cards
 
   // STAGE 1: Proposal Authority Card (when proposed)
   if (selectedTask.lifecycle === 'proposed') {
