@@ -91,11 +91,6 @@ export function renderProjectChat(
   const workingGroups = project.workingGroups || [];
   const agentMembers = project.memberships.filter((m) => m.memberKind === 'agent');
 
-  // Check for active open collection window in this project under wake-model-assisted policy
-  const openBatch = state.routingBatches.find(
-    (b) => b.projectId === project.id && (b.status === 'open' || b.status === 'evaluating')
-  );
-
   chatViewEl.innerHTML = `
     <!-- Left Pane: Categorized Chat Cards List -->
     <aside class="chat-list-pane" role="tablist" aria-label="Conversation Scopes">
@@ -257,21 +252,6 @@ export function renderProjectChat(
             : ''
         }
 
-        <!-- Active 30s Collection Window Banner (when collecting unaddressed messages under wake-model-assisted) -->
-        ${
-          openBatch && state.selectedScopeKind === 'project-channel'
-            ? `<div class="chat-batch-window-banner" style="padding: 8px 14px; background: rgba(88, 101, 242, 0.08); border-bottom: 1px solid rgba(88, 101, 242, 0.25); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
-                  <span class="status-dot purple" style="animation: pulse 1.5s infinite;"></span>
-                  <span><strong>Active 30s Collection Window</strong>: ~${openBatch.countdownRemainingSec ?? 18}s remaining · <code>${openBatch.inputMessageIds.length}</code> unaddressed input queued</span>
-                </div>
-                <button class="btn btn-secondary btn-sm inspect-open-batch-btn" data-batch="${openBatch.id}" style="font-size: 10px; padding: 2px 6px; height: auto;">
-                  Inspect Open Batch →
-                </button>
-              </div>`
-            : ''
-        }
-
         <!-- Chat Timeline Messages Body -->
         <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 440px;">
           ${
@@ -425,12 +405,6 @@ export function renderProjectChat(
           ? state.selectedDirectMessagePeerId
           : undefined
     );
-  });
-
-  // Open Batch Button in Window Banner
-  chatViewEl.querySelector('.inspect-open-batch-btn')?.addEventListener('click', (ev) => {
-    const batchId = (ev.currentTarget as HTMLElement).getAttribute('data-batch') || 'batch-005';
-    renderRoutingInspectorModal(rootContainer, state, batchId);
   });
 
   // Message Routing Tag click listener -> Open Inspector Modal

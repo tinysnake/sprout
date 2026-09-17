@@ -218,6 +218,9 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Permanent Quick-Mention Chips & In-Composer Addressing Pills:</strong> Rejected per owner review in favor of a clean, uncluttered composer; deterministic addressing and collection windows remain governed by ADR-0007 invariants.
           </li>
           <li>
+            <strong>Intrusive In-Chat Collection Window Countdown Banners:</strong> Rejected per owner review in favor of a clean conversation flow; routing batches remain inspectable via message tags and conversation details without interrupting active chat.
+          </li>
+          <li>
             <strong>Automatic Timeout-Driven Lease Release:</strong> Rejected in ADR-0005; silently releasing an idle or blocked Task's environment causes catastrophic loss of uncommitted state in scarce host environments.
           </li>
           <li>

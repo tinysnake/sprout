@@ -304,7 +304,7 @@ test('Durable Projected Replies: loop-prevention badge, provenance metadata, and
   }
 });
 
-test('Active 30s Collection Window: banner rendering and countdown inspection', async () => {
+test('Active 30s Collection Window: banner removed from chat timeline per owner review', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -322,19 +322,8 @@ test('Active 30s Collection Window: banner rendering and countdown inspection', 
     stateManager.openChatDetail('project-channel');
     const document = dom.window.document;
 
-    // Verify Active Collection Window Banner
-    const banner = document.querySelector('.chat-batch-window-banner');
-    assert.ok(banner, 'Active 30s collection window banner rendered');
-    assert.match(banner.textContent ?? '', /Active 30s Collection Window/);
-    assert.match(banner.textContent ?? '', /unaddressed input queued/);
-
-    const inspectBtn = banner.querySelector('.inspect-open-batch-btn') as HTMLButtonElement;
-    assert.ok(inspectBtn);
-    inspectBtn.click();
-
-    const modal = document.querySelector('.proto-modal-dialog');
-    assert.ok(modal, 'Inspector opened from open window banner');
-    assert.match(modal.textContent ?? '', /Causal Wake Routing Inspector/);
+    // Verify Active Collection Window Banner is removed to prevent chat clutter
+    assert.equal(document.querySelector('.chat-batch-window-banner'), null, 'Batch window banner removed');
   } finally {
     await cleanup();
   }
