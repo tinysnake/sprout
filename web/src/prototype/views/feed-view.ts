@@ -28,13 +28,13 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
     <!-- Top Scope Selector Dropdown -->
     <div class="feed-scope-filter-bar">
       <div class="feed-scope-dropdown-wrapper">
-        <label for="feed-scope-select" class="feed-scope-label">
-          ${renderIcon('project', 14)}
-          <span>Project Scope:</span>
-        </label>
-        <select id="feed-scope-select" class="form-select feed-scope-select" aria-label="Select Project Scope">
-          ${renderScopeSelectOptions(state)}
-        </select>
+        <div class="feed-scope-inner">
+          <span class="feed-scope-icon">${renderIcon('project', 16)}</span>
+          <label for="feed-scope-select" class="feed-scope-label">Scope:</label>
+          <select id="feed-scope-select" class="form-select feed-scope-select" aria-label="Select Project Scope">
+            ${renderScopeSelectOptions(state)}
+          </select>
+        </div>
       </div>
     </div>
   `;

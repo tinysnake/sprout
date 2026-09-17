@@ -1635,6 +1635,9 @@ code {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .feed-header {
@@ -1644,47 +1647,68 @@ code {
 
 /* Scope Filter Bar (Dropdown Only) */
 .feed-scope-filter-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
+  width: 100%;
+  margin-top: 10px;
 }
 
 .feed-scope-dropdown-wrapper {
+  width: 100%;
+  max-width: 100%;
+}
+
+.feed-scope-inner {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  max-width: 440px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  transition: all 0.15s ease;
+  min-height: 40px;
+}
+
+.feed-scope-inner:focus-within {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.feed-scope-icon {
+  color: var(--accent-primary);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .feed-scope-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
   font-size: 12px;
   font-weight: 700;
   color: var(--text-secondary);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .feed-scope-select {
   flex: 1;
+  min-width: 0;
+  width: 100%;
   font-size: 13px;
   font-weight: 600;
-  min-height: 38px;
-  padding: 6px 12px;
-  background: var(--bg-surface-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  height: 36px;
+  background: transparent;
+  border: none;
   color: var(--text-primary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  outline: none;
+  padding: 0 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .feed-scope-select:focus {
-  border-color: var(--accent-primary);
-  outline: 2px solid var(--accent-border);
+  outline: none;
 }
 
 /* 4 Streamlined Urgency Pills */
