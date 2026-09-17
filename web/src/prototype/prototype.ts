@@ -573,8 +573,14 @@ export function initPrototype(mountEl: HTMLElement): void {
         stateManager.openTaskDetail(ev.state.taskId, false);
       } else if (ev.state?.page === 'task-list') {
         stateManager.closeTaskDetail(false);
+      } else if (ev.state?.page === 'chat-detail') {
+        stateManager.openChatDetail(ev.state.scopeKind, ev.state.scopeId, false);
+      } else if (ev.state?.page === 'chat-list') {
+        stateManager.closeChatDetail(false);
       } else if (state.primaryNav === 'project' && state.projectTab === 'tasks' && state.taskViewMode === 'detail') {
         stateManager.closeTaskDetail(false);
+      } else if (state.primaryNav === 'project' && state.projectTab === 'chat' && state.chatViewMode === 'detail') {
+        stateManager.closeChatDetail(false);
       }
     });
   }

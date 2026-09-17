@@ -135,9 +135,11 @@ test('Project Overview & Chat: renders contract, memberships, workspaces, and ch
     assert.match(document.body.textContent ?? '', /Bound Workspaces & Host Environments/);
     assert.match(document.body.textContent ?? '', /minesweeper-threejs/);
 
-    // 2. Chat Tab with Scope Cards and Unread Badges
+    // 2. Chat Tab with Scope Cards, Last Message Preview, Unread Badges & Split Layout
     stateManager.setPrimaryNav('project', 'chat');
-    assert.ok(document.querySelector('.chat-scopes-grid'), 'Chat scopes grid rendered');
+    assert.ok(document.querySelector('.chat-list-pane'), 'Chat list pane rendered');
+    assert.ok(document.querySelector('.chat-detail-pane'), 'Chat detail pane rendered');
+    assert.ok(document.querySelector('.chat-section-divider'), 'Section dividers rendered');
 
     const chatCards = document.querySelectorAll('.chat-scope-card');
     assert.ok(chatCards.length >= 3, 'Rendered #general, Working Group, and DM cards');
@@ -146,9 +148,23 @@ test('Project Overview & Chat: renders contract, memberships, workspaces, and ch
     assert.match(document.body.textContent ?? '', /Core Mechanics WG/);
     assert.match(document.body.textContent ?? '', /@Programmer/);
 
+    // Verify last message subtitles
+    const previews = document.querySelectorAll('.chat-card-preview');
+    assert.ok(previews.length >= 3, 'Chat card previews rendered');
+    assert.match(document.body.textContent ?? '', /Cascade recursion tested/);
+
     // Check red unread badge dots
     const unreadDots = document.querySelectorAll('.unread-badge-dot');
     assert.ok(unreadDots.length > 0, 'Unread badge dots rendered');
+
+    // 3. Mobile Hierarchy Navigation: tap card -> enters detail mode -> back button in header
+    stateManager.openChatDetail('working-group-channel', 'wg-mechanics');
+    const backToChatsBtn = document.querySelector('#btn-header-back-to-chats') as HTMLButtonElement;
+    assert.ok(backToChatsBtn, 'App-Header switches to Back to Chats button in detail mode');
+    assert.match(document.body.textContent ?? '', /Core Mechanics WG/);
+
+    backToChatsBtn.click();
+    assert.equal(stateManager.getSnapshot().chatViewMode, 'list', 'Returned to chat list mode');
   } finally {
     await cleanup();
   }

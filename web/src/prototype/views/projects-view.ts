@@ -32,12 +32,24 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
       state.tasks.find((t) => t.id === state.selectedTaskId)
     : undefined;
 
+  const isChatDetailPage =
+    state.projectTab === 'chat' && state.chatViewMode === 'detail';
+
+  let activeChatTitle = '#general';
+  if (state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId) {
+    const wg = project.workingGroups.find((w) => w.id === state.selectedWorkingGroupId);
+    activeChatTitle = wg?.displayName || 'Working Group';
+  } else if (state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId) {
+    const peer = project.memberships.find((m) => m.memberId === state.selectedDirectMessagePeerId);
+    activeChatTitle = `@${peer?.displayName || state.selectedDirectMessagePeerId}`;
+  }
+
   // Top Project Navigation Bar (App Header Style)
   const projectNav = document.createElement('div');
   projectNav.className = 'project-nav-container';
 
   if (isTaskDetailPage && selectedTask) {
-    // Focused Task Detail App-Header: Only Back Button & Task Title (cannot switch project while inspecting detail)
+    // Focused Task Detail App-Header: Only Back Button & Task Title
     projectNav.innerHTML = `
       <header class="project-top-bar">
         <div class="project-selector-row">
@@ -55,8 +67,27 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
     projectNav.querySelector('#btn-header-back-to-tasks')?.addEventListener('click', () => {
       stateManager.closeTaskDetail();
     });
+  } else if (isChatDetailPage) {
+    // Focused Chat Detail App-Header for Mobile Hierarchy: Back Button & Chat Title
+    projectNav.innerHTML = `
+      <header class="project-top-bar">
+        <div class="project-selector-row">
+          <button class="btn btn-secondary btn-sm back-to-chats-btn" id="btn-header-back-to-chats" title="Return to Chats List">
+            ${renderIcon('chevron-left', 16)} Back to Chats
+          </button>
+          <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+            <span>${activeChatTitle}</span>
+            <span class="status-pill neutral" style="font-size: 10px;">Chat</span>
+          </div>
+        </div>
+      </header>
+    `;
+
+    projectNav.querySelector('#btn-header-back-to-chats')?.addEventListener('click', () => {
+      stateManager.closeChatDetail();
+    });
   } else {
-    // Standard Project App-Header: Project selector on left, Info and New buttons on right (segmented tabs removed)
+    // Standard Project App-Header: Project selector on left, Info and New buttons on right
     projectNav.innerHTML = `
       <header class="project-top-bar">
         <div class="project-selector-row">
@@ -473,11 +504,11 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
 }
 
 /**
- * Renders the Project Discussion & Working Groups Chat View (Each Chat Scope is a clean Card with Red Unread Dot)
+ * Renders the Project Chat View (Split-Pane on Desktop / Hierarchical on Mobile with Minimal Cards, Preview Subtitles & Red Badges)
  */
 function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLElement {
-  const chatEl = document.createElement('div');
-  chatEl.className = 'project-chat-container';
+  const chatViewEl = document.createElement('div');
+  chatViewEl.className = `project-chat-view ${state.chatViewMode === 'detail' ? 'chat-mode-detail' : 'chat-mode-list'}`;
 
   let currentScopeLabel = 'Project Channel (#general)';
   let filteredMessages = (state.messages || []).filter((m) => m.projectId === project.id);
@@ -507,143 +538,242 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
   const unreadMap: Record<string, number> = {
     'project-channel': 2,
     'wg-mechanics': 1,
+    'wg-audio': 0,
     programmer: 1,
+    reviewer: 0,
+    designer: 0,
+    planner: 1,
   };
 
+  // Helper to find last message for any scope
+  const projectMessages = (state.messages || []).filter((m) => m.projectId === project.id);
+  const getLastMessage = (kind: string, id?: string) => {
+    let msgs: any[] = [];
+    if (kind === 'project-channel') {
+      msgs = projectMessages.filter((m) => m.scope.kind === 'project-channel');
+    } else if (kind === 'working-group-channel') {
+      msgs = projectMessages.filter(
+        (m) => m.scope.kind === 'working-group-channel' && m.scope.workingGroupId === id
+      );
+    } else if (kind === 'direct-message') {
+      msgs = projectMessages.filter(
+        (m) =>
+          m.scope.kind === 'direct-message' &&
+          (m.scope.recipientId === id || m.authorId === id)
+      );
+    }
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  };
+
+  const generalLastMsg = getLastMessage('project-channel');
   const isGeneralActive = state.selectedScopeKind === 'project-channel';
 
-  chatEl.innerHTML = `
-    <!-- Top Scope Cards Grid (One Card per Chat Scope with Red Unread Dot) -->
-    <div class="chat-scopes-grid" role="tablist" aria-label="Conversation Scopes">
-      <!-- 1. Project #general Channel Card -->
-      <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
-        <div class="chat-scope-card-left">
-          ${renderIcon('chat', 16)}
-          <span class="chat-scope-card-title">#general</span>
+  const activeWorkingGroups = project.workingGroups.filter((w) => w.status === 'active');
+  const activeAgentMembers = project.memberships.filter(
+    (m) => m.memberKind === 'agent' && m.status === 'active'
+  );
+
+  chatViewEl.innerHTML = `
+    <!-- Left Pane: Categorized Chat Cards List -->
+    <aside class="chat-list-pane" role="tablist" aria-label="Conversation Scopes">
+      
+      <!-- 1. Project Channel Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Project Channels</span>
         </div>
-        ${unreadMap['project-channel'] ? `<span class="unread-badge-dot">${unreadMap['project-channel']}</span>` : ''}
-      </div>
-
-      <!-- 2. Working Group Cards -->
-      ${project.workingGroups
-        .filter((w) => w.status === 'active')
-        .map((w) => {
-          const isActive =
-            state.selectedScopeKind === 'working-group-channel' && state.selectedWorkingGroupId === w.id;
-          const unreadCount = unreadMap[w.id] || 0;
-          return `
-            <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" aria-selected="${isActive}">
-              <div class="chat-scope-card-left">
-                ${renderIcon('users', 16)}
-                <span class="chat-scope-card-title">${w.displayName}</span>
+        <div class="chat-cards-list">
+          <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
+            <div class="chat-card-avatar-wrap">
+              <div class="chat-card-avatar icon-avatar">
+                ${renderIcon('chat', 16)}
               </div>
-              ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
             </div>
-          `;
-        })
-        .join('')}
-
-      <!-- 3. Direct Message Cards -->
-      ${project.memberships
-        .filter((m) => m.memberKind === 'agent' && m.status === 'active')
-        .map((m) => {
-          const isActive =
-            state.selectedScopeKind === 'direct-message' && state.selectedDirectMessagePeerId === m.memberId;
-          const unreadCount = unreadMap[m.memberId] || 0;
-          return `
-            <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
-              <div class="chat-scope-card-left">
-                ${renderIcon('bot', 16)}
-                <span class="chat-scope-card-title">@${m.displayName}</span>
+            <div class="chat-card-main">
+              <div class="chat-card-header-row">
+                <span class="chat-card-title">#general</span>
+                <div class="chat-card-meta-right">
+                  ${generalLastMsg?.timestamp ? `<span class="chat-card-timestamp">${generalLastMsg.timestamp}</span>` : ''}
+                  ${unreadMap['project-channel'] ? `<span class="unread-badge-dot">${unreadMap['project-channel']}</span>` : ''}
+                </div>
               </div>
-              ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+              <div class="chat-card-preview" title="${generalLastMsg?.content || 'No messages yet'}">
+                ${generalLastMsg?.content || 'No messages yet in project channel.'}
+              </div>
             </div>
-          `;
-        })
-        .join('')}
-    </div>
-
-    <!-- Active Conversation View -->
-    <div class="card" style="display: flex; flex-direction: column; min-height: 480px;">
-      <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-        <div>
-          <span class="card-title">${currentScopeLabel}</span>
-          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
-            Project: <code>${project.displayName}</code> · Routing: <code>${project.wakePolicy}</code>
           </div>
         </div>
-        <button class="btn btn-secondary btn-sm open-inspector-btn" title="Inspect Causal Wake Routing Chain">
-          ${renderIcon('lightning', 14)} Inspect Routing
-        </button>
       </div>
 
-      <!-- Chat Timeline Messages -->
-      <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 380px;">
-        ${
-          filteredMessages.length === 0
-            ? `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 0;">
-                No messages yet in this conversation scope. Send a message to start collaboration.
-              </div>`
-            : filteredMessages
-                .map(
-                  (msg) => `
-              <div class="chat-msg ${msg.authorKind === 'human' ? 'msg-me' : 'msg-them'}">
-                <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 3px;">
-                  <div style="display: flex; align-items: center; gap: 6px;">
-                    <span style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName ?? msg.authorId}</span>
-                    <span class="status-pill neutral" style="font-size: 9px; padding: 1px 5px;">${msg.authorKind}</span>
-                    ${
-                      msg.isProjectedReply
-                        ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;">Projected Reply</span>`
-                        : ''
-                    }
+      <!-- Divider -->
+      <div class="chat-section-divider"></div>
+
+      <!-- 2. Working Groups Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Working Groups (${activeWorkingGroups.length})</span>
+        </div>
+        <div class="chat-cards-list">
+          ${activeWorkingGroups
+            .map((w) => {
+              const isActive =
+                state.selectedScopeKind === 'working-group-channel' &&
+                state.selectedWorkingGroupId === w.id;
+              const lastMsg = getLastMessage('working-group-channel', w.id);
+              const unreadCount = unreadMap[w.id] || 0;
+              return `
+                <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" aria-selected="${isActive}">
+                  <div class="chat-card-avatar-wrap">
+                    <div class="chat-card-avatar icon-avatar">
+                      ${renderIcon('users', 16)}
+                    </div>
                   </div>
-                  <span style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
+                  <div class="chat-card-main">
+                    <div class="chat-card-header-row">
+                      <span class="chat-card-title">${w.displayName}</span>
+                      <div class="chat-card-meta-right">
+                        ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
+                        ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+                      </div>
+                    </div>
+                    <div class="chat-card-preview" title="${lastMsg?.content || 'No messages yet'}">
+                      ${lastMsg?.content || 'No messages yet in working group.'}
+                    </div>
+                  </div>
                 </div>
-                <div class="msg-text" style="font-size: 13px; line-height: 1.45;">${msg.content}</div>
-                ${
-                  msg.routingCausalChainId
-                    ? `<div style="margin-top: 4px; font-size: 10px; color: var(--text-muted); display: flex; align-items: center; gap: 4px;">
-                        ${renderIcon('lightning', 10)}
-                        <span>Batch: <code>${msg.routingCausalChainId}</code> (${msg.disposition})</span>
-                      </div>`
-                    : ''
-                }
-              </div>
-            `
-                )
-                .join('')
-        }
+              `;
+            })
+            .join('')}
+        </div>
       </div>
 
-      <!-- Chat Composer -->
-      <div class="chat-composer" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; gap: 8px; align-items: center;">
-        <input type="text" class="form-input chat-input-text" placeholder="Type message or @mention..." style="flex: 1; min-height: 38px;" ${project.status === 'archived' ? 'disabled placeholder="Project is archived (read-only)"' : ''} />
-        <button class="btn btn-primary send-msg-btn" style="min-height: 38px;" ${project.status === 'archived' ? 'disabled' : ''}>
-          ${renderIcon('send', 14)} Send
-        </button>
+      <!-- Divider -->
+      <div class="chat-section-divider"></div>
+
+      <!-- 3. Direct Messages Section -->
+      <div class="chat-section">
+        <div class="chat-section-header">
+          <span>Direct Messages (${activeAgentMembers.length})</span>
+        </div>
+        <div class="chat-cards-list">
+          ${activeAgentMembers
+            .map((m) => {
+              const isActive =
+                state.selectedScopeKind === 'direct-message' &&
+                state.selectedDirectMessagePeerId === m.memberId;
+              const lastMsg = getLastMessage('direct-message', m.memberId);
+              const unreadCount = unreadMap[m.memberId] || 0;
+              return `
+                <div class="chat-scope-card ${isActive ? 'active' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
+                  <div class="chat-card-avatar-wrap">
+                    <div class="chat-card-avatar agent-avatar">
+                      ${m.avatar || renderIcon('bot', 16)}
+                    </div>
+                  </div>
+                  <div class="chat-card-main">
+                    <div class="chat-card-header-row">
+                      <span class="chat-card-title">@${m.displayName}</span>
+                      <div class="chat-card-meta-right">
+                        ${lastMsg?.timestamp ? `<span class="chat-card-timestamp">${lastMsg.timestamp}</span>` : ''}
+                        ${unreadCount > 0 ? `<span class="unread-badge-dot">${unreadCount}</span>` : ''}
+                      </div>
+                    </div>
+                    <div class="chat-card-preview" title="${lastMsg?.content || 'No messages yet'}">
+                      ${lastMsg?.content || 'No messages yet with agent.'}
+                    </div>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
       </div>
-    </div>
+
+    </aside>
+
+    <!-- Right Pane: Active Conversation Detail -->
+    <section class="chat-detail-pane">
+      <div class="card" style="display: flex; flex-direction: column; min-height: 480px; height: 100%;">
+        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div>
+            <span class="card-title">${currentScopeLabel}</span>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
+              Project: <code>${project.displayName}</code> · Routing: <code>${project.wakePolicy}</code>
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-sm open-inspector-btn" title="Inspect Causal Wake Routing Chain">
+            ${renderIcon('lightning', 14)} Inspect Routing
+          </button>
+        </div>
+
+        <!-- Chat Timeline Messages -->
+        <div class="chat-messages-body" style="flex: 1; padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: 420px;">
+          ${
+            filteredMessages.length === 0
+              ? `<div style="text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 0;">
+                  No messages yet in this conversation scope. Send a message to start collaboration.
+                </div>`
+              : filteredMessages
+                  .map(
+                    (msg) => `
+                <div class="chat-msg ${msg.authorKind === 'human' ? 'msg-me' : 'msg-them'}">
+                  <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 3px;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-weight: 700; font-size: 12px;">${msg.authorDisplayName ?? msg.authorId}</span>
+                      <span class="status-pill neutral" style="font-size: 9px; padding: 1px 5px;">${msg.authorKind}</span>
+                      ${
+                        msg.isProjectedReply
+                          ? `<span class="badge badge-purple" style="font-size: 9px; padding: 1px 5px;">Projected Reply</span>`
+                          : ''
+                      }
+                    </div>
+                    <span style="font-size: 10px; color: var(--text-muted);">${msg.timestamp}</span>
+                  </div>
+                  <div class="msg-text" style="font-size: 13px; line-height: 1.45;">${msg.content}</div>
+                  ${
+                    msg.routingCausalChainId
+                      ? `<div style="margin-top: 4px; font-size: 10px; color: var(--text-muted); display: flex; align-items: center; gap: 4px;">
+                          ${renderIcon('lightning', 10)}
+                          <span>Batch: <code>${msg.routingCausalChainId}</code> (${msg.disposition})</span>
+                        </div>`
+                      : ''
+                  }
+                </div>
+              `
+                  )
+                  .join('')
+          }
+        </div>
+
+        <!-- Chat Composer -->
+        <div class="chat-composer" style="padding: 10px 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-surface-elevated); display: flex; gap: 8px; align-items: center;">
+          <input type="text" class="form-input chat-input-text" placeholder="Type message or @mention..." style="flex: 1; min-height: 38px;" ${project.status === 'archived' ? 'disabled placeholder="Project is archived (read-only)"' : ''} />
+          <button class="btn btn-primary send-msg-btn" style="min-height: 38px;" ${project.status === 'archived' ? 'disabled' : ''}>
+            ${renderIcon('send', 14)} Send
+          </button>
+        </div>
+      </div>
+    </section>
   `;
 
-  // Scope Card Click Listeners (Select Scope)
-  chatEl.querySelectorAll('.chat-scope-card').forEach((card) => {
+  // Scope Card Click Listeners (Select Scope / Open Detail)
+  chatViewEl.querySelectorAll('.chat-scope-card').forEach((card) => {
     card.addEventListener('click', (ev) => {
       const target = ev.currentTarget as HTMLElement;
       const kind = target.getAttribute('data-kind') as any;
       const id = target.getAttribute('data-id') || undefined;
-      stateManager.selectScope(kind, id);
+      stateManager.openChatDetail(kind, id);
     });
   });
 
   // Routing Inspector Listener
-  chatEl.querySelector('.open-inspector-btn')?.addEventListener('click', () => {
+  chatViewEl.querySelector('.open-inspector-btn')?.addEventListener('click', () => {
     stateManager.openInspector('routing', 'batch-001');
   });
 
   // Send message handler
-  const inputEl = chatEl.querySelector('.chat-input-text') as HTMLInputElement;
-  const sendBtn = chatEl.querySelector('.send-msg-btn') as HTMLButtonElement;
+  const inputEl = chatViewEl.querySelector('.chat-input-text') as HTMLInputElement;
+  const sendBtn = chatViewEl.querySelector('.send-msg-btn') as HTMLButtonElement;
 
   const handleSend = () => {
     if (!inputEl || !inputEl.value.trim() || project.status === 'archived') return;
@@ -665,7 +795,7 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
     if (e.key === 'Enter') handleSend();
   });
 
-  return chatEl;
+  return chatViewEl;
 }
 
 // --- Modals for Project Management ---

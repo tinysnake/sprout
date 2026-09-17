@@ -70,13 +70,22 @@ Rather than forcing all Project concerns into a single monolithic tab or scrollv
   - `Switch Workspace Path`: Permitted only when no active task run or held lease exists on that environment.
   - `Unbind Environment`: Refused while active task lease or recovery is held; files on host are preserved.
 
-### Communication Scopes & Working Groups
-- **Project Channel (`#general`):** Default broadcast channel for all project members, with quick preview and jump button.
-- **Working Groups (Temporary Collaboration Scopes):**
-  - Displays name, goal, rules, creator attribution, member list, and status (`Active` vs `Disbanded`).
-  - `+ Create Working Group`: Atomically creates a focused sub-team scope with creator as initial member.
-  - `Disband Working Group`: Marks group channel read-only; preserves all membership history and messages without hard deletion.
-  - `Restore Working Group`: Restores disbanded working group to active status.
+### Communication Scopes, Chat Cards & Responsive Layout
+- **Categorized Scope Architecture:** Separates communication into three distinct sections with clean dividers:
+  1. **Project Channels:** Broadcast channel (`#general`) for whole-project coordination.
+  2. **Working Groups:** Focused team scopes with member counts (`Core Mechanics WG`, `WebAudio Effects WG`).
+  3. **Direct Messages:** 1-on-1 collaboration scopes with active project agents (`@Programmer`, `@Reviewer`, `@Designer`, `@Planner`).
+- **Minimalist Scope Cards:**
+  - Left icon or agent avatar.
+  - Middle: Scope title + 2-line clamped subtitle previewing the latest message content (with overflow ellipsis).
+  - Right: Timestamp and prominent red unread badge dot with unread counter.
+- **Wide Screen (Desktop) Split-Pane Layout:**
+  - Left column (310px): Categorized chat cards list.
+  - Right column: Active conversation timeline stream, message composer, and causal routing inspector link.
+  - Clicking any card on the left instantly updates the active conversation on the right.
+- **Narrow Screen (Mobile) Hierarchical IM Layout:**
+  - **Level 1 (Chat List):** Full-screen categorized card list. App-Header displays standard Project Selector + Info + New Project buttons.
+  - **Level 2 (Chat Detail):** Tapping any chat card drills down into the full-screen conversation stream and composer. The App-Header transforms into a focused back-navigation header (`← Back to Chats` + Chat Title), with native browser history (`pushState`/`popstate`) support.
 
 ### Safe Project Archiving
 - **Active Work Guard:** Archiving is safely blocked if any task in the project has an active agent run, held lease, or unconfirmed recovery. An explanatory warning identifies the blocking task.

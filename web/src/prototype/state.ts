@@ -44,6 +44,7 @@ export interface PrototypeState {
   mobileFeedSplitTab: 'attention' | 'activity';
   taskViewMode: 'list' | 'detail';
   taskFilter: string;
+  chatViewMode: 'list' | 'detail';
   selectedProjectId: string;
   selectedScopeKind: 'project-channel' | 'working-group-channel' | 'direct-message';
   selectedWorkingGroupId?: string | undefined;
@@ -864,9 +865,20 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'working-group-channel', workingGroupId: 'wg-mechanics' },
     authorId: 'programmer',
     authorKind: 'agent',
-    authorDisplayName: "Programmer", authorAvatar: "OP",
+    authorDisplayName: "Programmer", authorAvatar: "AG",
     timestamp: '18m ago',
     content: 'Cascade recursion tested on 30x16 expert grid: depth 42 reached in under 1.2ms.',
+    disposition: 'informational',
+  },
+  {
+    id: 'msg-5b',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'working-group-channel', workingGroupId: 'wg-audio' },
+    authorId: 'designer',
+    authorKind: 'agent',
+    authorDisplayName: "Designer", authorAvatar: "AG",
+    timestamp: '12m ago',
+    content: 'Synthesizer oscillators hooked to user click gestures; audio buffer warm and latency under 5ms.',
     disposition: 'informational',
   },
   {
@@ -886,11 +898,44 @@ const initialMessages: MessageItem[] = [
     scope: { kind: 'direct-message', recipientId: 'op-primary' },
     authorId: 'planner',
     authorKind: 'agent',
-    authorDisplayName: "Planner", authorAvatar: "OP",
+    authorDisplayName: "Planner", authorAvatar: "AG",
     timestamp: '9m ago',
     content: 'Yes, proposal Task #105 is ready for your Approve-and-Begin decision once Task #101 completes.',
     disposition: 'non-routing',
     isProjectedReply: true,
+  },
+  {
+    id: 'msg-8',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'programmer' },
+    authorId: 'programmer',
+    authorKind: 'agent',
+    authorDisplayName: "Programmer", authorAvatar: "AG",
+    timestamp: '6m ago',
+    content: 'Lease held on Task #101; awaiting operator review for 3D coordinate mapping verification.',
+    disposition: 'addressed',
+  },
+  {
+    id: 'msg-9',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'reviewer' },
+    authorId: 'reviewer',
+    authorKind: 'agent',
+    authorDisplayName: "Reviewer", authorAvatar: "AG",
+    timestamp: '4m ago',
+    content: 'All unit test suites passing with 100% assertions green on macOS and Ubuntu runners.',
+    disposition: 'informational',
+  },
+  {
+    id: 'msg-10',
+    projectId: 'proj-minesweeper',
+    scope: { kind: 'direct-message', recipientId: 'designer' },
+    authorId: 'designer',
+    authorKind: 'agent',
+    authorDisplayName: "Designer", authorAvatar: "AG",
+    timestamp: '2m ago',
+    content: 'Refined UI tokens and dark mode contrast ratios for high visibility.',
+    disposition: 'informational',
   },
 ];
 
@@ -1279,6 +1324,7 @@ class StateManager {
       mobileFeedSplitTab: 'attention',
       taskViewMode: 'list',
       taskFilter: 'all',
+      chatViewMode: 'list',
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
@@ -1870,6 +1916,40 @@ class StateManager {
       this.state.selectedDirectMessagePeerId = id;
     }
     this.notify(`Changed conversation scope to ${kind}`);
+  }
+
+  public openChatDetail(
+    kind: 'project-channel' | 'working-group-channel' | 'direct-message',
+    id?: string,
+    pushHistory = true
+  ) {
+    this.state.selectedScopeKind = kind;
+    if (kind === 'working-group-channel') {
+      this.state.selectedWorkingGroupId = id;
+    } else if (kind === 'direct-message') {
+      this.state.selectedDirectMessagePeerId = id;
+    }
+    this.state.chatViewMode = 'detail';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState(
+          { page: 'chat-detail', scopeKind: kind, scopeId: id },
+          '',
+          window.location.pathname + '#chat-' + (id || 'general')
+        );
+      } catch {}
+    }
+    this.notify(`Opened conversation detail for ${id || 'general'}`);
+  }
+
+  public closeChatDetail(pushHistory = true) {
+    this.state.chatViewMode = 'list';
+    if (pushHistory && typeof window !== 'undefined' && window.history && typeof window.history.pushState === 'function') {
+      try {
+        window.history.pushState({ page: 'chat-list' }, '', window.location.pathname + '#chats');
+      } catch {}
+    }
+    this.notify('Closed chat detail and returned to chat list');
   }
 
   public selectTask(taskId: string) {
