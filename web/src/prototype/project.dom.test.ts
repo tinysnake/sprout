@@ -410,9 +410,8 @@ test('Task Operating Loop: filter dropdown, grid view, page drill-down, and back
     (filteredCards[0] as HTMLElement).click();
 
     // Verify we switched to Task Detail Page
-    assert.ok(document.querySelector('.task-detail-top-nav'), 'Task Detail Page rendered');
-    const backBtn = document.querySelector('#btn-back-to-tasks') as HTMLButtonElement;
-    assert.ok(backBtn, 'Back to Tasks button rendered');
+    const backBtn = document.querySelector('.back-to-tasks-btn') as HTMLButtonElement;
+    assert.ok(backBtn, 'Back to Tasks button rendered in App-Header');
 
     // Verify Detail Page has lifecycle sentence & operating controls
     assert.match(document.body.textContent ?? '', /Task active · Agent running · Lease held/);

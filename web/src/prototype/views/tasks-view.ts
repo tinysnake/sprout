@@ -120,13 +120,6 @@ function renderTaskListPage(
                     borderClass = 'border-neutral';
                   }
 
-                  let lifecycleSentence = `Task ${t.lifecycle} · Run ${t.agentRunLifecycle} · Lease ${t.leaseLifecycle}`;
-                  if (t.lifecycle === 'proposed') {
-                    lifecycleSentence = `Task proposed · Executes NO run · Holds NO lease`;
-                  } else if (t.agentRunLifecycle === 'running') {
-                    lifecycleSentence = `Task ${t.lifecycle} · Agent running · Lease ${t.leaseLifecycle}`;
-                  }
-
                   return `
                 <div class="task-grid-card task-select-btn ${borderClass}" data-task="${t.id}" role="option" tabindex="0">
                   <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
@@ -144,10 +137,6 @@ function renderTaskListPage(
 
                   <div class="task-grid-card-goal">
                     ${t.currentVersion.goal}
-                  </div>
-
-                  <div class="lifecycle-sentence" style="font-size: 10px; margin-top: 2px;">
-                    ${lifecycleSentence}
                   </div>
 
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-secondary);">
@@ -208,27 +197,7 @@ function renderTaskDetailPage(
   project: ProjectItem | undefined,
   selectedTask: TaskItem
 ): HTMLElement {
-  // Top Navigation Bar: Back button (Item 3)
-  const topNav = document.createElement('div');
-  topNav.className = 'task-detail-top-nav';
-
-  topNav.innerHTML = `
-    <button class="btn btn-secondary btn-sm back-to-tasks-btn task-select-btn" id="btn-back-to-tasks" title="Return to Task List">
-      ${renderIcon('chevron-left', 16)} Back to Tasks
-    </button>
-    <div style="font-size: 13px; font-weight: 700; color: var(--text-secondary); display: flex; align-items: center; gap: 6px;">
-      <span>Task #${selectedTask.id.replace('task-', '')}</span>
-      <span class="status-pill neutral" style="font-size: 10px;">v${selectedTask.currentVersion.version}</span>
-    </div>
-  `;
-
-  topNav.querySelector('#btn-back-to-tasks')?.addEventListener('click', () => {
-    stateManager.closeTaskDetail();
-  });
-
-  container.appendChild(topNav);
-
-  // 3-Lifecycle Disambiguation Banner
+  // 3-Lifecycle Disambiguation Banner (App-Header handles Back button)
   const lifecycleCard = document.createElement('div');
   lifecycleCard.className = 'lifecycle-disambiguation-box';
 
