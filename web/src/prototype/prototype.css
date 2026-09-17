@@ -98,6 +98,26 @@
   margin: 0;
   padding: 0;
   -webkit-tap-highlight-color: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 *:focus-visible {
@@ -1622,29 +1642,12 @@ code {
   padding-bottom: 14px;
 }
 
-/* Scope Filter Bar (Dropdown + Dynamic Urgent Chips) */
+/* Scope Filter Bar (Unified Scope Chips) */
 .feed-scope-filter-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-top: 12px;
-  flex-wrap: wrap;
-}
-
-.feed-scope-dropdown-wrapper {
-  flex-shrink: 0;
-}
-
-.feed-scope-select {
-  font-size: 12px;
-  font-weight: 600;
-  min-height: 36px;
-  padding: 4px 12px;
-  background: var(--bg-surface-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  cursor: pointer;
 }
 
 .feed-scope-chips {
@@ -1654,6 +1657,12 @@ code {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 2px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.feed-scope-chips::-webkit-scrollbar {
+  display: none;
 }
 
 .scope-chip-btn {
@@ -1722,6 +1731,12 @@ code {
   padding-bottom: 4px;
   margin-top: 8px;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.attention-urgency-pills::-webkit-scrollbar {
+  display: none;
 }
 
 .urgency-pill-btn {
