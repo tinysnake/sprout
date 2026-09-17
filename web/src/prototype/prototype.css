@@ -98,26 +98,6 @@
   margin: 0;
   padding: 0;
   -webkit-tap-highlight-color: transparent;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
-}
-
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: var(--radius-full);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
 }
 
 *:focus-visible {
@@ -1696,7 +1676,7 @@ code {
   font-size: 13px;
   font-weight: 600;
   height: 36px;
-  background: transparent;
+  background-color: transparent;
   border: none;
   color: var(--text-primary);
   cursor: pointer;
@@ -1705,6 +1685,13 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.feed-scope-select option,
+.form-select option,
+.scenario-select option {
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
 }
 
 .feed-scope-select:focus {
