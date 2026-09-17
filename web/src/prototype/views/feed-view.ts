@@ -112,7 +112,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
 
   let optionsHtml = `
     <option value="all" ${currentScope === 'all' ? 'selected' : ''}>
-      📂 全部项目 / All Projects (${allAttCount} 待办)
+      全部项目 / All Projects (${allAttCount} 待办)
     </option>
   `;
 
@@ -125,7 +125,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
     );
     optionsHtml += `
       <option value="${proj.id}" ${currentScope === proj.id ? 'selected' : ''}>
-        🎮 ${proj.displayName} (${projItems.length} 待办)
+        ${proj.displayName} (${projItems.length} 待办)
       </option>
     `;
   }
@@ -135,7 +135,7 @@ function renderScopeSelectOptions(state: PrototypeState): string {
   );
   optionsHtml += `
     <option value="infrastructure" ${currentScope === 'infrastructure' ? 'selected' : ''}>
-      🖥️ 基础设施 / Infrastructure (${infraItems.length} 待办)
+      基础设施 / Infrastructure (${infraItems.length} 待办)
     </option>
   `;
 

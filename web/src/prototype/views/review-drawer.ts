@@ -25,7 +25,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- Ticket #62 Acceptance Verification Checklist -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--accent-primary);">
-          <span>✓</span> Ticket #62 Acceptance Criteria Verification
+          ${renderIcon('check', 16)} Ticket #62 Acceptance Criteria Verification
         </h4>
         <div class="review-checklist">
           <label class="review-check-item">
@@ -54,7 +54,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- Ticket #61 Baseline Checklist -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--accent-primary);">
-          <span>✓</span> Ticket #61 Acceptance Criteria Verification (Inherited Shared Baseline)
+          ${renderIcon('check', 16)} Ticket #61 Acceptance Criteria Verification (Inherited Shared Baseline)
         </h4>
         <div class="review-checklist">
           <label class="review-check-item">
@@ -71,7 +71,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- 1. Accepted Decisions -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--green-ready);">
-          <span>✓</span> Accepted Baseline Decisions (#61) & Feed Decisions (#62)
+          ${renderIcon('check', 16)} Accepted Baseline Decisions (#61) & Feed Decisions (#62)
         </h4>
         <ul class="review-list">
           <li>
@@ -101,7 +101,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- 2. Rejected Patterns -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--red-action);">
-          <span>✕</span> Rejected Patterns
+          ${renderIcon('close', 16)} Rejected Patterns
         </h4>
         <ul class="review-list">
           <li>
@@ -122,7 +122,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- 3. Unresolved Questions & Implementation Notes -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--yellow-attention);">
-          <span>?</span> Unresolved Questions & Implementation Notes
+          ${renderIcon('alert', 16)} Unresolved Questions & Implementation Notes
         </h4>
         <ul class="review-list">
           <li>
@@ -140,7 +140,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
       <!-- 4. Reuse & Revision Rules for Later Module Tickets -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--purple-agent);">
-          <span>⚓</span> Reuse & Revision Rules for Later Module Tickets (#63-#68)
+          ${renderIcon('layers', 16)} Reuse & Revision Rules for Later Module Tickets (#63-#68)
         </h4>
         <ul class="review-list">
           <li>

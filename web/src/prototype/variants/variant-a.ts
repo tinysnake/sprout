@@ -1,3 +1,4 @@
+import { renderIcon } from "../icons.js";
 import { stateManager, type PrototypeState } from '../state.js';
 
 /**
@@ -18,7 +19,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
   headerCard.innerHTML = `
     <div class="card-header">
       <div>
-        <h2 style="font-size: 16px; font-weight: 700;">📡 Unified Operations & Intervention Stream</h2>
+        <h2 style="font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px;">${renderIcon("lightning", 18)} Unified Operations & Intervention Stream</h2>
         <p style="font-size: 12px; color: var(--text-secondary);">
           Variant A: Feed-first architecture. Attention items, active tasks, messages, and telemetry in a single stream.
         </p>
@@ -27,13 +28,13 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
     </div>
     <!-- Quick Status Bar -->
     <div style="display: flex; gap: 8px; flex-wrap: wrap; background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 12px;">
-      <span>🚨 <strong>${state.attentionItems.length}</strong> Attention</span>
+      <span><strong>${state.attentionItems.length}</strong> Attention</span>
       <span>•</span>
-      <span>🎯 <strong>${state.tasks.filter((t) => t.lifecycle === 'active').length}</strong> Active Task</span>
+      <span><strong>${state.tasks.filter((t) => t.lifecycle === "active").length}</strong> Active Task</span>
       <span>•</span>
-      <span>🖥️ <strong>${state.environments.filter((e) => e.trafficLight === 'green').length}/${state.environments.length}</strong> Envs Ready</span>
+      <span><strong>${state.environments.filter((e) => e.trafficLight === "green").length}/${state.environments.length}</strong> Envs Ready</span>
       <span>•</span>
-      <span>💰 <strong>$0.38</strong> Observed Today</span>
+      <span><strong>$0.38</strong> Observed Today</span>
     </div>
   `;
   container.appendChild(headerCard);
@@ -49,7 +50,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
     pinnedTitle.style.fontSize = '13px';
     pinnedTitle.style.fontWeight = '700';
     pinnedTitle.style.color = 'var(--red-action)';
-    pinnedTitle.innerHTML = '📌 PINNED HUMAN ACTIONS (Fast Intervention)';
+    pinnedTitle.innerHTML = "PINNED HUMAN ACTIONS (Fast Intervention)";
     pinnedSection.appendChild(pinnedTitle);
 
     for (const item of state.attentionItems) {
@@ -108,7 +109,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
           <h3 style="font-size: 14px; font-weight: 700; margin-top: 2px;">#${activeTask.id}: ${activeTask.currentVersion.title}</h3>
         </div>
         <span class="status-pill ${activeTask.agentRunLifecycle === 'running' ? 'purple' : 'neutral'}">
-          ${activeTask.agentRunLifecycle === 'running' ? '⚡ Agent Running' : 'Idle'}
+          ${activeTask.agentRunLifecycle === 'running' ? 'Agent Running' : 'Idle'}
         </span>
       </div>
       <div style="font-size: 12px; color: var(--text-secondary); background: var(--bg-surface-elevated); padding: 8px; border-radius: var(--radius-sm);">
@@ -120,9 +121,9 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
         ${
           activeTask.agentRunLifecycle === 'running'
             ? activeTask.lifecycle === 'Task pause requested'
-              ? `<button class="btn btn-danger btn-sm btn-block stream-interrupt-btn">🛑 Interrupt Active Run</button>`
-              : `<button class="btn btn-warning btn-sm btn-block stream-pause-btn">⏸️ Pause Task (Admission Hold)</button>`
-            : `<button class="btn btn-primary btn-sm btn-block stream-resume-btn">▶️ Resume</button>`
+              ? `<button class="btn btn-danger btn-sm btn-block stream-interrupt-btn">Interrupt Active Run</button>`
+              : `<button class="btn btn-warning btn-sm btn-block stream-pause-btn">Pause Task (Admission Hold)</button>`
+            : `<button class="btn btn-primary btn-sm btn-block stream-resume-btn">Resume</button>`
         }
       </div>
     `;
@@ -145,7 +146,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
   streamCard.className = 'card';
   streamCard.innerHTML = `
     <div class="card-header">
-      <span class="card-title" style="font-size: 14px;">💬 Unified Conversation & Execution Stream</span>
+      <span class="card-title" style="font-size: 14px; display: flex; align-items: center; gap: 6px;">${renderIcon("chat", 14)} Unified Conversation & Execution Stream</span>
       <span style="font-size: 11px; color: var(--text-muted);">Persistence-before-wake</span>
     </div>
     <div style="display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto;">
@@ -157,7 +158,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
             <div class="msg-author">
               <span>${msg.authorAvatar}</span>
               <span>${msg.authorDisplayName}</span>
-              ${msg.isProjectedReply ? '<span class="projected-badge" style="font-size: 9px;">🤖 Projected Reply</span>' : ''}
+              ${msg.isProjectedReply ? '<span class="projected-badge" style="font-size: 9px;">Projected Reply</span>' : ''}
             </div>
             <span style="color: var(--text-muted); font-size: 10px;">${msg.timestamp}</span>
           </div>
@@ -176,8 +177,8 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
   quickInput.innerHTML = `
     <input class="chat-input" placeholder="Quick command or message (@all, @Planner, etc.)..." style="min-height: 40px; padding: 8px 12px;" />
     <div style="display: flex; justify-content: space-between; align-items: center;">
-      <span style="font-size: 11px; color: var(--text-muted);">⚡ Variant A: Stream-First Interaction</span>
-      <button class="btn btn-primary btn-sm send-stream-btn">Send 🚀</button>
+      <span style="font-size: 11px; color: var(--text-muted);">Variant A: Stream-First Interaction</span>
+      <button class="btn btn-primary btn-sm send-stream-btn">Send</button>
     </div>
   `;
 

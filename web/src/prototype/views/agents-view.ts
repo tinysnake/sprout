@@ -53,7 +53,7 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       state.agents.push({
         id,
         displayName: name.trim(),
-        avatar: '🤖',
+        avatar: name.trim().slice(0, 2).toUpperCase(),
         description: 'Custom specialized agent.',
         status: 'active',
         privateMemoryEntriesCount: 0,

@@ -190,7 +190,7 @@ export function initPrototype(mountEl: HTMLElement): void {
         <button class="return-context-btn" id="btn-pop-return">
           <span>← Back to ${state.returnContext.fromLabel}</span>
         </button>
-        <button class="return-dismiss-btn" id="btn-dismiss-return" title="Dismiss return link">✕</button>
+        <button class="return-dismiss-btn" id="btn-dismiss-return" title="Dismiss return link" aria-label="Dismiss return link">${renderIcon('close', 12)}</button>
       `;
 
       returnBanner.querySelector('#btn-pop-return')?.addEventListener('click', () => {

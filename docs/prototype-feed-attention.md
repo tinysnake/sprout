@@ -10,12 +10,12 @@ The interactive prototype artifact is executable via `npm run prototype` (servin
 
 ## 1. Bounded Scope: Owned vs. Excluded Concerns
 
-| Bounded Owned Concerns (Ticket #62) | Excluded Downstream Concerns (Owned by Module Tickets #63–#68) |
+| Bounded Owned Concerns (Ticket #62) | Excluded Downstream Concerns (Owned by Module Tickets #63-#68) |
 |---|---|
 | **Feed Landing Surface:** Primary cross-project entry point for discovery and situational awareness. | **Task Authority & Run Workflows (#63):** Authorizing task begin, 2-stage pause/interrupt, versioning edits, completing or rejecting validation claims. |
 | **Human Attention Section:** Concrete separation of urgent, actionable human interventions from routine background logs. | **Chat & Communication Workflows (#64):** Authoring project messages, creating working groups, causal routing batch inspector. |
 | **Scope & Project Filtering:** Scalable Scope Dropdown (`[ 全部项目 (4) ▾ ]`) plus dynamic urgent Project quick-chips that only surface projects with active attention. | **Environment Lifecycle Workflows (#65):** Approving worker enrollment, editing permissions, triggering emergency Force Release. |
-| **Prioritization & Multi-Modal Tiers:** 4 streamlined urgency tiers (`全部`, `🔴 需人工干预`, `🟡 待审批验证`, `🔵 提案与通知`) with dynamic counters. | **Global Agent Definitions (#66):** Configuring work options, editing standing instructions, memory management. |
+| **Prioritization & Multi-Modal Tiers:** 4 streamlined urgency tiers (`全部`, ` 需人工干预`, `[Yellow] 待审批验证`, `[Blue] 提案与通知`) with dynamic counters. | **Global Agent Definitions (#66):** Configuring work options, editing standing instructions, memory management. |
 | **Contextual Discovery & Transcolation:** Disambiguated lifecycle sentences (`Task · Run · Lease`), actor attribution, why attention is needed, and transcolation of infrastructure issues blocking project tasks. | **Usage & Cost Analysis (#67):** 6-view telemetry filtering, billing rates, token reconciliation. |
 | **Deep-Link Delegation:** Navigating directly to authoritative domain surfaces with sticky `← Back to Feed` return breadcrumbs and filter state preservation. | **Settings & Operator Identity (#68):** Overlay network settings, diagnostics, fourth tab naming. |
 | **Live In-Flight Work Snapshot:** Real-time visibility into active tasks and running agent turns across environments. | |
@@ -30,14 +30,14 @@ The Feed experience establishes an explicit, concrete distinction between **Huma
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ 0. PROJECT / SCOPE FILTER BAR (Dropdown + Dynamic Urgent Chips)             │
-│    ├── Dropdown: [ 📂 全部项目 (4 待办) ▾ | 🎮 O7 扫雷 (3) | 🖥️ 基础设施 (1) ]   │
-│    └── Dynamic Chips: [ 全部 (4) ] [ 🎮 O7 扫雷 🔴2 🟡1 ] [ 🖥️ 基础设施 🟡1 ]    │
+│    ├── Dropdown: [ 📂 全部项目 (4 待办) ▾ | 🎮 O7 扫雷 (3) |  基础设施 (1) ]   │
+│    └── Dynamic Chips: [ 全部 (4) ] [ 🎮 O7 扫雷 [Red]2 [Yellow]1 ] [  基础设施 [Yellow]1 ]    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ 1. PROMINENT HUMAN ATTENTION QUEUE (Urgent, Actionable, Sorted by Urgency)   │
-│    ├── 4 Urgency Pills: [ 全部 (4) | 🔴 需干预 (2) | 🟡 待审批 (2) | 🔵 提案 (0) ] │
-│    ├── 🔴 Action Required: Blocker permissions, Lease recovery, Host offline │
-│    ├── 🟡 Attention Needed: Validation claims, Pending worker enrollment    │
-│    └── 🔵 Info / Pending Notice: Proposed tasks awaiting begin authority     │
+│    ├── 4 Urgency Pills: [ 全部 (4) | [Red] 需干预 (2) | [Yellow] 待审批 (2) | [Blue] 提案 (0) ] │
+│    ├── [Red] Action Required: Blocker permissions, Lease recovery, Host offline │
+│    ├── [Yellow] Attention Needed: Validation claims, Pending worker enrollment    │
+│    └── [Blue] Info / Pending Notice: Proposed tasks awaiting begin authority     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ 2. LIVE IN-FLIGHT WORK SNAPSHOT (Real-Time Background Execution)             │
 │    └── Pulsing Active Tasks: Running agent, Engine/Model, Duration, Env     │
@@ -62,12 +62,12 @@ Under ADR-0006, ADR-0008, and ADR-0009:
 During interactive grilling, the filtering architecture was unified into a three-tiered model:
 
 1. **Top Scope Selector Dropdown (`<select id="feed-scope-select">`):**
-   - **Unified Scope Dropdown:** Houses all projects and infrastructure in one clean, scalable control (`[ 📂 全部项目 (4 待办) ▾ ]`, `[ 🎮 O7 扫雷 (3 待办) ]`, `[ ⚡ Sprout 核心 (0 待办) ]`, `[ 🖥️ 基础设施 (1 待办) ]`).
+   - **Unified Scope Dropdown:** Houses all projects and infrastructure in one clean, scalable control (`[ 📂 全部项目 (4 待办) ▾ ]`, `[ 🎮 O7 扫雷 (3 待办) ]`, `[  Sprout 核心 (0 待办) ]`, `[  基础设施 (1 待办) ]`).
    - Completely eliminates duplicate pills/chips beneath the dropdown, ensuring zero redundant filter UI across phone and desktop.
    - **Infrastructure Event Transcolation Rule:** Infrastructure issues directly blocking or recovering a project's task (e.g. Windows worker offline holding Task #104 lease) transcolate into that project's filtered Attention view, ensuring the operator sees the root cause. Generic host enrollments appear only under `All` and `Infrastructure`.
-   - **Lightweight Project Clear Banner:** Selecting a project with 0 attention items displays a clean green banner (`✓ <Project>: 当前无待办事项，系统自主运行中`), without hiding its active in-flight tasks or scoped activity stream.
+   - **Lightweight Project Clear Banner:** Selecting a project with 0 attention items displays a clean green banner (`[Pass] <Project>: 当前无待办事项，系统自主运行中`), without hiding its active in-flight tasks or scoped activity stream.
 2. **Attention Urgency Pills (Dynamic Counter AND Intersection):**
-   - Streamlined into 4 distinct pills: `全部`, `🔴 需人工干预`, `🟡 待审批验证`, `🔵 提案与通知`.
+   - Streamlined into 4 distinct pills: `全部`, `[Red] 需人工干预`, `[Yellow] 待审批验证`, `[Blue] 提案与通知`.
    - Counters dynamically recalculate based on the active Project Scope.
 3. **Activity Event Stream Scoping:**
    - When a project is selected, the operational activity stream strictly scopes to events belonging to that project.
@@ -135,7 +135,7 @@ The prototype provides 1-click state matrix switching (housed in the top Prototy
 
 ---
 
-## 7. Downstream Module Reuse Rules (#63–#68)
+## 7. Downstream Module Reuse Rules (#63-#68)
 
 1. **#63 (Project View):** Integrates Task-level deep-link landing targets, claim verification cards, and 2-stage pause/interrupt controls.
 2. **#64 (Chat):** Integrates Project and Working Group deep-link landing targets and causal routing inspectors.
