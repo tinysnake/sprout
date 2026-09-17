@@ -472,10 +472,10 @@ function renderEnvironmentDetailCard(
 
     <!-- 4. Active Lease, Recovery, and Force Release Resolution Area -->
     ${
-      env.workSafety === 'recovery' || env.leaseRecovery
-        ? renderRecoveryAlertBox(env, activeTask)
-        : env.workSafety === 'reconciling'
+      env.workSafety === 'reconciling'
         ? renderReconcilingBox(env)
+        : env.workSafety === 'recovery' || env.leaseRecovery
+        ? renderRecoveryAlertBox(env, activeTask)
         : env.activeLeaseHolder
         ? renderActiveLeaseBox(env, env.activeLeaseHolder)
         : env.forcedReleaseRecord
