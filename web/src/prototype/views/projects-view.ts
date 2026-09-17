@@ -24,14 +24,13 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
   const recoveryTasks = projectTasks.filter((t) => t.lifecycle === 'recovery');
   const proposedTasks = projectTasks.filter((t) => t.lifecycle === 'proposed');
   const activeMembers = project.memberships.filter((m) => m.status === 'active');
-  const activeWorkingGroups = project.workingGroups.filter((w) => w.status === 'active');
 
-  // Top Project Navigation & Metadata Header
+  // Top Project Navigation Bar (App Header Style)
   const projectNav = document.createElement('div');
   projectNav.className = 'project-nav-container';
 
   projectNav.innerHTML = `
-    <!-- Top Project Selector & Actions Bar -->
+    <!-- Top Project Selector & Actions Bar (App-Header style, flush with edge) -->
     <header class="project-top-bar">
       <div class="project-selector-group">
         <div style="display: flex; align-items: center; gap: 6px;">
@@ -41,73 +40,70 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
               .map(
                 (p) => `
               <option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>
-                ${p.displayName} (${p.status})
+                ${p.displayName} ${p.status === 'archived' ? '(Archived)' : ''}
               </option>
             `
               )
               .join('')}
           </select>
         </div>
-        <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">
-          ${project.status === 'active' ? 'Active' : 'Archived (Read-Only)'}
-        </span>
-        <button class="btn btn-secondary btn-sm new-project-btn" title="Create a new Project applying General collaboration template v1.0">
-          ${renderIcon('plus', 14)} New Project
+
+        <!-- Info Button (Item 6) -->
+        <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
+          ${renderIcon('info', 16)}
         </button>
+
+        <!-- + New Project Button (Item 2: only +, tooltip) -->
+        <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
+          ${renderIcon('plus', 16)}
+        </button>
+
+        ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px;">Archived</span>` : ''}
       </div>
 
-      <!-- Segmented Sub-Nav Tabs -->
+      <!-- Segmented Sub-Nav Tabs (Item 4 & 5: responsive icon+label, hidden on desktop sidebar) -->
       <nav class="project-segmented-tabs" role="tablist" aria-label="Project Sub-Views">
         <button class="project-segmented-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-tab="overview" role="tab" aria-selected="${state.projectTab === 'overview'}">
-          ${renderIcon('overview', 14)}
-          <span>Overview</span>
+          <span class="tab-icon-row">${renderIcon('overview', 16)}</span>
+          <span class="tab-label">Overview</span>
         </button>
         <button class="project-segmented-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-tab="tasks" role="tab" aria-selected="${state.projectTab === 'tasks'}">
-          ${renderIcon('tasks', 14)}
-          <span>Tasks</span>
-          <span class="tab-badge">${projectTasks.length}</span>
+          <span class="tab-icon-row">
+            ${renderIcon('tasks', 16)}
+            <span class="tab-badge">${projectTasks.length}</span>
+          </span>
+          <span class="tab-label">Tasks</span>
         </button>
         <button class="project-segmented-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-tab="chat" role="tab" aria-selected="${state.projectTab === 'chat'}">
-          ${renderIcon('chat', 14)}
-          <span>Chat</span>
-          ${activeWorkingGroups.length > 0 ? `<span class="tab-badge" style="background: var(--purple-agent); color: #fff;">${activeWorkingGroups.length} WGs</span>` : ''}
+          <span class="tab-icon-row">
+            ${renderIcon('chat', 16)}
+          </span>
+          <span class="tab-label">Chat</span>
         </button>
       </nav>
     </header>
-
-    <!-- Project Metadata Snapshot Strip -->
-    <div class="project-metadata-strip" aria-label="Project metadata snapshot">
-      <div class="project-metadata-item" title="Derived template source">
-        ${renderIcon('box', 13)}
-        <span><strong>Template:</strong> ${project.templateSource}</span>
-      </div>
-      <div class="project-metadata-divider"></div>
-      <div class="project-metadata-item" title="Bound host environments">
-        ${renderIcon('server', 13)}
-        <span><strong>Workspaces:</strong> ${project.boundEnvironmentWorkspaces.length} Bound</span>
-      </div>
-      <div class="project-metadata-divider"></div>
-      <div class="project-metadata-item" title="Active project memberships">
-        ${renderIcon('users', 13)}
-        <span><strong>Members:</strong> ${activeMembers.length} Active</span>
-      </div>
-      <div class="project-metadata-divider"></div>
-      <div class="project-metadata-item" title="Task operating status">
-        ${renderIcon('tasks', 13)}
-        <span><strong>Tasks:</strong> ${activeTasks.length} Active · ${validationTasks.length} Validation · ${blockedTasks.length} Blocked · ${proposedTasks.length} Proposed · ${recoveryTasks.length} Recovery</span>
-      </div>
-      <div class="project-metadata-divider"></div>
-      <div class="project-metadata-item" title="Wake routing policy">
-        ${renderIcon('lightning', 13)}
-        <span><strong>Routing:</strong> ${project.wakePolicy === 'wake-model-assisted' ? 'Wake-Model (30s batch)' : 'Explicit-only'}</span>
-      </div>
-    </div>
   `;
 
   // Project selector switch listener
   projectNav.querySelector('#project-selector')?.addEventListener('change', (ev) => {
     const selectedId = (ev.target as HTMLSelectElement).value;
     stateManager.selectProject(selectedId);
+  });
+
+  // Project info modal listener
+  projectNav.querySelector('#project-info-btn')?.addEventListener('click', () => {
+    renderProjectInfoModal(
+      container,
+      state,
+      project,
+      projectTasks,
+      activeTasks,
+      validationTasks,
+      blockedTasks,
+      proposedTasks,
+      recoveryTasks,
+      activeMembers
+    );
   });
 
   // Segmented sub-tab listeners
@@ -195,7 +191,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
           <ul style="margin-left: 18px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 4px;">
             ${(project.rules && project.rules.length > 0
               ? project.rules
-              : ['Preserve modular seams and single-context documentation', 'Verify cross-platform compatibility before task completion']
+              : ['Preserve modular boundaries and single-context documentation', 'Verify cross-platform compatibility before task completion']
             )
               .map((r: string) => `<li>${r}</li>`)
               .join('')}
@@ -768,6 +764,115 @@ function renderProjectChat(state: PrototypeState, project: ProjectItem): HTMLEle
 }
 
 // --- Modals for Project Management ---
+
+function renderProjectInfoModal(
+  parentEl: HTMLElement,
+  state: PrototypeState,
+  project: ProjectItem,
+  projectTasks: any[],
+  activeTasks: any[],
+  validationTasks: any[],
+  blockedTasks: any[],
+  proposedTasks: any[],
+  recoveryTasks: any[],
+  activeMembers: any[]
+) {
+  const modal = document.createElement('div');
+  modal.className = 'proto-modal-backdrop';
+
+  modal.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="info-modal-title">
+      <div class="proto-modal-header">
+        <strong id="info-modal-title" style="font-size: 15px; display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('info', 16)} Project Information & Metadata
+        </strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close modal">${renderIcon('close', 12)}</button>
+      </div>
+
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px;">
+        <!-- 1. Identity & Template -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 14px; font-weight: 700;">${project.displayName}</span>
+            <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">${project.status}</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px;">
+            ID: <code>${project.id}</code> · Created: ${project.createdAt}
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+            <strong>Template Origin:</strong> <code>${project.templateSource}</code>
+          </div>
+        </div>
+
+        <!-- 2. Bound Host Workspaces -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Bound Workspaces & Host Environments (${project.boundEnvironmentWorkspaces.length})
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
+            ${project.boundEnvironmentWorkspaces
+              .map((ws) => {
+                const env = state.environments.find((e) => e.id === ws.environmentId);
+                return `
+              <div style="font-size: 12px; display: flex; justify-content: space-between; align-items: center; background: var(--bg-surface); padding: 6px 8px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
+                <span style="display: inline-flex; align-items: center; gap: 5px;">
+                  ${renderIcon(env?.platform === 'windows' ? 'desktop' : 'server', 13)}
+                  <strong>${ws.environmentId}</strong>
+                </span>
+                <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">${ws.relativeWorkspacePath}</span>
+              </div>
+            `;
+              })
+              .join('')}
+          </div>
+        </div>
+
+        <!-- 3. Memberships -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Active Project Members (${activeMembers.length})
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.4;">
+            ${activeMembers.map((m) => `<strong>${m.displayName}</strong> (${m.memberKind})`).join(', ')}
+          </div>
+        </div>
+
+        <!-- 4. Tasks Operating Breakdown -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Task Operating Status (${projectTasks.length} Total)
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
+            <span class="status-pill green" style="font-size: 10px;">${activeTasks.length} Active</span>
+            <span class="status-pill yellow" style="font-size: 10px;">${validationTasks.length} Validation</span>
+            <span class="status-pill red" style="font-size: 10px;">${blockedTasks.length} Blocked</span>
+            <span class="status-pill yellow" style="font-size: 10px;">${proposedTasks.length} Proposed</span>
+            <span class="status-pill red" style="font-size: 10px;">${recoveryTasks.length} Recovery</span>
+          </div>
+        </div>
+
+        <!-- 5. Wake Routing Policy -->
+        <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
+            Wake Routing Policy
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+            <span class="status-pill purple" style="font-size: 11px;">
+              ${project.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (30s batch window)' : 'Explicit Mentions Only'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="proto-modal-footer">
+        <button class="btn btn-secondary close-modal-btn">Close</button>
+      </div>
+    </div>
+  `;
+
+  modal.querySelectorAll('.close-modal-btn').forEach((b) => b.addEventListener('click', () => modal.remove()));
+  parentEl.appendChild(modal);
+}
 
 function renderNewProjectModal(parentEl: HTMLElement) {
   const modal = document.createElement('div');

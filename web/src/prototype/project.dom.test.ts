@@ -52,7 +52,7 @@ async function setupPrototypeDom() {
   };
 }
 
-test('Project Multi-View: renders project switcher, metadata snapshot, and sub-nav tabs', async () => {
+test('Project Multi-View: renders project switcher, info button, metadata modal, and sub-nav tabs', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
     const { initPrototype } = (await vite.ssrLoadModule(
@@ -80,13 +80,21 @@ test('Project Multi-View: renders project switcher, metadata snapshot, and sub-n
     const subNavTabs = document.querySelectorAll('.project-segmented-tab');
     assert.equal(subNavTabs.length, 3, 'Overview, Tasks, and Chat tabs rendered');
 
-    // 3. Verify Metadata Snapshot Strip
-    const metadataStrip = document.querySelector('.project-metadata-strip');
-    assert.ok(metadataStrip, 'Metadata snapshot strip rendered');
-    assert.match(metadataStrip.textContent ?? '', /General collaboration template v1.0/);
-    assert.match(metadataStrip.textContent ?? '', /Workspaces/);
-    assert.match(metadataStrip.textContent ?? '', /Members/);
-    assert.match(metadataStrip.textContent ?? '', /Routing/);
+    // 3. Verify Project Info Button and Modal Popup
+    const infoBtn = document.querySelector('#project-info-btn') as HTMLButtonElement;
+    assert.ok(infoBtn, 'Project info button rendered');
+    infoBtn.click();
+
+    const infoModal = document.querySelector('.proto-modal-dialog');
+    assert.ok(infoModal, 'Project info modal opened');
+    assert.match(infoModal.textContent ?? '', /Project Information & Metadata/);
+    assert.match(infoModal.textContent ?? '', /General collaboration template v1.0/);
+    assert.match(infoModal.textContent ?? '', /Bound Workspaces/);
+    assert.match(infoModal.textContent ?? '', /Active Project Members/);
+
+    const closeBtn = infoModal.querySelector('.close-modal-btn') as HTMLButtonElement;
+    closeBtn.click();
+    assert.equal(document.querySelector('.proto-modal-backdrop'), null, 'Modal closed');
   } finally {
     await cleanup();
   }

@@ -63,6 +63,9 @@ export function renderIcon(name: string, size = 18, className = 'proto-icon'): s
     case 'review':
       return `<svg ${common}><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" /></svg>`;
 
+    case 'info':
+      return `<svg ${common}><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>`;
+
     case 'check':
       return `<svg ${common}><polyline points="20 6 9 17 4 12" /></svg>`;
 
