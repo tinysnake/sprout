@@ -1642,7 +1642,7 @@ code {
   padding-bottom: 14px;
 }
 
-/* Scope Filter Bar (Unified Scope Chips) */
+/* Scope Filter Bar (Dropdown Only) */
 .feed-scope-filter-bar {
   display: flex;
   align-items: center;
@@ -1650,77 +1650,41 @@ code {
   margin-top: 12px;
 }
 
-.feed-scope-chips {
+.feed-scope-dropdown-wrapper {
   display: flex;
   align-items: center;
-  gap: 6px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  padding-bottom: 2px;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  gap: 8px;
+  width: 100%;
+  max-width: 440px;
 }
 
-.feed-scope-chips::-webkit-scrollbar {
-  display: none;
-}
-
-.scope-chip-btn {
-  background: var(--bg-surface-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: var(--radius-full);
-  cursor: pointer;
-  white-space: nowrap;
+.feed-scope-label {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  transition: all 0.15s ease;
-  min-height: 34px;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
-.scope-chip-btn:hover {
-  border-color: var(--accent-primary);
+.feed-scope-select {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 38px;
+  padding: 6px 12px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
-  background: var(--accent-bg);
+  cursor: pointer;
+  transition: all 0.15s ease;
 }
 
-.scope-chip-btn.active {
-  background: var(--accent-primary);
-  color: #ffffff;
+.feed-scope-select:focus {
   border-color: var(--accent-primary);
-  font-weight: 700;
-}
-
-.badge-dot-count {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: var(--radius-full);
-  line-height: 1;
-}
-
-.badge-dot-count.red {
-  background: var(--red-action);
-  color: #ffffff;
-}
-
-.badge-dot-count.yellow {
-  background: var(--yellow-attention);
-  color: #000000;
-}
-
-.scope-chip-btn.active .badge-dot-count.red {
-  background: #ffffff;
-  color: var(--red-action);
-}
-
-.scope-chip-btn.active .badge-dot-count.yellow {
-  background: #ffffff;
-  color: #b45309;
+  outline: 2px solid var(--accent-border);
 }
 
 /* 4 Streamlined Urgency Pills */

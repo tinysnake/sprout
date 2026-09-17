@@ -70,9 +70,9 @@ test('Feed & Attention: renders three-tier hierarchy with clean production UI', 
     assert.ok(feedHeader, 'Feed header rendered');
     assert.match(feedHeader.textContent ?? '', /Operations Feed & Human Attention/);
 
-    // 2. Verify Scope Filter Bar
-    const scopeChips = document.querySelectorAll('.scope-chip-btn');
-    assert.ok(scopeChips.length >= 3, 'Scope chips rendered for all, projects, and infrastructure');
+    // 2. Verify Scope Filter Bar (Dropdown)
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.ok(scopeSelect, 'Scope select dropdown rendered');
 
     // 3. Verify Tier 1: Human Attention Section
     const attentionSection = document.querySelector('.attention-section');
@@ -110,10 +110,11 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
     assert.equal(document.querySelectorAll('.attention-card').length, 4, 'All 4 attention items initially');
     assert.equal(document.querySelectorAll('.active-task-card').length, 1, '1 active task in all scope');
 
-    // Click O7 Minesweeper Scope Chip
-    const minesweeperChip = document.querySelector('.scope-chip-btn[data-scope="proj-minesweeper"]') as HTMLButtonElement;
-    assert.ok(minesweeperChip, 'O7 Minesweeper scope chip found');
-    minesweeperChip.click();
+    // Select O7 Minesweeper in Scope Dropdown
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.ok(scopeSelect);
+    scopeSelect.value = 'proj-minesweeper';
+    scopeSelect.dispatchEvent(new dom.window.Event('change'));
 
     // Verify Attention items filtered to O7 Minesweeper (including transcolated recovery task #104)
     const filteredCards = document.querySelectorAll('.attention-card');
@@ -129,10 +130,9 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
       assert.match(row.textContent ?? '', /O7 Minesweeper/);
     });
 
-    // Switch Scope to Infrastructure via Chip
-    const infraChip = document.querySelector('.scope-chip-btn[data-scope="infrastructure"]') as HTMLButtonElement;
-    assert.ok(infraChip, 'Infrastructure scope chip found');
-    infraChip.click();
+    // Switch Scope to Infrastructure via Dropdown
+    scopeSelect.value = 'infrastructure';
+    scopeSelect.dispatchEvent(new dom.window.Event('change'));
 
     // Verify Attention items filtered to infrastructure
     const infraCards = document.querySelectorAll('.attention-card');
@@ -143,8 +143,8 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
     assert.equal(document.querySelectorAll('.active-task-card').length, 0, '0 active tasks under infrastructure');
 
     // Reset to All
-    const allChip = document.querySelector('.scope-chip-btn[data-scope="all"]') as HTMLButtonElement;
-    allChip.click();
+    scopeSelect.value = 'all';
+    scopeSelect.dispatchEvent(new dom.window.Event('change'));
     assert.equal(document.querySelectorAll('.attention-card').length, 4, 'Reset to all 4 attention items');
   } finally {
     await cleanup();
@@ -215,9 +215,11 @@ test('Feed & Attention: deep-link navigation preserves scope and filter state on
 
     const document = dom.window.document;
 
-    // 1. Select O7 Minesweeper scope
-    const minesweeperChip = document.querySelector('.scope-chip-btn[data-scope="proj-minesweeper"]') as HTMLButtonElement;
-    minesweeperChip.click();
+    // 1. Select O7 Minesweeper scope via Dropdown
+    const scopeSelect = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.ok(scopeSelect);
+    scopeSelect.value = 'proj-minesweeper';
+    scopeSelect.dispatchEvent(new dom.window.Event('change'));
 
     // 2. Click "Review Claim in Tasks →" button on Task #101 card
     const actionBtn = document.querySelector('.attention-action-btn[data-attention-id="att-1"]') as HTMLButtonElement;
@@ -236,8 +238,8 @@ test('Feed & Attention: deep-link navigation preserves scope and filter state on
 
     // Verify returned to Feed AND scope filter is preserved as proj-minesweeper
     assert.ok(document.querySelector('.feed-view'), 'Returned to Feed view');
-    const activeChip = document.querySelector('.scope-chip-btn.active') as HTMLButtonElement;
-    assert.equal(activeChip.getAttribute('data-scope'), 'proj-minesweeper', 'Scope filter state was preserved on return');
+    const scopeSelectAfter = document.querySelector('#feed-scope-select') as HTMLSelectElement;
+    assert.equal(scopeSelectAfter.value, 'proj-minesweeper', 'Scope filter state was preserved on return');
   } finally {
     await cleanup();
   }

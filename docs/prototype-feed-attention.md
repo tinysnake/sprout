@@ -61,9 +61,9 @@ Under ADR-0006, ADR-0008, and ADR-0009:
 
 During interactive grilling, the filtering architecture was unified into a three-tiered model:
 
-1. **Top Scope Filter (Dropdown + Dynamic Urgent Chips):**
-   - **Scope Dropdown (`<select>`):** Accommodates arbitrary project counts (5–50+ projects) without horizontal wrapping or clutter.
-   - **Dynamic Urgent Quick-Chips:** Surfaces horizontal chips **only for projects that currently have active attention items** (e.g. `[ 全部 ]`, `[ O7 扫雷 🔴2 🟡1 ]`, `[ 基础设施 🟡1 ]`). Projects with 0 attention items remain in the dropdown and do not clutter the quick-chip bar.
+1. **Top Scope Selector Dropdown (`<select id="feed-scope-select">`):**
+   - **Unified Scope Dropdown:** Houses all projects and infrastructure in one clean, scalable control (`[ 📂 全部项目 (4 待办) ▾ ]`, `[ 🎮 O7 扫雷 (3 待办) ]`, `[ ⚡ Sprout 核心 (0 待办) ]`, `[ 🖥️ 基础设施 (1 待办) ]`).
+   - Completely eliminates duplicate pills/chips beneath the dropdown, ensuring zero redundant filter UI across phone and desktop.
    - **Infrastructure Event Transcolation Rule:** Infrastructure issues directly blocking or recovering a project's task (e.g. Windows worker offline holding Task #104 lease) transcolate into that project's filtered Attention view, ensuring the operator sees the root cause. Generic host enrollments appear only under `All` and `Infrastructure`.
    - **Lightweight Project Clear Banner:** Selecting a project with 0 attention items displays a clean green banner (`✓ <Project>: 当前无待办事项，系统自主运行中`), without hiding its active in-flight tasks or scoped activity stream.
 2. **Attention Urgency Pills (Dynamic Counter AND Intersection):**
@@ -110,7 +110,7 @@ The prototype provides 1-click state matrix switching (housed in the top Prototy
 ### Accepted Decisions (Ticket #62)
 
 1. **Strict Discovery & Context Boundary:** Feed is discovery/context only; all domain actions are delegated to authoritative domain surfaces via deep links with `← Back to Feed` return breadcrumbs and filter state preservation.
-2. **Scalable Scope Filter Bar:** Hybrid Scope Dropdown + Dynamic Urgent Chips that only surface projects with active attention.
+2. **Unified Scope Selector Dropdown:** Scalable Project Scope dropdown with active attention counts, eliminating duplicate chips.
 3. **Three-Tier Feed Structure:**
    - *Prominent Attention Section* (Top): Prioritized by urgency (`Action Required` → `Attention` → `Info`), with 4 streamlined urgency pills.
    - *Live In-Flight Work Snapshot* (Middle): Pulsing live status of executing tasks and agent runs across environments.
@@ -126,7 +126,7 @@ The prototype provides 1-click state matrix switching (housed in the top Prototy
 2. **Single Flat Timeline without Attention Isolation:** Rejected; mixing critical blockers with routine heartbeat logs risks missing human-action-required events.
 3. **Color-Only Urgency Signals:** Rejected; attention items must pair color with distinctive category icons, severity badges, and textual reasons.
 4. **Standalone Disjoint Attention Destination:** Rejected in #60 & #61; attention belongs prominently within the Feed cross-project landing surface.
-5. **Static Flattened Horizontal Project Chip List for All Projects:** Rejected in #62 grilling; flat chip lists overflow and clutter when project counts grow.
+5. **Duplicate Scope Filter Pills alongside Dropdown:** Rejected in #62 grilling; having both a dropdown and chips sitting side-by-side creates redundant UI clutter. A single clean dropdown is adopted.
 
 ### Unresolved Questions & Implementation Notes
 

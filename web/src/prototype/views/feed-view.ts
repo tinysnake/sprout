@@ -25,20 +25,25 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
       Central surface for cross-project discovery, urgent Human interventions, active work telemetry, and background collaboration history.
     </p>
 
-    <!-- Top Scope Filter Bar -->
+    <!-- Top Scope Selector Dropdown -->
     <div class="feed-scope-filter-bar">
-      <div class="feed-scope-chips" role="group" aria-label="Project Scope Filter">
-        ${renderScopeChips(state)}
+      <div class="feed-scope-dropdown-wrapper">
+        <label for="feed-scope-select" class="feed-scope-label">
+          ${renderIcon('project', 14)}
+          <span>Project Scope:</span>
+        </label>
+        <select id="feed-scope-select" class="form-select feed-scope-select" aria-label="Select Project Scope">
+          ${renderScopeSelectOptions(state)}
+        </select>
       </div>
     </div>
   `;
 
-  // Attach Scope chip listeners
-  headerEl.querySelectorAll('.scope-chip-btn[data-scope]').forEach((chip) => {
-    chip.addEventListener('click', (ev) => {
-      const scope = (ev.currentTarget as HTMLElement).getAttribute('data-scope') || 'all';
-      stateManager.setFeedScopeFilter(scope);
-    });
+  // Attach Scope select listener
+  const scopeSelect = headerEl.querySelector('#feed-scope-select') as HTMLSelectElement;
+  scopeSelect?.addEventListener('change', (ev) => {
+    const val = (ev.target as HTMLSelectElement).value;
+    stateManager.setFeedScopeFilter(val);
   });
 
   container.appendChild(headerEl);
@@ -101,14 +106,14 @@ function getScopedActivities(state: PrototypeState): ActivityFeedItem[] {
   return state.activityFeedItems.filter((a) => a.projectId === scope);
 }
 
-function renderScopeChips(state: PrototypeState): string {
+function renderScopeSelectOptions(state: PrototypeState): string {
   const currentScope = state.feedScopeFilter;
   const allAttCount = state.attentionItems.length;
 
-  let chipsHtml = `
-    <button class="scope-chip-btn ${currentScope === 'all' ? 'active' : ''}" data-scope="all">
-      <span>全部 / All (${allAttCount})</span>
-    </button>
+  let optionsHtml = `
+    <option value="all" ${currentScope === 'all' ? 'selected' : ''}>
+      📂 全部项目 / All Projects (${allAttCount} 待办)
+    </option>
   `;
 
   for (const proj of state.projects) {
@@ -118,31 +123,23 @@ function renderScopeChips(state: PrototypeState): string {
         (i.referenceType === 'task' &&
           state.tasks.find((t) => t.id === i.referenceId)?.projectId === proj.id)
     );
-    const redCount = projItems.filter((i) => i.severity === 'action_required').length;
-    const yellowCount = projItems.filter((i) => i.severity === 'attention').length;
-    chipsHtml += `
-      <button class="scope-chip-btn ${currentScope === proj.id ? 'active' : ''}" data-scope="${proj.id}">
-        <span>${proj.displayName}</span>
-        ${redCount > 0 ? `<span class="badge-dot-count red">${redCount}</span>` : ''}
-        ${yellowCount > 0 ? `<span class="badge-dot-count yellow">${yellowCount}</span>` : ''}
-      </button>
+    optionsHtml += `
+      <option value="${proj.id}" ${currentScope === proj.id ? 'selected' : ''}>
+        🎮 ${proj.displayName} (${projItems.length} 待办)
+      </option>
     `;
   }
 
   const infraItems = state.attentionItems.filter(
     (i) => i.projectName === 'Infrastructure' || i.category.startsWith('env_') || !i.projectId
   );
-  const infraRed = infraItems.filter((i) => i.severity === 'action_required').length;
-  const infraYellow = infraItems.filter((i) => i.severity === 'attention').length;
-  chipsHtml += `
-    <button class="scope-chip-btn ${currentScope === 'infrastructure' ? 'active' : ''}" data-scope="infrastructure">
-      <span>基础设施</span>
-      ${infraRed > 0 ? `<span class="badge-dot-count red">${infraRed}</span>` : ''}
-      ${infraYellow > 0 ? `<span class="badge-dot-count yellow">${infraYellow}</span>` : ''}
-    </button>
+  optionsHtml += `
+    <option value="infrastructure" ${currentScope === 'infrastructure' ? 'selected' : ''}>
+      🖥️ 基础设施 / Infrastructure (${infraItems.length} 待办)
+    </option>
   `;
 
-  return chipsHtml;
+  return optionsHtml;
 }
 
 // ---------------------------------------------------------------------------
