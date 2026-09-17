@@ -30,14 +30,14 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
   const headerCard = document.createElement('div');
   headerCard.className = 'card envs-header-card';
   headerCard.innerHTML = `
-    <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
-      <div>
-        <h2 style="font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+    <div class="card-header envs-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
+      <div style="flex: 1; min-width: 0;">
+        <h2 style="font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${renderIcon('environments', 18)}
           <span>Environments & Host Infrastructure</span>
         </h2>
       </div>
-      <div style="display: flex; gap: 6px; align-items: center;">
+      <div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0; margin-left: auto;">
         <button class="btn btn-primary btn-sm register-host-btn icon-only-btn" id="btn-register-host" title="Register New Host" aria-label="Register New Host">
           ${renderIcon('plus', 14)}
         </button>
@@ -87,71 +87,76 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
     openRegisterHostDialog();
   });
 
-  container.appendChild(headerCard);
-
   // --- 2. Master / Detail Layout Construction (Phone & Fluid Parity / Desktop Split) ---
   const isSingleColumn = state.viewportMode === 'mobile' || state.viewportMode === 'fluid';
   const showSingleColumnDetail = isSingleColumn && state.environmentViewMode === 'detail' && selectedEnv;
 
-  if (isSingleColumn) {
-    if (showSingleColumnDetail) {
-      // Single Column Detail View with Sticky Back Header
-      const mobileDetailWrapper = document.createElement('div');
-      mobileDetailWrapper.className = 'envs-mobile-detail-wrapper';
+  if (showSingleColumnDetail) {
+    // Single Column Detail View: Replace Home Title Bar with Traditional Back Header (Like Chat / Project Detail)
+    const mobileDetailWrapper = document.createElement('div');
+    mobileDetailWrapper.className = 'envs-mobile-detail-wrapper';
 
-      const mobileBackNav = document.createElement('div');
-      mobileBackNav.className = 'mobile-detail-nav-header';
-      mobileBackNav.innerHTML = `
-        <button class="btn btn-secondary btn-sm back-to-envs-btn" id="btn-back-to-envs" aria-label="Back to environments list">
-          ${renderIcon('chevron-left', 14)} Back to Environments
-        </button>
-        <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px;">
-          <span class="status-dot ${selectedEnv.trafficLight}"></span>
-          <span style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${selectedEnv.displayName}</span>
-        </div>
-      `;
+    const mobileBackNav = document.createElement('div');
+    mobileBackNav.className = 'mobile-detail-nav-header';
+    mobileBackNav.innerHTML = `
+      <button class="btn btn-secondary btn-sm back-to-envs-btn" id="btn-back-to-envs" title="Back to Environments" aria-label="Back to environments list">
+        ${renderIcon('chevron-left', 14)} Back to Environments
+      </button>
+      <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px;">
+        <span class="status-dot ${selectedEnv.trafficLight}"></span>
+        <span style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${selectedEnv.displayName}</span>
+      </div>
+      <div class="sr-only">
+        Environments & Host Infrastructure
+        Ready (${readyCount}) Attention (${attentionCount}) Action Required (${actionRequiredCount}) Archived (${archivedCount})
+      </div>
+    `;
 
-      mobileBackNav.querySelector('#btn-back-to-envs')?.addEventListener('click', () => {
-        stateManager.closeEnvironmentDetail();
-      });
+    mobileBackNav.querySelector('#btn-back-to-envs')?.addEventListener('click', () => {
+      stateManager.closeEnvironmentDetail();
+    });
 
-      mobileDetailWrapper.appendChild(mobileBackNav);
-      mobileDetailWrapper.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
-      container.appendChild(mobileDetailWrapper);
-    } else {
+    mobileDetailWrapper.appendChild(mobileBackNav);
+    mobileDetailWrapper.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
+    container.appendChild(mobileDetailWrapper);
+  } else {
+    // Standard List or Desktop View: Include Header Card with Title and Filter Row
+    container.appendChild(headerCard);
+
+    if (isSingleColumn) {
       // Single Column Master List View
       const listContainer = document.createElement('div');
       listContainer.className = 'envs-master-list mobile-full';
       listContainer.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
       container.appendChild(listContainer);
-    }
-  } else {
-    // Desktop / Wide Fluid Split Layout
-    const splitLayout = document.createElement('div');
-    splitLayout.className = 'envs-split-layout';
-
-    // Left Column: Master List
-    const leftCol = document.createElement('div');
-    leftCol.className = 'envs-master-column';
-    leftCol.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
-    splitLayout.appendChild(leftCol);
-
-    // Right Column: Detail Panel
-    const rightCol = document.createElement('div');
-    rightCol.className = 'envs-detail-column';
-    if (selectedEnv) {
-      rightCol.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
     } else {
-      rightCol.innerHTML = `
-        <div class="card" style="padding: 30px; text-align: center; color: var(--text-muted);">
-          ${renderIcon('environments', 32)}
-          <p style="margin-top: 10px; font-size: 14px;">No environment matches the active filter.</p>
-        </div>
-      `;
-    }
-    splitLayout.appendChild(rightCol);
+      // Desktop 2-Column Split Layout
+      const splitLayout = document.createElement('div');
+      splitLayout.className = 'envs-split-layout';
 
-    container.appendChild(splitLayout);
+      // Left Column: Master List
+      const leftCol = document.createElement('div');
+      leftCol.className = 'envs-master-column';
+      leftCol.appendChild(renderEnvironmentMasterList(filteredEnvs, selectedEnv?.id));
+      splitLayout.appendChild(leftCol);
+
+      // Right Column: Detail Panel
+      const rightCol = document.createElement('div');
+      rightCol.className = 'envs-detail-column';
+      if (selectedEnv) {
+        rightCol.appendChild(renderEnvironmentDetailCard(selectedEnv, state));
+      } else {
+        rightCol.innerHTML = `
+          <div class="card" style="padding: 30px; text-align: center; color: var(--text-muted);">
+            ${renderIcon('environments', 32)}
+            <p style="margin-top: 10px; font-size: 14px;">No environment matches the active filter.</p>
+          </div>
+        `;
+      }
+      splitLayout.appendChild(rightCol);
+
+      container.appendChild(splitLayout);
+    }
   }
 
   return container;
@@ -318,54 +323,74 @@ function renderEnvironmentDetailCard(
         <span style="font-size: 11px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
       </div>
 
-      <div class="metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;">
-        <!-- 1. Enrollment -->
-        <div class="metric-tile">
-          <span class="metric-label">1. Enrollment</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.enrollmentStatus === 'approved' ? 'var(--green-ready)' : env.enrollmentStatus === 'pending' ? 'var(--yellow-attention)' : 'var(--red-action)'};">
-            ${env.enrollmentStatus.toUpperCase()}
-          </span>
-          <span class="metric-sub" style="font-family: var(--font-mono); font-size: 10px;">
-            ${env.workerIdentityKey.slice(0, 16)}...
-          </span>
-          ${
-            env.enrollmentStatus === 'pending'
-              ? `<button class="btn btn-primary btn-xs approve-enroll-btn" style="margin-top: 4px; width: 100%;">Approve</button>`
-              : ''
-          }
+      <!-- 1–4. Core Operational Status & Safety Dimensions (Unified with Capability Permissions Style) -->
+      <div class="health-dimensions-box" style="background: var(--bg-surface-elevated); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 12px; text-transform: uppercase; color: var(--text-muted); font-weight: 700;">
+            1–4. Core Operational Status & Safety Dimensions
+          </strong>
+          <span style="font-size: 10px; color: var(--text-muted);">ADR-0008 & ADR-0009</span>
         </div>
 
-        <!-- 2. Connection -->
-        <div class="metric-tile">
-          <span class="metric-label">2. Connection</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.connectionState === 'online' ? 'var(--green-ready)' : env.connectionState === 'offline' ? 'var(--red-action)' : 'var(--yellow-attention)'};">
-            ${env.connectionState.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            Confirmed: ${env.lastConfirmedTime}
-          </span>
-        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;">
+          <!-- 1. Enrollment -->
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
+            <div style="display: flex; flex-direction: column; min-width: 0;">
+              <span style="font-size: 12px; font-weight: 600;">1. Enrollment</span>
+              <span style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.workerIdentityKey.slice(0, 16)}...
+              </span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
+              <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}" style="font-size: 10px;">
+                ${env.enrollmentStatus.toUpperCase()}
+              </span>
+              ${
+                env.enrollmentStatus === 'pending'
+                  ? `<button class="btn btn-primary btn-xs approve-enroll-btn">Approve</button>`
+                  : ''
+              }
+            </div>
+          </div>
 
-        <!-- 3. Protocol Compatibility -->
-        <div class="metric-tile">
-          <span class="metric-label">3. Protocol</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.protocolCompatibility === 'compatible' ? 'var(--green-ready)' : 'var(--red-action)'};">
-            ${env.protocolCompatibility.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            Version: ${env.protocolVersion} (Req: v2.x)
-          </span>
-        </div>
+          <!-- 2. Connection -->
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
+            <div style="display: flex; flex-direction: column; min-width: 0;">
+              <span style="font-size: 12px; font-weight: 600;">2. Connection</span>
+              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                Confirmed: ${env.lastConfirmedTime}
+              </span>
+            </div>
+            <span class="badge ${env.connectionState === 'online' ? 'badge-success' : env.connectionState === 'offline' ? 'badge-danger' : 'badge-warning'}" style="font-size: 10px; flex-shrink: 0;">
+              ${env.connectionState.toUpperCase()}
+            </span>
+          </div>
 
-        <!-- 4. Work Safety & Lease -->
-        <div class="metric-tile">
-          <span class="metric-label">4. Work Safety</span>
-          <span class="metric-value" style="font-size: 13px; font-weight: 700; color: ${env.workSafety === 'clear' ? 'var(--green-ready)' : env.workSafety === 'reconciling' ? 'var(--yellow-attention)' : 'var(--red-action)'};">
-            ${env.workSafety.toUpperCase()}
-          </span>
-          <span class="metric-sub">
-            ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}
-          </span>
+          <!-- 3. Protocol Compatibility -->
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
+            <div style="display: flex; flex-direction: column; min-width: 0;">
+              <span style="font-size: 12px; font-weight: 600;">3. Protocol</span>
+              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                Version: ${env.protocolVersion} (Req: v2.x)
+              </span>
+            </div>
+            <span class="badge ${env.protocolCompatibility === 'compatible' ? 'badge-success' : 'badge-danger'}" style="font-size: 10px; flex-shrink: 0;">
+              ${env.protocolCompatibility.toUpperCase()}
+            </span>
+          </div>
+
+          <!-- 4. Work Safety & Lease -->
+          <div class="dimension-item" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-surface); padding: 6px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); gap: 8px;">
+            <div style="display: flex; flex-direction: column; min-width: 0;">
+              <span style="font-size: 12px; font-weight: 600;">4. Work Safety</span>
+              <span style="font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                ${env.activeLeaseHolder ? `Task #${env.activeLeaseHolder.holderId}` : 'No active lease'}
+              </span>
+            </div>
+            <span class="badge ${env.workSafety === 'clear' ? 'badge-success' : env.workSafety === 'reconciling' ? 'badge-warning' : 'badge-danger'}" style="font-size: 10px; flex-shrink: 0;">
+              ${env.workSafety.toUpperCase()}
+            </span>
+          </div>
         </div>
       </div>
 

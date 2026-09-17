@@ -3339,10 +3339,7 @@ code {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  box-shadow: var(--shadow-sm);
+  margin-bottom: 8px;
 }
 
 .env-detail-card {
