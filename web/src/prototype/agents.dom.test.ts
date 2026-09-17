@@ -299,7 +299,7 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     const { initPrototype } = (await vite.ssrLoadModule(
       '/src/prototype/prototype.ts'
     )) as typeof import('./prototype.js');
-    const { stateManager } = (await vite.ssrLoadModule(
+    const { checkEngineModelAvailability, stateManager } = (await vite.ssrLoadModule(
       '/src/prototype/state.ts'
     )) as typeof import('./state.js');
 
@@ -343,6 +343,16 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     assert.equal(sentinelModelResult.selectedOption, null, 'Unavailable model cannot be admitted');
     assert.equal(sentinelModelResult.evaluationSteps[1]?.status, 'skipped_model_missing');
     assert.match(sentinelModelResult.evaluationSteps[1]?.reason ?? '', /not available/);
+
+    // Model inventory is an exact token list: gpt-4 must not match gpt-4o.
+    const mac = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary')!;
+    assert.equal(checkEngineModelAvailability('codex', 'gpt-4', mac).isAvailable, false);
+    assert.equal(checkEngineModelAvailability('codex', 'gpt-4o', mac).isAvailable, true);
+    mac.engineDetails!.codex!.modelAvailability = 'unknown';
+    const unknownInventoryResult = stateManager.evaluateAdmissionFallback('designer', 'mac-studio-primary')!;
+    assert.equal(unknownInventoryResult.evaluationSteps[0]?.status, 'skipped_model_missing');
+    assert.match(unknownInventoryResult.evaluationSteps[0]?.reason ?? '', /unknown or unavailable/i);
+    assert.equal(unknownInventoryResult.selectedOption?.engine, 'pi', 'Fallback remains pre-acceptance only');
 
     // Test environment eligibility gating on offline/recovery host (win-dev-box, F-66-02)
     const winResult = stateManager.evaluateAdmissionFallback('programmer', 'win-dev-box');
@@ -750,6 +760,100 @@ test('Agents: Environment Compatibility UI displays clear ineligibility reasons 
 
     // Healthy online host (Mac Studio Primary) admits Programmer via PI
     assert.match(text, /Admitted via PI/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Task admission: the shared gate refuses unhealthy hosts and the Begin page records its selected option', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    // F-66-02 state + page path: the offline/recovery fixture is not selectable
+    // and direct approval cannot mutate it into an active Task/run.
+    stateManager.setPrimaryNav('project', 'tasks');
+    stateManager.selectTask('task-201');
+    const offlineOption = dom.window.document.querySelector('option[value="win-dev-box"]') as HTMLOptionElement;
+    assert.ok(offlineOption);
+    assert.equal(offlineOption.disabled, true);
+    assert.match(offlineOption.textContent ?? '', /Unavailable:.*offline/i);
+    const offlineBegin = stateManager.approveAndBeginProposal('task-201', 'win-dev-box', 'programmer');
+    assert.equal(offlineBegin.success, false);
+    const offlineTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-201')!;
+    assert.equal(offlineTask.lifecycle, 'proposed');
+    assert.equal(offlineTask.agentRunLifecycle, 'none');
+    assert.equal(offlineTask.runs.length, 0);
+    const incompatibleBegin = stateManager.approveAndBeginProposal('task-201', 'mac-mini-mismatch', 'programmer');
+    assert.equal(incompatibleBegin.success, false);
+    assert.match(incompatibleBegin.reason ?? '', /protocol incompatible/i);
+
+    // F-66-01 actual Begin page path: once a ready fixture is available, the
+    // first evaluator-selected option—not a hard-coded engine/model—is stored.
+    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary')!;
+    delete readyEnvironment.activeLeaseHolder;
+    stateManager.selectTask('task-105-prop');
+    const readyOption = dom.window.document.querySelector('option[value="mac-studio-primary"]') as HTMLOptionElement;
+    assert.ok(readyOption);
+    assert.equal(readyOption.disabled, false);
+    assert.match(readyOption.textContent ?? '', /Ready via CODEX/);
+    const beginButton = dom.window.document.querySelector('.approve-begin-btn') as HTMLButtonElement;
+    beginButton.click();
+    const admittedTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-105-prop')!;
+    assert.equal(admittedTask.agentRunLifecycle, 'running');
+    assert.equal(admittedTask.runs[0]?.engine, 'codex');
+    assert.equal(admittedTask.runs[0]?.workModel, 'gpt-4o');
+    assert.equal(admittedTask.runs[0]?.effort, 'medium');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Task and Project admission: archived Agents cannot receive new membership or work', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    // F-66-04 direct Project creation must be atomic: no active membership is
+    // persisted when an archived Agent is requested.
+    const projectCount = stateManager.getSnapshot().projects.length;
+    const createResult = stateManager.createProject('Archived Agent Rejection', '', [], ['legacy-coder']);
+    assert.equal(createResult.success, false);
+    assert.match(createResult.reason ?? '', /archived/i);
+    assert.equal(stateManager.getSnapshot().projects.length, projectCount);
+
+    // F-66-04 page path filters archived historical members, while direct Task
+    // admission refuses the same Agent before creating a run.
+    stateManager.setPrimaryNav('project', 'tasks');
+    stateManager.selectTask('task-105-prop');
+    const leadSelect = dom.window.document.querySelector('.select-begin-lead') as HTMLSelectElement;
+    assert.ok(leadSelect);
+    assert.equal(Array.from(leadSelect.options).some((option) => option.value === 'legacy-coder'), false);
+    const runCount = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-105-prop')!.runs.length;
+    const beginResult = stateManager.approveAndBeginProposal('task-105-prop', 'mac-studio-primary', 'legacy-coder');
+    assert.equal(beginResult.success, false);
+    assert.match(beginResult.reason ?? '', /archived/i);
+    const task = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-105-prop')!;
+    assert.equal(task.lifecycle, 'proposed');
+    assert.equal(task.runs.length, runCount);
   } finally {
     await cleanup();
   }

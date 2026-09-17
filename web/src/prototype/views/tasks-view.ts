@@ -311,9 +311,11 @@ function renderTaskDetailPage(
               ${(project?.boundEnvironmentWorkspaces || [])
                 .map((ws) => {
                   const env = state.environments.find((e) => e.id === ws.environmentId);
-                  const isBusy = env?.activeLeaseHolder !== undefined;
-                  return `<option value="${ws.environmentId}" ${isBusy ? 'disabled' : ''}>
-                    ${ws.environmentId} (${env?.platform}) ${isBusy ? '· [BUSY LEASE]' : '· Ready'}
+                  const admission = stateManager.evaluateTaskAdmission(selectedTask.id, ws.environmentId, selectedTask.taskLeadId);
+                  const reason = admission.envIneligibilityReason || admission.rejectionReason;
+                  const isAdmissible = Boolean(admission.selectedOption);
+                  return `<option value="${ws.environmentId}" ${isAdmissible ? '' : 'disabled'}>
+                    ${ws.environmentId} (${env?.platform}) ${isAdmissible ? `· Ready via ${admission.selectedOption!.engine.toUpperCase()}` : `· Unavailable: ${reason || 'No compatible work option'}`}
                   </option>`;
                 })
                 .join('')}
@@ -323,7 +325,12 @@ function renderTaskDetailPage(
             <label style="font-size: 12px; font-weight: 700;">Confirm Task Lead Agent *</label>
             <select class="form-select select-begin-lead" style="width: 100%; margin-top: 4px;">
               ${(project?.memberships || [])
-                .filter((m) => m.memberKind === 'agent' && m.status === 'active')
+                .filter(
+                  (m) =>
+                    m.memberKind === 'agent' &&
+                    m.status === 'active' &&
+                    state.agents.find((agent) => agent.id === m.memberId)?.status === 'active'
+                )
                 .map(
                   (m) => `
                 <option value="${m.memberId}" ${m.memberId === selectedTask.taskLeadId ? 'selected' : ''}>

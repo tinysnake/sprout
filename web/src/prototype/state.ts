@@ -34,6 +34,23 @@ export type EnvironmentEligibilityCheck = {
   reason?: string;
 };
 
+type AdmissionStep = {
+  priority: number;
+  option: AgentWorkOption;
+  status: 'selected' | 'skipped_unsupported' | 'skipped_unauthenticated' | 'skipped_model_missing' | 'skipped_unconfigured';
+  reason: string;
+};
+
+export type AdmissionEvaluation = {
+  agent?: AgentDefinition;
+  environment?: EnvironmentInstance;
+  envIneligibilityReason?: string | undefined;
+  rejectionReason?: string | undefined;
+  evaluationSteps: AdmissionStep[];
+  selectedOption: AgentWorkOption | null;
+  guaranteeNote: string;
+};
+
 export function checkEnvironmentEligibility(env: EnvironmentInstance): EnvironmentEligibilityCheck {
   if (env.enrollmentStatus !== 'approved') {
     return {
@@ -94,22 +111,21 @@ export function checkEngineModelAvailability(
   }
 
   const detail = env.engineDetails?.[engine];
-  if (detail) {
-    const rawAvailability = detail.modelAvailability?.trim() || '';
-    if (rawAvailability === '' || rawAvailability === 'none' || rawAvailability === 'unknown') {
-      return {
-        isAvailable: false,
-        reason: `Model availability for engine "${engine}" on host ${env.displayName} is reported as ${rawAvailability || 'none'}.`,
-      };
-    }
-    const availableModels = rawAvailability.split(',').map((s) => s.trim().toLowerCase());
-    const requestedModel = workModel.trim().toLowerCase();
-    if (!availableModels.includes(requestedModel) && !rawAvailability.toLowerCase().includes(requestedModel)) {
-      return {
-        isAvailable: false,
-        reason: `Model "${workModel}" is not available for engine "${engine}" on host ${env.displayName} (available: ${rawAvailability}).`,
-      };
-    }
+  const rawAvailability = detail?.modelAvailability?.trim() || '';
+  if (rawAvailability === '' || rawAvailability.toLowerCase() === 'none' || rawAvailability.toLowerCase() === 'unknown') {
+    return {
+      isAvailable: false,
+      reason: `Model availability for engine "${engine}" on host ${env.displayName} is unknown or unavailable.`,
+    };
+  }
+
+  const availableModels = rawAvailability.split(',').map((model) => model.trim().toLowerCase()).filter(Boolean);
+  const requestedModel = workModel.trim().toLowerCase();
+  if (!requestedModel || !availableModels.includes(requestedModel)) {
+    return {
+      isAvailable: false,
+      reason: `Model "${workModel}" is not available for engine "${engine}" on host ${env.displayName} (available: ${rawAvailability}).`,
+    };
   }
 
   return { isAvailable: true };
@@ -3007,7 +3023,7 @@ class StateManager {
     this.notify(`Restored Agent "${agent.displayName}". Agent is available for new project assignments and runs.`);
   }
 
-  public evaluateAdmissionFallback(agentId: string, environmentId: string) {
+  public evaluateAdmissionFallback(agentId: string, environmentId: string): AdmissionEvaluation | null {
     const agent = this.state.agents.find((a) => a.id === agentId);
     const env = this.state.environments.find((e) => e.id === environmentId);
     if (!agent || !env) return null;
@@ -3049,12 +3065,7 @@ class StateManager {
       };
     }
 
-    const evaluationSteps: {
-      priority: number;
-      option: AgentWorkOption;
-      status: 'selected' | 'skipped_unsupported' | 'skipped_unauthenticated' | 'skipped_model_missing' | 'skipped_unconfigured';
-      reason: string;
-    }[] = [];
+    const evaluationSteps: AdmissionStep[] = [];
 
     let selectedOption: AgentWorkOption | null = null;
 
@@ -3132,9 +3143,74 @@ class StateManager {
       environment: env,
       evaluationSteps,
       selectedOption,
+      rejectionReason: selectedOption
+        ? undefined
+        : evaluationSteps.at(-1)?.reason || `No configured work option is available on ${env.displayName}.`,
       guaranteeNote:
         'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).',
     };
+  }
+
+  /**
+   * The one task/run admission seam. It composes the ordered option evaluator
+   * with Project membership, workspace, and lease checks before any Task or
+   * run state is changed.
+   */
+  public evaluateTaskAdmission(taskId: string, environmentId: string, leadAgentId: string): AdmissionEvaluation {
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    const project = task && this.state.projects.find((candidate) => candidate.id === task.projectId);
+    const agent = this.state.agents.find((candidate) => candidate.id === leadAgentId);
+    const env = this.state.environments.find((candidate) => candidate.id === environmentId);
+    const guaranteeNote =
+      'Pre-Acceptance Fallback Guarantee: Evaluated before run admission. Once accepted by engine, execution failure is reported directly; Sprout never silently replays work (ADR-0008).';
+
+    if (!task) {
+      return { rejectionReason: 'Task not found.', evaluationSteps: [], selectedOption: null, guaranteeNote };
+    }
+    if (!agent) {
+      return { rejectionReason: 'Selected Agent not found.', evaluationSteps: [], selectedOption: null, guaranteeNote };
+    }
+    if (!env) {
+      return { agent, rejectionReason: 'Selected Environment not found.', evaluationSteps: [], selectedOption: null, guaranteeNote };
+    }
+
+    // This is intentionally called for every Task/run path, rather than
+    // replicating option, model, and host checks at individual call sites.
+    const evaluation = this.evaluateAdmissionFallback(leadAgentId, environmentId)!;
+    if (!evaluation.selectedOption) return evaluation;
+
+    if (!project || project.status !== 'active') {
+      return { ...evaluation, selectedOption: null, rejectionReason: 'Project is unavailable for new work admission.' };
+    }
+    const membership = project.memberships.find(
+      (member) => member.memberId === leadAgentId && member.memberKind === 'agent' && member.status === 'active'
+    );
+    if (!membership) {
+      return {
+        ...evaluation,
+        selectedOption: null,
+        rejectionReason: `Agent "${agent.displayName}" is not an active member of Project "${project.displayName}". Add or restore Project membership before beginning work.`,
+      };
+    }
+    const workspace = project.boundEnvironmentWorkspaces.find(
+      (binding) => binding.environmentId === environmentId && binding.isPrepared
+    );
+    if (!workspace) {
+      return {
+        ...evaluation,
+        selectedOption: null,
+        rejectionReason: `Environment "${env.displayName}" has no prepared Project workspace for "${project.displayName}".`,
+      };
+    }
+    if (env.activeLeaseHolder && env.activeLeaseHolder.holderId !== task.id) {
+      return {
+        ...evaluation,
+        selectedOption: null,
+        rejectionReason: `Environment "${env.displayName}" is busy with another Task lease and cannot admit new work.`,
+      };
+    }
+
+    return evaluation;
   }
 
   public setUsageFilter(filter: Partial<PrototypeState['usageFilter']>) {
@@ -3167,9 +3243,17 @@ class StateManager {
 
   // --- Task Journey Actions (ADR-0006) ---
 
-  public approveAndBeginProposal(taskId: string, environmentId: string, leadAgentId: string) {
+  public approveAndBeginProposal(taskId: string, environmentId: string, leadAgentId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task || task.lifecycle !== 'proposed') return;
+    if (!task || task.lifecycle !== 'proposed') return { success: false, reason: 'Task proposal is unavailable.' };
+
+    const admission = this.evaluateTaskAdmission(taskId, environmentId, leadAgentId);
+    const selectedOption = admission.selectedOption;
+    if (!selectedOption) {
+      const reason = admission.rejectionReason || admission.envIneligibilityReason || 'No compatible configured work option is available.';
+      this.notify(`Cannot approve & begin Task #${taskId.replace('task-', '')}: ${reason}`);
+      return { success: false, reason };
+    }
 
     task.selectedEnvironmentId = environmentId;
     task.taskLeadId = leadAgentId;
@@ -3179,15 +3263,16 @@ class StateManager {
 
     // Simulate automatic first run submission for Agent lead
     const newRunId = `run-${Date.now().toString().slice(-3)}`;
-    const leadAgent = this.state.agents.find((a) => a.id === leadAgentId);
+    const leadAgent = this.state.agents.find((a) => a.id === leadAgentId)!;
+    const env = this.state.environments.find((candidate) => candidate.id === environmentId)!;
     const newRun: NestedAgentRun = {
       id: newRunId,
       taskId: task.id,
       agentId: leadAgentId,
       agentDisplayName: leadAgent ? leadAgent.displayName : leadAgentId,
-      engine: 'pi',
-      workModel: 'claude-3-5-sonnet',
-      effort: 'high',
+      engine: selectedOption.engine,
+      workModel: selectedOption.workModel,
+      effort: selectedOption.effort,
       contentVersionUsed: task.currentVersion.version,
       lifecycle: 'running',
       startedAt: 'Just now',
@@ -3200,8 +3285,17 @@ class StateManager {
     task.runs.unshift(newRun);
     task.activeRunId = newRunId;
     task.agentRunLifecycle = 'running';
+    env.activeLeaseHolder = {
+      holderKind: 'task',
+      holderId: task.id,
+      projectId: task.projectId,
+      acquiredAt: 'Just now',
+      taskTitle: task.currentVersion.title,
+      leadAgentName: leadAgent.displayName,
+    };
 
-    this.notify(`Approved & began Task #${taskId} on ${environmentId}. Lease held, first lead run started.`);
+    this.notify(`Approved & began Task #${taskId} on ${environmentId} using ${selectedOption.engine} · ${selectedOption.workModel}. Lease held, first lead run started.`);
+    return { success: true };
   }
 
   public pauseTask(taskId: string) {
@@ -3310,6 +3404,14 @@ class StateManager {
 
       this.notify(`Accepted Task #${taskId} completion claim! Task context recycled, lease safely released, Task completed.`);
     } else {
+      const admission = this.evaluateTaskAdmission(task.id, task.selectedEnvironmentId || '', task.taskLeadId);
+      const selectedOption = admission.selectedOption;
+      if (!selectedOption) {
+        this.notify(
+          `Cannot require correction for Task #${taskId}: ${admission.rejectionReason || admission.envIneligibilityReason || 'no compatible configured work option is available.'}`
+        );
+        return;
+      }
       task.lifecycle = 'active';
       delete task.pendingCompletionClaim;
       this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
@@ -3320,9 +3422,9 @@ class StateManager {
         taskId: task.id,
         agentId: task.taskLeadId,
         agentDisplayName: task.taskLeadId,
-        engine: 'pi',
-        workModel: 'claude-3-5-sonnet',
-        effort: 'high',
+        engine: selectedOption.engine,
+        workModel: selectedOption.workModel,
+        effort: selectedOption.effort,
         contentVersionUsed: task.currentVersion.version,
         lifecycle: 'running',
         startedAt: 'Just now',
@@ -3676,10 +3778,20 @@ class StateManager {
     rules?: string[],
     selectedAgentIds: string[] = [],
     boundEnvIds: string[] = []
-  ) {
+  ): { success: boolean; reason?: string } {
     if (!displayName || !displayName.trim()) {
-      this.notify('Project creation failed: Display name cannot be empty.');
-      return;
+      const reason = 'Project creation failed: Display name cannot be empty.';
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    const archivedAgent = selectedAgentIds
+      .map((agentId) => this.state.agents.find((agent) => agent.id === agentId))
+      .find((agent) => agent?.status === 'archived');
+    if (archivedAgent) {
+      const reason = `Cannot create Project with Agent "${archivedAgent.displayName}": archived Agents cannot receive new Project memberships. Restore the Agent first (ADR-0008).`;
+      this.notify(reason);
+      return { success: false, reason };
     }
 
     const projectId = `proj-${Date.now().toString().slice(-4)}`;
@@ -3695,7 +3807,7 @@ class StateManager {
       },
     ];
 
-    for (const agentId of selectedAgentIds) {
+    for (const agentId of new Set(selectedAgentIds)) {
       const globalAgent = this.state.agents.find((a) => a.id === agentId);
       if (globalAgent) {
         memberships.push({
@@ -3745,6 +3857,7 @@ class StateManager {
     this.selectProject(projectId);
     this.setPrimaryNav('project', 'overview');
     this.notify(`Created Project "${displayName}" atomically with General collaboration template v1.0.`);
+    return { success: true };
   }
 
   public updateProjectContract(
@@ -4038,7 +4151,16 @@ class StateManager {
     if (!task || task.lifecycle !== 'active' || task.leaseLifecycle !== 'held') return;
 
     const targetAgentId = agentId || (task.runs.length % 2 === 0 ? 'reviewer' : task.taskLeadId);
-    const agent = this.state.agents.find((a) => a.id === targetAgentId);
+    const admission = this.evaluateTaskAdmission(task.id, task.selectedEnvironmentId || '', targetAgentId);
+    const selectedOption = admission.selectedOption;
+    if (!selectedOption) {
+      this.notify(
+        `Cannot start a sequential run for Task #${taskId}: ${admission.rejectionReason || admission.envIneligibilityReason || 'no compatible configured work option is available.'}`
+      );
+      return;
+    }
+
+    const agent = admission.agent!;
     const runId = `run-${Date.now().toString().slice(-3)}`;
 
     const newRun: NestedAgentRun = {
@@ -4046,9 +4168,9 @@ class StateManager {
       taskId: task.id,
       agentId: targetAgentId,
       agentDisplayName: agent ? agent.displayName : targetAgentId,
-      engine: 'codex',
-      workModel: 'gpt-4o',
-      effort: 'high',
+      engine: selectedOption.engine,
+      workModel: selectedOption.workModel,
+      effort: selectedOption.effort,
       contentVersionUsed: task.currentVersion.version,
       lifecycle: 'running',
       startedAt: 'Just now',

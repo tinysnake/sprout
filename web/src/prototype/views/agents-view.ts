@@ -919,7 +919,7 @@ function renderAgentDetailCard(
     simOutput.innerHTML = `
       <div class="agent-simulation-result">
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <strong style="color: var(--text-primary); font-size: 12px;">Evaluation for ${res.environment.displayName}:</strong>
+          <strong style="color: var(--text-primary); font-size: 12px;">Evaluation for ${res.environment?.displayName || 'selected Environment'}:</strong>
           <span class="badge ${res.selectedOption ? 'badge-green' : 'badge-red'}" style="font-size: 10px;">
             ${res.selectedOption ? `Admitted Option: ${res.selectedOption.engine.toUpperCase()}` : 'Admission Refused'}
           </span>
