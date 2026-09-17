@@ -1003,3 +1003,63 @@ test('Archived Agents: chat and Working Group admission reject new collaboration
     await cleanup();
   }
 });
+
+test('Archived Agents: archive cancels an admitted direct-message reply without deleting history (F-66-09-RACE)', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { stateManager, getAgentAttributionHistory } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const projectId = 'proj-minesweeper';
+    const reviewerHistory = stateManager
+      .getSnapshot()
+      .messages.filter((message) => message.projectId === projectId && message.authorId === 'reviewer')
+      .map((message) => message.id);
+    const messageCountBeforeAdmission = stateManager.getSnapshot().messages.length;
+
+    const admitted = stateManager.sendMessage(
+      projectId,
+      { kind: 'direct-message', recipientId: 'reviewer' },
+      'Archive before the projected reply'
+    );
+    assert.equal(admitted.success, true, 'Active Reviewer admits a direct message');
+    assert.equal(stateManager.getSnapshot().messages.length, messageCountBeforeAdmission + 1);
+
+    assert.equal(stateManager.archiveAgent('reviewer').success, true, 'Archive cancels the admitted reply');
+    const messageCountAtArchive = stateManager.getSnapshot().messages.length;
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    assert.equal(stateManager.getSnapshot().messages.length, messageCountAtArchive, 'No projected reply or other new message appears after archive');
+    assert.deepEqual(
+      stateManager
+        .getSnapshot()
+        .messages.filter((message) => message.projectId === projectId && message.authorId === 'reviewer')
+        .map((message) => message.id),
+      reviewerHistory,
+      'Archive preserves the Reviewer message history while suppressing the pending reply'
+    );
+    const reviewer = stateManager.getSnapshot().agents.find((agent) => agent.id === 'reviewer')!;
+    assert.deepEqual(
+      getAgentAttributionHistory(stateManager.getSnapshot(), reviewer).map((record) => record.entityId).sort(),
+      ['msg-9', 'run-204'],
+      'Retained message and run attribution remains readable after archive'
+    );
+
+    stateManager.restoreAgent('reviewer');
+    const messageCountBeforeRestoredReply = stateManager.getSnapshot().messages.length;
+    assert.equal(
+      stateManager.sendMessage(projectId, { kind: 'direct-message', recipientId: 'reviewer' }, 'Active reply remains available').success,
+      true
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const restoredReply = stateManager
+      .getSnapshot()
+      .messages.slice(messageCountBeforeRestoredReply)
+      .find((message) => message.authorKind === 'agent' && message.authorId === 'reviewer');
+    assert.ok(restoredReply, 'Restored active Agent still emits its admitted projected reply');
+    assert.equal(restoredReply.isProjectedReply, true);
+  } finally {
+    await cleanup();
+  }
+});

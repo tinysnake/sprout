@@ -43,6 +43,11 @@ type AdmissionStep = {
   reason: string;
 };
 
+type PendingProjectedReply = {
+  agentId: string;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export type AdmissionEvaluation = {
   agent?: AgentDefinition;
   environment?: EnvironmentInstance;
@@ -2121,6 +2126,11 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
 class StateManager {
   private state: PrototypeState;
   private listeners: Array<() => void> = [];
+  // Projected replies are admitted work even though this prototype does not
+  // model them as Task runs. Archive cancels them before the Agent becomes
+  // read-only, and the callback independently fails closed on Agent status.
+  private pendingProjectedReplies = new Map<string, PendingProjectedReply>();
+  private nextPendingProjectedReplyId = 1;
 
   constructor() {
     this.state = {
@@ -2201,6 +2211,33 @@ class StateManager {
         // Ignore listener exceptions during DOM teardown
       }
     }
+  }
+
+  private scheduleProjectedReply(agentId: string, delayMs: number, emit: (agent: AgentDefinition) => void) {
+    const pendingReplyId = `pending-projected-reply-${this.nextPendingProjectedReplyId++}`;
+    const timer = setTimeout(() => {
+      const pendingReply = this.pendingProjectedReplies.get(pendingReplyId);
+      if (!pendingReply) return;
+      this.pendingProjectedReplies.delete(pendingReplyId);
+
+      // Clearing a timer during archive is the primary cancellation path. This
+      // recheck makes a callback that was already queued fail closed as well.
+      const agent = this.state.agents.find((candidate) => candidate.id === pendingReply.agentId);
+      if (!agent || agent.status !== 'active') return;
+      emit(agent);
+    }, delayMs);
+    this.pendingProjectedReplies.set(pendingReplyId, { agentId, timer });
+  }
+
+  private cancelPendingProjectedReplies(agentId: string): number {
+    let cancelled = 0;
+    for (const [pendingReplyId, pendingReply] of this.pendingProjectedReplies) {
+      if (pendingReply.agentId !== agentId) continue;
+      clearTimeout(pendingReply.timer);
+      this.pendingProjectedReplies.delete(pendingReplyId);
+      cancelled += 1;
+    }
+    return cancelled;
   }
 
   // --- Primary Navigation & Context Tab Actions (ADR-0008, Issue #60) ---
@@ -3094,8 +3131,13 @@ class StateManager {
       return { success: false, reason: msg };
     }
 
+    const cancelledReplyCount = this.cancelPendingProjectedReplies(agentId);
     agent.status = 'archived';
-    this.notify(`Archived Agent "${agent.displayName}". Historical attribution, private memory, and session slots preserved.`);
+    this.notify(
+      `Archived Agent "${agent.displayName}".${
+        cancelledReplyCount > 0 ? ` Cancelled ${cancelledReplyCount} admitted projected repl${cancelledReplyCount === 1 ? 'y' : 'ies'}.` : ''
+      } Historical attribution, private memory, and session slots preserved.`
+    );
     return { success: true };
   }
 
@@ -3722,11 +3764,11 @@ class StateManager {
     this.state.messages.push(newMsg);
 
     if (disposition === 'addressed') {
-      // Simulate deterministic reply
-      setTimeout(() => {
+      // An addressed message admits one deterministic projected reply. Capture
+      // the target now so archive can cancel that admitted work by Agent.
+      const targetAgentId = isDirect && 'recipientId' in scope ? scope.recipientId : 'programmer';
+      this.scheduleProjectedReply(targetAgentId, 800, (agent) => {
         const replyMsgId = `msg-reply-${Date.now().toString().slice(-4)}`;
-        const agentId = isDirect && 'recipientId' in scope ? scope.recipientId : 'programmer';
-        const agent = this.state.agents.find((a) => a.id === agentId) ?? this.state.agents[0]!;
 
         const replyMsg: MessageItem = {
           id: replyMsgId,
@@ -3750,7 +3792,7 @@ class StateManager {
         };
         this.state.messages.push(replyMsg);
         this.notify(`Projected reply from ${agent.displayName} received (Non-routing; cannot loop-wake).`);
-      }, 800);
+      });
       this.notify(`Sent addressed message ${newMsgId}. Bypasses wake policy; deterministic wake.`);
     } else if (disposition === 'wake-eligible') {
       // Simulate 30s batching window collection & wake model evaluation
@@ -3784,8 +3826,7 @@ class StateManager {
       this.state.routingBatches.unshift(batch);
       newMsg.routingCausalChainId = batchId;
 
-      setTimeout(() => {
-        const agent = this.state.agents.find((candidate) => candidate.id === 'designer');
+      this.scheduleProjectedReply('designer', 1200, (agent) => {
         batch.status = 'settled';
         batch.closedAt = 'Just now';
         const replyMsg: MessageItem = {
@@ -3798,7 +3839,7 @@ class StateManager {
           timestamp: 'Just now',
           content: `Evaluating unaddressed input from batch ${batchId}: Design updates configured.`,
           disposition: 'non-routing',
-          agentAttribution: agent ? currentAgentExecutionAttribution(agent) : undefined,
+          agentAttribution: currentAgentExecutionAttribution(agent),
           isProjectedReply: true,
           projectedReplyMeta: {
             runId: `run-proj-${Date.now().toString().slice(-3)}`,
@@ -3810,7 +3851,7 @@ class StateManager {
         };
         this.state.messages.push(replyMsg);
         this.notify(`Routing batch ${batchId} settled. Projected reply emitted with non-routing disposition.`);
-      }, 1200);
+      });
 
       this.notify(`Sent unaddressed message. Collected into 30s routing batch ${batchId}.`);
     } else {
