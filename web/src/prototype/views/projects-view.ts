@@ -25,100 +25,128 @@ export function renderProjectsView(state: PrototypeState): HTMLElement {
   const proposedTasks = projectTasks.filter((t) => t.lifecycle === 'proposed');
   const activeMembers = project.memberships.filter((m) => m.status === 'active');
 
+  const isTaskDetailPage =
+    state.projectTab === 'tasks' && state.taskViewMode === 'detail' && Boolean(state.selectedTaskId);
+  const selectedTask = isTaskDetailPage
+    ? projectTasks.find((t) => t.id === state.selectedTaskId) ??
+      state.tasks.find((t) => t.id === state.selectedTaskId)
+    : undefined;
+
   // Top Project Navigation Bar (App Header Style)
   const projectNav = document.createElement('div');
   projectNav.className = 'project-nav-container';
 
-  projectNav.innerHTML = `
-    <!-- Top Project Selector & Actions Bar (App-Header style, flush with edge) -->
-    <header class="project-top-bar">
-      <div class="project-selector-row">
-        <div class="project-selector-left">
-          ${renderIcon('folder', 18)}
-          <select class="project-dropdown-select" id="project-selector" aria-label="Select Project">
-            ${state.projects
-              .map(
-                (p) => `
-              <option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>
-                ${p.displayName} ${p.status === 'archived' ? '(Archived)' : ''}
-              </option>
-            `
-              )
-              .join('')}
-          </select>
-          ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px; flex-shrink: 0;">Archived</span>` : ''}
-        </div>
-
-        <div class="project-header-actions">
-          <!-- Info Button (Item 6) -->
-          <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
-            ${renderIcon('info', 16)}
+  if (isTaskDetailPage && selectedTask) {
+    // Focused Task Detail App-Header: Only Back Button & Task Title (cannot switch project while inspecting detail)
+    projectNav.innerHTML = `
+      <header class="project-top-bar">
+        <div class="project-selector-row">
+          <button class="btn btn-secondary btn-sm back-to-tasks-btn task-select-btn" id="btn-header-back-to-tasks" title="Return to Tasks List">
+            ${renderIcon('chevron-left', 16)} Back to Tasks
           </button>
-
-          <!-- + New Project Button (Item 2: only +, tooltip) -->
-          <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
-            ${renderIcon('plus', 16)}
-          </button>
+          <div style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+            <span>Task #${selectedTask.id.replace('task-', '')}</span>
+            <span class="status-pill neutral" style="font-size: 10px;">v${selectedTask.currentVersion.version}</span>
+          </div>
         </div>
-      </div>
+      </header>
+    `;
 
-      <!-- Segmented Sub-Nav Tabs (Item 4 & 5: responsive icon+label, hidden on desktop sidebar) -->
-      <nav class="project-segmented-tabs" role="tablist" aria-label="Project Sub-Views">
-        <button class="project-segmented-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-tab="overview" role="tab" aria-selected="${state.projectTab === 'overview'}">
-          <span class="tab-icon-row">${renderIcon('overview', 16)}</span>
-          <span class="tab-label">Overview</span>
-        </button>
-        <button class="project-segmented-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-tab="tasks" role="tab" aria-selected="${state.projectTab === 'tasks'}">
-          <span class="tab-icon-row">
-            ${renderIcon('tasks', 16)}
-            <span class="tab-badge">${projectTasks.length}</span>
-          </span>
-          <span class="tab-label">Tasks</span>
-        </button>
-        <button class="project-segmented-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-tab="chat" role="tab" aria-selected="${state.projectTab === 'chat'}">
-          <span class="tab-icon-row">
-            ${renderIcon('chat', 16)}
-          </span>
-          <span class="tab-label">Chat</span>
-        </button>
-      </nav>
-    </header>
-  `;
-
-  // Project selector switch listener
-  projectNav.querySelector('#project-selector')?.addEventListener('change', (ev) => {
-    const selectedId = (ev.target as HTMLSelectElement).value;
-    stateManager.selectProject(selectedId);
-  });
-
-  // Project info modal listener
-  projectNav.querySelector('#project-info-btn')?.addEventListener('click', () => {
-    renderProjectInfoModal(
-      container,
-      state,
-      project,
-      projectTasks,
-      activeTasks,
-      validationTasks,
-      blockedTasks,
-      proposedTasks,
-      recoveryTasks,
-      activeMembers
-    );
-  });
-
-  // Segmented sub-tab listeners
-  projectNav.querySelectorAll('.project-segmented-tab[data-tab]').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      const tab = (ev.currentTarget as HTMLElement).getAttribute('data-tab') as ProjectTab;
-      stateManager.setProjectTab(tab);
+    projectNav.querySelector('#btn-header-back-to-tasks')?.addEventListener('click', () => {
+      stateManager.closeTaskDetail();
     });
-  });
+  } else {
+    projectNav.innerHTML = `
+      <!-- Top Project Selector & Actions Bar (App-Header style, flush with edge) -->
+      <header class="project-top-bar">
+        <div class="project-selector-row">
+          <div class="project-selector-left">
+            ${renderIcon('folder', 18)}
+            <select class="project-dropdown-select" id="project-selector" aria-label="Select Project">
+              ${state.projects
+                .map(
+                  (p) => `
+                <option value="${p.id}" ${p.id === project.id ? 'selected' : ''}>
+                  ${p.displayName} ${p.status === 'archived' ? '(Archived)' : ''}
+                </option>
+              `
+                )
+                .join('')}
+            </select>
+            ${project.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px; flex-shrink: 0;">Archived</span>` : ''}
+          </div>
 
-  // New Project modal listener
-  projectNav.querySelector('.new-project-btn')?.addEventListener('click', () => {
-    renderNewProjectModal(container);
-  });
+          <div class="project-header-actions">
+            <!-- Info Button (Item 6) -->
+            <button class="btn btn-secondary btn-sm project-info-btn" id="project-info-btn" title="Project Information & Metadata" aria-label="Project Information & Metadata">
+              ${renderIcon('info', 16)}
+            </button>
+
+            <!-- + New Project Button (Item 2: only +, tooltip) -->
+            <button class="btn btn-secondary btn-sm new-project-btn" title="Create New Project" aria-label="Create New Project">
+              ${renderIcon('plus', 16)}
+            </button>
+          </div>
+        </div>
+
+        <!-- Segmented Sub-Nav Tabs (Item 4 & 5: responsive icon+label, hidden on desktop sidebar) -->
+        <nav class="project-segmented-tabs" role="tablist" aria-label="Project Sub-Views">
+          <button class="project-segmented-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-tab="overview" role="tab" aria-selected="${state.projectTab === 'overview'}">
+            <span class="tab-icon-row">${renderIcon('overview', 16)}</span>
+            <span class="tab-label">Overview</span>
+          </button>
+          <button class="project-segmented-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-tab="tasks" role="tab" aria-selected="${state.projectTab === 'tasks'}">
+            <span class="tab-icon-row">
+              ${renderIcon('tasks', 16)}
+              <span class="tab-badge">${projectTasks.length}</span>
+            </span>
+            <span class="tab-label">Tasks</span>
+          </button>
+          <button class="project-segmented-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-tab="chat" role="tab" aria-selected="${state.projectTab === 'chat'}">
+            <span class="tab-icon-row">
+              ${renderIcon('chat', 16)}
+            </span>
+            <span class="tab-label">Chat</span>
+          </button>
+        </nav>
+      </header>
+    `;
+
+    // Project selector switch listener
+    projectNav.querySelector('#project-selector')?.addEventListener('change', (ev) => {
+      const selectedId = (ev.target as HTMLSelectElement).value;
+      stateManager.selectProject(selectedId);
+    });
+
+    // Project info modal listener
+    projectNav.querySelector('#project-info-btn')?.addEventListener('click', () => {
+      renderProjectInfoModal(
+        container,
+        state,
+        project,
+        projectTasks,
+        activeTasks,
+        validationTasks,
+        blockedTasks,
+        proposedTasks,
+        recoveryTasks,
+        activeMembers
+      );
+    });
+
+    // Segmented sub-tab listeners
+    projectNav.querySelectorAll('.project-segmented-tab[data-tab]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        const tab = (ev.currentTarget as HTMLElement).getAttribute('data-tab') as ProjectTab;
+        stateManager.setProjectTab(tab);
+      });
+    });
+
+    // New Project modal listener
+    projectNav.querySelector('.new-project-btn')?.addEventListener('click', () => {
+      renderNewProjectModal(container);
+    });
+  }
 
   container.appendChild(projectNav);
 

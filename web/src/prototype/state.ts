@@ -1267,7 +1267,7 @@ class StateManager {
       theme: 'dark', // Default to dark theme
       density: 'comfortable', // Default to comfortable density
       primaryNav: 'feed', // 1st primary destination
-      projectTab: 'tasks',
+      projectTab: 'overview',
       manageTab: 'environments',
       activeTab: 'attention',
       feedLayoutVariant: 'unified',
@@ -1341,7 +1341,15 @@ class StateManager {
     manageTab?: ManageTab
   ) {
     this.state.primaryNav = nav;
-    if (projectTab) this.state.projectTab = projectTab;
+    if (projectTab) {
+      this.state.projectTab = projectTab;
+      if (projectTab !== 'tasks') {
+        this.state.taskViewMode = 'list';
+      }
+    } else if (nav === 'project') {
+      this.state.projectTab = 'overview';
+      this.state.taskViewMode = 'list';
+    }
     if (manageTab) this.state.manageTab = manageTab;
 
     // Maintain backwards compatibility with activeTab

@@ -2422,27 +2422,15 @@ code {
 .tasks-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
 }
 
-@media (min-width: 600px) {
-  .tasks-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (min-width: 960px) {
+@media (min-width: 768px) {
   .viewport-stage.mode-desktop .tasks-grid,
   .viewport-stage.mode-fluid .tasks-grid {
     grid-template-columns: repeat(3, 1fr);
-  }
-}
-
-@media (min-width: 1300px) {
-  .viewport-stage.mode-desktop .tasks-grid,
-  .viewport-stage.mode-fluid .tasks-grid {
-    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
   }
 }
 
@@ -2450,12 +2438,12 @@ code {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 12px 14px;
+  padding: 14px 16px;
   cursor: pointer;
   transition: all 0.15s ease;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   text-decoration: none;
 }
 
