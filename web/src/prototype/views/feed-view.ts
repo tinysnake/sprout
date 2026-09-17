@@ -447,19 +447,23 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
       </span>
     </div>
 
-    <!-- 4 Streamlined Urgency Pills (Dynamic Counter AND Intersection) -->
+    <!-- 4 Streamlined Urgency Pills (Single Row 4-Column Bar with Top Stat & Bottom Label) -->
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
       <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all">
-        <span>全部 (${scopedItems.length})</span>
+        <span class="urgency-pill-top">${scopedItems.length}</span>
+        <span class="urgency-pill-bottom">全部</span>
       </button>
       <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required">
-        <span>🔴 需干预 (${redItems.length})</span>
+        <span class="urgency-pill-top"><span class="status-dot red"></span> ${redItems.length}</span>
+        <span class="urgency-pill-bottom">需干预</span>
       </button>
       <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention">
-        <span>🟡 待审批 (${yellowItems.length})</span>
+        <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${yellowItems.length}</span>
+        <span class="urgency-pill-bottom">待审批</span>
       </button>
       <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info">
-        <span>🔵 提案/通知 (${blueItems.length})</span>
+        <span class="urgency-pill-top"><span class="status-dot blue"></span> ${blueItems.length}</span>
+        <span class="urgency-pill-bottom">提案/通知</span>
       </button>
     </div>
 
