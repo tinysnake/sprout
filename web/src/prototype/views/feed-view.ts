@@ -1,4 +1,5 @@
 import { renderIcon } from '../icons.js';
+import { activateOnKeyboard } from '../keyboard.js';
 import { stateManager, type PrototypeState } from '../state.js';
 import type {
   ActivityFeedItem,
@@ -7,6 +8,14 @@ import type {
 } from '../types.js';
 
 export function renderFeedView(state: PrototypeState): HTMLElement {
+  const scenario = state.feedScenarioSnapshot;
+  const presentationState = scenario
+    ? {
+        ...state,
+        attentionItems: scenario.attentionItems,
+        activityFeedItems: scenario.activityFeedItems,
+      }
+    : state;
   const container = document.createElement('div');
   container.className = 'feed-view';
 
@@ -32,7 +41,7 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
           <span class="feed-scope-icon">${renderIcon('project', 16)}</span>
           <label for="feed-scope-select" class="feed-scope-label">Scope:</label>
           <select id="feed-scope-select" class="form-select feed-scope-select" aria-label="Select Project Scope">
-            ${renderScopeSelectOptions(state)}
+            ${renderScopeSelectOptions(presentationState)}
           </select>
         </div>
       </div>
@@ -49,12 +58,12 @@ export function renderFeedView(state: PrototypeState): HTMLElement {
   container.appendChild(headerEl);
 
   // Render active layout variant
-  if (state.feedLayoutVariant === 'split-board') {
-    container.appendChild(renderSplitBoardLayout(state));
-  } else if (state.feedLayoutVariant === 'project-grouped') {
-    container.appendChild(renderProjectGroupedLayout(state));
+  if (presentationState.feedLayoutVariant === 'split-board') {
+    container.appendChild(renderSplitBoardLayout(presentationState));
+  } else if (presentationState.feedLayoutVariant === 'project-grouped') {
+    container.appendChild(renderProjectGroupedLayout(presentationState));
   } else {
-    container.appendChild(renderUnifiedLayout(state));
+    container.appendChild(renderUnifiedLayout(presentationState));
   }
 
   return container;
@@ -87,8 +96,12 @@ function getScopedAttentionItems(state: PrototypeState): AttentionItem[] {
 
 function getScopedActiveTasks(state: PrototypeState) {
   const scope = state.feedScopeFilter;
+  const scenarioTaskIds = state.feedScenarioSnapshot?.activeTaskIds;
   const activeTasks = state.tasks.filter(
-    (t) => t.lifecycle === 'active' || t.agentRunLifecycle === 'running'
+    (t) =>
+      (scenarioTaskIds
+        ? scenarioTaskIds.includes(t.id)
+        : t.lifecycle === 'active' || t.agentRunLifecycle === 'running')
   );
   if (scope === 'all') return activeTasks;
   if (scope === 'infrastructure') return [];
@@ -542,7 +555,7 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
             const activeRun = task.runs.find((r) => r.lifecycle === 'running') ?? task.runs[task.runs.length - 1];
 
             return `
-            <div class="card active-task-card" data-task-id="${task.id}">
+            <button type="button" class="card active-task-card" data-task-id="${task.id}" aria-label="Open Task ${task.id.replace('task-', '')}: ${task.currentVersion.title}">
               <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
                 <div>
                   <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
@@ -565,7 +578,7 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
                   Goal: ${task.currentVersion.goal}
                 </div>
               </div>
-            </div>
+            </button>
           `;
           })
           .join('')}
@@ -575,12 +588,14 @@ function renderActiveWorkSection(state: PrototypeState): HTMLElement {
   `;
 
   section.querySelectorAll('.active-task-card').forEach((card) => {
-    card.addEventListener('click', (ev) => {
-      const taskId = (ev.currentTarget as HTMLElement).getAttribute('data-task-id');
+    const navigate = () => {
+      const taskId = card.getAttribute('data-task-id');
       if (taskId) {
         stateManager.navigateWithReturn({ nav: 'project', projectTab: 'tasks', taskId }, 'Feed');
       }
-    });
+    };
+    card.addEventListener('click', navigate);
+    activateOnKeyboard(card as HTMLElement, navigate);
   });
 
   return section;
@@ -706,7 +721,7 @@ function renderAttentionCardHtml(item: AttentionItem): string {
                 : 'Routing Notice';
 
   return `
-    <div class="attention-card ${item.severity === 'action_required' ? 'severity-action-required' : item.severity === 'attention' ? 'severity-attention' : 'severity-info'}"
+    <button type="button" class="attention-card ${item.severity === 'action_required' ? 'severity-action-required' : item.severity === 'attention' ? 'severity-attention' : 'severity-info'}"
          data-attention-id="${item.id}"
          data-ref="${item.referenceId}"
          data-cat="${item.category}"
@@ -737,13 +752,13 @@ function renderAttentionCardHtml(item: AttentionItem): string {
           <span>${item.timestamp}</span>
         </div>
       </div>
-    </div>
+    </button>
   `;
 }
 
 function renderActivityRowHtml(item: ActivityFeedItem): string {
   return `
-    <div class="list-item list-item-interactive activity-feed-row"
+    <button type="button" class="list-item list-item-interactive activity-feed-row"
          data-act-id="${item.id}"
          data-target-nav="${item.targetNav}"
          data-target-proj-tab="${item.targetProjectTab ?? ''}"
@@ -763,14 +778,14 @@ function renderActivityRowHtml(item: ActivityFeedItem): string {
         <span class="provenance-tag time" title="${item.timestamp}">${item.relativeTime}</span>
         <span class="list-item-chevron">${renderIcon('chevron-right', 14)}</span>
       </div>
-    </div>
+    </button>
   `;
 }
 
 function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
   root.querySelectorAll('.attention-card').forEach((card) => {
-    card.addEventListener('click', (ev) => {
-      const attId = (ev.currentTarget as HTMLElement).getAttribute('data-attention-id');
+    const navigate = () => {
+      const attId = card.getAttribute('data-attention-id');
       const item = state.attentionItems.find((a) => a.id === attId);
       if (!item) return;
 
@@ -806,14 +821,16 @@ function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
           'Feed'
         );
       }
-    });
+    };
+    card.addEventListener('click', navigate);
+    activateOnKeyboard(card as HTMLElement, navigate);
   });
 }
 
 function attachActivityRowHandlers(root: HTMLElement) {
   root.querySelectorAll('.activity-feed-row').forEach((row) => {
-    row.addEventListener('click', (ev) => {
-      const target = ev.currentTarget as HTMLElement;
+    const navigate = () => {
+      const target = row as HTMLElement;
       const nav = (target.getAttribute('data-target-nav') as any) || 'project';
       const projTab = target.getAttribute('data-target-proj-tab') as any;
       const manageTab = target.getAttribute('data-target-manage-tab') as any;
@@ -837,6 +854,8 @@ function attachActivityRowHandlers(root: HTMLElement) {
       }
 
       stateManager.navigateWithReturn(navTarget, 'Feed');
-    });
+    };
+    row.addEventListener('click', navigate);
+    activateOnKeyboard(row as HTMLElement, navigate);
   });
 }
