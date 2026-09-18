@@ -27,7 +27,24 @@ export function renderProjectChat(
     currentScopeTitle = activeWorkingGroup?.displayName || state.selectedWorkingGroupId;
     if (activeWorkingGroup?.status === 'disbanded') {
       isReadOnly = true;
-      readOnlyReason = 'This Working Group has been disbanded. Conversation history is preserved as read-only.';
+      const restoreEligibility = stateManager.evaluateWorkingGroupEligibility(
+        project.id,
+        activeWorkingGroup.id,
+        'restore'
+      );
+      readOnlyReason = restoreEligibility.success
+        ? 'This Working Group has been disbanded. Conversation history is preserved as read-only.'
+        : restoreEligibility.reason ?? 'This Working Group is unavailable for restoration.';
+    } else if (activeWorkingGroup) {
+      const messageEligibility = stateManager.evaluateWorkingGroupEligibility(
+        project.id,
+        activeWorkingGroup.id,
+        'message'
+      );
+      if (!messageEligibility.success) {
+        isReadOnly = true;
+        readOnlyReason = messageEligibility.reason ?? 'This Working Group is unavailable for new collaboration.';
+      }
     }
     filteredMessages = filteredMessages.filter(
       (m) =>
@@ -93,14 +110,6 @@ export function renderProjectChat(
 
   const workingGroups = project.workingGroups || [];
   const agentMembers = project.memberships.filter((m) => m.memberKind === 'agent');
-  const archivedWorkingGroupAgent = activeWorkingGroup?.memberIds
-    .map((memberId) => state.agents.find((agent) => agent.id === memberId))
-    .find((agent) => agent?.status === 'archived');
-  if (archivedWorkingGroupAgent) {
-    isReadOnly = true;
-    readOnlyReason = `Agent @${archivedWorkingGroupAgent.displayName} is archived. This Working Group history is review-only; create a new group for active Agents.`;
-  }
-
   chatViewEl.innerHTML = `
     <!-- Left Pane: Categorized Chat Cards List -->
     <aside class="chat-list-pane" role="tablist" aria-label="Conversation Scopes">
@@ -259,7 +268,14 @@ export function renderProjectChat(
                 </div>
                 ${
                   activeWorkingGroup && activeWorkingGroup.status === 'disbanded'
-                    ? `<button class="btn btn-secondary btn-sm restore-wg-quick-btn" style="font-size: 11px; padding: 2px 8px;">Restore WG</button>`
+                    ? (() => {
+                        const eligibility = stateManager.evaluateWorkingGroupEligibility(
+                          project.id,
+                          activeWorkingGroup.id,
+                          'restore'
+                        );
+                        return `<button class="btn btn-secondary btn-sm restore-wg-quick-btn" style="font-size: 11px; padding: 2px 8px;" ${eligibility.success ? '' : 'disabled'} title="${eligibility.success ? 'Restore Working Group' : 'Restore unavailable until all retained members are eligible'}">Restore WG</button>`;
+                      })()
                     : ''
                 }
               </div>`
@@ -380,7 +396,8 @@ export function renderProjectChat(
   // Restore WG quick button (in banner)
   chatViewEl.querySelector('.restore-wg-quick-btn')?.addEventListener('click', () => {
     if (activeWorkingGroup) {
-      stateManager.restoreWorkingGroup(project.id, activeWorkingGroup.id);
+      const result = stateManager.restoreWorkingGroup(project.id, activeWorkingGroup.id);
+      if (!result.success && result.reason) window.alert(result.reason);
     }
   });
 
@@ -470,6 +487,20 @@ export function renderProjectChat(
                     <div style="font-size: 10px; color: var(--text-muted);">
                       Direct DM, exact @mention, or @all broadcast admitted immediately, bypassing wake policy and collection windows.
                     </div>
+                    ${
+                      msg.deterministicRoutingOutcomes?.length
+                        ? `<div class="deterministic-routing-outcomes" style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">
+                            ${msg.deterministicRoutingOutcomes
+                              .map(
+                                (outcome) => `<div style="font-size: 10px; color: ${outcome.status === 'admitted' ? 'var(--green-ready)' : 'var(--red-action)'};">
+                                  <strong>@${outcome.targetDisplayName ?? outcome.targetAgentId}</strong> · ${outcome.status === 'admitted' ? 'Admitted' : 'Failed closed'}<br />
+                                  <span style="color: var(--text-muted);">${outcome.reason}</span>
+                                </div>`
+                              )
+                              .join('')}
+                          </div>`
+                        : ''
+                    }
                   `
                   : `
                     <div style="font-size: 10px; color: var(--text-muted);">
@@ -611,12 +642,12 @@ export function renderChatInfoModal(
             ? `<div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                   <span style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
-                    Working Group Members (${targetWg.memberIds.length})
+                    Working Group Members (${(targetWg.status === 'disbanded' ? targetWg.retainedMemberIds ?? targetWg.memberIds : targetWg.memberIds).length})
                   </span>
                   <span class="status-pill ${targetWg.status === 'active' ? 'green' : 'neutral'}" style="font-size: 9px;">${targetWg.status}</span>
                 </div>
                 <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-                  ${targetWg.memberIds
+                  ${(targetWg.status === 'disbanded' ? targetWg.retainedMemberIds ?? targetWg.memberIds : targetWg.memberIds)
                     .map((id: string) => {
                       const m = project.memberships.find((mb) => mb.memberId === id);
                       return `<strong>${m?.displayName || id}</strong>`;
@@ -1092,6 +1123,10 @@ export function renderWorkingGroupDetailsModal(
   modal.className = 'proto-modal-backdrop';
 
   const isDisbanded = wg.status === 'disbanded';
+  const displayedMemberIds = isDisbanded ? wg.retainedMemberIds ?? wg.memberIds : wg.memberIds;
+  const restoreEligibility = isDisbanded
+    ? stateManager.evaluateWorkingGroupEligibility(project.id, wg.id, 'restore')
+    : { success: true as const };
 
   modal.innerHTML = `
     <div class="proto-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="manage-wg-title" style="max-width: 520px;">
@@ -1118,10 +1153,10 @@ export function renderWorkingGroupDetailsModal(
 
         <div class="card" style="padding: 10px 12px; margin: 0; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);">
           <div style="font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase;">
-            Working Group Members (${wg.memberIds.length})
+            ${isDisbanded ? 'Retained Working Group Members' : 'Working Group Members'} (${displayedMemberIds.length})
           </div>
           <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
-            ${wg.memberIds
+            ${displayedMemberIds
               .map((id) => {
                 const m = project.memberships.find((mb) => mb.memberId === id);
                 return `<strong>${m?.displayName || id}</strong>`;
@@ -1136,14 +1171,16 @@ export function renderWorkingGroupDetailsModal(
           <div style="font-size: 11px; color: var(--text-secondary);">
             ${
               isDisbanded
-                ? 'This working group is currently disbanded. Channel is read-only. Restoring will reactivate the channel for communication.'
+                ? restoreEligibility.success
+                  ? 'This working group is currently disbanded. Channel is read-only. Restoring will reactivate the channel for communication.'
+                  : restoreEligibility.reason
                 : 'Disbanding a working group is non-destructive. The channel becomes read-only and all configuration, memberships, and messages are preserved for audit and possible restore.'
             }
           </div>
           <div style="margin-top: 4px;">
             ${
               isDisbanded
-                ? `<button class="btn btn-primary btn-sm btn-restore-wg" style="gap: 6px;">${renderIcon('refresh', 14)} Restore Working Group</button>`
+                ? `<button class="btn btn-primary btn-sm btn-restore-wg" style="gap: 6px;" ${restoreEligibility.success ? '' : 'disabled'}>${renderIcon('refresh', 14)} Restore Working Group</button>`
                 : `<button class="btn btn-danger btn-sm btn-disband-wg" style="gap: 6px;">${renderIcon('archive', 14)} Disband Working Group (Read-Only)</button>`
             }
           </div>
@@ -1163,8 +1200,9 @@ export function renderWorkingGroupDetailsModal(
   });
 
   modal.querySelector('.btn-restore-wg')?.addEventListener('click', () => {
-    stateManager.restoreWorkingGroup(project.id, wg.id);
-    modal.remove();
+    const result = stateManager.restoreWorkingGroup(project.id, wg.id);
+    if (result.success) modal.remove();
+    else if (result.reason) window.alert(result.reason);
   });
 
   parentEl.appendChild(modal);

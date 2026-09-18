@@ -139,8 +139,9 @@ Project membership is a reference relationship that gives an Agent responsibilit
 ### Membership Ending Safety
 Ending an Agent's Project membership:
 1. Deactivates future communication and run admissions for that Agent within that Project.
-2. If the Agent is currently the Task Lead of an unfinished Task, the Task enters a `blocked` lifecycle with an explicit, routable blocker requiring the Human operator to assign a replacement Task Lead.
-3. **Preserves Attribution**: Historical messages, Task runs, and completion claims permanently retain the Agent's identity and configuration version.
+2. Ends current participation in every Working Group without deleting its participation history. A disbanded group cannot be restored while any retained member lacks an active Project membership.
+3. If the Agent is currently the Task Lead of an unfinished Task, the Task enters a `blocked` lifecycle with an explicit, routable blocker requiring the Human operator to assign a replacement Task Lead.
+4. **Preserves Attribution**: Historical messages, Working Group participation, Task runs, and completion claims permanently retain the Agent's identity and configuration version.
 
 ---
 
@@ -151,6 +152,8 @@ Archiving an Agent is non-destructive (ADR-0008):
 - **Safety Guard**: An Agent **cannot be archived** while it has an active run or remains the Task Lead of an unfinished Task. The UI validates active tasks and prevents accidental archiving.
 - **Archive Effects**:
   - Bars new Project memberships, chat messages, and Task runs.
+  - Exact Project-channel mentions fail closed for an archived target, retain visible per-target routing evidence, and never silently wake a different Agent.
+  - Cancels pending projected replies for the archived Agent; callbacks independently recheck Agent and Project state before appending a reply.
   - Retains all private memory entries, past chat messages, Task run facts, and engine session slots.
   - Re-activable at any time via "Restore Agent".
 

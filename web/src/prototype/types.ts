@@ -84,7 +84,18 @@ export type WorkingGroup = {
   goal?: string | undefined;
   rules?: string[] | undefined;
   creatorId: string;
+  /** Current participants while active. Empty while a disbanded group is read-only. */
   memberIds: string[];
+  /** Frozen restore candidates captured when the group is disbanded. */
+  retainedMemberIds?: string[] | undefined;
+  /** Historical participation survives membership end and group restoration. */
+  membershipHistory?:
+    | {
+        memberId: string;
+        joinedAt: string;
+        endedAt?: string | undefined;
+      }[]
+    | undefined;
   status: 'active' | 'disbanded';
   createdAt: string;
 };
@@ -112,6 +123,14 @@ export type MessageItem = {
   timestamp: string;
   content: string;
   disposition: RoutingDisposition;
+  deterministicRoutingOutcomes?:
+    | {
+        targetAgentId: string;
+        targetDisplayName?: string | undefined;
+        status: 'admitted' | 'failed';
+        reason: string;
+      }[]
+    | undefined;
   agentAttribution?: AgentExecutionAttribution | undefined;
   isProjectedReply?: boolean | undefined;
   projectedReplyMeta?:

@@ -45,8 +45,31 @@ type AdmissionStep = {
 
 type PendingProjectedReply = {
   agentId: string;
+  projectId: string;
   timer: ReturnType<typeof setTimeout>;
 };
+
+type CollaborationEligibility = {
+  success: boolean;
+  reason?: string;
+};
+
+type MentionToken = {
+  value: string;
+  normalized: string;
+};
+
+function extractExactMentionTokens(content: string): MentionToken[] {
+  const tokens: MentionToken[] = [];
+  const matcher = /(^|[^a-zA-Z0-9_-])@([a-zA-Z0-9_-]+)(?=$|[^a-zA-Z0-9_-])/g;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(content)) !== null) {
+    const value = match[2];
+    if (!value) continue;
+    tokens.push({ value, normalized: value.toLowerCase() });
+  }
+  return tokens;
+}
 
 export type AdmissionEvaluation = {
   agent?: AgentDefinition;
@@ -2213,7 +2236,12 @@ class StateManager {
     }
   }
 
-  private scheduleProjectedReply(agentId: string, delayMs: number, emit: (agent: AgentDefinition) => void) {
+  private scheduleProjectedReply(
+    projectId: string,
+    agentId: string,
+    delayMs: number,
+    emit: (agent: AgentDefinition) => void
+  ) {
     const pendingReplyId = `pending-projected-reply-${this.nextPendingProjectedReplyId++}`;
     const timer = setTimeout(() => {
       const pendingReply = this.pendingProjectedReplies.get(pendingReplyId);
@@ -2223,16 +2251,28 @@ class StateManager {
       // Clearing a timer during archive is the primary cancellation path. This
       // recheck makes a callback that was already queued fail closed as well.
       const agent = this.state.agents.find((candidate) => candidate.id === pendingReply.agentId);
-      if (!agent || agent.status !== 'active') return;
+      const project = this.state.projects.find((candidate) => candidate.id === pendingReply.projectId);
+      if (!agent || agent.status !== 'active' || !project || project.status !== 'active') return;
       emit(agent);
     }, delayMs);
-    this.pendingProjectedReplies.set(pendingReplyId, { agentId, timer });
+    this.pendingProjectedReplies.set(pendingReplyId, { agentId, projectId, timer });
   }
 
   private cancelPendingProjectedReplies(agentId: string): number {
     let cancelled = 0;
     for (const [pendingReplyId, pendingReply] of this.pendingProjectedReplies) {
       if (pendingReply.agentId !== agentId) continue;
+      clearTimeout(pendingReply.timer);
+      this.pendingProjectedReplies.delete(pendingReplyId);
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
+  private cancelProjectPendingProjectedReplies(projectId: string): number {
+    let cancelled = 0;
+    for (const [pendingReplyId, pendingReply] of this.pendingProjectedReplies) {
+      if (pendingReply.projectId !== projectId) continue;
       clearTimeout(pendingReply.timer);
       this.pendingProjectedReplies.delete(pendingReplyId);
       cancelled += 1;
@@ -3723,6 +3763,194 @@ class StateManager {
 
   // --- Project, Messaging & Routing Actions (ADR-0007, ADR-0008) ---
 
+  private checkAgentProjectEligibility(
+    project: ProjectItem,
+    agentId: string,
+    action: string
+  ): CollaborationEligibility {
+    const agent = this.state.agents.find((candidate) => candidate.id === agentId);
+    if (!agent) {
+      return {
+        success: false,
+        reason: `Cannot ${action}: Agent "${agentId}" does not exist. The target was not substituted.`,
+      };
+    }
+    if (agent.status === 'archived') {
+      return {
+        success: false,
+        reason: `Cannot ${action} Agent "${agent.displayName}": Agent is archived. Restore the Agent first; history remains review-only (ADR-0008).`,
+      };
+    }
+
+    const membership = project.memberships.find(
+      (candidate) => candidate.memberId === agentId && candidate.memberKind === 'agent'
+    );
+    if (!membership || membership.status !== 'active') {
+      return {
+        success: false,
+        reason: `Cannot ${action} Agent "${agent.displayName}": an active Project membership is required. The target was not substituted.`,
+      };
+    }
+    return { success: true };
+  }
+
+  private getRetainedWorkingGroupMemberIds(group: ProjectItem['workingGroups'][number]): string[] {
+    return Array.from(new Set(group.retainedMemberIds ?? group.memberIds));
+  }
+
+  private ensureWorkingGroupMembershipHistory(group: ProjectItem['workingGroups'][number]) {
+    if (group.membershipHistory) return;
+    group.membershipHistory = this.getRetainedWorkingGroupMemberIds(group).map((memberId) => ({
+      memberId,
+      joinedAt: group.createdAt,
+    }));
+  }
+
+  public evaluateWorkingGroupEligibility(
+    projectId: string,
+    workingGroupId: string,
+    operation: 'message' | 'restore' = 'message'
+  ): CollaborationEligibility {
+    const project = this.state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status !== 'active') {
+      return {
+        success: false,
+        reason: `Cannot ${operation} Working Group in archived Project "${project.displayName}". History remains read-only.`,
+      };
+    }
+
+    const group = project.workingGroups.find((candidate) => candidate.id === workingGroupId);
+    if (!group) return { success: false, reason: 'Working Group not found' };
+    if (operation === 'message' && group.status !== 'active') {
+      return {
+        success: false,
+        reason: `Cannot send a message: Working Group "${group.displayName}" is disbanded. History remains readable.`,
+      };
+    }
+    if (operation === 'restore' && group.status !== 'disbanded') {
+      return { success: false, reason: `Working Group "${group.displayName}" is already active.` };
+    }
+
+    const memberIds = operation === 'restore' ? this.getRetainedWorkingGroupMemberIds(group) : group.memberIds;
+    for (const memberId of memberIds) {
+      const membership = project.memberships.find((candidate) => candidate.memberId === memberId);
+      if (!membership || membership.status !== 'active') {
+        const displayName = membership?.displayName ?? memberId;
+        return {
+          success: false,
+          reason: `Cannot ${operation} Working Group "${group.displayName}": member "${displayName}" no longer has an active Project membership. Group history remains review-only (ADR-0008).`,
+        };
+      }
+      if (membership.memberKind === 'agent') {
+        const agentEligibility = this.checkAgentProjectEligibility(
+          project,
+          memberId,
+          operation === 'restore' ? `restore Working Group with` : `send a Working Group message to`
+        );
+        if (!agentEligibility.success) {
+          return {
+            success: false,
+            reason: `Cannot ${operation} Working Group "${group.displayName}": ${agentEligibility.reason}`,
+          };
+        }
+      }
+    }
+    return { success: true };
+  }
+
+  private resolveDeterministicRouting(
+    project: ProjectItem,
+    scope: MessageItem['scope'],
+    content: string
+  ): NonNullable<MessageItem['deterministicRoutingOutcomes']> {
+    if (scope.kind === 'direct-message') {
+      const agent = this.state.agents.find((candidate) => candidate.id === scope.recipientId);
+      return [
+        {
+          targetAgentId: scope.recipientId,
+          targetDisplayName: agent?.displayName,
+          status: 'admitted',
+          reason: 'Project-scoped direct Message deterministically admitted.',
+        },
+      ];
+    }
+
+    const tokens = extractExactMentionTokens(content);
+    if (tokens.length === 0) return [];
+
+    const outcomes = new Map<string, NonNullable<MessageItem['deterministicRoutingOutcomes']>[number]>();
+    const group =
+      scope.kind === 'working-group-channel'
+        ? project.workingGroups.find((candidate) => candidate.id === scope.workingGroupId)
+        : undefined;
+    const scopeMemberIds = group ? new Set(group.memberIds) : undefined;
+
+    const addAgentTarget = (agentId: string, mentionLabel: string) => {
+      if (outcomes.has(agentId)) return;
+      const agent = this.state.agents.find((candidate) => candidate.id === agentId);
+      const projectEligibility = this.checkAgentProjectEligibility(project, agentId, `route exact mention ${mentionLabel} to`);
+      if (!projectEligibility.success) {
+        outcomes.set(agentId, {
+          targetAgentId: agentId,
+          targetDisplayName: agent?.displayName,
+          status: 'failed',
+          reason: projectEligibility.reason ?? 'Deterministic routing failed closed.',
+        });
+        return;
+      }
+      if (scopeMemberIds && !scopeMemberIds.has(agentId)) {
+        outcomes.set(agentId, {
+          targetAgentId: agentId,
+          targetDisplayName: agent?.displayName,
+          status: 'failed',
+          reason: `Cannot route exact mention ${mentionLabel}: Agent "${agent?.displayName ?? agentId}" is not a current member of this Working Group. The target was not substituted.`,
+        });
+        return;
+      }
+      outcomes.set(agentId, {
+        targetAgentId: agentId,
+        targetDisplayName: agent?.displayName,
+        status: 'admitted',
+        reason: `Exact mention ${mentionLabel} deterministically admitted without wake-model judgement.`,
+      });
+    };
+
+    for (const token of tokens) {
+      if (token.normalized === 'all') {
+        project.memberships
+          .filter(
+            (membership) =>
+              membership.memberKind === 'agent' &&
+              membership.status === 'active' &&
+              (!scopeMemberIds || scopeMemberIds.has(membership.memberId))
+          )
+          .forEach((membership) => addAgentTarget(membership.memberId, '@all'));
+        continue;
+      }
+
+      const target = this.state.agents.find(
+        (candidate) =>
+          candidate.id.toLowerCase() === token.normalized ||
+          candidate.displayName.toLowerCase().replace(/\s+/g, '-') === token.normalized
+      );
+      if (!target) {
+        const unknownKey = `unknown:${token.normalized}`;
+        if (!outcomes.has(unknownKey)) {
+          outcomes.set(unknownKey, {
+            targetAgentId: token.value,
+            status: 'failed',
+            reason: `Cannot route exact mention @${token.value}: no matching Agent exists. The target was not substituted or sent to wake-model judgement (ADR-0007).`,
+          });
+        }
+        continue;
+      }
+      addAgentTarget(target.id, `@${token.value}`);
+    }
+
+    return [...outcomes.values()];
+  }
+
   public sendMessage(
     projectId: string,
     scope: MessageItem['scope'],
@@ -3737,9 +3965,12 @@ class StateManager {
       return admission;
     }
 
-    const newMsgId = `msg-${Date.now().toString().slice(-4)}`;
     const isDirect = scope.kind === 'direct-message';
-    const isExplicitMention = content.includes('@') || content.includes('@all');
+    const exactMentions = isDirect ? [] : extractExactMentionTokens(content);
+    const isExplicitMention = exactMentions.length > 0;
+    const deterministicRoutingOutcomes =
+      isDirect || isExplicitMention ? this.resolveDeterministicRouting(project, scope, content) : [];
+    const newMsgId = `msg-${Date.now().toString().slice(-4)}`;
 
     let disposition: MessageItem['disposition'] = 'informational';
     if (isDirect || isExplicitMention) {
@@ -3759,51 +3990,63 @@ class StateManager {
       timestamp: 'Just now',
       content,
       disposition,
+      deterministicRoutingOutcomes:
+        deterministicRoutingOutcomes.length > 0 ? deterministicRoutingOutcomes : undefined,
     };
 
     this.state.messages.push(newMsg);
 
     if (disposition === 'addressed') {
-      // An addressed message admits one deterministic projected reply. Capture
-      // the target now so archive can cancel that admitted work by Agent.
-      const targetAgentId = isDirect && 'recipientId' in scope ? scope.recipientId : 'programmer';
-      this.scheduleProjectedReply(targetAgentId, 800, (agent) => {
-        const replyMsgId = `msg-reply-${Date.now().toString().slice(-4)}`;
-
-        const replyMsg: MessageItem = {
-          id: replyMsgId,
-          projectId,
-          scope,
-          authorId: agent.id,
-          authorKind: 'agent',
-          authorDisplayName: agent.displayName,
-          authorAvatar: agent.avatar,
-          timestamp: 'Just now',
-          content: `Acknowledged: "${content.slice(0, 40)}...". Proceeding with deterministic execution.`,
-          disposition: 'non-routing',
-          agentAttribution: currentAgentExecutionAttribution(agent),
-          isProjectedReply: true,
-          projectedReplyMeta: {
-            runId: `run-det-${Date.now().toString().slice(-3)}`,
-            agentId: agent.id,
-            wakeRequestId: `wake-det-${Date.now().toString().slice(-3)}`,
-            triggeringMessageIds: [newMsgId],
-          },
-        };
-        this.state.messages.push(replyMsg);
-        this.notify(`Projected reply from ${agent.displayName} received (Non-routing; cannot loop-wake).`);
-      });
-      this.notify(`Sent addressed message ${newMsgId}. Bypasses wake policy; deterministic wake.`);
+      const admittedTargets = deterministicRoutingOutcomes.filter((outcome) => outcome.status === 'admitted');
+      for (const target of admittedTargets) {
+        // Capture each exact target now. Archive can cancel only that Agent's
+        // admitted work, and no invalid target can silently fall through.
+        this.scheduleProjectedReply(projectId, target.targetAgentId, 800, (agent) => {
+          const replyMsgId = `msg-reply-${Date.now().toString().slice(-4)}`;
+          const replyMsg: MessageItem = {
+            id: replyMsgId,
+            projectId,
+            scope,
+            authorId: agent.id,
+            authorKind: 'agent',
+            authorDisplayName: agent.displayName,
+            authorAvatar: agent.avatar,
+            timestamp: 'Just now',
+            content: `Acknowledged: "${content.slice(0, 40)}...". Proceeding with deterministic execution.`,
+            disposition: 'non-routing',
+            agentAttribution: currentAgentExecutionAttribution(agent),
+            isProjectedReply: true,
+            projectedReplyMeta: {
+              runId: `run-det-${Date.now().toString().slice(-3)}`,
+              agentId: agent.id,
+              wakeRequestId: `wake-det-${Date.now().toString().slice(-3)}`,
+              triggeringMessageIds: [newMsgId],
+            },
+          };
+          this.state.messages.push(replyMsg);
+          this.notify(`Projected reply from ${agent.displayName} received (Non-routing; cannot loop-wake).`);
+        });
+      }
+      const failedTargets = deterministicRoutingOutcomes.filter((outcome) => outcome.status === 'failed');
+      this.notify(
+        `Sent addressed message ${newMsgId}. ${admittedTargets.length} deterministic target(s) admitted; ${failedTargets.length} failed closed with durable evidence.`
+      );
     } else if (disposition === 'wake-eligible') {
       // Simulate 30s batching window collection & wake model evaluation
       const batchId = `batch-${Date.now().toString().slice(-4)}`;
+      const wakeTargetId = 'designer';
+      const wakeTargetEligibility = this.checkAgentProjectEligibility(
+        project,
+        wakeTargetId,
+        'admit wake-model selection for'
+      );
       const batch: RoutingBatch = {
         id: batchId,
         projectId,
         openedAt: 'Just now',
         closedAt: 'In 30s',
         inputMessageIds: [newMsgId],
-        status: 'evaluating',
+        status: wakeTargetEligibility.success ? 'evaluating' : 'failed-closed',
         attemptsCount: 1,
         wakeModel: 'gpt-4o-mini',
         frozenContextSummary: {
@@ -3816,24 +4059,45 @@ class StateManager {
         decisions: [
           {
             messageId: newMsgId,
-            targetAgentId: 'designer',
-            status: 'selected',
-            rationale: 'Unaddressed query matches Designer collaboration instructions.',
+            targetAgentId: wakeTargetId,
+            status: wakeTargetEligibility.success ? 'selected' : 'failed',
+            rationale: wakeTargetEligibility.success
+              ? 'Unaddressed query matches Designer collaboration instructions.'
+              : wakeTargetEligibility.reason ?? 'Selected Agent failed current membership admission.',
           },
         ],
         resultingWakeRequestIds: [`wake-${batchId}`],
+        resultingWakeRequests: [
+          {
+            wakeRequestId: `wake-${batchId}`,
+            targetAgentId: wakeTargetId,
+            admissionStatus: wakeTargetEligibility.success ? 'admitted' : 'failed',
+            failureReason: wakeTargetEligibility.success ? undefined : wakeTargetEligibility.reason,
+          },
+        ],
+        failureReason: wakeTargetEligibility.success
+          ? undefined
+          : `Wake-model selection failed current Agent admission. ${wakeTargetEligibility.reason}`,
       };
       this.state.routingBatches.unshift(batch);
       newMsg.routingCausalChainId = batchId;
 
-      this.scheduleProjectedReply('designer', 1200, (agent) => {
+      if (!wakeTargetEligibility.success) {
+        this.notify(`Sent unaddressed message. Routing batch ${batchId} failed closed: ${wakeTargetEligibility.reason}`);
+        return {
+          success: true,
+          reason: wakeTargetEligibility.reason ?? 'Wake-model selection failed current Agent admission.',
+        };
+      }
+
+      this.scheduleProjectedReply(projectId, wakeTargetId, 1200, (agent) => {
         batch.status = 'settled';
         batch.closedAt = 'Just now';
         const replyMsg: MessageItem = {
           id: `msg-proj-${Date.now().toString().slice(-4)}`,
           projectId,
           scope,
-          authorId: 'designer',
+          authorId: agent.id,
           authorKind: 'agent',
           authorDisplayName: "Designer", authorAvatar: "OP",
           timestamp: 'Just now',
@@ -3843,7 +4107,7 @@ class StateManager {
           isProjectedReply: true,
           projectedReplyMeta: {
             runId: `run-proj-${Date.now().toString().slice(-3)}`,
-            agentId: 'designer',
+            agentId: agent.id,
             wakeRequestId: `wake-${batchId}`,
             triggeringMessageIds: [newMsgId],
           },
@@ -3905,6 +4169,10 @@ class StateManager {
       goal: goal ?? undefined,
       creatorId: this.state.operator.id,
       memberIds: Array.from(new Set([this.state.operator.id, ...memberIds])),
+      membershipHistory: Array.from(new Set([this.state.operator.id, ...memberIds])).map((memberId) => ({
+        memberId,
+        joinedAt: 'Just now',
+      })),
       status: 'active' as const,
       createdAt: 'Just now',
     };
@@ -3919,6 +4187,9 @@ class StateManager {
     const wg = project.workingGroups.find((g) => g.id === wgId);
     if (!wg) return;
 
+    this.ensureWorkingGroupMembershipHistory(wg);
+    wg.retainedMemberIds = Array.from(new Set(wg.memberIds));
+    wg.memberIds = [];
     wg.status = 'disbanded';
     this.notify(`Disbanded Working group "${wg.displayName}". Channel is now read-only; history preserved.`);
   }
@@ -3928,15 +4199,23 @@ class StateManager {
     if (!project) return { success: false, reason: 'Project not found' };
     const wg = project.workingGroups.find((g) => g.id === wgId);
     if (!wg) return { success: false, reason: 'Working Group not found' };
-    const archivedAgent = wg.memberIds
-      .map((memberId) => this.state.agents.find((agent) => agent.id === memberId))
-      .find((agent) => agent?.status === 'archived');
-    if (archivedAgent) {
-      const reason = `Cannot restore Working Group "${wg.displayName}": Agent "${archivedAgent.displayName}" is archived. Restore the Agent first; group history remains review-only (ADR-0008).`;
-      this.notify(reason);
-      return { success: false, reason };
+    const eligibility = this.evaluateWorkingGroupEligibility(projectId, wgId, 'restore');
+    if (!eligibility.success) {
+      this.notify(eligibility.reason);
+      return eligibility;
     }
 
+    const restoredMemberIds = this.getRetainedWorkingGroupMemberIds(wg);
+    this.ensureWorkingGroupMembershipHistory(wg);
+    for (const memberId of restoredMemberIds) {
+      const hasCurrentHistory = wg.membershipHistory?.some(
+        (record) => record.memberId === memberId && !record.endedAt
+      );
+      if (!hasCurrentHistory) {
+        wg.membershipHistory?.push({ memberId, joinedAt: 'Just now' });
+      }
+    }
+    wg.memberIds = restoredMemberIds;
     wg.status = 'active';
     this.notify(`Restored Working group "${wg.displayName}". Channel is active.`);
     return { success: true };
@@ -3956,37 +4235,19 @@ class StateManager {
     if (scope.kind === 'direct-message') {
       const member = project.memberships.find((candidate) => candidate.memberId === scope.recipientId);
       const agent = this.state.agents.find((candidate) => candidate.id === scope.recipientId);
-      if (!agent || agent.status === 'archived') {
+      if (!agent) {
         return {
           success: false,
-          reason: `Cannot message Agent "${agent?.displayName || scope.recipientId}": Agent is archived. Restore the Agent first; message history remains review-only (ADR-0008).`,
+          reason: `Cannot message Agent "${scope.recipientId}": global Agent record not found. Message was not persisted or retargeted.`,
         };
       }
-      if (!member || member.memberKind !== 'agent' || member.status !== 'active') {
-        return {
-          success: false,
-          reason: `Cannot message Agent "${agent.displayName}": an active Project membership is required. History remains readable.`,
-        };
-      }
+      const eligibility = this.checkAgentProjectEligibility(project, agent.id, 'message');
+      if (!eligibility.success) return eligibility;
+      if (!member || member.memberKind !== 'agent') return { success: false, reason: 'Active Agent membership not found.' };
     }
 
     if (scope.kind === 'working-group-channel') {
-      const wg = project.workingGroups.find((group) => group.id === scope.workingGroupId);
-      if (!wg || wg.status !== 'active') {
-        return {
-          success: false,
-          reason: 'Cannot send a message: this Working Group is unavailable for new collaboration. History remains readable.',
-        };
-      }
-      const archivedAgent = wg.memberIds
-        .map((memberId) => this.state.agents.find((agent) => agent.id === memberId))
-        .find((agent) => agent?.status === 'archived');
-      if (archivedAgent) {
-        return {
-          success: false,
-          reason: `Cannot send to Working Group "${wg.displayName}": Agent "${archivedAgent.displayName}" is archived. Its collaboration history is review-only; create a new group for active Agents.`,
-        };
-      }
+      return this.evaluateWorkingGroupEligibility(project.id, scope.workingGroupId, 'message');
     }
 
     return { success: true };
@@ -4123,8 +4384,15 @@ class StateManager {
       return;
     }
 
+    const cancelledReplyCount = this.cancelProjectPendingProjectedReplies(projectId);
     project.status = 'archived';
-    this.notify(`Archived Project "${project.displayName}". Channels are now read-only; history and workspaces preserved.`);
+    this.notify(
+      `Archived Project "${project.displayName}". Channels are now read-only; history and workspaces preserved.${
+        cancelledReplyCount > 0
+          ? ` Cancelled ${cancelledReplyCount} pending projected repl${cancelledReplyCount === 1 ? 'y' : 'ies'}.`
+          : ''
+      }`
+    );
   }
 
   public restoreProject(projectId: string) {
@@ -4143,6 +4411,11 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status === 'archived') {
+      const reason = `Cannot add Agent membership to archived Project "${project.displayName}". Restore the Project first; historical memberships remain unchanged.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
     const globalAgent = this.state.agents.find((a) => a.id === agentId);
     if (!globalAgent) return { success: false, reason: 'Agent not found' };
@@ -4210,11 +4483,18 @@ class StateManager {
 
     member.status = 'ended';
 
-    // Also remove from active working groups
+    // End current participation in every Working Group without erasing the
+    // group's retained restore candidates or participation history.
     for (const wg of project.workingGroups) {
-      if (wg.status === 'active') {
-        wg.memberIds = wg.memberIds.filter((id) => id !== memberId);
+      this.ensureWorkingGroupMembershipHistory(wg);
+      if (wg.status === 'disbanded' && !wg.retainedMemberIds) {
+        wg.retainedMemberIds = Array.from(new Set(wg.memberIds));
       }
+      const currentHistory = wg.membershipHistory?.find(
+        (record) => record.memberId === memberId && !record.endedAt
+      );
+      if (currentHistory) currentHistory.endedAt = 'Just now';
+      wg.memberIds = wg.status === 'disbanded' ? [] : wg.memberIds.filter((id) => id !== memberId);
     }
 
     // Check if active tasks depend on this lead
@@ -4245,6 +4525,11 @@ class StateManager {
   public restoreProjectMembership(projectId: string, memberId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status === 'archived') {
+      const reason = `Cannot restore membership in archived Project "${project.displayName}". Restore the Project first; historical membership remains ended.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
     const member = project.memberships.find((m) => m.memberId === memberId);
     if (!member) return { success: false, reason: 'Project membership not found' };
     const mutationCheck = this.checkProjectMembershipMutation(project, member, 'restore');
@@ -4360,7 +4645,15 @@ class StateManager {
     leadId: string,
     proposerKind: 'human' | 'agent' = 'human',
     proposerId?: string
-  ) {
+  ): { success: boolean; reason?: string } {
+    const project = this.state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status === 'archived') {
+      const reason = `Cannot create a Task proposal in archived Project "${project.displayName}". Restore the Project first; existing Task history remains readable.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
     const newId = `task-${Date.now().toString().slice(-3)}`;
     const newProp: TaskItem = {
       id: newId,
@@ -4389,6 +4682,7 @@ class StateManager {
     this.state.tasks.unshift(newProp);
     this.selectTask(newId);
     this.notify(`Created Task Proposal #${newId.replace('task-', '')}: "${title}". Awaiting Human Approval to begin.`);
+    return { success: true };
   }
 
   public rejectTaskProposal(taskId: string, reason: string) {

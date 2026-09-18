@@ -817,7 +817,10 @@ function renderNewProposalModal(
   modal.className = 'proto-modal-backdrop';
 
   const eligibleAgents = project.memberships.filter(
-    (m) => m.memberKind === 'agent' && m.status === 'active'
+    (membership) =>
+      membership.memberKind === 'agent' &&
+      membership.status === 'active' &&
+      state.agents.find((agent) => agent.id === membership.memberId)?.status === 'active'
   );
 
   modal.innerHTML = `
