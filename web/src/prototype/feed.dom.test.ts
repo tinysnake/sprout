@@ -255,7 +255,7 @@ test('Feed presets are isolated snapshots and cannot contradict authoritative re
     const beforeTasks = structuredClone(stateManager.getSnapshot().tasks);
     const beforeEnvironments = structuredClone(stateManager.getSnapshot().environments);
     const recoveryTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-104');
-    const recoveryEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'win-dev-box');
+    const recoveryEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'env-recovery');
     assert.equal(recoveryTask?.lifecycle, 'recovery');
     assert.equal(recoveryEnvironment?.workSafety, 'recovery');
     assert.ok(recoveryEnvironment?.activeLeaseHolder, 'fixture starts with a held recovery lease');
@@ -322,7 +322,7 @@ test('Feed, Environment, and shared shell drill-downs support keyboard activatio
     stateManager.setPrimaryNav('manage', undefined, 'environments');
     stateManager.closeEnvironmentDetail(false);
     const environmentCard = dom.window.document.querySelector(
-      '.env-master-card[data-env="mac-studio-primary"]'
+      '.env-master-card[data-env="env-ready"]'
     ) as HTMLElement;
     assert.ok(environmentCard);
     assert.equal(environmentCard.tagName, 'BUTTON');

@@ -11,6 +11,7 @@ import type {
   EngineKind,
   EnvironmentInstance,
   FeedLayoutVariant,
+  FeedScenarioSnapshot,
   FeedStatePreset,
   ManageTab,
   MessageItem,
@@ -209,6 +210,7 @@ export interface PrototypeState {
   activeTab: ActiveTab;
   feedLayoutVariant: FeedLayoutVariant;
   feedStatePreset: FeedStatePreset;
+  feedScenarioSnapshot?: FeedScenarioSnapshot | undefined;
   feedScopeFilter: string;
   feedAttentionSeverityFilter: 'all' | AttentionSeverity;
   feedAttentionFilter: 'all' | AttentionCategory | AttentionSeverity;
