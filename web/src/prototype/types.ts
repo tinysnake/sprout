@@ -496,6 +496,17 @@ export type ProjectItem = {
 
 export type UsageActivityKind = 'agent_run' | 'routing_attempt';
 
+export type UsageActivityOutcome =
+  | 'completed'
+  | 'ongoing'
+  | 'failed'
+  | 'stopped'
+  | 'interrupted';
+
+export type UsageSettlementRange = 'today' | '7d' | '30d';
+
+export type UsageObservationState = 'stable' | 'delayed' | 'corrected' | 'pending';
+
 export type UsageActivity = {
   id: string;
   kind: UsageActivityKind;
@@ -504,25 +515,40 @@ export type UsageActivity = {
   agentId?: string | undefined;
   engine?: EngineKind | undefined;
   model: string;
+  provider?: string | undefined;
   activityTime: string;
-  wallDurationMs: number;
+  settlementRange: UsageSettlementRange;
+  outcome: UsageActivityOutcome;
+  sessionMode: 'new' | 'resumed';
+  observationState: UsageObservationState;
+  wallDurationMs?: number | undefined;
+  durationStatus: 'complete' | 'partial' | 'unavailable';
+  engineDurationMs?: number | undefined;
+  taskCalendarElapsedMs?: number | undefined;
+  outcomeReason?: string | undefined;
   tokenDimensions: {
     status: 'complete' | 'partial' | 'unavailable';
-    totalInput: number;
-    uncachedInput: number;
-    cachedReads: number;
-    cacheWrite: number;
-    output: number;
-    reasoningOutput: number;
-    total: number;
+    totalInput?: number | undefined;
+    uncachedInput?: number | undefined;
+    cachedReads?: number | undefined;
+    cacheWrite?: number | undefined;
+    output?: number | undefined;
+    reasoningOutput?: number | undefined;
+    total?: number | undefined;
+    source: string;
   };
   costValuation: {
     attributableBilledCostStatus: 'unavailable';
     apiEquivalentStatus: 'available' | 'pending' | 'unavailable';
-    estimatedUsdMicros: number;
-    provenance: 'provider_estimated' | 'harness_calculated' | 'locally_estimated';
+    estimatedUsdMicros?: number | undefined;
+    provenance?: 'provider_estimated' | 'harness_calculated' | 'locally_estimated' | undefined;
     billingBasis: 'metered_api' | 'subscription_included' | 'unknown';
+    source?: string | undefined;
+    sourceVersion?: string | undefined;
+    note: string;
   };
+  durationSource: string;
+  coverageNote: string;
   observationHistory?:
     | {
         timestamp: string;
@@ -530,6 +556,7 @@ export type UsageActivity = {
         status: string;
         usdMicros?: number | undefined;
         note: string;
+        supersedes?: string | undefined;
       }[]
     | undefined;
 };

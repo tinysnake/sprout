@@ -22,6 +22,28 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
     </div>
 
     <div class="review-drawer-content">
+      <!-- Ticket #67 Acceptance Verification Checklist -->
+      <div class="review-card usage-review-card">
+        <h4 class="review-section-title" style="color: var(--accent-primary);">
+          ${renderIcon('chart', 16)} Ticket #67 Usage &amp; Costs Review
+        </h4>
+        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 10px;">
+          First implementation attempt is ready for Product Owner review. The surface is a disposable prototype; domain and telemetry obligations remain represented in state and the retained artifact.
+        </p>
+        <div class="review-checklist">
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Six views and activity drill-down:</strong> Agent run, Task, Project, Agent, model, and time range views share filters and link to activity detail.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Truthful facts:</strong> Token dimensions, Sprout wall duration, billed-cost availability, API-equivalent estimate, billing basis, provenance, and coverage are distinct.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>State matrix:</strong> Resumed, ongoing, failed, stopped, interrupted, delayed, corrected, incomplete, and mixed-provenance examples are seeded without zero-filling unknowns.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Work and wake separation:</strong> Agent-run activity is attributed to Agent and Task; Routing-attempt activity is Project-owned and never absorbed into either.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Retained artifact:</strong> <code>docs/prototype-usage-costs.md</code> records the model, coverage matrix, review posture, and reuse rules.</span></label>
+        </div>
+        <div class="usage-review-decisions">
+          <div><strong>Accepted reuse</strong><span>Shared shell, restrained hierarchy, progressive disclosure, touch targets, keyboard focus, and on-demand evidence patterns from #61 to #66.</span></div>
+          <div><strong>Rejected in this prototype</strong><span>Budgets, alerts, admission limits, automatic stops, billing-account controls, chart-library choices, candidate harness controls, and unlabelled cost.</span></div>
+          <div><strong>Owner unresolved</strong><span>Default time range, summary emphasis, and whether aggregate constituent links should remain visible by default. No preference is silently treated as accepted.</span></div>
+        </div>
+      </div>
+
       <!-- Ticket #66 Acceptance Verification Checklist -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--accent-primary);">
