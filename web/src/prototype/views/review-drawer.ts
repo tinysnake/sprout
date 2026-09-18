@@ -28,7 +28,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           ${renderIcon('chart', 16)} Ticket #67 Usage &amp; Costs Review
         </h4>
         <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.45; margin-bottom: 10px;">
-          First implementation attempt is ready for Product Owner review. The surface is a disposable prototype; domain and telemetry obligations remain represented in state and the retained artifact.
+          Product Owner review is accepted. The surface remains a disposable prototype; domain and telemetry obligations remain represented in state and the retained artifact.
         </p>
         <div class="review-checklist">
           <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Six views and activity drill-down:</strong> Agent run, Task, Project, Agent, model, and time range views share filters and link to activity detail.</span></label>
@@ -40,7 +40,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         <div class="usage-review-decisions">
           <div><strong>Accepted reuse</strong><span>Shared shell, restrained hierarchy, progressive disclosure, touch targets, keyboard focus, and on-demand evidence patterns from #61 to #66.</span></div>
           <div><strong>Rejected in this prototype</strong><span>Budgets, alerts, admission limits, automatic stops, billing-account controls, chart-library choices, candidate harness controls, and unlabelled cost.</span></div>
-          <div><strong>Owner unresolved</strong><span>Default time range, summary emphasis, and whether aggregate constituent links should remain visible by default. No preference is silently treated as accepted.</span></div>
+          <div><strong>Accepted presentation defaults</strong><span>All retained activity opens by default; duration, known tokens, and API-equivalent estimate share the first-glance summary; constituent links remain visible; work and routing coverage stay separate.</span></div>
         </div>
 
       <!-- Ticket #68 Acceptance Verification Checklist -->
@@ -355,10 +355,10 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
         </ul>
       </div>
 
-      <!-- 3. Unresolved Questions & Implementation Notes -->
+      <!-- 3. Settled Clarifications & Implementation Notes -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--yellow-attention);">
-          ${renderIcon('alert', 16)} Unresolved Questions & Implementation Notes
+          ${renderIcon('alert', 16)} Settled Clarifications & Implementation Notes
         </h4>
         <ul class="review-list">
           <li>
@@ -377,10 +377,10 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Cross-Environment Task Migration:</strong> Moving an in-progress Task across environments is deferred post-M2; Task begin binds the Task to one Environment instance for its entire lifecycle.
           </li>
           <li>
-            <strong>Feed Visibility for Degraded Agents (#66 Fog):</strong> When an engine or model is degraded across all enrolled environments, whether the Agent should surface in cross-project Feed attention or remain scoped to Manage &gt; Agents.
+            <strong>Feed Visibility for Degraded Agents:</strong> Feed shows an Agent-wide compatibility problem only when it blocks or degrades current Project work; otherwise it remains scoped to Manage &gt; Agents.
           </li>
           <li>
-            <strong>Private Memory Operator Management (#66 Fog):</strong> Whether the Local Operator should be able to inspect or clear Agent private-memory entries in M2, or whether memory lifecycle remains engine-native and read-only.
+            <strong>Private Memory Operator Management:</strong> M2 exposes only neutral metadata such as entry count. Private-memory inspection, editing, and clearing remain engine-native and outside the Web product.
           </li>
         </ul>
       </div>

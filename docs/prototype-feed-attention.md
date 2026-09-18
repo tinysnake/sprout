@@ -105,7 +105,7 @@ The prototype provides 1-click state matrix switching (housed in the top Prototy
 
 ---
 
-## 6. Accepted Decisions, Rejected Patterns & Unresolved Questions
+## 6. Accepted Decisions, Rejected Patterns & Implementation Boundary
 
 ### Accepted Decisions (Ticket #62)
 
@@ -128,10 +128,10 @@ The prototype provides 1-click state matrix switching (housed in the top Prototy
 4. **Standalone Disjoint Attention Destination:** Rejected in #60 & #61; attention belongs prominently within the Feed cross-project landing surface.
 5. **Duplicate Scope Filter Pills alongside Dropdown:** Rejected in #62 grilling; having both a dropdown and chips sitting side-by-side creates redundant UI clutter. A single clean dropdown is adopted.
 
-### Unresolved Questions & Implementation Notes
+### Settled Implementation Boundary
 
-1. **Feed Polling vs. Server-Sent Push Rate:** The prototype uses an in-memory reactive state stream; production M2 implementation will settle WebSocket vs. SSE subscription rates for low-latency push on mobile.
-2. **Attention Item Dismissal / Snooze Policy:** Whether non-critical warnings (e.g. stale telemetry notice) can be temporarily snoozed by the operator or must always remain until underlying health recovers.
+1. **Feed Delivery Transport:** The prototype uses an in-memory reactive state stream. WebSocket versus SSE and subscription rates are implementation choices that must preserve timely mobile updates; they do not change the accepted Feed behaviour.
+2. **Attention Persistence:** M2 has no dismiss or snooze action. An attention item remains until its authoritative underlying state clears so Feed cannot hide unresolved work or recovery facts.
 
 ---
 

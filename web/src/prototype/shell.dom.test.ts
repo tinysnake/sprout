@@ -266,7 +266,7 @@ test('interaction primitives verify state language, traffic-light reasons, dange
     assert.match(reviewDrawer.textContent ?? '', /Ticket #61 Acceptance Criteria Verification/);
     assert.match(reviewDrawer.textContent ?? '', /Accepted Baseline Decisions/);
     assert.match(reviewDrawer.textContent ?? '', /Rejected Patterns/);
-    assert.match(reviewDrawer.textContent ?? '', /Unresolved Questions/);
+    assert.match(reviewDrawer.textContent ?? '', /Settled Clarifications/);
     assert.match(reviewDrawer.textContent ?? '', /Reuse & Revision Rules for Later Module Tickets/);
 
     const closeReviewBtn = reviewDrawer.querySelector('.close-review-btn') as HTMLButtonElement;

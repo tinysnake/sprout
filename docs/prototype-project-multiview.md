@@ -196,7 +196,7 @@ The prototype includes 8 predeclared scenarios accessible via the top Scenario J
 
 ---
 
-## 6. Accepted Decisions, Rejected Patterns & Unresolved Questions
+## 6. Accepted Decisions, Rejected Patterns & Clarifications
 
 ### Accepted Decisions
 1. **Multi-View Project Navigation:** Project concerns are partitioned into `Overview`, `Tasks`, and `Chat` rather than one flat tab.
@@ -215,6 +215,6 @@ The prototype includes 8 predeclared scenarios accessible via the top Scenario J
 5. **Automatic Terminal Failures on Run Interruption:** Interrupted runs enter recovery and keep lease locked to prevent work loss.
 6. **Hard Deletion of Memberships, Workspaces, or Projects:** Destroys historical audit trails.
 
-### Unresolved Questions
+### Settled Clarifications
 1. **Multi-Task Concurrency per Environment:** ADR-0005 strictly enforces one active Task lease per Environment instance.
 2. **Working Group Creation Policy:** In M2, any Project member can create a Working Group; the creator is automatically added as its initial member.

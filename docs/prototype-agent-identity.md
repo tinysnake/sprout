@@ -189,6 +189,8 @@ The prototype demonstrates realistic data covering all 5 canonical states:
   11. *No Search Box*: The Agents header has no search input; the 5 status filter pills are the only list-narrowing control, matching the Environments surface.
   12. *Repo-Standard Modal Primitives*: Create Agent, Agent Architecture Guide, Edit Agent, Edit Standing Instructions, Add Work Option, Archive Agent, and Run Attribution Trace dialogs use the shared `proto-modal-*` overlay/dialog/header/body/footer primitives from the accepted #61 baseline, so they render as centered, dimmed-backdrop modals with a legible title, fields, and Cancel/Confirm actions on both phone and desktop.
   13. *Keyboard Navigation Parity*: Agent master cards and Project, Working Group, and direct-message scope cards are focusable and activate with Enter or Space without adding controls or default visual density.
+  14. *Bounded Feed Attention*: An Agent-wide compatibility problem appears in Feed only when it blocks or degrades current Project work; otherwise it remains visible in `Manage > Agents`. Feed does not become a duplicate global Agent-health list.
+  15. *Private Memory Boundary*: M2 exposes only neutral private-memory metadata such as entry count. Inspecting, editing, or clearing private-memory content remains engine-native and outside the Local Operator MVP Web surface.
 - **Verification Command**:
   ```bash
   npm run typecheck && node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'

@@ -9,9 +9,10 @@ production API.
 
 The prototype opens on a mixed retained-activity fixture so the operator can
 inspect known, partial, pending, unavailable, delayed, and corrected facts in
-one pass. The default time range, summary emphasis, and aggregate link density
-remain **unresolved owner preferences**. They are proposed presentation choices,
-not silent product decisions.
+one pass. Owner acceptance keeps the demonstrated defaults: all retained
+activity, equal first-glance treatment of duration, known tokens, and
+API-equivalent estimates, visible aggregate constituent links, and separate
+work-model and Routing-attempt coverage.
 
 The visible summary is split into Work-model Agent runs and Project-owned
 Routing attempts. Each kind has its own duration, known-token, and
@@ -135,19 +136,20 @@ billing basis, measurement coverage, source, and observation history.
 - A dense telemetry dump as the default page or permanently visible correction
   history.
 
-### Unresolved owner decisions
+### Accepted presentation defaults
 
-- Should the default time range be All retained activity, Previous 7 days, or
-  Today once real data exists?
-- Should the top summary emphasize known token volume, coverage, or model
-  duration for a technical lead's first glance?
-- Should aggregate constituent activity links remain visible by default or move
-  behind one compact disclosure on narrow screens?
-- Should a future prototype add a separate routing-coverage callout, or is the
-  current Project view separation sufficient?
+- The initial time range is All retained activity.
+- Duration, known token volume, and API-equivalent estimate receive equal
+  first-glance treatment; coverage remains visibly qualified rather than being
+  collapsed into one confidence score.
+- Aggregate constituent activity links remain visible, including on narrow
+  screens through the accepted responsive layout.
+- Work-model and Routing-attempt coverage remain separate in both the summary
+  and the Project-owned routing evidence.
 
-These questions are intentionally surfaced for Human review. The first
-implementation does not claim owner acceptance.
+These defaults are owner-accepted prototype decisions. Production work may
+improve responsive disclosure without combining activity kinds, hiding
+coverage, or changing the provenance and unknown-not-zero contract.
 
 ## Verification and reuse rule
 

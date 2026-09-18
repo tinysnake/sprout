@@ -187,7 +187,7 @@ In accordance with ADR-0007:
 
 ---
 
-## 9. Accepted Decisions, Rejected Patterns & Unresolved Questions
+## 9. Accepted Decisions, Rejected Patterns & Clarifications
 
 ### Accepted Decisions (Ticket #64, ADR-0007, ADR-0008)
 1. **Three-Tier Scope Partitioning**: Project Broadcast, Working Groups, and Project-Scoped Direct Messages.
@@ -210,6 +210,6 @@ In accordance with ADR-0007:
 8. **Intrusive In-Chat Collection Window Countdown Banners**: Rejected per owner review in favor of a clean conversation flow; routing batches remain inspectable via message tags and conversation details without interrupting chat view.
 9. **Permanent In-Message Display of Routing Tags, Badges & Provenance Cards**: Rejected per owner review in favor of an on-demand popup triggered by an `i` button to the left of the message timestamp on both human and agent messages, eliminating visual clutter from the conversational stream.
 
-### Unresolved Questions
+### Settled Clarifications
 1. **Working Group Creation Authority**: In M2, any Project member can create a Working Group; creator is automatically enrolled.
 2. **Collection Window Duration Tuning**: Defaulted to 30 seconds per ADR-0007; configurable per project template.

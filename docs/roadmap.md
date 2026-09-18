@@ -48,7 +48,7 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 - An active Task never moves between Environment instances.
 - Core modules remain independently testable and verifiable.
 - Individual capabilities use observable acceptance checks even though overall MVP readiness is a Human product decision.
-- Open product details are settled through [Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44), not guessed in this outcome map.
+- The product decisions settled by [Map #44](https://github.com/tinysnake/sprout/issues/44), ADR-0006 through ADR-0010, and the retained #61–#68 prototype artifacts are constraints for implementation rather than details for implementation workers to reinvent.
 
 **Non-goals for M2**:
 
@@ -65,7 +65,26 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 
 ## M2 supporting outcomes
 
-These outcomes deliberately remain at product-result level while Map #44 resolves the decision fog. They may be split, merged, or reordered before implementation maps begin.
+These outcomes remain at product-result level after Map #44 settled the product
+direction. Their dependency graph is now the implementation-planning baseline;
+later evidence may still split or reorder implementation slices without reopening
+the settled authority, routing, management, recovery, usage, or interaction
+boundaries.
+
+Map #44 contributed decision evidence, not production evidence:
+
+- #45–#52 and ADR-0006 through ADR-0010 settle the readiness boundary, Task
+  authority, Message and wake routing, management journeys, self-hosted
+  operation and recovery, and truthful usage semantics.
+- #61–#68 retain one owner-accepted mobile-first interaction direction for the
+  shared shell, Feed, Project and Task loop, Chat, Environments, Agents, Usage
+  and Costs, and Settings.
+- The final integrated review on #44 passed the complete retained prototype and
+  its domain, privacy, accessibility, responsive, and cross-module checks.
+
+These records make the outcomes specifiable, but they do not make the production
+outcomes evidenced. M2-O1 through M2-O7 therefore remain Unproven until production
+implementation and the stated outcome checks supply their own acceptance evidence.
 
 ### M2-O1 — Product-managed collaboration setup
 
@@ -162,7 +181,18 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 
 ## Current M2 frontier
 
-[Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44) is the active development map. It resolves product and operational decisions across the M2 outcomes before `/to-spec` collapses them into a buildable specification. No production implementation map should guess the decisions still open there.
+[Map #44](https://github.com/tinysnake/sprout/issues/44) completed the product-
+direction frontier. The next planning step is to turn its settled decisions into
+buildable production specifications and Tickets without treating the retained
+prototype as backend implementation.
+
+The outcome frontier contains M2-O1 and M2-O5: product-managed collaboration
+setup unlocks the Human-authorized work, routing, and self-hosted-operation paths,
+while truthful usage observability can advance independently from the evidenced
+M1 telemetry baseline. Production slices should remain end to end and may stage
+shared persistence or API seams only when each slice has observable acceptance.
+M2-O6 follows the production capabilities it unifies, and M2-O7 remains the final
+dogfooding and owner-readiness outcome.
 
 ## Prototype-to-implementation boundary
 
@@ -170,7 +200,13 @@ The focused prototype Tickets in Map #44 are decision artifacts for the operator
 
 Prototype UI simplification is also not backend scope reduction. Hiding, moving into an on-demand inspector, or removing a field or control from a page must not be interpreted as permission to delete the corresponding domain data, lifecycle state, routing metadata, batching and failure evidence, audit/provenance links, API contract, or storage requirement. A backend capability is removed or deferred only by an explicit product decision recorded separately from the visual prototype.
 
-Backend implementation begins after Map #44 satisfies its exit criteria and the owner confirms the settled direction. Wayfinder then hands the decisions through `/to-spec` and `/to-tickets`, which create buildable implementation Tickets with explicit backend acceptance and links to the relevant prototype evidence. Until that hand-off, prototype work must not be treated as production implementation; after it, implementation Tickets must preserve every backend obligation that the prototype only hides or presents on demand.
+Map #44 satisfied its exit criteria after the owner confirmed the settled
+direction and the final integrated review passed. Wayfinder now hands those
+decisions through `/to-spec` and `/to-tickets`, which create buildable
+implementation Tickets with explicit backend acceptance and links to the
+relevant prototype evidence. Prototype work must not be treated as production
+implementation; implementation Tickets must preserve every backend obligation
+that the prototype only hides or presents on demand.
 
 ## Completed medium-term goal
 
