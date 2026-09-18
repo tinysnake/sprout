@@ -458,7 +458,6 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
         <h1>Usage &amp; Costs</h1>
         <p>Observe model activity with enough context to distinguish usage, estimates, bills, and gaps.</p>
       </div>
-      <div class="usage-header-meta"><span class="status-pill blue">Prototype fixture data</span><span>Scope: ${activities.length} activities</span></div>
     </header>
 
     <section class="usage-reading-note" aria-label="Usage semantics">
