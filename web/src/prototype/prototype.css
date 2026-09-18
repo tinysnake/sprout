@@ -4358,10 +4358,6 @@ code {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.usage-close-detail {
-  min-height: var(--touch-target);
-}
-
 .usage-section-kicker {
   color: var(--text-muted);
   font-size: 10px;
@@ -4651,10 +4647,6 @@ code {
   align-items: center;
 }
 
-.viewport-stage.mode-mobile .usage-detail-header .usage-close-detail {
-  min-width: 44px;
-}
-
 .viewport-stage.mode-mobile .usage-detail-item {
   grid-template-columns: 1fr;
   gap: 4px;
@@ -4789,10 +4781,6 @@ code {
 
   .usage-detail-header {
     align-items: center;
-  }
-
-  .usage-detail-header .usage-close-detail {
-    min-width: 44px;
   }
 
   .usage-detail-item {

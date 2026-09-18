@@ -176,7 +176,6 @@ function renderActivityDetail(activity: UsageActivity, state: PrototypeState): s
           <h3>${escapeHtml(activity.id)} <span class="status-pill ${outcomeClass(activity)}">${escapeHtml(formatOutcome(activity))}</span></h3>
           <p>${escapeHtml(activityKindLabel(activity.kind))} / ${escapeHtml(projectName(state, activity.projectId))} / ${escapeHtml(activity.activityTime)}</p>
         </div>
-        <button class="btn btn-ghost btn-sm usage-close-detail" type="button">Close</button>
       </div>
 
       <div class="usage-detail-grid">
@@ -534,10 +533,6 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
     button.addEventListener('click', () => {
       stateManager.setUsageFilter({ timeRange: 'all', projectId: 'all', agentId: 'all', model: 'all', selectedActivityId: undefined });
     });
-  });
-
-  container.querySelector('.usage-close-detail')?.addEventListener('click', () => {
-    stateManager.setUsageFilter({ selectedActivityId: undefined });
   });
 
   return container;
