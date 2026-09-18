@@ -103,7 +103,7 @@ The authority boundary is explicit rather than inferred from status names:
 | State a Task blocker | Human or Task lead |
 | Make a Task completion claim | Task lead |
 | Pause or resume a Task | Human only |
-| Validate, correct, end, recover, or discard a Task | Human only |
+| Validate, correct, end, recover, discard, or Force Release a Task | Human only |
 
 Sprout may carry out the consequences of an authorized command—acquiring a
 lease, admitting a run, reconciling interruption, or cleaning Task context—but
@@ -159,7 +159,9 @@ unfinished Task terminal automatically.
 
 ## Recovery and inactivity
 
-Only a Human may choose **Resume** or **Discard** in recovery:
+Only a Human may choose **Resume** or **Discard** in ordinary recovery. ADR-0009
+later adds Human-only **Force Release** as an emergency exception when ordinary
+proof or cleanup cannot complete:
 
 - recovery during begin retries preparation and returns to active work with no
   active Agent run on the original Environment instance;
@@ -174,10 +176,14 @@ Only a Human may choose **Resume** or **Discard** in recovery:
   workspace and its work. Retrying recovery for an already accepted completion
   instead preserves its `completed` intent.
 
-Cleanup or release failure remains recovery and cannot be displayed as completed
-or cancelled. Long idle, paused, blocked, or validation periods may produce
-Human attention and reminders, but never start a run, end the Task, or make
-its Environment instance reassignable automatically.
+Cleanup or release failure normally remains recovery and cannot be displayed as
+completed or cancelled. ADR-0009 adds one explicit exception for an otherwise
+stuck Local Operator MVP: a Human may use Force Release, acknowledge the
+unresolved proof or cleanup, abandon the Task through an emergency Task end,
+and leave a permanent forced-release disposition. Long idle, paused, blocked,
+or validation periods may produce Human attention and reminders, but never
+start a run, end the Task, or make its Environment instance reassignable
+automatically.
 
 ## Operator-visible state
 

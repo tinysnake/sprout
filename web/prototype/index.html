@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Sprout — Shared Mobile-First Shell & Style Baseline (Ticket #61)</title>
+    <link rel="stylesheet" href="/src/prototype/prototype.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { initPrototype } from '/src/prototype/prototype.ts';
+      const mount = document.getElementById('app');
+      if (mount) {
+        initPrototype(mount);
+      }
+    </script>
+  </body>
+</html>

@@ -23,10 +23,10 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 1. One local technical lead operates a self-hosted Sprout instance.
 2. Codex and Pi are the required work engines; the already implemented `agy` and `opencode` adapters do not require long-running product acceptance during M2.
 3. macOS and Windows are the required operator environments.
-4. Projects, reusable Agents, Environment instances, memberships, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
+4. Projects, reusable Agents, Environment instances, memberships, Working groups, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
 5. A Task remains bound to one Environment instance from Task begin through Task end.
 6. Humans and Agents may propose Tasks, but only a Human may authorize Task begin and acquisition of the Task lease.
-7. Projects can choose between explicit-only and wake-model-assisted Project-channel routing.
+7. Projects can choose between explicit-only and wake-model-assisted routing for their Project and Working group channels.
 8. Routine Project communication, Task control, Agent-run observation, Environment management, and recovery are available with mobile and desktop capability parity.
 9. Token usage, duration, and monetary cost are recorded and presented truthfully at useful scopes.
 10. Sprout, lightweight-game, and Unity development provide ongoing dogfooding evidence without any one scenario becoming a mechanical release gate.
@@ -48,7 +48,7 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 - An active Task never moves between Environment instances.
 - Core modules remain independently testable and verifiable.
 - Individual capabilities use observable acceptance checks even though overall MVP readiness is a Human product decision.
-- Open product details are settled through [Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44), not guessed in this outcome map.
+- The product decisions settled by [Map #44](https://github.com/tinysnake/sprout/issues/44), ADR-0006 through ADR-0010, and the retained #61–#68 prototype artifacts are constraints for implementation rather than details for implementation workers to reinvent.
 
 **Non-goals for M2**:
 
@@ -65,18 +65,37 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 
 ## M2 supporting outcomes
 
-These outcomes deliberately remain at product-result level while Map #44 resolves the decision fog. They may be split, merged, or reordered before implementation maps begin.
+These outcomes remain at product-result level after Map #44 settled the product
+direction. Their dependency graph is now the implementation-planning baseline;
+later evidence may still split or reorder implementation slices without reopening
+the settled authority, routing, management, recovery, usage, or interaction
+boundaries.
+
+Map #44 contributed decision evidence, not production evidence:
+
+- #45–#52 and ADR-0006 through ADR-0010 settle the readiness boundary, Task
+  authority, Message and wake routing, management journeys, self-hosted
+  operation and recovery, and truthful usage semantics.
+- #61–#68 retain one owner-accepted mobile-first interaction direction for the
+  shared shell, Feed, Project and Task loop, Chat, Environments, Agents, Usage
+  and Costs, and Settings.
+- The final integrated review on #44 passed the complete retained prototype and
+  its domain, privacy, accessibility, responsive, and cross-module checks.
+
+These records make the outcomes specifiable, but they do not make the production
+outcomes evidenced. M2-O1 through M2-O7 therefore remain Unproven until production
+implementation and the stated outcome checks supply their own acceptance evidence.
 
 ### M2-O1 — Product-managed collaboration setup
 
 **Status**: Unproven
 **Depends on**: M1
 
-A technical lead can establish reusable Agents, connected Environments, and Projects with explicit contracts and at least one Project template through the product rather than hand-written runtime configuration.
+A technical lead can establish reusable Agents, connected Environments, and Projects with explicit contracts, Project and Working group communication scopes, and at least one Project template through the product rather than hand-written runtime configuration.
 
 **Outcome checks**:
 
-- Agent, Environment, Project, membership, template, and workspace responsibilities remain distinct and understandable.
+- Agent, Environment, Project, membership, Working group, template, and workspace responsibilities remain distinct and understandable.
 - Routine create, inspect, change, and retirement journeys are available through Web while preserving historical identity.
 - Host-local engine authentication and workspace facts do not leak into portable Agent or Project identity.
 
@@ -99,7 +118,7 @@ Humans and Agents can propose durable work, Human authorization controls Task be
 **Status**: Unproven
 **Depends on**: M2-O1
 
-Direct messages, explicit Project-channel addressing, and optional wake-model routing let members collaborate without unexplained silence or uncontrolled Agent wakes.
+Project-scoped direct messages, Project channels, Working group channels, and optional wake-model routing let members collaborate without unexplained silence or uncontrolled Agent wakes.
 
 **Outcome checks**:
 
@@ -132,6 +151,7 @@ The operator can understand token usage, duration, and monetary cost across Agen
 - Codex and Pi telemetry semantics are measured and documented.
 - Missing, delayed, cached, resumed, failed, reported, and estimated values remain distinguishable.
 - The settled run, Task, Project, Agent, model, and time-range views are available on mobile and desktop.
+- Project, model, and time-range aggregates distinguish work-model Agent runs from wake-model Routing attempts and expose measurement coverage instead of treating missing activity as zero.
 
 ### M2-O6 — Mobile-first operator control
 
@@ -161,7 +181,32 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 
 ## Current M2 frontier
 
-[Map: define the Sprout Local Operator MVP](https://github.com/tinysnake/sprout/issues/44) is the active development map. It resolves product and operational decisions across the M2 outcomes before `/to-spec` collapses them into a buildable specification. No production implementation map should guess the decisions still open there.
+[Map #44](https://github.com/tinysnake/sprout/issues/44) completed the product-
+direction frontier. The next planning step is to turn its settled decisions into
+buildable production specifications and Tickets without treating the retained
+prototype as backend implementation.
+
+The outcome frontier contains M2-O1 and M2-O5: product-managed collaboration
+setup unlocks the Human-authorized work, routing, and self-hosted-operation paths,
+while truthful usage observability can advance independently from the evidenced
+M1 telemetry baseline. Production slices should remain end to end and may stage
+shared persistence or API seams only when each slice has observable acceptance.
+M2-O6 follows the production capabilities it unifies, and M2-O7 remains the final
+dogfooding and owner-readiness outcome.
+
+## Prototype-to-implementation boundary
+
+The focused prototype Tickets in Map #44 are decision artifacts for the operator experience. Accepting a prototype settles the demonstrated interaction patterns, terminology, boundaries, and owner decisions; it does **not** claim that the corresponding production capabilities or backend contracts are implemented.
+
+Prototype UI simplification is also not backend scope reduction. Hiding, moving into an on-demand inspector, or removing a field or control from a page must not be interpreted as permission to delete the corresponding domain data, lifecycle state, routing metadata, batching and failure evidence, audit/provenance links, API contract, or storage requirement. A backend capability is removed or deferred only by an explicit product decision recorded separately from the visual prototype.
+
+Map #44 satisfied its exit criteria after the owner confirmed the settled
+direction and the final integrated review passed. Wayfinder now hands those
+decisions through `/to-spec` and `/to-tickets`, which create buildable
+implementation Tickets with explicit backend acceptance and links to the
+relevant prototype evidence. Prototype work must not be treated as production
+implementation; implementation Tickets must preserve every backend obligation
+that the prototype only hides or presents on demand.
 
 ## Completed medium-term goal
 

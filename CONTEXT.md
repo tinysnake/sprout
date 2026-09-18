@@ -16,20 +16,64 @@ _Avoid_: Backend, Sprout instance
 A person who participates in Sprout and retains authority that cannot be delegated to an Agent.
 _Avoid_: User account, Human Agent
 
+**Operator identity**:
+The single authentication boundary through which the Local Operator MVP's one Human controls one Sprout instance from one or more browser sessions. It is not a multi-Human account, role, or Team membership.
+_Avoid_: Admin account, Team owner
+
 **Project**:
-A collaboration space in which human and agent members pursue a defined goal under shared rules.
+A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment, although it cannot begin Agent work until the required resources are present.
 _Avoid_: Project group, group chat
 
 **Project channel**:
-The shared conversation through which a project's people and agents coordinate.
+The shared conversation in which all current members of one Project coordinate. Temporary member subsets use Working group channels instead.
 _Avoid_: Project, group
 
+**Working group**:
+A temporary collaboration scope within one Project, containing a subset of current Project members together with an optional goal and rules, its own channel, and durable membership history. It may provide context and provenance for work but does not own Tasks, Environment access, Project workspaces, or leases.
+_Avoid_: Project, Task, default group
+
+**Working group channel**:
+The shared conversation whose participants are the current members of one Working group.
+_Avoid_: Project channel, direct message
+
+**Project-scoped direct message**:
+A private conversation between two current members of one Project, governed and recorded within that Project. The same pair communicating in another Project has a separate conversation and context.
+_Avoid_: Global direct message, cross-Project direct message
+
+**Message**:
+One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, or Working group channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+_Avoid_: Task, prompt, run event
+
+**Project event**:
+A durable system-produced fact exposed in a Project, with an explicit routing disposition that determines whether it has a responsible Agent, may be judged by a wake model, remains informational, or requires Human action.
+_Avoid_: System Message, log line
+
+**Routing disposition**:
+The declared treatment of a Project event: addressed, wake-eligible, informational, human-action-required, or non-routing. Only addressed events route deterministically and only wake-eligible events may enter wake-model routing.
+_Avoid_: Notification severity, inferred intent
+
 **Wake policy**:
-The project-level rule that decides whether an unaddressed project-channel message remains informational or is evaluated by a wake model for Agent recipients. Direct messages and explicit Agent mentions bypass this policy and wake their recipients.
+The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Project-scoped direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
 _Avoid_: Notification setting, workflow
 
+**Routing batch**:
+The durable, frozen set of eligible unaddressed Messages and Project events collected during one Project's bounded wake-model window. One batch may produce at most one Agent run per selected Agent while retaining the outcome of every input.
+_Avoid_: Chat transcript, Task, prompt
+
+**Routing attempt**:
+One wake-model evaluation of one frozen routing batch and its bounded Project-shared context. Validation failure may retry the same snapshot once; a retry is a distinct durable attempt, not a new Message or batch.
+_Avoid_: Agent run, hidden model call
+
+**Wake request**:
+The durable per-recipient decision that a Message or routing batch should admit one Agent run. It preserves the routing reason, admission outcome, and causal links to its input and run.
+_Avoid_: Message, notification, Agent run
+
+**Projected reply**:
+The final assistant text from a completed Message-triggered Agent run, persisted by Sprout as an Agent-authored Message. It is non-routing: it may inform later bounded Project-channel context but cannot itself open a routing window or wake another Agent.
+_Avoid_: Raw run output, Agent-initiated Message
+
 **Project contract**:
-The facts, goals, responsibilities, rules, permissions, environment access, and completion criteria presented to agents collaborating in a project.
+The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules without Sprout interpreting conflicts between written rules.
 _Avoid_: Prompt, chat agreement
 
 **Project template**:
@@ -48,6 +92,10 @@ _Avoid_: Environment instance, Task context directory
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent
 
+**Agent work option**:
+One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. At run admission Sprout chooses the first option available on the selected Environment instance, and it never changes options automatically after an engine accepts the run.
+_Avoid_: Environment binding, model fallback retry
+
 **Agent run**:
 One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
 _Avoid_: Agent, task
@@ -55,6 +103,38 @@ _Avoid_: Agent, task
 **Agent run stop**:
 An intentional request by a Human, or by the Task lead for a run it initiated, to settle one active agent run without ending its Task or releasing the Task lease. The Human's operator action is named Interrupt, but its intentional run outcome is stopped, distinct from an unexpected run interruption.
 _Avoid_: Task pause, Task end, interruption
+
+**Usage activity**:
+One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
+_Avoid_: Billable run, Agent run
+
+**Usage observation**:
+One durable, source- and version-identified token, duration, or monetary fact for a Usage activity, including its completeness, observation time, and any append-only correction relationship.
+_Avoid_: Usage total, invoice line
+
+**Model activity duration**:
+The sum of Sprout wall durations for the Usage activities in an aggregate. It is not Task calendar elapsed time or an engine-native latency.
+_Avoid_: Task duration, provider latency
+
+**Attributable billed cost**:
+A settled provider invoice or ledger amount attributable to one Usage activity. It remains unavailable when an engine exposes only usage or an estimate.
+_Avoid_: API-equivalent cost estimate, reported cost
+
+**API-equivalent cost estimate**:
+A USD valuation of observed model usage that is explicitly not a settled bill. It may be provider-estimated, harness-calculated, or locally estimated, and may be pending, available, or unavailable.
+_Avoid_: Billed cost, actual cost
+
+**Billing basis**:
+Whether a Usage activity used metered API access, subscription-inclusive access, or an unknown access basis. It is independent of valuation provenance; subscription-inclusive does not mean zero attributable cost.
+_Avoid_: Valuation provenance, payment method
+
+**Valuation provenance**:
+The authority that produced an API-equivalent cost estimate: provider-estimated, harness-calculated, or locally estimated from a frozen official-price snapshot.
+_Avoid_: Billing basis, billed status
+
+**Measurement coverage**:
+The complete, partial, pending, or unavailable composition accompanying a usage aggregate so its known subtotal cannot imply that missing activities were measured as zero.
+_Avoid_: Confidence score, success rate
 
 **Interrupt**:
 The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Agent run stop whose outcome is stopped, not interrupted.
@@ -117,11 +197,11 @@ The Human decision to accept a Task completion claim or require correction. Acce
 _Avoid_: Agent self-approval, Agent run completion
 
 **Task end**:
-The Human-authorized act that has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not.
+The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed.
 _Avoid_: Stop, cancel
 
 **Task discard**:
-The Human decision to abandon a begun Task, including during recovery, and authorize Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved.
+The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision rather than a successful normal discard.
 _Avoid_: Delete Project workspace, automatic cleanup
 
 **Task lease**:
@@ -144,6 +224,10 @@ _Avoid_: Tool, command
 An actual physical system, VM, or container made available for work under an environment definition.
 _Avoid_: Environment definition, workspace
 
+**Environment enrollment**:
+The Human-approved binding between one Environment instance, one Sprout instance, and a Worker identity whose private key remains on the Environment host. Enrollment is independent of current connectivity, protocol compatibility, engine readiness, and Project access.
+_Avoid_: Engine login, transport reachability, Project Environment access
+
 **Environment worker**:
 The Sprout-owned process inside one environment instance that starts and supervises engine sessions on behalf of agent runs. It supervises an engine CLI; it does not implement an agent runtime.
 _Avoid_: Agent, daemon, backend
@@ -153,5 +237,13 @@ A time-bounded right to use an environment instance's lease-requiring capabiliti
 _Avoid_: Agent environment, lock
 
 **Lease recovery**:
-The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume or discard it; one-round Agent run recovery retains its existing holder or Human controls.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume, discard, or Force Release it; one-round Agent run recovery retains its existing holder or Human controls.
 _Avoid_: Cleanup, lock timeout
+
+**Force Release**:
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it abandons and cancels the Task through an emergency Task end without deleting the Project workspace.
+_Avoid_: Automatic expiry, normal release, lease steal
+
+**Operational event**:
+A compact durable fact needed to explain Sprout startup, schema migration, Environment enrollment or connectivity, interruption, reconciliation, recovery, or release without retaining credentials, private infrastructure details, conversation content, or raw logs.
+_Avoid_: Log line, Message, Project event
