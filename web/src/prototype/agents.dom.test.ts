@@ -1266,8 +1266,15 @@ test('Collaboration admission: wake selection and archived-Project callbacks fai
     );
     const failedBatch = stateManager.getSnapshot().routingBatches[0]!;
     assert.equal(failedBatch.status, 'failed-closed');
+    assert.equal(failedBatch.closedAt, 'Just now', 'Immediate terminal batch does not retain a future close deadline');
     assert.equal(failedBatch.decisions[0]?.status, 'failed');
-    assert.equal(failedBatch.resultingWakeRequests?.[0]?.admissionStatus, 'failed');
+    const failedWakeRequest = failedBatch.resultingWakeRequests?.[0]!;
+    assert.equal(failedWakeRequest.admissionStatus, 'failed', 'Legacy admission failure fact remains compatible');
+    assert.equal(failedWakeRequest.terminalStatus, 'failed-closed');
+    assert.deepEqual(failedWakeRequest.terminalResponsibility, { kind: 'agent', id: 'designer' });
+    assert.match(failedWakeRequest.terminalReason ?? '', /active Project membership/i);
+    assert.match(failedWakeRequest.failureReason ?? '', /active Project membership/i);
+    assert.ok(failedWakeRequest.terminalTimestamp, 'Immediate admission failure is terminalized at construction');
     assert.match(failedBatch.failureReason ?? '', /active Project membership/i);
     assert.equal(stateManager.getSnapshot().messages.length, messageCountBeforeWake + 1);
 
@@ -1674,6 +1681,9 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
       kind: 'agent',
       id: 'reviewer',
     });
+    assert.equal(preExistingAgentBatch.resultingWakeRequests?.[0]?.terminalStatus, 'failed-closed');
+    assert.match(preExistingAgentBatch.resultingWakeRequests?.[0]?.terminalReason ?? '', /Agent.*archived/i);
+    assert.ok(preExistingAgentBatch.resultingWakeRequests?.[0]?.terminalTimestamp);
     assert.match(addressedMessage.deterministicRoutingOutcomes?.[0]?.reason ?? '', /Agent.*archived.*no reply.*will not replay/i);
     stateManager.selectProject(agentProjectId);
     stateManager.setPrimaryNav('project', 'chat');
@@ -1769,10 +1779,17 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
             rationale: 'Persisted settled parent with incomplete per-request evidence.',
           },
         ],
-        resultingWakeRequestIds: ['wake-settled-pending', 'wake-settled-admitted'],
+        resultingWakeRequestIds: ['wake-settled-pending', 'wake-settled-admitted', 'wake-settled-partial-terminal'],
         resultingWakeRequests: [
           { wakeRequestId: 'wake-settled-pending', targetAgentId: 'designer', admissionStatus: 'pending' },
           { wakeRequestId: 'wake-settled-admitted', targetAgentId: 'designer', admissionStatus: 'admitted' },
+          {
+            wakeRequestId: 'wake-settled-partial-terminal',
+            targetAgentId: 'designer',
+            admissionStatus: 'failed',
+            terminalStatus: 'failed-closed',
+            failureReason: 'Cancelled because Project "Docs Portal" was archived before routing settlement.',
+          },
         ],
       }
     );
@@ -1807,6 +1824,7 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
       assert.equal(wakeRequest.admissionStatus, 'failed');
       assert.equal(wakeRequest.terminalStatus, 'failed-closed');
       assert.deepEqual(wakeRequest.terminalResponsibility, { kind: 'project', id: projectId });
+      assert.match(wakeRequest.terminalReason ?? '', /Project.*archived/i);
       assert.match(wakeRequest.failureReason ?? '', /Project.*archived/i);
       assert.ok(wakeRequest.terminalTimestamp);
     }
@@ -1817,6 +1835,7 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     for (const wakeRequest of preExistingSettled.resultingWakeRequests ?? []) {
       assert.equal(wakeRequest.terminalStatus, 'failed-closed');
       assert.deepEqual(wakeRequest.terminalResponsibility, { kind: 'project', id: projectId });
+      assert.match(wakeRequest.terminalReason ?? '', /Project.*archived/i);
       assert.match(wakeRequest.failureReason ?? '', /Project.*archived/i);
       assert.ok(wakeRequest.terminalTimestamp);
     }

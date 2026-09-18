@@ -2402,23 +2402,31 @@ class StateManager {
     fallbackResponsibility: NonNullable<RoutingBatch['terminalResponsibility']>
   ): boolean {
     if (wakeRequest.terminalStatus) {
+      const isSettled = wakeRequest.terminalStatus === 'settled';
       if (!wakeRequest.terminalResponsibility) {
-        wakeRequest.terminalResponsibility = wakeRequest.terminalStatus === 'settled'
+        wakeRequest.terminalResponsibility = isSettled
           ? { kind: 'agent', id: wakeRequest.targetAgentId }
           : fallbackResponsibility;
       }
+      if (!wakeRequest.terminalReason) {
+        wakeRequest.terminalReason = isSettled
+          ? 'Agent run settled and its projected reply was persisted.'
+          : wakeRequest.failureReason ?? 'WakeRequest failed closed without a projected reply.';
+      }
       if (!wakeRequest.terminalTimestamp) wakeRequest.terminalTimestamp = terminalTimestamp();
-      if (wakeRequest.terminalStatus !== 'settled' && !wakeRequest.failureReason) {
-        wakeRequest.failureReason = wakeRequest.terminalReason ?? 'WakeRequest failed closed without a projected reply.';
+      if (!isSettled && !wakeRequest.failureReason) {
+        wakeRequest.failureReason = wakeRequest.terminalReason;
       }
       return true;
     }
 
     if (wakeRequest.linkedRunId && wakeRequest.projectedReplyId) {
-      wakeRequest.terminalStatus = 'settled';
-      wakeRequest.terminalResponsibility = { kind: 'agent', id: wakeRequest.targetAgentId };
-      wakeRequest.terminalReason ??= 'Agent run settled and its projected reply was persisted.';
-      wakeRequest.terminalTimestamp ??= terminalTimestamp();
+      this.terminalizeWakeRequest(
+        wakeRequest,
+        'settled',
+        { kind: 'agent', id: wakeRequest.targetAgentId },
+        'Agent run settled and its projected reply was persisted.'
+      );
       return true;
     }
 
@@ -4413,11 +4421,24 @@ class StateManager {
         wakeTargetId,
         'admit wake-model selection for'
       );
+      const wakeRequest: ResultingWakeRequestRecord = {
+        wakeRequestId: `wake-${batchId}`,
+        targetAgentId: wakeTargetId,
+        admissionStatus: 'admitted',
+      };
+      if (!wakeTargetEligibility.success) {
+        this.terminalizeWakeRequest(
+          wakeRequest,
+          'failed-closed',
+          { kind: 'agent', id: wakeTargetId },
+          wakeTargetEligibility.reason ?? 'Selected Agent failed current membership admission.'
+        );
+      }
       const batch: RoutingBatch = {
         id: batchId,
         projectId,
         openedAt: 'Just now',
-        closedAt: 'In 30s',
+        closedAt: wakeTargetEligibility.success ? 'In 30s' : 'Just now',
         inputMessageIds: [newMsgId],
         status: wakeTargetEligibility.success ? 'evaluating' : 'failed-closed',
         attemptsCount: 1,
@@ -4439,18 +4460,8 @@ class StateManager {
               : wakeTargetEligibility.reason ?? 'Selected Agent failed current membership admission.',
           },
         ],
-        resultingWakeRequestIds: [`wake-${batchId}`],
-        resultingWakeRequests: [
-          {
-            wakeRequestId: `wake-${batchId}`,
-            targetAgentId: wakeTargetId,
-            admissionStatus: wakeTargetEligibility.success ? 'admitted' : 'failed',
-            failureReason: wakeTargetEligibility.success ? undefined : wakeTargetEligibility.reason,
-            terminalResponsibility: wakeTargetEligibility.success
-              ? undefined
-              : { kind: 'agent', id: wakeTargetId },
-          },
-        ],
+        resultingWakeRequestIds: [wakeRequest.wakeRequestId],
+        resultingWakeRequests: [wakeRequest],
         failureReason: wakeTargetEligibility.success
           ? undefined
           : `Wake-model selection failed current Agent admission. ${wakeTargetEligibility.reason}`,
@@ -4475,7 +4486,6 @@ class StateManager {
         );
         const runId = `run-proj-${Date.now().toString().slice(-3)}`;
         const replyMsgId = `msg-proj-${Date.now().toString().slice(-4)}`;
-        const settledAt = terminalTimestamp();
         batch.status = 'settled';
         batch.closedAt = 'Just now';
         if (wakeRequest) {
@@ -4487,7 +4497,6 @@ class StateManager {
             { kind: 'agent', id: agent.id },
             'Agent run settled and its projected reply was persisted.'
           );
-          wakeRequest.terminalTimestamp = settledAt;
         }
         const replyMsg: MessageItem = {
           id: replyMsgId,
