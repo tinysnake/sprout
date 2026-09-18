@@ -3700,6 +3700,18 @@ class StateManager {
     return { success: true };
   }
 
+  /**
+   * Completion claims judge an immutable Task content version, not whatever
+   * happens to be current when a Human opens the validation control.  Keep
+   * the lookup at the state boundary so validation can distinguish a
+   * legitimate historical claim from a forged or no-longer-recorded version.
+   */
+  private findTaskContentVersion(task: TaskItem, version: number) {
+    if (!Number.isInteger(version) || version < 1) return undefined;
+    if (task.currentVersion.version === version) return task.currentVersion;
+    return task.historyVersions.find((candidate) => candidate.version === version);
+  }
+
   private keepTaskBlockedForLeadSelection(task: TaskItem, reason: string) {
     task.lifecycle = 'blocked';
     if (!task.activeBlocker?.id.startsWith('blocker-lead-')) {
@@ -3925,6 +3937,39 @@ class StateManager {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return { success: false, reason: 'Task not found.' };
 
+    // Validation is itself a deliberate Human hold.  A Human may place a
+    // settled completion claim on the paused surface without resuming work;
+    // the claim, lease, and run history remain available for validation.
+    if (task.lifecycle === 'awaiting validation') {
+      if (!task.pendingCompletionClaim) {
+        const reason = `Cannot pause Task #${taskId}: awaiting-validation state has no completion claim.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      const leaseCheck = this.checkTaskLease(task, 'pause', 'held', false);
+      if (!leaseCheck.success) {
+        this.notify(leaseCheck.reason);
+        return leaseCheck;
+      }
+      if (task.agentRunLifecycle === 'running') {
+        const reason = `Cannot pause Task #${taskId}: completion claim cannot coexist with an active run.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      if (task.activeRunId) {
+        const settledRun = task.runs.find((run) => run.id === task.activeRunId);
+        if (!settledRun || settledRun.lifecycle === 'running') {
+          const reason = `Cannot pause Task #${taskId}: the claimed run pointer is not settled.`;
+          this.notify(reason);
+          return { success: false, reason };
+        }
+        delete task.activeRunId;
+      }
+      task.lifecycle = 'paused';
+      this.notify(`Paused Task #${taskId} while its completion claim awaits Human validation. Lease remains held.`);
+      return { success: true };
+    }
+
     if (task.lifecycle === 'Task pause requested' || task.lifecycle === 'paused') {
       const leaseCheck = this.checkTaskLease(task, 'pause', 'held', false);
       if (!leaseCheck.success) {
@@ -4030,6 +4075,12 @@ class StateManager {
       this.notify(leaseCheck.reason);
       return leaseCheck;
     }
+    if (task.pendingCompletionClaim) {
+      const reason = `Cannot resume Task #${taskId}: Human must validate or require correction for the pending completion claim first.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
     if (task.activeRunId || task.agentRunLifecycle === 'running') {
       const reason = `Cannot resume Task #${taskId}: an active run must settle before Task resume.`;
       this.notify(reason);
@@ -4123,8 +4174,9 @@ class StateManager {
       this.notify(`Cannot clear proposal blocker for Task #${taskId} without selecting an eligible lead. Proposal still holds no lease and admits no run.`);
       return { success: false, reason: 'Task proposal blockers require Human lead/content revision.' };
     }
-    if (task.lifecycle !== 'blocked') {
-      const reason = `Cannot resolve blocker on Task #${taskId}: Task lifecycle is ${task.lifecycle}, not blocked.`;
+    const wasPaused = task.lifecycle === 'paused';
+    if (task.lifecycle !== 'blocked' && !wasPaused) {
+      const reason = `Cannot resolve blocker on Task #${taskId}: Task lifecycle is ${task.lifecycle}, not blocked or paused.`;
       this.notify(reason);
       return { success: false, reason };
     }
@@ -4150,10 +4202,16 @@ class StateManager {
     }
 
     delete task.activeBlocker;
-    task.lifecycle = 'active';
-    this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+    if (!wasPaused) task.lifecycle = 'active';
+    if (!task.pendingCompletionClaim) {
+      this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+    }
 
-    this.notify(`Resolved blocker on Task #${taskId}. Returned to active advancement.`);
+    this.notify(
+      wasPaused
+        ? `Resolved blocker on paused Task #${taskId}. Admission hold and lease remain in place until Human Resume.`
+        : `Resolved blocker on Task #${taskId}. Returned to active advancement.`
+    );
     return { success: true };
   }
 
@@ -4168,7 +4226,8 @@ class StateManager {
 
     // Validation is state-authoritative. A stale claim cannot end a blocked,
     // proposed, recovering, or otherwise ineligible Task merely because the
-    // claim object survived a later membership change.
+    // claim object survived a later membership change. A paused Task is an
+    // intentional admission hold, so it is a valid validation surface too.
     const leadEligibility = this.evaluateTaskLeadEligibility(task);
     if (!leadEligibility.success) {
       if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'cancelled') {
@@ -4178,18 +4237,31 @@ class StateManager {
       this.notify(reason);
       return { success: false, reason };
     }
-    if (task.lifecycle !== 'awaiting validation') {
-      const reason = `Cannot validate Task #${taskId}: current Task lifecycle is ${task.lifecycle}; awaiting validation is required.`;
+    if (task.lifecycle !== 'awaiting validation' && task.lifecycle !== 'paused') {
+      const reason = `Cannot validate Task #${taskId}: current Task lifecycle is ${task.lifecycle}; awaiting validation or paused is required.`;
       this.notify(reason);
       return { success: false, reason };
     }
-    if (task.pendingCompletionClaim.submittedByLeadId !== task.taskLeadId) {
-      const reason = `Cannot validate Task #${taskId}: completion claim attribution does not match the current Task lead.`;
+
+    const claim = task.pendingCompletionClaim;
+    const claimedVersion = this.findTaskContentVersion(task, claim.contentVersion);
+    if (!claimedVersion) {
+      const reason = `Cannot validate Task #${taskId}: completion claim references an unrecorded Task content version.`;
       this.notify(reason);
       return { success: false, reason };
     }
-    if (task.pendingCompletionClaim.contentVersion !== task.currentVersion.version) {
-      const reason = `Cannot validate Task #${taskId}: completion claim targets an old Task content version.`;
+    if (claimedVersion.taskLeadId !== claim.submittedByLeadId) {
+      const reason = `Cannot validate Task #${taskId}: completion claim attribution does not match the lead recorded by its Task content version.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.currentVersion.taskLeadId !== task.taskLeadId) {
+      const reason = `Cannot validate Task #${taskId}: current Task lead facts are inconsistent with the current content version.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.activeBlocker) {
+      const reason = `Cannot validate Task #${taskId}: its active blocker must be resolved before completion validation.`;
       this.notify(reason);
       return { success: false, reason };
     }
@@ -4218,6 +4290,19 @@ class StateManager {
       this.notify(`Accepted Task #${taskId} completion claim! Task context recycled, lease safely released, Task completed.`);
       return { success: true };
     } else {
+      const wasPaused = task.lifecycle === 'paused';
+      if (wasPaused) {
+        // Requiring correction records the Human decision but does not
+        // override a prior pause.  The next run remains an explicit Human
+        // Resume decision, and no admission evaluation or run is started.
+        delete task.pendingCompletionClaim;
+        delete task.activeRunId;
+        task.lifecycle = 'paused';
+        this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+        this.notify(`Required correction on paused Task #${taskId}. Lease and admission hold remain until Human Resume.`);
+        return { success: true };
+      }
+
       const admission = this.evaluateTaskAdmission(task.id, task.selectedEnvironmentId || '', task.taskLeadId);
       const selectedOption = admission.selectedOption;
       if (!selectedOption) {

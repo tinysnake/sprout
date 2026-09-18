@@ -378,7 +378,10 @@ function renderTaskDetailPage(
   }
 
   // STAGE 2: Completion Claim Validation Card (when awaiting validation)
-  if (selectedTask.lifecycle === 'awaiting validation' && selectedTask.pendingCompletionClaim) {
+  if (
+    (selectedTask.lifecycle === 'awaiting validation' || selectedTask.lifecycle === 'paused') &&
+    selectedTask.pendingCompletionClaim
+  ) {
     const claim = selectedTask.pendingCompletionClaim;
     const claimCard = document.createElement('div');
     claimCard.className = 'operating-stage-card border-yellow';
@@ -390,12 +393,13 @@ function renderTaskDetailPage(
           ${renderIcon('check', 18)}
           <span>Task Completion Claim Submitted for Human Validation</span>
         </div>
-        <span class="status-pill yellow">Lease Held</span>
+        <span class="status-pill yellow">Lease Held${selectedTask.lifecycle === 'paused' ? ' · Paused' : ''}</span>
       </div>
 
       <div class="stage-body">
         <p style="color: var(--text-secondary);">
-          Lead Agent <strong>${selectedTask.taskLeadId}</strong> submitted a formal completion claim. Human validation is required to accept and authorize safe Task end, or require deliberate correction.
+          Lead Agent <strong>${claim.submittedByLeadId}</strong> submitted a formal completion claim. Human validation is required to accept and authorize safe Task end, or require deliberate correction.
+          ${claim.submittedByLeadId !== selectedTask.taskLeadId ? `<br><span style="font-size: 12px; color: var(--text-muted);">Current Task lead: <strong>${selectedTask.taskLeadId}</strong> (replacement remains subject to current eligibility).</span>` : ''}
         </p>
 
         <div style="background: var(--bg-surface-elevated); padding: 12px; border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 8px;">
@@ -438,7 +442,7 @@ function renderTaskDetailPage(
   }
 
   // STAGE 3: Routable Blocker Card (when blocked)
-  if (selectedTask.lifecycle === 'blocked' && selectedTask.activeBlocker) {
+  if ((selectedTask.lifecycle === 'blocked' || selectedTask.lifecycle === 'paused') && selectedTask.activeBlocker) {
     const blocker = selectedTask.activeBlocker;
     const blockerCard = document.createElement('div');
     blockerCard.className = 'operating-stage-card border-red';
@@ -450,7 +454,7 @@ function renderTaskDetailPage(
           ${renderIcon('alert', 18)}
           <span>Routable Task Blocker</span>
         </div>
-        <span class="status-pill red">Lease Held</span>
+        <span class="status-pill red">Lease Held${selectedTask.lifecycle === 'paused' ? ' · Paused' : ''}</span>
       </div>
 
       <div class="stage-body">
@@ -467,7 +471,11 @@ function renderTaskDetailPage(
 
       <div class="stage-actions">
         <button class="btn btn-primary resolve-blocker-btn">
-          ${renderIcon('check', 14)} Resolve Blocker & Resume Advance →
+          ${
+            selectedTask.lifecycle === 'paused'
+              ? `${renderIcon('check', 14)} Resolve Blocker · Keep Task Paused`
+              : `${renderIcon('check', 14)} Resolve Blocker & Resume Advance →`
+          }
         </button>
       </div>
     `;

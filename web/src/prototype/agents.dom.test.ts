@@ -1723,6 +1723,194 @@ test('Task lifecycle authority: proposed, running, validation, blocked, and safe
   }
 });
 
+test('Task completion claims retain recorded content and submitter facts across allowed edits', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('project', 'tasks');
+    const task = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-101')!;
+    const env = stateManager.getSnapshot().environments.find((candidate) => candidate.id === task.selectedEnvironmentId)!;
+    env.activeLeaseHolder = {
+      holderKind: 'task',
+      holderId: task.id,
+      projectId: task.projectId,
+      acquiredAt: 'Just now',
+    };
+    const claim = task.pendingCompletionClaim!;
+    assert.equal(claim.contentVersion, 1);
+    assert.equal(claim.submittedByLeadId, 'programmer');
+
+    // Both edits are Human-authorized while validation is pending. The second
+    // edit replaces the current lead, but must not rewrite what the claim judged.
+    assert.equal(
+      stateManager.updateTaskContentVersion(
+        task.id,
+        'Revised board grid',
+        'Keep the original board behaviour while clarifying mobile input.',
+        task.currentVersion.constraints,
+        task.currentVersion.validationCriteria,
+        'programmer'
+      ).success,
+      true
+    );
+    assert.equal(
+      stateManager.updateTaskContentVersion(
+        task.id,
+        'Reassigned board grid',
+        'The replacement lead owns the next deliberate advance.',
+        task.currentVersion.constraints,
+        task.currentVersion.validationCriteria,
+        'designer'
+      ).success,
+      true
+    );
+    assert.equal(task.currentVersion.version, 3);
+    assert.equal(task.taskLeadId, 'designer');
+    assert.equal(task.pendingCompletionClaim, claim, 'The recorded claim remains pending after content/lead edits');
+
+    // A forged version or submitter fact still fails closed; a historical
+    // version is accepted only when the claim submitter matches that version's
+    // recorded lead. Current lead eligibility is checked independently.
+    claim.contentVersion = 99;
+    assert.equal(stateManager.validateTaskCompletion(task.id, 'accept').success, false);
+    assert.equal(task.lifecycle, 'awaiting validation');
+    claim.contentVersion = 1;
+    claim.submittedByLeadId = 'designer';
+    assert.equal(stateManager.validateTaskCompletion(task.id, 'accept').success, false);
+    assert.equal(task.lifecycle, 'awaiting validation');
+    claim.submittedByLeadId = 'programmer';
+
+    stateManager.selectTask(task.id);
+    assert.match(dom.window.document.body.textContent ?? '', /Evaluated against Task Content Version v1/);
+    const acceptButton = dom.window.document.querySelector('.accept-claim-btn') as HTMLButtonElement;
+    assert.ok(acceptButton, 'DOM retains validation for a claim against a historical version');
+    acceptButton.click();
+
+    assert.equal(task.lifecycle, 'completed');
+    assert.equal(task.leaseLifecycle, 'released');
+    assert.equal(env.activeLeaseHolder, undefined, 'Exact Task lease ownership is released only after valid validation');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Paused completion claims support accept and correction without resuming admission', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('project', 'tasks');
+    const task = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-101')!;
+    const env = stateManager.getSnapshot().environments.find((candidate) => candidate.id === task.selectedEnvironmentId)!;
+    env.activeLeaseHolder = {
+      holderKind: 'task',
+      holderId: task.id,
+      projectId: task.projectId,
+      acquiredAt: 'Just now',
+    };
+    assert.equal(stateManager.pauseTask(task.id).success, true, 'Human may pause a settled pending claim without releasing its lease');
+    stateManager.selectTask(task.id);
+    assert.ok(dom.window.document.querySelector('.accept-claim-btn'), 'Paused DOM keeps the Human accept control');
+    assert.match(dom.window.document.body.textContent ?? '', /Lease Held · Paused/);
+
+    const claimRunsBeforeAccept = task.runs.length;
+    (dom.window.document.querySelector('.accept-claim-btn') as HTMLButtonElement).click();
+    assert.equal(task.lifecycle, 'completed', 'Paused accept may safely end without a prior Resume');
+    assert.equal(task.leaseLifecycle, 'released');
+    assert.equal(task.runs.length, claimRunsBeforeAccept, 'Accept does not start another run');
+    assert.equal(env.activeLeaseHolder, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Paused correction and blocker resolution preserve the lease until explicit Human Resume', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('project', 'tasks');
+    const claimTask = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-101')!;
+    const claimEnv = stateManager.getSnapshot().environments.find((candidate) => candidate.id === claimTask.selectedEnvironmentId)!;
+    claimEnv.activeLeaseHolder = {
+      holderKind: 'task',
+      holderId: claimTask.id,
+      projectId: claimTask.projectId,
+      acquiredAt: 'Just now',
+    };
+    assert.equal(stateManager.pauseTask(claimTask.id).success, true);
+    stateManager.selectTask(claimTask.id);
+    assert.ok(dom.window.document.querySelector('.require-correction-btn'), 'Paused DOM keeps the correction control');
+    const runsBeforeCorrection = claimTask.runs.length;
+    (dom.window as unknown as { prompt: (message?: string, defaultValue?: string) => string }).prompt = () => 'Refine the mobile edge case.';
+    (globalThis as unknown as { prompt: (message?: string, defaultValue?: string) => string }).prompt = () => 'Refine the mobile edge case.';
+    (dom.window.document.querySelector('.require-correction-btn') as HTMLButtonElement).click();
+    assert.equal(claimTask.lifecycle, 'paused');
+    assert.equal(claimTask.pendingCompletionClaim, undefined);
+    assert.equal(claimTask.leaseLifecycle, 'held');
+    assert.equal(claimTask.activeRunId, undefined);
+    assert.equal(claimTask.runs.length, runsBeforeCorrection, 'Paused correction does not start a run');
+    assert.equal(claimEnv.activeLeaseHolder?.holderId, claimTask.id);
+    assert.ok(dom.window.document.querySelector('.resume-task-btn'), 'Explicit Human Resume remains the next advancement control');
+    (dom.window.document.querySelector('.resume-task-btn') as HTMLButtonElement).click();
+    assert.equal(claimTask.lifecycle, 'active');
+    assert.equal(claimTask.leaseLifecycle, 'held');
+    assert.equal(claimTask.agentRunLifecycle, 'none');
+
+    const blockedTask = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-103')!;
+    const blockedEnv = stateManager.getSnapshot().environments.find((candidate) => candidate.id === blockedTask.selectedEnvironmentId)!;
+    blockedTask.lifecycle = 'paused';
+    blockedTask.agentRunLifecycle = 'none';
+    blockedTask.leaseLifecycle = 'held';
+    blockedEnv.activeLeaseHolder = {
+      holderKind: 'task',
+      holderId: blockedTask.id,
+      projectId: blockedTask.projectId,
+      acquiredAt: 'Just now',
+    };
+    stateManager.selectTask(blockedTask.id);
+    assert.ok(dom.window.document.querySelector('.resolve-blocker-btn'), 'Paused DOM exposes blocker resolution');
+    (dom.window.document.querySelector('.resolve-blocker-btn') as HTMLButtonElement).click();
+    assert.equal(blockedTask.lifecycle, 'paused', 'Resolving a paused blocker does not resume work');
+    assert.equal(blockedTask.activeBlocker, undefined);
+    assert.equal(blockedTask.leaseLifecycle, 'held');
+    assert.equal(blockedTask.agentRunLifecycle, 'none');
+    assert.equal(blockedEnv.activeLeaseHolder?.holderId, blockedTask.id);
+    assert.ok(dom.window.document.querySelector('.resume-task-btn'));
+    (dom.window.document.querySelector('.resume-task-btn') as HTMLButtonElement).click();
+    assert.equal(blockedTask.lifecycle, 'active', 'Only explicit Human Resume leaves the paused hold');
+    assert.equal(blockedTask.leaseLifecycle, 'held');
+    assert.equal(blockedTask.agentRunLifecycle, 'none');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Routing cancellation: Agent and Project archive write durable terminal outcomes without replies', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
