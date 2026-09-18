@@ -110,6 +110,62 @@ test('Environments: renders 6 independent health dimensions and mandatory textua
   }
 });
 
+test('Environments: health filters and selected master cards expose accessible current state and context', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+    stateManager.setViewportMode('desktop');
+    stateManager.setPrimaryNav('manage', undefined, 'environments');
+
+    const document = dom.window.document;
+    const allFilter = document.querySelector('.env-filter-box-btn[data-filter="all"]') as HTMLButtonElement;
+    const readyFilter = document.querySelector('.env-filter-box-btn[data-filter="ready"]') as HTMLButtonElement;
+    assert.equal(allFilter.getAttribute('aria-pressed'), 'true');
+    assert.equal(readyFilter.getAttribute('aria-pressed'), 'false');
+
+    readyFilter.click();
+
+    assert.equal(document.querySelector('.env-filter-box-btn[data-filter="ready"]')?.getAttribute('aria-pressed'), 'true');
+    assert.equal(document.querySelector('.env-filter-box-btn[data-filter="all"]')?.getAttribute('aria-pressed'), 'false');
+
+    stateManager.setEnvironmentFilter('all');
+    stateManager.selectEnvironment('win-dev-box');
+    const card = document.querySelector('.env-master-card[data-env="win-dev-box"]') as HTMLButtonElement;
+    assert.ok(card);
+    assert.equal(card.getAttribute('aria-current'), 'page');
+
+    const describedBy = (card.getAttribute('aria-describedby') ?? '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+    const accessibleContext = `${card.getAttribute('aria-label') ?? ''} ${describedBy}`;
+    assert.match(accessibleContext, /action required/i);
+    assert.match(accessibleContext, /red/i);
+    assert.match(accessibleContext, /worker offline for 14 minutes/i);
+    assert.match(accessibleContext, /connection offline/i);
+    assert.match(accessibleContext, /protocol v2\.1 compatible/i);
+    assert.match(accessibleContext, /lease recovery/i);
+    assert.match(accessibleContext, /holder task #104/i);
+    assert.equal(card.querySelector('.quick-probe-btn'), null, 'Probe remains a separate sibling action');
+    assert.ok(
+      card.parentElement?.querySelector('.quick-probe-btn'),
+      'Separate Probe action remains available'
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Environments: approving pending enrollment updates status, connectivity, and traffic light', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
