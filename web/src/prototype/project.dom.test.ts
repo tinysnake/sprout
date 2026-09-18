@@ -210,6 +210,11 @@ test('Task Operating Loop: proposal begin acquires lease and starts first lead r
     assert.ok(appMount);
     initPrototype(appMount);
 
+    // Free the fixture lease before exercising this independent, ready begin path.
+    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary');
+    assert.ok(readyEnvironment);
+    delete readyEnvironment.activeLeaseHolder;
+
     // Select proposed task
     stateManager.setPrimaryNav('project', 'tasks');
     stateManager.selectTask('task-105-prop');

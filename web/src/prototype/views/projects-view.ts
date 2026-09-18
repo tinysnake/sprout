@@ -198,6 +198,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
       t.lifecycle === 'recovery' ||
       t.lifecycle === 'Task pause requested'
   );
+  const latestCompatibilityCheck = project.compatibilityHistory?.[0];
 
   overviewEl.innerHTML = `
     <!-- 1. Project Contract & Purpose Card -->
@@ -208,7 +209,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
           <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">
             ${project.status === 'active' ? 'Active' : 'Archived'}
           </span>
-          <button class="btn btn-secondary btn-sm edit-contract-btn" title="Edit Project Contract" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          <button class="btn btn-secondary btn-sm edit-contract-btn" title="${project.status === 'archived' ? 'Archived Project: restore before editing the contract' : 'Edit Project Contract'}" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
             ${renderIcon('edit', 14)}
           </button>
         </div>
@@ -253,7 +254,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             </div>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary btn-sm toggle-policy-btn" ${project.status === 'archived' ? 'disabled' : ''}>
+            <button class="btn btn-secondary btn-sm toggle-policy-btn" title="${project.status === 'archived' ? 'Archived Project: restore before changing wake policy' : 'Change Project wake policy'}" ${project.status === 'archived' ? 'disabled' : ''}>
               Switch to ${project.wakePolicy === 'wake-model-assisted' ? 'Explicit-only' : 'Wake-Model Assisted'}
             </button>
             ${
@@ -273,6 +274,22 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             ? `<div style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--yellow-attention); font-size: 11px; color: var(--yellow-attention); display: flex; align-items: center; gap: 6px;">
                 ${renderIcon('alert', 14)}
                 <span><strong>Archive Safely Blocked:</strong> Task #${activeTask.id.replace('task-', '')} (${activeTask.lifecycle}, lease ${activeTask.leaseLifecycle}) is currently active. Settle or discard active work before archiving.</span>
+              </div>`
+            : ''
+        }
+        ${
+          latestCompatibilityCheck
+            ? `<div class="project-restore-compatibility" style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid ${latestCompatibilityCheck.status === 'ready' ? 'var(--green-ready)' : 'var(--red-action)'}; font-size: 11px; color: var(--text-secondary);">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <strong style="color: var(--text-primary);">Latest restore compatibility check</strong>
+                  <span class="status-pill ${latestCompatibilityCheck.status === 'ready' ? 'green' : 'red'}" style="font-size: 9px;">${latestCompatibilityCheck.status}</span>
+                </div>
+                <div style="margin-top: 3px;">${latestCompatibilityCheck.summary}</div>
+                ${latestCompatibilityCheck.environments
+                  .map(
+                    (result) => `<div style="margin-top: 2px; color: var(--text-muted);"><code>${result.environmentId}</code> · ${result.status}: ${result.reason}</div>`
+                  )
+                  .join('')}
               </div>`
             : ''
         }
@@ -400,7 +417,8 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
   overviewEl.querySelector('.toggle-policy-btn')?.addEventListener('click', () => {
     const nextPolicy =
       project.wakePolicy === 'wake-model-assisted' ? 'explicit-only' : 'wake-model-assisted';
-    stateManager.setProjectWakePolicy(project.id, nextPolicy);
+    const result = stateManager.setProjectWakePolicy(project.id, nextPolicy);
+    if (!result.success && result.reason) window.alert(result.reason);
   });
 
   // Archive Project
@@ -448,7 +466,10 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
   overviewEl.querySelectorAll('.restore-member-btn').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
       const memberId = (ev.currentTarget as HTMLElement).getAttribute('data-member')!;
-      stateManager.restoreProjectMembership(project.id, memberId);
+      const result = stateManager.restoreProjectMembership(project.id, memberId);
+      if (!result.success && result.reason) {
+        window.alert(result.reason);
+      }
     });
   });
 
@@ -735,8 +756,9 @@ function renderEditContractModal(parentEl: HTMLElement, project: ProjectItem) {
       .filter(Boolean);
     const guidance = (modal.querySelector('.edit-guidance-input') as HTMLTextAreaElement).value.trim();
 
-    stateManager.updateProjectContract(project.id, goal, rules, guidance);
-    modal.remove();
+    const result = stateManager.updateProjectContract(project.id, goal, rules, guidance);
+    if (!result.success && result.reason) window.alert(result.reason);
+    else modal.remove();
   });
 
   parentEl.appendChild(modal);
@@ -747,7 +769,7 @@ function renderAddMemberModal(parentEl: HTMLElement, state: PrototypeState, proj
   modal.className = 'proto-modal-backdrop';
 
   const unassignedAgents = state.agents.filter(
-    (a) => !project.memberships.some((m) => m.memberId === a.id && m.status === 'active')
+    (a) => a.status === 'active' && !project.memberships.some((m) => m.memberId === a.id && m.status === 'active')
   );
 
   modal.innerHTML = `
@@ -824,7 +846,9 @@ function renderBindEnvironmentModal(
   modal.className = 'proto-modal-backdrop';
 
   const unassignedEnvs = state.environments.filter(
-    (e) => !project.boundEnvironmentWorkspaces.some((b) => b.environmentId === e.id)
+    (e) =>
+      e.enrollmentStatus === 'approved' &&
+      !project.boundEnvironmentWorkspaces.some((b) => b.environmentId === e.id)
   );
 
   modal.innerHTML = `
@@ -879,8 +903,9 @@ function renderBindEnvironmentModal(
       const root =
         env?.workspaceRoots[0] ||
         (env?.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
-      stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
-      modal.remove();
+      const result = stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
+      if (result.success) modal.remove();
+      else if (result.reason) window.alert(result.reason);
     }
   });
 

@@ -1,170 +1,1474 @@
 import { renderIcon } from '../icons.js';
-import { stateManager, type PrototypeState } from '../state.js';
+import {
+  checkEngineModelAvailability,
+  checkEnvironmentEligibility,
+  getAgentAttributionHistory,
+  stateManager,
+  type PrototypeState,
+} from '../state.js';
+import type { AgentDefinition, AgentWorkOption, EngineKind, EnvironmentInstance } from '../types.js';
 
 export function renderAgentsView(state: PrototypeState): HTMLElement {
   const container = document.createElement('div');
-  container.className = 'view-container';
+  container.className = 'view-container agents-view';
 
-  // Section 1: Agents Header
-  const agentsHeader = document.createElement('div');
-  agentsHeader.className = 'card';
-  agentsHeader.innerHTML = `
-    <div class="card-header">
-      <div>
-        <h2 style="font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+  const filter = state.agentFilter || 'all';
+
+  // Helper to determine agent traffic light status
+  function getAgentTrafficLight(agent: AgentDefinition, envs: EnvironmentInstance[]): {
+    trafficLight: 'green' | 'yellow' | 'red' | 'gray';
+    reason: string;
+  } {
+    if (agent.status === 'archived') {
+      return {
+        trafficLight: 'gray',
+        reason: 'Archived Agent · Preserved attribution, private memory, and session slots (ADR-0008)',
+      };
+    }
+
+    if (agent.workOptions.length === 0) {
+      return {
+        trafficLight: 'red',
+        reason: 'Invalid configuration: Agent has no work options. At least one option required (ADR-0008).',
+      };
+    }
+
+    // Check availability of options across enrolled eligible environments (ADR-0008)
+    const eligibleEnvs = envs.filter((e) => checkEnvironmentEligibility(e).isEligible);
+    if (eligibleEnvs.length === 0) {
+      return {
+        trafficLight: 'yellow',
+        reason: 'Attention: No eligible online environments available for run admission evaluation.',
+      };
+    }
+
+    const isOptionAdmissibleOnAny = (opt: AgentWorkOption) => {
+      if (opt.isConfigured === false) return false;
+      return eligibleEnvs.some((e) => checkEngineModelAvailability(opt.engine, opt.workModel, e).isAvailable);
+    };
+
+    const opt1 = agent.workOptions[0]!;
+    const opt1ReadyOnAny = isOptionAdmissibleOnAny(opt1);
+
+    if (opt1ReadyOnAny) {
+      const fallbackCount = agent.workOptions.length - 1;
+      return {
+        trafficLight: 'green',
+        reason: `Ready: Priority 1 option (${opt1.engine.toUpperCase()} · ${opt1.workModel} · ${opt1.effort}) is ready on online host(s)${
+          fallbackCount > 0 ? ` · ${fallbackCount} fallback option(s) configured` : ''
+        }.`,
+      };
+    }
+
+    // Check if any secondary option is ready (pre-acceptance fallback available)
+    const anyFallbackReady = agent.workOptions.slice(1).some((opt) => isOptionAdmissibleOnAny(opt));
+
+    if (anyFallbackReady) {
+      return {
+        trafficLight: 'yellow',
+        reason: `Attention: Priority 1 option (${opt1.engine.toUpperCase()} · ${opt1.workModel}) unavailable; pre-acceptance fallback option available at run admission.`,
+      };
+    }
+
+    return {
+      trafficLight: 'red',
+      reason: `Action Required: All configured work options (${agent.workOptions
+        .map((o) => o.engine.toUpperCase())
+        .join(', ')}) are unconfigured, unauthenticated, or missing on current environments (ADR-0008).`,
+    };
+  }
+
+  // Calculate counts for filters
+  const allAgents = state.agents;
+  const activeCount = allAgents.filter((a) => a.status === 'active').length;
+  const attentionCount = allAgents.filter((a) => {
+    if (a.status !== 'active') return false;
+    const st = getAgentTrafficLight(a, state.environments);
+    return st.trafficLight === 'yellow';
+  }).length;
+  const unavailableCount = allAgents.filter((a) => {
+    if (a.status !== 'active') return false;
+    const st = getAgentTrafficLight(a, state.environments);
+    return st.trafficLight === 'red';
+  }).length;
+  const archivedCount = allAgents.filter((a) => a.status === 'archived').length;
+
+  // Filter agents
+  const filteredAgents = allAgents.filter((a) => {
+    // Filter pill match
+    if (filter === 'active') {
+      if (a.status !== 'active') return false;
+    } else if (filter === 'attention') {
+      if (a.status !== 'active') return false;
+      const st = getAgentTrafficLight(a, state.environments);
+      if (st.trafficLight !== 'yellow') return false;
+    } else if (filter === 'unavailable') {
+      if (a.status !== 'active') return false;
+      const st = getAgentTrafficLight(a, state.environments);
+      if (st.trafficLight !== 'red') return false;
+    } else if (filter === 'archived') {
+      if (a.status !== 'archived') return false;
+    }
+
+    return true;
+  });
+
+  const selectedAgent =
+    allAgents.find((a) => a.id === state.selectedAgentId) ?? filteredAgents[0] ?? allAgents[0];
+
+  // --- 1. Header Area with Filter Bar and Actions ---
+  const headerCard = document.createElement('div');
+  headerCard.className = 'agents-header-card';
+  headerCard.innerHTML = `
+    <div class="agents-header-top-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;">
+      <div style="flex: 1; min-width: 0;">
+        <h2 style="font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
           ${renderIcon('agents', 18)}
           <span>Agents & Work Option Preferences</span>
         </h2>
-        <p style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-          Agent identity is global and portable across Projects and Environments (ADR-0008).
-        </p>
       </div>
-      <button class="btn btn-secondary btn-sm new-agent-btn">
-        + New Agent
-      </button>
+      <div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0; margin-left: auto;">
+        <button class="btn btn-primary btn-sm new-agent-btn icon-only-btn" id="btn-create-agent" title="Create New Agent" aria-label="Create New Agent">
+          ${renderIcon('plus', 14)}
+        </button>
+        <button class="btn btn-secondary btn-sm agent-guide-btn icon-only-btn" id="btn-agent-guide" title="Agent Architecture Guide (ADR-0008)" aria-label="Agent Architecture Guide">
+          ${renderIcon('guide', 14)}
+        </button>
+      </div>
     </div>
 
-    <!-- Agent Selector Tabs -->
-    <div style="display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px;">
-      ${state.agents
-        .map(
-          (a) => `
-        <button class="btn btn-sm agent-tab-btn ${state.selectedAgentId === a.id ? 'btn-primary' : 'btn-secondary'}" data-agent="${a.id}" style="display: inline-flex; align-items: center; gap: 6px;">
-          ${renderIcon('bot', 14)}
-          <span>${a.displayName}</span>
-        </button>
-      `
-        )
-        .join('')}
+    <!-- Filter Row: Modeled after Attention Urgency & Environment Filter Pills -->
+    <div class="agent-filter-boxes" role="group" aria-label="Filter agents by status and readiness">
+      <button class="agent-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" title="All (${allAgents.length})">
+        <span class="agent-filter-box-top"><span class="status-dot purple"></span> ${allAgents.length}</span>
+        <span class="agent-filter-box-bottom">All<span class="sr-only"> (${allAgents.length})</span></span>
+      </button>
+      <button class="agent-filter-box-btn filter-pill ${filter === 'active' ? 'active' : ''}" data-filter="active" title="Active (${activeCount})">
+        <span class="agent-filter-box-top"><span class="status-dot green"></span> ${activeCount}</span>
+        <span class="agent-filter-box-bottom">Active<span class="sr-only"> (${activeCount})</span></span>
+      </button>
+      <button class="agent-filter-box-btn filter-pill ${filter === 'attention' ? 'active' : ''}" data-filter="attention" title="Attention (${attentionCount})">
+        <span class="agent-filter-box-top"><span class="status-dot yellow"></span> ${attentionCount}</span>
+        <span class="agent-filter-box-bottom">Attention<span class="sr-only"> (${attentionCount})</span></span>
+      </button>
+      <button class="agent-filter-box-btn filter-pill ${filter === 'unavailable' ? 'active' : ''}" data-filter="unavailable" title="Unavailable (${unavailableCount})">
+        <span class="agent-filter-box-top"><span class="status-dot red"></span> ${unavailableCount}</span>
+        <span class="agent-filter-box-bottom">Unavailable<span class="sr-only"> (${unavailableCount})</span></span>
+      </button>
+      <button class="agent-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" title="Archived (${archivedCount})">
+        <span class="agent-filter-box-top"><span class="status-dot gray"></span> ${archivedCount}</span>
+        <span class="agent-filter-box-bottom">Archived<span class="sr-only"> (${archivedCount})</span></span>
+      </button>
     </div>
   `;
 
-  agentsHeader.querySelectorAll('.agent-tab-btn').forEach((btn) => {
+  headerCard.querySelectorAll('.filter-pill').forEach((btn) => {
     btn.addEventListener('click', (ev) => {
-      const agentId = (ev.currentTarget as HTMLElement).getAttribute('data-agent')!;
-      stateManager.selectAgent(agentId);
+      const f = (ev.currentTarget as HTMLElement).getAttribute('data-filter')!;
+      stateManager.setAgentFilter(f);
     });
   });
 
-  agentsHeader.querySelector('.new-agent-btn')?.addEventListener('click', () => {
-    const name = prompt('Enter Agent Display Name:');
-    if (name && name.trim()) {
-      const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-      state.agents.push({
-        id,
-        displayName: name.trim(),
-        avatar: name.trim().slice(0, 2).toUpperCase(),
-        description: 'Custom specialized agent.',
-        status: 'active',
-        privateMemoryEntriesCount: 0,
-        workOptions: [
-          { id: `opt-${id}-1`, engine: 'pi', workModel: 'claude-3-5-sonnet', effort: 'high', isConfigured: true },
-          { id: `opt-${id}-2`, engine: 'codex', workModel: 'gpt-4o', effort: 'medium', isConfigured: true },
-        ],
-      });
-      stateManager.selectAgent(id);
-    }
+  headerCard.querySelector('#btn-agent-guide')?.addEventListener('click', () => {
+    openAgentGuideDialog();
   });
 
-  container.appendChild(agentsHeader);
+  headerCard.querySelector('#btn-create-agent')?.addEventListener('click', () => {
+    openCreateAgentDialog();
+  });
 
-  // Section 2: Selected Agent Detail Card
-  const selectedAgent = state.agents.find((a) => a.id === state.selectedAgentId) ?? state.agents[0];
-  if (!selectedAgent) {
-    container.innerHTML += `<div class="card"><p>No agent selected.</p></div>`;
+  // --- 2. Master / Detail Layout Construction (Phone & Fluid Parity / Desktop Split) ---
+  const isSingleColumn = state.viewportMode === 'mobile' || state.viewportMode === 'fluid';
+  const showSingleColumnDetail = isSingleColumn && state.agentViewMode === 'detail' && selectedAgent;
+
+  if (showSingleColumnDetail) {
+    // Single Column Detail View: Dedicated level-2 view with top back header (omits list header/filter row)
+    const mobileDetailWrapper = document.createElement('div');
+    mobileDetailWrapper.className = 'agents-mobile-detail-wrapper';
+
+    const st = getAgentTrafficLight(selectedAgent, state.environments);
+
+    const mobileBackNav = document.createElement('div');
+    mobileBackNav.className = 'mobile-detail-nav-header';
+    mobileBackNav.innerHTML = `
+      <button class="btn btn-secondary btn-sm back-to-agents-btn" id="btn-back-to-agents" title="Back to Agents" aria-label="Back to agents list">
+        ${renderIcon('chevron-left', 14)} <span class="back-btn-text">Back</span>
+      </button>
+      <div class="mobile-detail-title-wrap">
+        <span class="status-dot ${st.trafficLight}"></span>
+        <span class="mobile-detail-title-text">${selectedAgent.displayName}</span>
+      </div>
+    `;
+
+    mobileBackNav.querySelector('#btn-back-to-agents')?.addEventListener('click', () => {
+      stateManager.closeAgentDetail();
+    });
+
+    mobileDetailWrapper.appendChild(mobileBackNav);
+    mobileDetailWrapper.appendChild(renderAgentDetailCard(selectedAgent, state, getAgentTrafficLight));
+
+    container.appendChild(mobileDetailWrapper);
     return container;
   }
 
-  const detailCard = document.createElement('div');
-  detailCard.className = 'card';
-  detailCard.innerHTML = `
-    <div class="card-header">
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <div style="width: 36px; height: 36px; border-radius: var(--radius-sm); background: var(--purple-agent-bg); border: 1px solid var(--purple-agent-border); color: var(--purple-agent); display: flex; align-items: center; justify-content: center;">
-          ${renderIcon('bot', 20)}
-        </div>
-        <div>
-          <h3 style="font-size: 16px; font-weight: 700;">${selectedAgent.displayName} (<code>${selectedAgent.id}</code>)</h3>
-          <p style="font-size: 12px; color: var(--text-secondary);">${selectedAgent.description}</p>
-        </div>
-      </div>
-      <span class="status-pill green">Active</span>
-    </div>
+  // Master / Detail Split for Desktop (or Master List for Mobile List Mode)
+  container.appendChild(headerCard);
 
-    <!-- Standing Instructions -->
-    <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); font-size: 12px;">
-      <span style="font-weight: 700; color: var(--text-muted); text-transform: uppercase; font-size: 11px;">Standing Instructions:</span>
-      <p style="color: var(--text-primary); margin-top: 4px;">${selectedAgent.standingInstructions ?? 'None'}</p>
-    </div>
+  const splitLayout = document.createElement('div');
+  splitLayout.className = 'agents-split-layout';
 
-    <!-- Ordered Work Options -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 14px; font-weight: 700; color: var(--text-primary);">
-          Ordered Execution Preferences (Work Options)
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted);">Evaluated at run admission</span>
+  // Left Master Column
+  const masterColumn = document.createElement('div');
+  masterColumn.className = 'agents-master-column';
+
+  if (filteredAgents.length === 0) {
+    masterColumn.innerHTML = `
+      <div class="card" style="padding: 24px 16px; text-align: center; color: var(--text-secondary);">
+        <p style="font-size: 13px; margin: 0 0 8px 0;">No agents matching filter "${filter}".</p>
+        <button class="btn btn-secondary btn-sm" id="btn-reset-agent-filter">Reset Filters</button>
       </div>
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        ${selectedAgent.workOptions
-          .map(
-            (opt, idx) => `
-          <div style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span class="status-pill neutral" style="font-size: 11px; font-weight: 700;">Priority ${idx + 1}</span>
-              <strong>${opt.engine.toUpperCase()}</strong>
-              <span style="color: var(--text-secondary);">Model: <code>${opt.workModel}</code></span>
-              <span class="status-pill purple" style="font-size: 10px;">Effort: ${opt.effort}</span>
+    `;
+    masterColumn.querySelector('#btn-reset-agent-filter')?.addEventListener('click', () => {
+      stateManager.setAgentFilter('all');
+    });
+  } else {
+    const cardList = document.createElement('div');
+    cardList.className = 'agents-card-list';
+
+    filteredAgents.forEach((agent) => {
+      const st = getAgentTrafficLight(agent, state.environments);
+      const isSelected = selectedAgent && selectedAgent.id === agent.id;
+      const opt1 = agent.workOptions[0];
+
+      // Calculate project memberships count
+      const memberProjectsCount = state.projects.filter((p) =>
+        p.memberships.some((m) => m.memberId === agent.id && m.status === 'active')
+      ).length;
+
+      const card = document.createElement('div');
+      card.className = `agent-master-card ${isSelected ? 'active' : ''}`;
+      card.setAttribute('data-agent-id', agent.id);
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('aria-label', `Open Agent ${agent.displayName}`);
+      card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+
+      card.innerHTML = `
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+            <div class="agent-avatar-badge">
+              ${agent.avatar || agent.displayName.slice(0, 2).toUpperCase()}
             </div>
-            <span class="status-pill ${opt.isConfigured ? 'green' : 'neutral'}" style="font-size: 10px;">
-              ${opt.isConfigured ? 'Ready' : 'Not configured'}
+            <div style="min-width: 0;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <strong style="font-size: 14px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                  ${agent.displayName}
+                </strong>
+                <code style="font-size: 10px; color: var(--text-muted); background: var(--bg-surface-elevated); padding: 1px 4px; border-radius: var(--radius-xs);">
+                  ${agent.id}
+                </code>
+              </div>
+              <p style="font-size: 11px; color: var(--text-secondary); margin: 2px 0 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                ${agent.description}
+              </p>
+            </div>
+          </div>
+          <span class="status-dot ${st.trafficLight}" title="${st.reason}"></span>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+          ${
+            opt1
+              ? `<span class="badge" style="font-size: 10px; background: var(--bg-surface-elevated); color: var(--text-primary); border: 1px solid var(--border-subtle);">
+                  ${opt1.engine.toUpperCase()}: <code>${opt1.workModel}</code>
+                </span>`
+              : ''
+          }
+          <span class="badge" style="font-size: 10px; background: var(--bg-surface-elevated); color: var(--text-secondary);">
+            ${agent.workOptions.length} opt${agent.workOptions.length !== 1 ? 's' : ''}
+          </span>
+          <span class="badge" style="font-size: 10px; background: var(--bg-surface-elevated); color: var(--text-secondary);">
+            ${memberProjectsCount} proj${memberProjectsCount !== 1 ? 's' : ''}
+          </span>
+          <span class="badge" style="font-size: 10px; background: var(--bg-surface-elevated); color: var(--text-muted);">
+            v${agent.version || 1}
+          </span>
+        </div>
+      `;
+
+      const selectAgent = () => {
+        stateManager.selectAgent(agent.id);
+      };
+      card.addEventListener('click', selectAgent);
+      card.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        selectAgent();
+      });
+
+      cardList.appendChild(card);
+    });
+
+    masterColumn.appendChild(cardList);
+  }
+
+  splitLayout.appendChild(masterColumn);
+
+  // Right Detail Column (Desktop view)
+  if (!isSingleColumn && selectedAgent) {
+    const detailColumn = document.createElement('div');
+    detailColumn.className = 'agents-detail-column';
+    detailColumn.appendChild(renderAgentDetailCard(selectedAgent, state, getAgentTrafficLight));
+    splitLayout.appendChild(detailColumn);
+  }
+
+  container.appendChild(headerCard);
+  container.appendChild(splitLayout);
+
+  return container;
+}
+
+// --- 3. Render Agent Detail Card ---
+function renderAgentDetailCard(
+  agent: AgentDefinition,
+  state: PrototypeState,
+  getTrafficLight: (
+    agent: AgentDefinition,
+    envs: EnvironmentInstance[]
+  ) => { trafficLight: 'green' | 'yellow' | 'red' | 'gray'; reason: string }
+): HTMLElement {
+  const detailCard = document.createElement('div');
+  detailCard.className = 'agent-detail-card';
+
+  const st = getTrafficLight(agent, state.environments);
+  const attributionHistory = getAgentAttributionHistory(state, agent);
+
+  // Project Memberships for this agent
+  const activeMemberships = state.projects
+    .map((p) => {
+      const mem = p.memberships.find((m) => m.memberId === agent.id);
+      return mem ? { project: p, membership: mem } : null;
+    })
+    .filter((item): item is { project: (typeof state.projects)[0]; membership: (typeof state.projects)[0]['memberships'][0] } => item !== null);
+
+  const isGreen = st.trafficLight === 'green';
+  const isYellow = st.trafficLight === 'yellow';
+  const bannerBg = isGreen
+    ? 'var(--green-ready-bg)'
+    : isYellow
+      ? 'var(--yellow-attention-bg)'
+      : st.trafficLight === 'red'
+        ? 'var(--red-action-bg)'
+        : 'var(--bg-surface-elevated)';
+  const bannerBorder = isGreen
+    ? 'var(--green-ready)'
+    : isYellow
+      ? 'var(--yellow-attention)'
+      : st.trafficLight === 'red'
+        ? 'var(--red-action)'
+        : 'var(--border-subtle)';
+
+  detailCard.innerHTML = `
+    <!-- Top Summary Banner (Clean, no verbose paragraphs, tooltip on demand) -->
+    <div class="env-traffic-light-banner" title="${st.reason}" style="margin-bottom: 2px; background: ${bannerBg}; border: 1px solid ${bannerBorder}; border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;">
+      <div class="env-traffic-light-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="status-dot ${st.trafficLight}"></span>
+          <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-primary);">
+            ${isGreen ? 'Ready' : isYellow ? 'Attention / Degraded' : st.trafficLight === 'red' ? 'Action Required' : 'Archived'}
+          </strong>
+        </div>
+        <span style="font-size: 11px; color: var(--text-secondary);">
+          ${agent.status === 'active' ? `v${agent.version || 1} · Active` : 'Archived'}
+        </span>
+      </div>
+    </div>
+
+    <!-- Section 1: Agent Identity & Core Facts (Clean non-redundant items) -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="dimensions-2x2-grid">
+        <div class="dimension-item">
+          <div class="dimension-item-top">
+            <span class="dimension-item-label">Stable Identity</span>
+            <span class="dimension-item-sub"><code>${agent.id}</code></span>
+          </div>
+          <div class="dimension-item-action">
+            <span class="badge" style="background: var(--bg-surface-elevated); color: var(--text-primary); font-size: 10px;">
+              ${agent.displayName}
             </span>
           </div>
-        `
-          )
-          .join('')}
+        </div>
+
+        <div class="dimension-item">
+          <div class="dimension-item-top">
+            <span class="dimension-item-label">Private Memory</span>
+            <span class="dimension-item-sub">Preserved across projects</span>
+          </div>
+          <div class="dimension-item-action">
+            <span class="badge" style="background: var(--bg-surface-elevated); color: var(--text-secondary); font-size: 10px;">
+              ${agent.privateMemoryEntriesCount} memory entries
+            </span>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- Environment Compatibility Matrix -->
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <span style="font-size: 14px; font-weight: 700; color: var(--text-primary);">
-        Environment Compatibility Matrix
-      </span>
-      <div style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px;">
-        ${state.environments
-          .map((env) => {
-            const hasCompatibleOption = selectedAgent.workOptions.some((opt) => {
-              const readiness = env.engineReadiness[opt.engine];
-              return readiness === 'ready';
+    <!-- Section 2: Standing Instructions -->
+    <div style="background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 12px; display: flex; flex-direction: column; gap: 6px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;">
+          Standing Instructions (Optional)
+        </span>
+        ${
+          agent.status === 'active'
+            ? `<button class="btn btn-ghost btn-sm edit-instructions-btn" id="btn-edit-instructions" style="font-size: 11px; padding: 2px 6px;">
+                ${renderIcon('edit', 12)} Edit
+              </button>`
+            : ''
+        }
+      </div>
+      <p style="font-size: 13px; color: var(--text-primary); line-height: 1.4; margin: 0;">
+        ${agent.standingInstructions ? agent.standingInstructions : `<em style="color: var(--text-muted);">No standing instructions configured. Standing instructions provide persistent guidance across all projects and tasks.</em>`}
+      </p>
+    </div>
+
+    <!-- Section 3: Ordered Work Options (Execution Preferences) with Drag-and-Drop Reorder -->
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <span style="font-size: 13px; font-weight: 700; color: var(--text-primary);">
+            Ordered Execution Preferences (Work Options)
+          </span>
+          <p style="font-size: 11px; color: var(--text-muted); margin: 2px 0 0 0;">
+            Drag to reorder priority. Evaluated at run admission in top-to-bottom order (ADR-0008).
+          </p>
+        </div>
+        ${
+          agent.status === 'active'
+            ? `<button class="btn btn-secondary btn-sm add-option-btn" id="btn-add-option" style="font-size: 12px;">
+                ${renderIcon('plus', 12)} Add Option
+              </button>`
+            : ''
+        }
+      </div>
+
+      <!-- Work Options List with Drag Handles -->
+      <div class="agent-options-drag-list" style="display: flex; flex-direction: column; gap: 6px;">
+        ${agent.workOptions
+          .map((opt, idx) => {
+            const isFirst = idx === 0;
+
+            // Check readiness across enrolled eligible environments (ADR-0008)
+            const matchingReadyEnvs = state.environments.filter((e) => {
+              if (!checkEnvironmentEligibility(e).isEligible) return false;
+              if (opt.isConfigured === false) return false;
+              return checkEngineModelAvailability(opt.engine, opt.workModel, e).isAvailable;
             });
+            const isReadyOnAny = matchingReadyEnvs.length > 0;
+
             return `
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 4px;">
-              <span>${env.displayName} (${env.platform})</span>
-              <span class="status-pill ${hasCompatibleOption ? 'green' : 'yellow'}" style="font-size: 11px;">
-                ${hasCompatibleOption ? 'Compatible (First option available)' : 'Requires Engine Login / Setup'}
-              </span>
-            </div>
-          `;
+              <div
+                class="agent-option-row"
+                data-option-id="${opt.id}"
+                data-index="${idx}"
+                ${agent.status === 'active' ? 'draggable="true"' : ''}
+              >
+                <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                  ${
+                    agent.status === 'active'
+                      ? `<div class="drag-handle-wrap" tabindex="0" role="button" title="Drag or press Up/Down arrows to reorder priority" aria-label="Reorder priority for ${opt.engine.toUpperCase()} option">
+                          ${renderIcon('grip-vertical', 14)}
+                        </div>`
+                      : ''
+                  }
+                  <div class="agent-option-info">
+                    <span class="badge ${isFirst ? 'badge-info' : 'badge'}" style="font-size: 10px; font-weight: 700;">
+                      Priority ${idx + 1}${isFirst ? ' (Primary)' : ' (Fallback)'}
+                    </span>
+                    <strong style="font-size: 13px; color: var(--text-primary);">
+                      ${opt.engine.toUpperCase()}
+                    </strong>
+                    <span style="font-size: 12px; color: var(--text-secondary);">
+                      Model: <code style="color: var(--accent-primary);">${opt.workModel}</code>
+                    </span>
+                    <span class="status-pill purple" style="font-size: 10px; padding: 2px 6px;">
+                      Effort: ${opt.effort}
+                    </span>
+                    <span class="badge ${isReadyOnAny ? 'badge-green' : 'badge-yellow'}" style="font-size: 10px;">
+                      ${
+                        isReadyOnAny
+                          ? `Ready on ${matchingReadyEnvs.length} host(s)`
+                          : opt.isConfigured === false
+                          ? 'Unconfigured'
+                          : 'Unavailable / Login Req'
+                      }
+                    </span>
+                  </div>
+                </div>
+
+                ${
+                  agent.status === 'active'
+                    ? `<div class="agent-option-actions">
+                        <button
+                          class="btn btn-ghost btn-sm move-opt-up-btn"
+                          data-index="${idx}"
+                          ${idx === 0 ? 'disabled' : ''}
+                          title="Move priority up"
+                          aria-label="Move ${opt.engine.toUpperCase()} priority up"
+                        >
+                          ${renderIcon('arrow-up', 12)}
+                        </button>
+                        <button
+                          class="btn btn-ghost btn-sm move-opt-down-btn"
+                          data-index="${idx}"
+                          ${idx === agent.workOptions.length - 1 ? 'disabled' : ''}
+                          title="Move priority down"
+                          aria-label="Move ${opt.engine.toUpperCase()} priority down"
+                        >
+                          ${renderIcon('arrow-down', 12)}
+                        </button>
+                        <button class="btn btn-ghost btn-sm delete-opt-btn" data-opt="${opt.id}" ${agent.workOptions.length <= 1 ? 'disabled title="An Agent must have at least one work option (ADR-0008)"' : 'title="Remove Option"'} aria-label="Remove Option">
+                          ${renderIcon('trash', 12)}
+                        </button>
+                      </div>`
+                    : ''
+                }
+              </div>
+            `;
           })
           .join('')}
       </div>
+
+      <!-- Pre-Acceptance Fallback & No-Replay Guarantee Invariant Card -->
+      <div class="agent-fallback-box">
+        <div style="display: flex; align-items: center; gap: 6px; color: var(--accent-primary); font-weight: 700;">
+          ${renderIcon('shield', 14)}
+          <span>Pre-Acceptance Fallback & No-Silent-Replay Guarantee (ADR-0008)</span>
+        </div>
+        <p style="margin: 0; color: var(--text-secondary); line-height: 1.4;">
+          1. <strong>Pre-Acceptance Fallback</strong>: At run admission, Sprout takes the first configured option permitted and authenticated on the target Environment.
+        </p>
+        <p style="margin: 0; color: var(--text-secondary); line-height: 1.4;">
+          2. <strong>No Silent Replay</strong>: Once an engine accepts the run, any later failure is reported directly as an error. Sprout <em>never</em> silently replays work through lower-priority options because tools may have already caused irreversible side effects.
+        </p>
+      </div>
     </div>
 
-    <!-- Footer Stats -->
-    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-subtle); padding-top: 8px;">
-      <span>Private Memory Entries: ${selectedAgent.privateMemoryEntriesCount}</span>
-      <button class="btn btn-secondary btn-sm archive-agent-btn">
-        Archive Agent (Preserve Attribution)
-      </button>
+    <!-- Section 4: Environment Compatibility & Admission Evaluation (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-env-compat">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('server', 14)}
+          <span>Environment Compatibility & Admission Evaluation</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge" style="font-size: 10px;">${state.environments.length} Hosts</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
+      </div>
+      <div class="foldable-body">
+        <p style="font-size: 11px; color: var(--text-muted); margin: 0;">
+          Evaluated at run admission across enrolled worker hosts. Host credentials and local paths remain isolated (ADR-0008).
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 12px;">
+          ${state.environments
+            .map((env) => {
+              const evalResult = stateManager.evaluateAdmissionFallback(agent.id, env.id);
+              const matchedOpt = evalResult?.selectedOption;
+              const isCompatible = Boolean(matchedOpt);
+
+              let badgeHtml = '';
+              if (isCompatible) {
+                badgeHtml = `<span class="badge badge-green" style="font-size: 10px;">
+                  Admitted via ${matchedOpt?.engine.toUpperCase()} (<code>${matchedOpt?.workModel}</code>)
+                </span>`;
+              } else if (evalResult?.envIneligibilityReason) {
+                const envStatusLabel =
+                  env.enrollmentStatus !== 'approved'
+                    ? `Enrollment: ${env.enrollmentStatus}`
+                    : env.connectionState !== 'online'
+                    ? `${env.connectionState === 'offline' ? 'Offline' : 'Reconnecting'} (${env.workSafety})`
+                    : env.protocolCompatibility !== 'compatible'
+                    ? 'Protocol Incompatible'
+                    : `Safety: ${env.workSafety}`;
+                badgeHtml = `<span class="badge badge-red" style="font-size: 10px;" title="${evalResult.envIneligibilityReason}">
+                  Ineligible · ${envStatusLabel}
+                </span>`;
+              } else {
+                badgeHtml = `<span class="badge badge-yellow" style="font-size: 10px;">
+                  No compatible option ready
+                </span>`;
+              }
+
+              return `
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; gap: 8px;">
+                  <div style="min-width: 0;">
+                    <strong style="color: var(--text-primary);">${env.displayName}</strong>
+                    <span style="color: var(--text-muted); font-size: 11px;"> (${env.platform} · ${env.connectionState})</span>
+                  </div>
+                  <div style="text-align: right; flex-shrink: 0;">
+                    ${badgeHtml}
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+
+          <!-- Interactive Admission Simulation Row -->
+          <div style="margin-top: 6px; padding-top: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <label for="sim-env-select" style="font-size: 11px; font-weight: 600; color: var(--text-secondary);">Simulate on:</label>
+              <select id="sim-env-select" class="form-select" style="font-size: 11px; padding: 2px 6px; height: 26px; width: auto;">
+                ${state.environments.map((e) => `<option value="${e.id}">${e.displayName}</option>`).join('')}
+              </select>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="btn-run-simulation" style="font-size: 11px; padding: 3px 8px;">
+              ${renderIcon('play', 10)} Test Admission Fallback
+            </button>
+          </div>
+
+          <!-- Simulation Output Box (populated on test) -->
+          <div id="simulation-output-box" style="display: none; margin-top: 6px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 5: Project Memberships & Responsibilities (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-project-memberships">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('folder', 14)}
+          <span>Project Memberships & Responsibilities</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge" style="font-size: 10px;">${activeMemberships.length} Projects</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
+      </div>
+      <div class="foldable-body">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${
+            activeMemberships.length === 0
+              ? `<div class="card" style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">
+                  Agent has not been added to any Project memberships yet. (Add via Project Overview).
+                </div>`
+              : activeMemberships
+                  .map(
+                    ({ project, membership }) => `
+                <div class="agent-membership-row">
+                  <div class="agent-membership-row-top">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <strong style="color: var(--text-primary); font-size: 13px;">${project.displayName}</strong>
+                      <code style="font-size: 10px; color: var(--text-muted);">${project.id}</code>
+                    </div>
+                    <span class="badge ${membership.status === 'active' ? 'badge-green' : 'badge'}" style="font-size: 10px;">
+                      ${membership.status.toUpperCase()}
+                    </span>
+                  </div>
+                  <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    <strong>Responsibility:</strong> ${membership.responsibilities || 'General collaboration'}
+                  </div>
+                  ${
+                    membership.collaborationInstructions
+                      ? `<div style="font-size: 11px; color: var(--text-muted);">
+                          <strong>Instructions:</strong> ${membership.collaborationInstructions}
+                        </div>`
+                      : ''
+                  }
+                </div>
+              `
+                  )
+                  .join('')
+          }
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 6: Configuration Version Changelog (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-version-changelog">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('history', 14)}
+          <span>Configuration Version Changelog</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge-info" style="font-size: 10px;">v${agent.version || 1}</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
+      </div>
+      <div class="foldable-body">
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${
+            (agent.versionHistory && agent.versionHistory.length > 0)
+              ? agent.versionHistory
+                  .map(
+                    (v) => `
+                <div class="agent-version-row">
+                  <div class="agent-version-row-top">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span class="badge badge-info" style="font-size: 10px; font-weight: 700;">v${v.version}</span>
+                      <strong style="font-size: 12px; color: var(--text-primary);">${v.changeSummary}</strong>
+                    </div>
+                    <span style="font-size: 10px; color: var(--text-muted);">${v.timestamp}</span>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">
+                    By ${v.author} · ${v.optionsCount} work option(s) configured
+                  </div>
+                </div>
+              `
+                  )
+                  .join('')
+              : `<div class="agent-version-row">
+                  <div class="agent-version-row-top">
+                    <span class="badge badge-info" style="font-size: 10px;">v1</span>
+                    <span style="font-size: 10px; color: var(--text-muted);">${agent.createdAt || 'Initial'}</span>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Initial Agent definition created.</div>
+                </div>`
+          }
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 7: Historical Run Attribution & Provenance (Foldable Box, default collapsed) -->
+    <div class="foldable-card" id="foldable-attribution-trace">
+      <div class="foldable-header" role="button" aria-expanded="false" tabindex="0">
+        <div class="foldable-title-wrap">
+          ${renderIcon('clipboard', 14)}
+          <span>Historical Run Attribution & Provenance</span>
+        </div>
+        <div class="foldable-header-right">
+          <span class="badge badge" style="font-size: 10px;">${attributionHistory.length} Facts</span>
+          <span class="foldable-chevron">${renderIcon('chevron-right', 14)}</span>
+        </div>
+      </div>
+      <div class="foldable-body">
+        <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.4; display: flex; flex-direction: column; gap: 8px;">
+          <p style="margin: 0;">
+            Historical Messages, Task runs, and completion claims permanently retain the exact Agent configuration version, engine, model, and effort used at execution time (ADR-0008).
+          </p>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge" style="font-size: 10px;">
+              ${attributionHistory.length} recorded execution facts · Attribution survives rename & archive
+            </span>
+            <button class="btn btn-ghost btn-sm" id="btn-view-attribution" style="font-size: 11px;">
+              ${renderIcon('history', 12)} Full Trace Details
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 8: Operations Toolbar -->
+    <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-subtle); padding-top: 12px; margin-top: 4px; flex-wrap: wrap; gap: 8px;">
+      <div style="display: flex; gap: 6px;">
+        ${
+          agent.status === 'active'
+            ? `<button class="btn btn-secondary btn-sm edit-agent-btn" id="btn-edit-agent">
+                ${renderIcon('edit', 12)} Edit Agent
+              </button>`
+            : ''
+        }
+      </div>
+      <div>
+        ${
+          agent.status === 'active'
+            ? `<button class="btn btn-secondary btn-sm archive-agent-btn" id="btn-archive-agent" style="color: var(--red-action); border-color: var(--red-action-border);">
+                ${renderIcon('archive', 12)} Archive Agent
+              </button>`
+            : `<button class="btn btn-primary btn-sm restore-agent-btn" id="btn-restore-agent">
+                ${renderIcon('refresh', 12)} Restore Agent
+              </button>`
+        }
+      </div>
     </div>
   `;
 
-  detailCard.querySelector('.archive-agent-btn')?.addEventListener('click', () => {
-    alert(`Agent "${selectedAgent.displayName}" archived. Historical messages and runs remain attributable.`);
+  // Foldable Accordion Headers provide equivalent pointer and keyboard activation.
+  detailCard.querySelectorAll('.foldable-header').forEach((header) => {
+    const toggleFoldable = () => {
+      const card = header.closest('.foldable-card');
+      if (card) {
+        const isOpen = card.classList.toggle('open');
+        header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      }
+    };
+    header.addEventListener('click', toggleFoldable);
+    header.addEventListener('keydown', (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== 'Enter' && key !== ' ') return;
+      event.preventDefault();
+      toggleFoldable();
+    });
   });
 
-  container.appendChild(detailCard);
+  // Attach Event Listeners
+  detailCard.querySelector('#btn-edit-instructions')?.addEventListener('click', () => {
+    openEditInstructionsDialog(agent);
+  });
 
-  return container;
+  detailCard.querySelector('#btn-edit-agent')?.addEventListener('click', () => {
+    openEditAgentDialog(agent);
+  });
+
+  detailCard.querySelector('#btn-add-option')?.addEventListener('click', () => {
+    openAddWorkOptionDialog(agent);
+  });
+
+  detailCard.querySelectorAll('.delete-opt-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const optId = (ev.currentTarget as HTMLElement).getAttribute('data-opt')!;
+      stateManager.removeAgentWorkOption(agent.id, optId);
+    });
+  });
+
+  // Reorder buttons for mobile touch and keyboard users (ADR-0008)
+  detailCard.querySelectorAll('.move-opt-up-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const idxStr = (ev.currentTarget as HTMLElement).getAttribute('data-index');
+      const idx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (idx > 0) {
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx - 1);
+      }
+    });
+  });
+
+  detailCard.querySelectorAll('.move-opt-down-btn').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      const idxStr = (ev.currentTarget as HTMLElement).getAttribute('data-index');
+      const idx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (idx >= 0 && idx < agent.workOptions.length - 1) {
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx + 1);
+      }
+    });
+  });
+
+  // Keyboard reordering on drag handles and option rows
+  detailCard.querySelectorAll('.agent-option-row[draggable="true"]').forEach((row) => {
+    const idxStr = row.getAttribute('data-index');
+    const idx = idxStr ? parseInt(idxStr, 10) : -1;
+    const handle = row.querySelector('.drag-handle-wrap');
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' && idx > 0) {
+        e.preventDefault();
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx - 1);
+      } else if (e.key === 'ArrowDown' && idx >= 0 && idx < agent.workOptions.length - 1) {
+        e.preventDefault();
+        stateManager.reorderAgentWorkOptions(agent.id, idx, idx + 1);
+      }
+    };
+
+    handle?.addEventListener('keydown', handleKeyDown as EventListener);
+    row.addEventListener('keydown', (e) => {
+      if (e.target === row) {
+        handleKeyDown(e as KeyboardEvent);
+      }
+    });
+  });
+
+  // Drag-and-drop Reordering on Work Option Rows
+  let draggedIdx = -1;
+  const optionRows = detailCard.querySelectorAll('.agent-option-row[draggable="true"]');
+  optionRows.forEach((row) => {
+    row.addEventListener('dragstart', (e) => {
+      const dragEvent = e as DragEvent;
+      const idxStr = row.getAttribute('data-index');
+      draggedIdx = idxStr ? parseInt(idxStr, 10) : -1;
+      row.classList.add('dragging');
+      if (dragEvent.dataTransfer) {
+        dragEvent.dataTransfer.effectAllowed = 'move';
+        dragEvent.dataTransfer.setData('text/plain', String(draggedIdx));
+      }
+    });
+
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const dragEvent = e as DragEvent;
+      if (dragEvent.dataTransfer) {
+        dragEvent.dataTransfer.dropEffect = 'move';
+      }
+      row.classList.add('drag-over');
+    });
+
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over');
+    });
+
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const idxStr = row.getAttribute('data-index');
+      const targetIdx = idxStr ? parseInt(idxStr, 10) : -1;
+      if (draggedIdx !== -1 && targetIdx !== -1 && draggedIdx !== targetIdx) {
+        stateManager.reorderAgentWorkOptions(agent.id, draggedIdx, targetIdx);
+      }
+    });
+
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      optionRows.forEach((r) => r.classList.remove('drag-over'));
+    });
+  });
+
+  detailCard.querySelector('#btn-archive-agent')?.addEventListener('click', () => {
+    openArchiveConfirmDialog(agent);
+  });
+
+  detailCard.querySelector('#btn-restore-agent')?.addEventListener('click', () => {
+    stateManager.restoreAgent(agent.id);
+  });
+
+  detailCard.querySelector('#btn-view-attribution')?.addEventListener('click', () => {
+    openAttributionHistoryDialog(agent, state);
+  });
+
+  // Admission Fallback Simulation Handler
+  const simSelect = detailCard.querySelector('#sim-env-select') as HTMLSelectElement | null;
+  const simBtn = detailCard.querySelector('#btn-run-simulation');
+  const simOutput = detailCard.querySelector('#simulation-output-box') as HTMLElement | null;
+
+  simBtn?.addEventListener('click', () => {
+    if (!simSelect || !simOutput) return;
+    const envId = simSelect.value;
+    const res = stateManager.evaluateAdmissionFallback(agent.id, envId);
+    if (!res) return;
+
+    simOutput.style.display = 'block';
+    simOutput.innerHTML = `
+      <div class="agent-simulation-result">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="color: var(--text-primary); font-size: 12px;">Evaluation for ${res.environment?.displayName || 'selected Environment'}:</strong>
+          <span class="badge ${res.selectedOption ? 'badge-green' : 'badge-red'}" style="font-size: 10px;">
+            ${res.selectedOption ? `Admitted Option: ${res.selectedOption.engine.toUpperCase()}` : 'Admission Refused'}
+          </span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">
+          ${res.evaluationSteps
+            .map(
+              (step) => `
+            <div class="agent-sim-step">
+              <span class="badge ${step.status === 'selected' ? 'badge-green' : 'badge'}" style="font-size: 10px; flex-shrink: 0;">
+                P${step.priority}: ${step.option.engine.toUpperCase()}
+              </span>
+              <span style="font-size: 11px; color: ${step.status === 'selected' ? 'var(--green-ready)' : 'var(--text-secondary)'};">
+                ${step.reason}
+              </span>
+            </div>
+          `
+            )
+            .join('')}
+        </div>
+        <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px; line-height: 1.3;">
+          ${res.guaranteeNote}
+        </div>
+      </div>
+    `;
+  });
+
+  return detailCard;
+}
+
+// --- 4. Interactive Dialogs & Modals ---
+
+function openCreateAgentDialog() {
+  const existing = document.getElementById('dialog-create-agent');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-create-agent';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 520px; width: 92%;">
+      <div class="proto-modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('bot', 18)}
+          <strong style="font-size: 15px;">Create Global Agent Definition</strong>
+        </div>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
+          Agent identity is portable across Projects and Environments. An Agent requires a stable identity, non-empty display name, and at least one ordered work option (ADR-0008).
+        </p>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="new-agent-name">Display Name *</label>
+          <input type="text" id="new-agent-name" class="form-input" placeholder="e.g. Security Auditor, Frontend Engineer" required />
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="new-agent-desc">Description *</label>
+          <input type="text" id="new-agent-desc" class="form-input" placeholder="e.g. Vulnerability scanning, dependency audit" required />
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="new-agent-instructions">Standing Instructions (Optional)</label>
+          <textarea id="new-agent-instructions" class="form-textarea" rows="2" placeholder="Standing instructions applied across all tasks and projects..."></textarea>
+        </div>
+
+        <div style="border-top: 1px solid var(--border-subtle); padding-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+          <span style="font-size: 12px; font-weight: 700; color: var(--text-primary);">
+            Primary Work Option (Priority 1)
+          </span>
+          <div style="display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 8px;">
+            <div>
+              <label class="form-label" for="new-opt-engine" style="font-size: 11px;">Engine</label>
+              <select id="new-opt-engine" class="form-select" style="font-size: 12px;">
+                <option value="pi" selected>Pi</option>
+                <option value="codex">Codex</option>
+                <option value="agy">agy</option>
+                <option value="opencode">opencode</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="new-opt-model" style="font-size: 11px;">Work Model</label>
+              <input type="text" id="new-opt-model" class="form-input" value="claude-3-5-sonnet" style="font-size: 12px;" />
+            </div>
+            <div>
+              <label class="form-label" for="new-opt-effort" style="font-size: 11px;">Effort</label>
+              <select id="new-opt-effort" class="form-select" style="font-size: 12px;">
+                <option value="high" selected>high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="default">default</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="btn-confirm-create-agent">Create Agent</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  overlay.querySelector('#btn-confirm-create-agent')?.addEventListener('click', () => {
+    const nameInput = overlay.querySelector('#new-agent-name') as HTMLInputElement | null;
+    const descInput = overlay.querySelector('#new-agent-desc') as HTMLInputElement | null;
+    const instInput = overlay.querySelector('#new-agent-instructions') as HTMLTextAreaElement | null;
+    const engineSelect = overlay.querySelector('#new-opt-engine') as HTMLSelectElement | null;
+    const modelInput = overlay.querySelector('#new-opt-model') as HTMLInputElement | null;
+    const effortSelect = overlay.querySelector('#new-opt-effort') as HTMLSelectElement | null;
+
+    const name = nameInput?.value.trim();
+    const desc = descInput?.value.trim() || 'Specialized agent.';
+    const instructions = instInput?.value.trim();
+    const engine = (engineSelect?.value || 'pi') as EngineKind;
+    const model = modelInput?.value.trim() || 'claude-3-5-sonnet';
+    const effort = (effortSelect?.value || 'high') as 'low' | 'medium' | 'high' | 'default';
+
+    if (!name) {
+      alert('Please enter a display name for the agent.');
+      return;
+    }
+
+    stateManager.createAgent({
+      displayName: name,
+      description: desc,
+      standingInstructions: instructions,
+      workOptions: [
+        {
+          id: `opt-${Date.now()}-1`,
+          engine,
+          workModel: model,
+          effort,
+          isConfigured: true,
+        },
+      ],
+    });
+
+    overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openEditAgentDialog(agent: AgentDefinition) {
+  const existing = document.getElementById('dialog-edit-agent');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-edit-agent';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 480px; width: 92%;">
+      <div class="proto-modal-header">
+        <strong style="font-size: 15px;">Edit Agent Identity (${agent.id})</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="edit-agent-name">Display Name</label>
+          <input type="text" id="edit-agent-name" class="form-input" value="${agent.displayName}" required />
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="edit-agent-desc">Description</label>
+          <input type="text" id="edit-agent-desc" class="form-input" value="${agent.description}" required />
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="edit-agent-inst">Standing Instructions</label>
+          <textarea id="edit-agent-inst" class="form-textarea" rows="3">${agent.standingInstructions || ''}</textarea>
+        </div>
+        <div style="font-size: 11px; color: var(--text-muted);">
+          Editing agent facts creates version v${(agent.version || 1) + 1}. Past run attributions and active sessions retain their historical versions.
+        </div>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="btn-confirm-save-agent">Save Changes</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  overlay.querySelector('#btn-confirm-save-agent')?.addEventListener('click', () => {
+    const nameInput = overlay.querySelector('#edit-agent-name') as HTMLInputElement | null;
+    const descInput = overlay.querySelector('#edit-agent-desc') as HTMLInputElement | null;
+    const instInput = overlay.querySelector('#edit-agent-inst') as HTMLTextAreaElement | null;
+
+    const name = nameInput?.value.trim();
+    const desc = descInput?.value.trim();
+    const instructions = instInput?.value;
+
+    if (!name) {
+      alert('Display name cannot be empty.');
+      return;
+    }
+
+    stateManager.updateAgentIdentity(agent.id, {
+      displayName: name,
+      description: desc,
+      standingInstructions: instructions,
+    });
+
+    overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openEditInstructionsDialog(agent: AgentDefinition) {
+  const existing = document.getElementById('dialog-edit-inst');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-edit-inst';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 480px; width: 92%;">
+      <div class="proto-modal-header">
+        <strong style="font-size: 15px;">Edit Standing Instructions</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 8px;">
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
+          Standing instructions are global to Agent <strong>${agent.displayName}</strong> and apply to all future runs across all Projects.
+        </p>
+        <textarea id="edit-standing-inst-textarea" class="form-textarea" rows="4" placeholder="Enter standing instructions...">${agent.standingInstructions || ''}</textarea>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="btn-save-instructions">Save Instructions</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  overlay.querySelector('#btn-save-instructions')?.addEventListener('click', () => {
+    const textarea = overlay.querySelector('#edit-standing-inst-textarea') as HTMLTextAreaElement | null;
+    stateManager.updateAgentIdentity(agent.id, {
+      standingInstructions: textarea?.value || '',
+    });
+    overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openAddWorkOptionDialog(agent: AgentDefinition) {
+  const existing = document.getElementById('dialog-add-opt');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-add-opt';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 440px; width: 92%;">
+      <div class="proto-modal-header">
+        <strong style="font-size: 15px;">Add Work Option (Priority ${agent.workOptions.length + 1})</strong>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
+          Configure an execution fallback option. Sprout evaluates options in priority order at run admission (ADR-0008).
+        </p>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="add-opt-engine">Engine *</label>
+          <select id="add-opt-engine" class="form-select">
+            <option value="pi">Pi</option>
+            <option value="codex">Codex</option>
+            <option value="agy">agy</option>
+            <option value="opencode">opencode</option>
+          </select>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="add-opt-model">Work Model *</label>
+          <input type="text" id="add-opt-model" class="form-input" value="gpt-4o" required />
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <label class="form-label" for="add-opt-effort">Reasoning Effort</label>
+          <select id="add-opt-effort" class="form-select">
+            <option value="high">high</option>
+            <option value="medium" selected>medium</option>
+            <option value="low">low</option>
+            <option value="default">default</option>
+          </select>
+        </div>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="btn-confirm-add-option">Add Option</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  overlay.querySelector('#btn-confirm-add-option')?.addEventListener('click', () => {
+    const engineSelect = overlay.querySelector('#add-opt-engine') as HTMLSelectElement | null;
+    const modelInput = overlay.querySelector('#add-opt-model') as HTMLInputElement | null;
+    const effortSelect = overlay.querySelector('#add-opt-effort') as HTMLSelectElement | null;
+
+    const engine = (engineSelect?.value || 'pi') as EngineKind;
+    const model = modelInput?.value.trim() || 'gpt-4o';
+    const effort = (effortSelect?.value || 'medium') as 'low' | 'medium' | 'high' | 'default';
+
+    stateManager.addAgentWorkOption(agent.id, {
+      engine,
+      workModel: model,
+      effort,
+      isConfigured: true,
+    });
+
+    overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openArchiveConfirmDialog(agent: AgentDefinition) {
+  const existing = document.getElementById('dialog-archive-agent');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-archive-agent';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 460px; width: 92%;">
+      <div class="proto-modal-header">
+        <div style="display: flex; align-items: center; gap: 8px; color: var(--red-action);">
+          ${renderIcon('archive', 18)}
+          <strong style="font-size: 15px;">Archive Agent "${agent.displayName}"?</strong>
+        </div>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px; font-size: 12px; color: var(--text-secondary); line-height: 1.4;">
+        <p style="margin: 0;">
+          Archiving an Agent is a <strong>non-destructive</strong> operation (ADR-0008):
+        </p>
+        <ul style="margin: 0; padding-left: 18px;">
+          <li>Prevents new project memberships, messages, and task runs.</li>
+          <li>Strictly preserves all historical run attributions, messages, private memory, and engine session slots.</li>
+          <li>Can be restored at any time by the operator.</li>
+        </ul>
+        <p style="margin: 0; color: var(--text-muted); font-size: 11px;">
+          Safety Guard: An Agent cannot be archived while it has an active run or remains the Task lead of an unfinished Task.
+        </p>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="btn-confirm-archive">Archive Agent</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  overlay.querySelector('#btn-confirm-archive')?.addEventListener('click', () => {
+    const res = stateManager.archiveAgent(agent.id);
+    if (res.success) {
+      overlay.remove();
+    }
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openAttributionHistoryDialog(agent: AgentDefinition, state: PrototypeState) {
+  const existing = document.getElementById('dialog-attribution-trace');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-attribution-trace';
+  overlay.className = 'proto-modal-backdrop';
+
+  const history = getAgentAttributionHistory(state, agent);
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 560px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="proto-modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('history', 18)}
+          <strong style="font-size: 15px;">Run Attribution Trace: ${agent.displayName}</strong>
+        </div>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 10px; overflow-y: auto;">
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 0;">
+          Every completed run, projected message, and validation claim preserves the exact Agent version, engine, model, and effort used at execution time (ADR-0008).
+        </p>
+
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${
+            history.length === 0
+              ? `<div class="card" style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 12px;">
+                  No historical task runs or messages recorded for this agent yet.
+                </div>`
+              : history
+                  .map(
+                    (attr) => `
+                <div class="agent-attribution-row">
+                  <div class="agent-attribution-row-top">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span class="badge ${attr.entityKind === 'task_run' ? 'badge-info' : 'badge'}" style="font-size: 10px;">
+                        ${attr.entityKind === 'task_run' ? 'Task Run' : 'Message'}
+                      </span>
+                      <span style="font-size: 10px; color: var(--text-muted);"><code>${attr.entityId}</code></span>
+                      <strong style="color: var(--text-primary); font-size: 12px;">${attr.projectName}</strong>
+                    </div>
+                    <span style="font-size: 10px; color: var(--text-muted);">${attr.timestamp}</span>
+                  </div>
+                  <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    ${attr.summary}
+                  </div>
+                  <div style="display: flex; gap: 6px; align-items: center; font-size: 10px; color: var(--text-muted); margin-top: 2px;">
+                    <span>Used v${attr.configVersionUsed}</span>
+                    <span>·</span>
+                    <span>${attr.engineUsed.toUpperCase()} (<code>${attr.modelUsed}</code> · ${attr.effortUsed})</span>
+                  </div>
+                </div>
+              `
+                  )
+                  .join('')
+          }
+        </div>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Close</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  document.body.appendChild(overlay);
+}
+
+function openAgentGuideDialog() {
+  const existing = document.getElementById('dialog-agent-guide');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'dialog-agent-guide';
+  overlay.className = 'proto-modal-backdrop';
+
+  overlay.innerHTML = `
+    <div class="proto-modal-dialog" role="dialog" aria-modal="true" style="max-width: 580px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="proto-modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${renderIcon('guide', 18)}
+          <strong style="font-size: 15px;">Agent Identity & Work Options Architecture (ADR-0008)</strong>
+        </div>
+        <button class="btn btn-ghost btn-sm close-modal-btn" aria-label="Close dialog">${renderIcon('close', 14)}</button>
+      </div>
+      <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px; font-size: 12px; color: var(--text-secondary); line-height: 1.4; overflow-y: auto;">
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">1. Portable Identity Independent of Project & Environment</h4>
+          <p style="margin: 0;">
+            An Agent is created independently of any Project or Environment. It requires a stable ID, a display name, and at least one ordered work option. Private memory and configuration versions remain with the Agent across projects.
+          </p>
+        </div>
+
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">2. Ordered Execution Preferences (Work Options)</h4>
+          <p style="margin: 0;">
+            Each option contains an engine (Codex, Pi, agy, opencode), work model, and effort. The list may span multiple engines and models.
+          </p>
+        </div>
+
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">3. Pre-Acceptance Fallback vs No-Silent-Replay</h4>
+          <p style="margin: 0;">
+            At run admission, Sprout evaluates the selected Environment and takes the <em>first</em> configured option whose engine is permitted and authenticated and whose model is available. Fallback to a secondary option occurs <strong>strictly before</strong> an engine accepts the run. Once accepted, later failures are reported directly; Sprout <strong>never replays work silently</strong> through lower-priority options because tools may have already produced irreversible host side-effects.
+          </p>
+        </div>
+
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">4. Project Membership & Responsibility</h4>
+          <p style="margin: 0;">
+            Project membership references the global Agent identity and adds project-scoped responsibilities and collaboration instructions. Ending a membership stops future runs/messages without erasing historical attribution.
+          </p>
+        </div>
+
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">5. Non-Destructive Archive & Restore</h4>
+          <p style="margin: 0;">
+            Archiving an Agent bars new runs and memberships while preserving private memory, past messages, task records, and session slots. An Agent cannot be archived while leading an unfinished Task.
+          </p>
+        </div>
+
+        <div>
+          <h4 style="font-size: 13px; color: var(--text-primary); margin: 0 0 4px 0;">6. Strict Host Credential & Path Isolation</h4>
+          <p style="margin: 0;">
+            Agent identities and portable definitions never contain host filesystem paths or engine credentials. Web interacts solely with neutral relative workspace names and public readiness facts.
+          </p>
+        </div>
+      </div>
+      <div class="proto-modal-footer" style="display: flex; justify-content: flex-end;">
+        <button class="btn btn-secondary btn-sm close-modal-btn">Close</button>
+      </div>
+    </div>
+  `;
+
+  overlay.querySelectorAll('.close-modal-btn').forEach((btn) => {
+    btn.addEventListener('click', () => overlay.remove());
+  });
+
+  document.body.appendChild(overlay);
 }

@@ -227,7 +227,7 @@ function renderTaskDetailPage(
   }
 
   lifecycleCard.innerHTML = `
-    <div class="lifecycle-fold-header lifecycle-sentence-row" id="lifecycle-fold-toggle" role="button" aria-expanded="false" title="Click to expand/collapse lifecycle facts">
+    <div class="lifecycle-fold-header lifecycle-sentence-row" id="lifecycle-fold-toggle" role="button" tabindex="0" aria-expanded="false" title="Expand or collapse lifecycle facts">
       <div class="lifecycle-sentence-text">
         ${renderIcon('settings', 14)}
         <span>${lifecycleSentence}</span>
@@ -267,10 +267,17 @@ function renderTaskDetailPage(
     </div>
   `;
 
-  lifecycleCard.querySelector('#lifecycle-fold-toggle')?.addEventListener('click', () => {
+  const lifecycleToggle = lifecycleCard.querySelector('#lifecycle-fold-toggle');
+  const toggleLifecycleDetails = () => {
     const isExpanded = lifecycleCard.classList.toggle('expanded');
-    const toggle = lifecycleCard.querySelector('#lifecycle-fold-toggle');
-    if (toggle) toggle.setAttribute('aria-expanded', String(isExpanded));
+    lifecycleToggle?.setAttribute('aria-expanded', String(isExpanded));
+  };
+  lifecycleToggle?.addEventListener('click', toggleLifecycleDetails);
+  lifecycleToggle?.addEventListener('keydown', (event) => {
+    const key = (event as KeyboardEvent).key;
+    if (key !== 'Enter' && key !== ' ') return;
+    event.preventDefault();
+    toggleLifecycleDetails();
   });
 
   container.appendChild(lifecycleCard);
@@ -311,9 +318,11 @@ function renderTaskDetailPage(
               ${(project?.boundEnvironmentWorkspaces || [])
                 .map((ws) => {
                   const env = state.environments.find((e) => e.id === ws.environmentId);
-                  const isBusy = env?.activeLeaseHolder !== undefined;
-                  return `<option value="${ws.environmentId}" ${isBusy ? 'disabled' : ''}>
-                    ${ws.environmentId} (${env?.platform}) ${isBusy ? '· [BUSY LEASE]' : '· Ready'}
+                  const admission = stateManager.evaluateTaskAdmission(selectedTask.id, ws.environmentId, selectedTask.taskLeadId);
+                  const reason = admission.envIneligibilityReason || admission.rejectionReason;
+                  const isAdmissible = Boolean(admission.selectedOption);
+                  return `<option value="${ws.environmentId}" ${isAdmissible ? '' : 'disabled'}>
+                    ${ws.environmentId} (${env?.platform}) ${isAdmissible ? `· Ready via ${admission.selectedOption!.engine.toUpperCase()}` : `· Unavailable: ${reason || 'No compatible work option'}`}
                   </option>`;
                 })
                 .join('')}
@@ -323,7 +332,12 @@ function renderTaskDetailPage(
             <label style="font-size: 12px; font-weight: 700;">Confirm Task Lead Agent *</label>
             <select class="form-select select-begin-lead" style="width: 100%; margin-top: 4px;">
               ${(project?.memberships || [])
-                .filter((m) => m.memberKind === 'agent' && m.status === 'active')
+                .filter(
+                  (m) =>
+                    m.memberKind === 'agent' &&
+                    m.status === 'active' &&
+                    state.agents.find((agent) => agent.id === m.memberId)?.status === 'active'
+                )
                 .map(
                   (m) => `
                 <option value="${m.memberId}" ${m.memberId === selectedTask.taskLeadId ? 'selected' : ''}>
@@ -364,7 +378,10 @@ function renderTaskDetailPage(
   }
 
   // STAGE 2: Completion Claim Validation Card (when awaiting validation)
-  if (selectedTask.lifecycle === 'awaiting validation' && selectedTask.pendingCompletionClaim) {
+  if (
+    (selectedTask.lifecycle === 'awaiting validation' || selectedTask.lifecycle === 'paused') &&
+    selectedTask.pendingCompletionClaim
+  ) {
     const claim = selectedTask.pendingCompletionClaim;
     const claimCard = document.createElement('div');
     claimCard.className = 'operating-stage-card border-yellow';
@@ -376,12 +393,13 @@ function renderTaskDetailPage(
           ${renderIcon('check', 18)}
           <span>Task Completion Claim Submitted for Human Validation</span>
         </div>
-        <span class="status-pill yellow">Lease Held</span>
+        <span class="status-pill yellow">Lease Held${selectedTask.lifecycle === 'paused' ? ' · Paused' : ''}</span>
       </div>
 
       <div class="stage-body">
         <p style="color: var(--text-secondary);">
-          Lead Agent <strong>${selectedTask.taskLeadId}</strong> submitted a formal completion claim. Human validation is required to accept and authorize safe Task end, or require deliberate correction.
+          Lead Agent <strong>${claim.submittedByLeadId}</strong> submitted a formal completion claim. Human validation is required to accept and authorize safe Task end, or require deliberate correction.
+          ${claim.submittedByLeadId !== selectedTask.taskLeadId ? `<br><span style="font-size: 12px; color: var(--text-muted);">Current Task lead: <strong>${selectedTask.taskLeadId}</strong> (replacement remains subject to current eligibility).</span>` : ''}
         </p>
 
         <div style="background: var(--bg-surface-elevated); padding: 12px; border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 8px;">
@@ -424,7 +442,7 @@ function renderTaskDetailPage(
   }
 
   // STAGE 3: Routable Blocker Card (when blocked)
-  if (selectedTask.lifecycle === 'blocked' && selectedTask.activeBlocker) {
+  if ((selectedTask.lifecycle === 'blocked' || selectedTask.lifecycle === 'paused') && selectedTask.activeBlocker) {
     const blocker = selectedTask.activeBlocker;
     const blockerCard = document.createElement('div');
     blockerCard.className = 'operating-stage-card border-red';
@@ -436,7 +454,7 @@ function renderTaskDetailPage(
           ${renderIcon('alert', 18)}
           <span>Routable Task Blocker</span>
         </div>
-        <span class="status-pill red">Lease Held</span>
+        <span class="status-pill red">Lease Held${selectedTask.lifecycle === 'paused' ? ' · Paused' : ''}</span>
       </div>
 
       <div class="stage-body">
@@ -453,7 +471,11 @@ function renderTaskDetailPage(
 
       <div class="stage-actions">
         <button class="btn btn-primary resolve-blocker-btn">
-          ${renderIcon('check', 14)} Resolve Blocker & Resume Advance →
+          ${
+            selectedTask.lifecycle === 'paused'
+              ? `${renderIcon('check', 14)} Resolve Blocker · Keep Task Paused`
+              : `${renderIcon('check', 14)} Resolve Blocker & Resume Advance →`
+          }
         </button>
       </div>
     `;
@@ -510,7 +532,7 @@ function renderTaskDetailPage(
           'Discard this Task in recovery? Task context will be recycled, lease released, and Project workspace preserved.'
         )
       ) {
-        stateManager.discardTask(selectedTask.id);
+        stateManager.discardOrdinaryRecovery(selectedTask.id);
       }
     });
 
@@ -810,7 +832,10 @@ function renderNewProposalModal(
   modal.className = 'proto-modal-backdrop';
 
   const eligibleAgents = project.memberships.filter(
-    (m) => m.memberKind === 'agent' && m.status === 'active'
+    (membership) =>
+      membership.memberKind === 'agent' &&
+      membership.status === 'active' &&
+      state.agents.find((agent) => agent.id === membership.memberId)?.status === 'active'
   );
 
   modal.innerHTML = `

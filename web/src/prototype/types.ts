@@ -22,6 +22,34 @@ export type AgentWorkOption = {
   isConfigured: boolean;
 };
 
+export type AgentVersionRecord = {
+  version: number;
+  timestamp: string;
+  author: string;
+  changeSummary: string;
+  optionsCount: number;
+  standingInstructions?: string | undefined;
+};
+
+export type AgentAttributionRecord = {
+  id: string;
+  projectName: string;
+  projectId: string;
+  entityKind: 'task_run' | 'message' | 'validation_claim';
+  entityId: string;
+  timestamp: string;
+  configVersionUsed: number;
+  engineUsed: EngineKind;
+  modelUsed: string;
+  effortUsed: string;
+  summary: string;
+};
+
+export type AgentExecutionAttribution = Pick<
+  AgentAttributionRecord,
+  'configVersionUsed' | 'engineUsed' | 'modelUsed' | 'effortUsed'
+>;
+
 export type AgentDefinition = {
   id: string;
   displayName: string;
@@ -31,6 +59,11 @@ export type AgentDefinition = {
   workOptions: AgentWorkOption[];
   status: 'active' | 'archived';
   privateMemoryEntriesCount: number;
+  version?: number | undefined;
+  createdAt?: string | undefined;
+  updatedAt?: string | undefined;
+  versionHistory?: AgentVersionRecord[] | undefined;
+  attributionHistory?: AgentAttributionRecord[] | undefined;
 };
 
 export type ProjectMembership = {
@@ -51,7 +84,18 @@ export type WorkingGroup = {
   goal?: string | undefined;
   rules?: string[] | undefined;
   creatorId: string;
+  /** Current participants while active. Empty while a disbanded group is read-only. */
   memberIds: string[];
+  /** Frozen restore candidates captured when the group is disbanded. */
+  retainedMemberIds?: string[] | undefined;
+  /** Historical participation survives membership end and group restoration. */
+  membershipHistory?:
+    | {
+        memberId: string;
+        joinedAt: string;
+        endedAt?: string | undefined;
+      }[]
+    | undefined;
   status: 'active' | 'disbanded';
   createdAt: string;
 };
@@ -79,6 +123,21 @@ export type MessageItem = {
   timestamp: string;
   content: string;
   disposition: RoutingDisposition;
+  deterministicRoutingOutcomes?:
+    | {
+        targetAgentId: string;
+        targetDisplayName?: string | undefined;
+        status: 'admitted' | 'failed' | 'cancelled';
+        reason: string;
+        terminalResponsibility?:
+          | {
+              kind: 'agent' | 'project';
+              id: string;
+            }
+          | undefined;
+      }[]
+    | undefined;
+  agentAttribution?: AgentExecutionAttribution | undefined;
   isProjectedReply?: boolean | undefined;
   projectedReplyMeta?:
     | {
@@ -121,10 +180,24 @@ export type PrivacyBoundaryManifest = {
 export type ResultingWakeRequestRecord = {
   wakeRequestId: string;
   targetAgentId: string;
-  admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed';
+  /**
+   * Admission is a historical fact.  Keep the legacy `failed` value for
+   * migrated fixtures, but do not use it as the request's complete terminal
+   * state; `terminalStatus` is the durable lifecycle outcome below.
+   */
+  admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed' | 'cancelled' | 'failed-closed';
   linkedRunId?: string | undefined;
   projectedReplyId?: string | undefined;
   failureReason?: string | undefined;
+  terminalResponsibility?: RoutingTerminalResponsibility | undefined;
+  terminalStatus?: 'settled' | 'cancelled' | 'failed-closed' | undefined;
+  terminalReason?: string | undefined;
+  terminalTimestamp?: string | undefined;
+};
+
+export type RoutingTerminalResponsibility = {
+  kind: 'agent' | 'project';
+  id: string;
 };
 
 export type RoutingBatch = {
@@ -156,6 +229,7 @@ export type RoutingBatch = {
   resultingWakeRequestIds: string[];
   resultingWakeRequests?: ResultingWakeRequestRecord[] | undefined;
   failureReason?: string | undefined;
+  terminalResponsibility?: RoutingTerminalResponsibility | undefined;
 };
 
 export type TaskLifecycleState =
@@ -230,6 +304,7 @@ export type NestedAgentRun = {
   engine: EngineKind;
   workModel: string;
   effort: string;
+  agentConfigVersionUsed: number;
   contentVersionUsed: number;
   lifecycle: AgentRunLifecycleState;
   startedAt: string;
@@ -404,6 +479,19 @@ export type ProjectItem = {
   }[];
   workingGroups: WorkingGroup[];
   status: 'active' | 'archived';
+  compatibilityHistory?:
+    | {
+        evaluatedAt: string;
+        trigger: 'restore';
+        status: 'ready' | 'unavailable';
+        summary: string;
+        environments: {
+          environmentId: string;
+          status: 'compatible' | 'unavailable';
+          reason: string;
+        }[];
+      }[]
+    | undefined;
 };
 
 export type UsageActivityKind = 'agent_run' | 'routing_attempt';

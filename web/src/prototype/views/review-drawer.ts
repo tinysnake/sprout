@@ -22,6 +22,47 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
     </div>
 
     <div class="review-drawer-content">
+      <!-- Ticket #66 Acceptance Verification Checklist -->
+      <div class="review-card">
+        <h4 class="review-section-title" style="color: var(--accent-primary);">
+          ${renderIcon('check', 16)} Ticket #66 Acceptance Criteria Verification (Agent Identity & Work Options)
+        </h4>
+        <div class="review-checklist">
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Portable Agent Identity & Standing Instructions:</strong> Agent is defined independently of any Project or Environment; requires a stable identity, non-empty display name, and at least one ordered work option; optional standing instructions and description.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Ordered Work Options & Run Admission Fallback:</strong> Work options specify engine (Codex, Pi, agy, opencode), work model, and effort; evaluated in strict priority order at run admission to select the first available option.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Pre-Acceptance Fallback vs No-Silent-Replay Guarantee (ADR-0008):</strong> Fallback between options occurs strictly before an engine accepts the run; once accepted, later failures are reported directly rather than silently replaying work through lower-priority options.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Project Membership & Responsibility Separation:</strong> Project membership references global Agent identity, adding project-scoped responsibilities and collaboration instructions; ending membership stops new runs/messages without erasing historical attribution.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Strict Privacy Boundary & Neutral Host Facts:</strong> No host credentials, API keys, private keys, or absolute user home paths (/Users/..., C:\\Users\\...) appear in Agent identity; displays neutral relative paths and public engine auth facts.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Non-Destructive Archive & Historical Attribution:</strong> Archiving bars new runs and memberships while preserving private memory, past messages, task records, and session slots; safety guard prevents archiving an Agent leading an unfinished Task.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Phone & Desktop Responsive Parity & State Matrix:</strong> 100% interactive parity across 390px mobile viewport (drill-down & top back nav) and desktop split-pane layout, covering Healthy/Ready, Attention/Degraded, Unavailable, Empty, and Archived states.</span>
+          </label>
+          <label class="review-check-item">
+            <input type="checkbox" checked disabled />
+            <span><strong>Retained Artifact:</strong> Documented in <code>docs/prototype-agent-identity.md</code> and verified with DOM tests in <code>web/src/prototype/agents.dom.test.ts</code>.</span>
+          </label>
+        </div>
+      </div>
+
       <!-- Ticket #65 Acceptance Verification Checklist -->
       <div class="review-card">
         <h4 class="review-section-title" style="color: var(--accent-primary);">
@@ -185,7 +226,16 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Host Credential & Path Isolation:</strong> Engine API keys, private keys, and host filesystem absolute paths remain on the host; Web operates with neutral relative paths and public fingerprints.
           </li>
           <li>
-            <strong>Non-Destructive Archive & Security Unenrollment:</strong> Archiving preserves enrollment and history while barring new project bindings; unenrollment revokes worker identity. Both operations require that no active lease is held.
+            <strong>Portable Agent Identity Independent of Project & Environment (ADR-0008):</strong> Agents are global, portable definitions that can be assigned to multiple projects and run on heterogeneous environments without copying or embedding host paths/secrets.
+          </li>
+          <li>
+            <strong>Ordered Execution Preferences & Pre-Acceptance Fallback (ADR-0008):</strong> Work options (engine, model, effort) are evaluated at run admission; Sprout takes the first available option. Fallback occurs only before run acceptance.
+          </li>
+          <li>
+            <strong>Post-Acceptance No-Silent-Replay Guarantee (ADR-0008):</strong> Once an engine accepts a run, tool invocations may produce irreversible side effects; later failures are surfaced directly rather than silently replayed through lower-priority options.
+          </li>
+          <li>
+            <strong>Non-Destructive Agent Archiving (ADR-0008):</strong> Archiving an Agent preserves all private memory, past messages, task records, and session slots for permanent attribution, while barring new work. Restoring re-enables active assignment.
           </li>
         </ul>
       </div>
@@ -245,7 +295,19 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Preempting Active Clean Leases with Force Release:</strong> Rejected in ADR-0009; Force Release is strictly barred on clean active leases and is accessible only when an environment is in recovery.
           </li>
           <li>
-            <strong>Top Control Bar Space-Occupying Candidate Dropdowns:</strong> Rejected per owner review (<code>top-state-matrix-select</code>, <code>top-layout-select</code>, <code>scenario-jumper</code>); prototype top bar is streamlined to essential viewports and baseline controls, while underlying state matrices, scenario definitions, and backend requirements are fully preserved for downstream production implementation.
+            <strong>Automatic Post-Acceptance Fallback & Silent Replay:</strong> Rejected in ADR-0008; tools may produce irreversible host side-effects (git commits, file mutations, network requests); execution failures after engine acceptance must be reported as errors.
+          </li>
+          <li>
+            <strong>Binding Agents Directly to Specific Environments or Projects:</strong> Rejected in ADR-0008; violates the core portable worker identity boundary.
+          </li>
+          <li>
+            <strong>Hard Deletion of Archived Agents:</strong> Rejected in ADR-0008; would destroy historical Message, Task run, and cost attribution records.
+          </li>
+          <li>
+            <strong>Storing Host Credentials or Absolute Paths in Agent Identity:</strong> Rejected in ADR-0008; violates security and breaks portability across machines.
+          </li>
+          <li>
+            <strong>Allowing Agents with Zero Work Options:</strong> Rejected in ADR-0008; an Agent must have at least one ordered work option.
           </li>
         </ul>
       </div>
@@ -270,6 +332,12 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           </li>
           <li>
             <strong>Cross-Environment Task Migration:</strong> Moving an in-progress Task across environments is deferred post-M2; Task begin binds the Task to one Environment instance for its entire lifecycle.
+          </li>
+          <li>
+            <strong>Feed Visibility for Degraded Agents (#66 Fog):</strong> When an engine or model is degraded across all enrolled environments, whether the Agent should surface in cross-project Feed attention or remain scoped to Manage &gt; Agents.
+          </li>
+          <li>
+            <strong>Private Memory Operator Management (#66 Fog):</strong> Whether the Local Operator should be able to inspect or clear Agent private-memory entries in M2, or whether memory lifecycle remains engine-native and read-only.
           </li>
         </ul>
       </div>

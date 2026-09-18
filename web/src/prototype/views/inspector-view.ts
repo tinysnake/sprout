@@ -1,5 +1,5 @@
 import { renderIcon } from '../icons.js';
-import { stateManager, type PrototypeState } from '../state.js';
+import { getWakeRequestDisplayStatus, stateManager, type PrototypeState } from '../state.js';
 
 export function renderInspectorSheet(state: PrototypeState): HTMLElement | null {
   if (!state.inspectorSheet.isOpen || state.inspectorSheet.kind === 'none') {
@@ -43,6 +43,8 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
           <div><strong>Collection Window:</strong> ${batch?.openedAt} → ${batch?.closedAt} (${batch?.collectionWindowDurationSec ?? 30}s fixed window)</div>
           <div><strong>Wake Evaluation Model:</strong> <code>${batch?.wakeModel ?? 'gpt-4o-mini'}</code> (Attempt ${batch?.attemptsCount ?? 1} of 2)</div>
           <div><strong>Inputs in Batch:</strong> ${batch?.inputMessageIds.map((id) => `<code>${id}</code>`).join(', ') ?? 'none'}</div>
+          ${batch?.failureReason ? `<div style="color: var(--red-action);"><strong>Terminal outcome:</strong> ${batch.failureReason}</div>` : ''}
+          ${batch?.terminalResponsibility ? `<div><strong>Responsible ${batch.terminalResponsibility.kind}:</strong> <code>${batch.terminalResponsibility.id}</code></div>` : ''}
         </div>
 
         <!-- 2. Frozen Context Bounds & Privacy Exclusions -->
@@ -121,19 +123,25 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
             ? `<div style="display: flex; flex-direction: column; gap: 6px;">
                 <h4 style="font-size: 13px; font-weight: 700;">Resulting WakeRequest & Admission</h4>
                 ${batch.resultingWakeRequests
-                  .map(
-                    (w) => `
+                  .map((w) => {
+                    const status = getWakeRequestDisplayStatus(w);
+                    const statusClass = status === 'settled' ? 'green' : status === 'failed' || status === 'cancelled' || status === 'failed-closed' ? 'red' : 'yellow';
+                    return `
                   <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); font-size: 12px; border: 1px solid var(--border-subtle);">
                     <div style="display: flex; justify-content: space-between;">
                       <strong>WakeRequest: <code>${w.wakeRequestId}</code></strong>
-                      <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
+                      <span class="status-pill ${statusClass}" style="font-size: 9px;">${status}</span>
                     </div>
                     <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
                       Target: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                     </div>
+                    ${w.failureReason ? `<div style="font-size: 10px; color: var(--red-action); margin-top: 2px;">${w.failureReason}</div>` : ''}
+                    ${w.terminalReason ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Terminal reason:</strong> ${w.terminalReason}</div>` : ''}
+                    ${w.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Responsible ${w.terminalResponsibility.kind}:</strong> <code>${w.terminalResponsibility.id}</code></div>` : ''}
+                    ${w.terminalTimestamp ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Terminal at:</strong> <code>${w.terminalTimestamp}</code></div>` : ''}
                   </div>
-                `
-                  )
+                `;
+                  })
                   .join('')}
               </div>`
             : ''
