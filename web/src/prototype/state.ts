@@ -130,10 +130,16 @@ export function checkEnvironmentEligibility(env: EnvironmentInstance): Environme
       reason: `Protocol incompatible: ${env.protocolMismatchDetail || `worker protocol ${env.protocolVersion} is incompatible`}.`,
     };
   }
+  if (env.leaseRecovery) {
+    return {
+      isEligible: false,
+      reason: 'Work safety blocked: unresolved lease-recovery evidence is still attached to this Environment.',
+    };
+  }
   if (env.workSafety !== 'clear') {
     return {
       isEligible: false,
-      reason: `Work safety blocked: Environment is in ${env.workSafety} state (${env.leaseRecovery?.cause || 'lease recovery required'}).`,
+      reason: `Work safety blocked: Environment is in ${env.workSafety} state (lease recovery required).`,
     };
   }
   if (env.capabilityPermissions && env.capabilityPermissions.processExecution === false) {
@@ -3728,6 +3734,10 @@ class StateManager {
       this.notify(`Cannot ${action} Task #${task.id}: its routable blocker is still unresolved.`);
       return false;
     }
+    if (task.agentRunLifecycle === 'running' || task.activeRunId) {
+      this.notify(`Cannot ${action} Task #${task.id}: an active run must settle before active advancement resumes.`);
+      return false;
+    }
     if (task.leaseLifecycle !== 'held') {
       this.notify(`Cannot ${action} Task #${task.id}: only the normal Task begin or recovery boundary may establish a held lease.`);
       return false;
@@ -3735,9 +3745,129 @@ class StateManager {
     return true;
   }
 
+  /**
+   * Check the Task-held resource boundary before changing lifecycle state.
+   *
+   * The prototype keeps the Task lease and the Environment projection as two
+   * durable facts.  A lifecycle action that releases or recovers a lease must
+   * therefore validate both facts instead of trusting the button that called
+   * it.  The non-release controls intentionally do not require the seeded
+   * Environment projection's holder id: older prototype fixtures can show more
+   * than one Task's historical held lease on the same host. Recovery and
+   * emergency release always require an exact Task-held match; normal end
+   * preserves a different current holder rather than releasing it.
+   */
+  private checkTaskLease(
+    task: TaskItem,
+    action: string,
+    expected: 'held' | 'recovering',
+    requireHolderMatch: boolean
+  ): { success: true; env: EnvironmentInstance } | { success: false; reason: string } {
+    if (task.leaseLifecycle !== expected) {
+      return {
+        success: false,
+        reason: `Cannot ${action} Task #${task.id}: Task lease is ${task.leaseLifecycle}, expected ${expected}.`,
+      };
+    }
+    if (!task.selectedEnvironmentId) {
+      return { success: false, reason: `Cannot ${action} Task #${task.id}: no bound Environment lease exists.` };
+    }
+    const env = this.state.environments.find((candidate) => candidate.id === task.selectedEnvironmentId);
+    if (!env) {
+      return { success: false, reason: `Cannot ${action} Task #${task.id}: bound Environment is unavailable.` };
+    }
+    if (expected === 'held' && (env.workSafety === 'recovery' || env.leaseRecovery)) {
+      return {
+        success: false,
+        reason: `Cannot ${action} Task #${task.id}: Environment ${env.id} still has unresolved lease-recovery evidence.`,
+      };
+    }
+    if (expected === 'recovering' && (env.workSafety !== 'recovery' || !env.leaseRecovery)) {
+      return {
+        success: false,
+        reason: `Cannot ${action} Task #${task.id}: matching Environment lease recovery evidence is required.`,
+      };
+    }
+    if (requireHolderMatch && (
+      env.activeLeaseHolder?.holderKind !== 'task' ||
+      env.activeLeaseHolder.holderId !== task.id ||
+      env.activeLeaseHolder.projectId !== task.projectId
+    )) {
+      return {
+        success: false,
+        reason: `Cannot ${action} Task #${task.id}: Environment ${env.id} is not held by this Task.`,
+      };
+    }
+    return { success: true, env };
+  }
+
+  /** Stop every still-running nested run before a terminal Task transition. */
+  private stopTaskRuns(task: TaskItem, reason: string): { success: true } | { success: false; reason: string } {
+    const runningRuns = task.runs.filter((run) => run.lifecycle === 'running');
+    if (task.agentRunLifecycle === 'running' && runningRuns.length === 0) {
+      return {
+        success: false,
+        reason: `Cannot end Task #${task.id}: the active run fact has no running run record to settle.`,
+      };
+    }
+
+    for (const run of runningRuns) {
+      run.lifecycle = 'stopped';
+      run.settledAt = 'Just now';
+      run.stopRequestedBy = reason;
+      run.events.push({ time: 'Just now', kind: 'status_change', summary: `${reason} settled the active run before Task end.` });
+    }
+    if (runningRuns.length > 0 || task.agentRunLifecycle === 'running') {
+      task.agentRunLifecycle = 'stopped';
+    }
+    delete task.activeRunId;
+    return { success: true };
+  }
+
+  /**
+   * Complete the safe Task-end boundary after its lease and run checks pass.
+   * This is the only normal cancellation/completion path that clears an
+   * Environment lease projection or lease-recovery evidence.
+   */
+  private completeTaskEnd(
+    task: TaskItem,
+    terminal: 'completed' | 'cancelled',
+    env: EnvironmentInstance
+  ) {
+    task.lifecycle = terminal;
+    task.agentRunLifecycle = 'none';
+    task.leaseLifecycle = 'released';
+    delete task.activeRunId;
+    delete task.pendingCompletionClaim;
+    delete task.activeBlocker;
+    delete task.recoveryReason;
+
+    const ownsEnvironmentProjection =
+      env.activeLeaseHolder?.holderKind === 'task' &&
+      env.activeLeaseHolder.holderId === task.id &&
+      env.activeLeaseHolder.projectId === task.projectId;
+    if (ownsEnvironmentProjection) {
+      delete env.activeLeaseHolder;
+      // Safe Task end is the lease/recovery boundary: no stale recovery
+      // marker may survive a terminal Task with a released Environment.
+      delete env.leaseRecovery;
+      env.workSafety = 'clear';
+      env.trafficLight = 'green';
+      env.trafficLightReason = terminal === 'completed'
+        ? 'Task completed cleanly · Scratch context recycled by worker · Lease released'
+        : 'Task discarded cleanly · Scratch context recycled by worker · Lease released';
+    }
+    this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== task.id);
+  }
+
   public approveAndBeginProposal(taskId: string, environmentId: string, leadAgentId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'proposed') return { success: false, reason: 'Task proposal is unavailable.' };
+    if (task.leaseLifecycle !== 'none' || task.agentRunLifecycle !== 'none' || task.activeRunId) {
+      const reason = `Cannot approve & begin Task #${taskId}: proposal contains an unexpected lease or run fact.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
     const admission = this.evaluateTaskAdmission(taskId, environmentId, leadAgentId);
     const selectedOption = admission.selectedOption;
@@ -3791,48 +3921,127 @@ class StateManager {
     return { success: true };
   }
 
-  public pauseTask(taskId: string) {
+  public pauseTask(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+
+    if (task.lifecycle === 'Task pause requested' || task.lifecycle === 'paused') {
+      const leaseCheck = this.checkTaskLease(task, 'pause', 'held', false);
+      if (!leaseCheck.success) {
+        this.notify(leaseCheck.reason);
+        return leaseCheck;
+      }
+      if (task.lifecycle === 'Task pause requested') {
+        const activeRun = task.activeRunId
+          ? task.runs.find((run) => run.id === task.activeRunId)
+          : undefined;
+        if (task.agentRunLifecycle !== 'running' || !activeRun || activeRun.lifecycle !== 'running') {
+          const reason = `Cannot pause Task #${taskId}: pause-requested state has no coherent active run.`;
+          this.notify(reason);
+          return { success: false, reason };
+        }
+      } else if (task.agentRunLifecycle === 'running' || task.activeRunId) {
+        const reason = `Cannot pause Task #${taskId}: paused state cannot retain an active run.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      return { success: true };
+    }
+    if (task.lifecycle !== 'active') {
+      const reason = `Cannot pause Task #${taskId}: only an active Task with a held lease may be paused.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    const leaseCheck = this.checkTaskLease(task, 'pause', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
 
     if (task.agentRunLifecycle === 'running') {
+      const activeRun = task.activeRunId
+        ? task.runs.find((run) => run.id === task.activeRunId)
+        : undefined;
+      if (!activeRun || activeRun.lifecycle !== 'running') {
+        const reason = `Cannot pause Task #${taskId}: active run state is inconsistent and cannot be placed on hold.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
       // Stage 1: Pause requested (admission hold: current run finishes naturally)
       task.lifecycle = 'Task pause requested';
       this.notify(`Requested pause for Task #${taskId}: admission hold active; active run settling.`);
     } else {
+      if (task.activeRunId) delete task.activeRunId;
       task.lifecycle = 'paused';
       this.notify(`Paused Task #${taskId}. Lease remains held.`);
     }
+    return { success: true };
   }
 
-  public interruptActiveRun(taskId: string) {
+  public interruptActiveRun(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task || !task.activeRunId) return;
-
-    const run = task.runs.find((r) => r.id === task.activeRunId);
-    if (run && run.lifecycle === 'running') {
-      run.lifecycle = 'stopped';
-      run.settledAt = 'Just now';
-      run.stopRequestedBy = 'Operator (Human Interrupt)';
-      run.events.push({ time: 'Just now', kind: 'status_change', summary: 'Run intentionally stopped by Human Interrupt.' });
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (task.lifecycle !== 'active' && task.lifecycle !== 'Task pause requested') {
+      const reason = `Cannot interrupt Task #${taskId}: no active Task run may be interrupted from ${task.lifecycle}.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'interrupt', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    if (!task.activeRunId) {
+      const reason = `Cannot interrupt Task #${taskId}: no active run is recorded.`;
+      this.notify(reason);
+      return { success: false, reason };
     }
 
+    const run = task.runs.find((r) => r.id === task.activeRunId);
+    if (!run || run.lifecycle !== 'running') {
+      const reason = `Cannot interrupt Task #${taskId}: active run record is not running.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    run.lifecycle = 'stopped';
+    run.settledAt = 'Just now';
+    run.stopRequestedBy = 'Operator (Human Interrupt)';
+    run.events.push({ time: 'Just now', kind: 'status_change', summary: 'Run intentionally stopped by Human Interrupt.' });
     task.agentRunLifecycle = 'stopped';
     task.lifecycle = 'paused';
     delete task.activeRunId;
 
     this.notify(`Interrupted active run in Task #${taskId}. Run stopped; Task paused; Lease retained.`);
+    return { success: true };
   }
 
-  public resumeTask(taskId: string) {
+  public resumeTask(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (task.lifecycle !== 'paused') {
+      const reason = `Cannot resume Task #${taskId}: only a paused Task may resume deliberate advancement.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'resume', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    if (task.activeRunId || task.agentRunLifecycle === 'running') {
+      const reason = `Cannot resume Task #${taskId}: an active run must settle before Task resume.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
-    if (!this.canReturnTaskToActive(task, 'resume')) return;
+    if (!this.canReturnTaskToActive(task, 'resume')) return { success: false, reason: 'Task remains blocked.' };
 
     task.lifecycle = 'active';
     task.agentRunLifecycle = 'none';
     this.notify(`Resumed Task #${taskId} to active deliberate advancement. Lease held.`);
+    return { success: true };
   }
 
   public updateTaskContentVersion(
@@ -3845,6 +4054,30 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return { success: false, reason: 'Task not found.' };
+    if (task.lifecycle === 'completed' || task.lifecycle === 'cancelled' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
+      const reason = `Cannot revise completed Task #${taskId}: terminal Task content is immutable.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.lifecycle === 'proposed') {
+      if (task.leaseLifecycle !== 'none' || task.agentRunLifecycle !== 'none' || task.activeRunId) {
+        const reason = `Cannot revise Task proposal #${taskId}: proposal contains an unexpected lease or run fact.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+    } else if (task.lifecycle === 'recovery' || task.leaseLifecycle === 'recovering') {
+      const leaseCheck = this.checkTaskLease(task, 'revise Task content', 'recovering', true);
+      if (!leaseCheck.success) {
+        this.notify(leaseCheck.reason);
+        return leaseCheck;
+      }
+    } else {
+      const leaseCheck = this.checkTaskLease(task, 'revise Task content', 'held', false);
+      if (!leaseCheck.success) {
+        this.notify(leaseCheck.reason);
+        return leaseCheck;
+      }
+    }
     const leadEligibility = this.evaluateTaskLeadEligibility(task, newLeadId);
     if (!leadEligibility.success) {
       const reason = `Cannot revise Task responsibility: lead "${newLeadId}" must be an active global Agent with current active Project membership. Existing content and lead remain unchanged.`;
@@ -3882,19 +4115,30 @@ class StateManager {
     return { success: true };
   }
 
-  public resolveBlocker(taskId: string) {
+  public resolveBlocker(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task || !task.activeBlocker) return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (!task.activeBlocker) return { success: false, reason: 'Task has no active blocker.' };
     if (task.lifecycle === 'proposed') {
       this.notify(`Cannot clear proposal blocker for Task #${taskId} without selecting an eligible lead. Proposal still holds no lease and admits no run.`);
-      return;
+      return { success: false, reason: 'Task proposal blockers require Human lead/content revision.' };
+    }
+    if (task.lifecycle !== 'blocked') {
+      const reason = `Cannot resolve blocker on Task #${taskId}: Task lifecycle is ${task.lifecycle}, not blocked.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'resolve blocker', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
     }
 
     const leadEligibility = this.evaluateTaskLeadEligibility(task);
     if (!leadEligibility.success) {
       this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
       this.notify(`Cannot resolve blocker on Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`);
-      return;
+      return { success: false, reason: leadEligibility.reason ?? 'Task lead is unavailable.' };
     }
     if (task.activeBlocker.id.startsWith('blocker-lead-')) {
       this.keepTaskBlockedForLeadSelection(
@@ -3902,11 +4146,7 @@ class StateManager {
         'Task lead responsibility must be confirmed by a Human through Task content revision.'
       );
       this.notify(`Cannot clear lead blocker on Task #${taskId} generically. Human replacement/content revision must select an eligible lead.`);
-      return;
-    }
-    if (task.leaseLifecycle !== 'held') {
-      this.notify(`Cannot resolve blocker on Task #${taskId}: no held Task lease exists. Use the normal Task begin or recovery boundary.`);
-      return;
+      return { success: false, reason: 'Human lead replacement/content revision is required.' };
     }
 
     delete task.activeBlocker;
@@ -3914,42 +4154,80 @@ class StateManager {
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
 
     this.notify(`Resolved blocker on Task #${taskId}. Returned to active advancement.`);
+    return { success: true };
   }
 
-  public validateTaskCompletion(taskId: string, decision: 'accept' | 'require_correction', correctionNotes?: string) {
+  public validateTaskCompletion(
+    taskId: string,
+    decision: 'accept' | 'require_correction',
+    correctionNotes?: string
+  ): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task || !task.pendingCompletionClaim) return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (!task.pendingCompletionClaim) return { success: false, reason: 'Task has no pending completion claim.' };
+
+    // Validation is state-authoritative. A stale claim cannot end a blocked,
+    // proposed, recovering, or otherwise ineligible Task merely because the
+    // claim object survived a later membership change.
+    const leadEligibility = this.evaluateTaskLeadEligibility(task);
+    if (!leadEligibility.success) {
+      if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'cancelled') {
+        this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
+      }
+      const reason = `Cannot validate Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.lifecycle !== 'awaiting validation') {
+      const reason = `Cannot validate Task #${taskId}: current Task lifecycle is ${task.lifecycle}; awaiting validation is required.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.pendingCompletionClaim.submittedByLeadId !== task.taskLeadId) {
+      const reason = `Cannot validate Task #${taskId}: completion claim attribution does not match the current Task lead.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.pendingCompletionClaim.contentVersion !== task.currentVersion.version) {
+      const reason = `Cannot validate Task #${taskId}: completion claim targets an old Task content version.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'validate completion', 'held', true);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+
+    if (task.agentRunLifecycle === 'running') {
+      const reason = `Cannot validate Task #${taskId}: active run ${task.activeRunId ?? 'unknown'} must settle before validation.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.activeRunId) {
+      const historicalRun = task.runs.find((run) => run.id === task.activeRunId);
+      if (!historicalRun || historicalRun.lifecycle === 'running') {
+        const reason = `Cannot validate Task #${taskId}: active run pointer is not settled.`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+    }
 
     if (decision === 'accept') {
-      task.lifecycle = 'completed';
-      task.agentRunLifecycle = 'none';
-      task.leaseLifecycle = 'released';
-      delete task.pendingCompletionClaim;
-      this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
-
-      // Release environment lease
-      if (task.selectedEnvironmentId) {
-        const env = this.state.environments.find((e) => e.id === task.selectedEnvironmentId);
-        if (env && env.activeLeaseHolder?.holderId === task.id) {
-          delete env.activeLeaseHolder;
-          env.workSafety = 'clear';
-          env.trafficLight = 'green';
-          env.trafficLightReason = 'Ready for work · All capabilities permitted';
-        }
-      }
-
+      this.completeTaskEnd(task, 'completed', leaseCheck.env);
       this.notify(`Accepted Task #${taskId} completion claim! Task context recycled, lease safely released, Task completed.`);
+      return { success: true };
     } else {
       const admission = this.evaluateTaskAdmission(task.id, task.selectedEnvironmentId || '', task.taskLeadId);
       const selectedOption = admission.selectedOption;
       if (!selectedOption) {
-        this.notify(
-          `Cannot require correction for Task #${taskId}: ${admission.rejectionReason || admission.envIneligibilityReason || 'no compatible configured work option is available.'}`
-        );
-        return;
+        const reason = admission.rejectionReason || admission.envIneligibilityReason || 'no compatible configured work option is available.';
+        this.notify(`Cannot require correction for Task #${taskId}: ${reason}`);
+        return { success: false, reason };
       }
       task.lifecycle = 'active';
       delete task.pendingCompletionClaim;
+      delete task.activeRunId;
       this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
 
       // Add a note to history
@@ -3974,31 +4252,46 @@ class StateManager {
       task.agentRunLifecycle = 'running';
 
       this.notify(`Required correction on Task #${taskId}. Retained Environment lease, started deliberate correction advance.`);
+      return { success: true };
     }
   }
 
-  public discardTask(taskId: string) {
+  public discardTask(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
-
-    task.lifecycle = 'cancelled';
-    task.agentRunLifecycle = 'none';
-    task.leaseLifecycle = 'released';
-    delete task.activeRunId;
-    delete task.pendingCompletionClaim;
-    delete task.activeBlocker;
-    this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
-
-    if (task.selectedEnvironmentId) {
-      const env = this.state.environments.find((e) => e.id === task.selectedEnvironmentId);
-      if (env && env.activeLeaseHolder?.holderId === task.id) {
-        delete env.activeLeaseHolder;
-        env.workSafety = 'clear';
-        env.trafficLight = 'green';
-      }
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (task.lifecycle === 'cancelled') return { success: true };
+    if (task.lifecycle === 'completed' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
+      const reason = `Cannot discard Task #${taskId}: terminal Task lifecycle is ${task.lifecycle}.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.lifecycle === 'proposed') {
+      const reason = `Cannot discard proposed Task #${taskId}: withdraw or reject the proposal without pretending it held a lease.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (task.lifecycle === 'recovery' || task.leaseLifecycle === 'recovering') {
+      return this.discardOrdinaryRecovery(taskId);
     }
 
+    if (!['active', 'Task pause requested', 'paused', 'blocked', 'awaiting validation'].includes(task.lifecycle)) {
+      const reason = `Cannot discard Task #${taskId}: lifecycle ${task.lifecycle} is not a safe Task-end state.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'discard', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    const runStop = this.stopTaskRuns(task, 'Operator (Human Discard)');
+    if (!runStop.success) {
+      this.notify(runStop.reason);
+      return runStop;
+    }
+    this.completeTaskEnd(task, 'cancelled', leaseCheck.env);
     this.notify(`Discarded Task #${taskId}. Safe Task end completed: scratch context recycled, lease released, Project workspace preserved.`);
+    return { success: true };
   }
 
   // --- Recovery & Force Release Actions (ADR-0006, ADR-0009) ---
@@ -4007,13 +4300,38 @@ class StateManager {
     const env = this.state.environments.find((e) => e.id === envId);
     if (!env) return;
 
+    // Prefer the Task with an actual running turn when several historical
+    // held-lease fixtures point at the same Environment. A disconnect must
+    // record the run that was interrupted rather than a hard-coded fixture
+    // id, and the run must no longer remain falsely runnable in recovery.
+    const heldTasks = this.state.tasks.filter(
+      (candidate) => candidate.selectedEnvironmentId === envId && candidate.leaseLifecycle === 'held'
+    );
+    const projectedTask = heldTasks.find(
+      (candidate) =>
+        env.activeLeaseHolder?.holderKind === 'task' &&
+        env.activeLeaseHolder.holderId === candidate.id &&
+        env.activeLeaseHolder.projectId === candidate.projectId
+    );
+    const task = projectedTask ?? heldTasks.find(
+      (candidate) =>
+        candidate.agentRunLifecycle === 'running' || candidate.runs.some((run) => run.lifecycle === 'running')
+    ) ?? heldTasks[0];
+    const activeRun = task
+      ? (task.activeRunId
+        ? task.runs.find((run) => run.id === task.activeRunId && run.lifecycle === 'running') ?? task.runs.find((run) => run.lifecycle === 'running')
+        : task.runs.find((run) => run.lifecycle === 'running'))
+      : undefined;
+    const runningRuns = task?.runs.filter((run) => run.lifecycle === 'running') ?? [];
+
     env.connectionState = 'offline';
     env.trafficLight = 'red';
     env.trafficLightReason = 'Worker connection lost mid-turn · Lease recovery required';
     env.workSafety = 'recovery';
     env.leaseRecovery = {
       cause: 'Carrier TCP connection timed out during active turn execution.',
-      interruptedRunId: 'run-206',
+      interruptedRunId: activeRun?.id,
+      interruptedRunAgent: activeRun?.agentDisplayName,
       unresolvedFacts: [
         'Worker process unreachable over carrier overlay',
         'Engine process status unverified',
@@ -4022,11 +4340,21 @@ class StateManager {
     };
 
     // Mark task in recovery
-    const task = this.state.tasks.find((t) => t.selectedEnvironmentId === envId && t.leaseLifecycle === 'held');
     if (task) {
+      for (const run of runningRuns) {
+        run.lifecycle = 'interrupted';
+        run.settledAt = 'Just now';
+        run.interruptionReason = 'Worker channel lost while the run was executing.';
+        run.events.push({
+          time: 'Just now',
+          kind: 'status_change',
+          summary: 'INTERRUPTED: Worker channel lost; run retained for Human recovery decision.',
+        });
+      }
       task.lifecycle = 'recovery';
       task.agentRunLifecycle = 'interrupted';
       task.leaseLifecycle = 'recovering';
+      delete task.activeRunId;
       task.recoveryReason = 'Host worker channel lost mid-flight.';
     }
 
@@ -4050,9 +4378,26 @@ class StateManager {
     this.notify(`Simulated worker disconnect on ${envId}. Lease locked in recovery; no automatic reassignment.`);
   }
 
-  public resumeOrdinaryRecovery(taskId: string) {
+  public resumeOrdinaryRecovery(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task || task.lifecycle !== 'recovery') return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+    const isRecoveryLifecycle = task.lifecycle === 'recovery' ||
+      (task.lifecycle === 'blocked' && task.leaseLifecycle === 'recovering');
+    if (!isRecoveryLifecycle) {
+      const reason = `Cannot resume ordinary recovery for Task #${taskId}: lifecycle is ${task.lifecycle}.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'resume ordinary recovery', 'recovering', true);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    const runStop = this.stopTaskRuns(task, 'Worker recovery reconciliation');
+    if (!runStop.success) {
+      this.notify(runStop.reason);
+      return runStop;
+    }
 
     task.agentRunLifecycle = 'none';
     task.leaseLifecycle = 'held';
@@ -4072,10 +4417,11 @@ class StateManager {
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
     if (!this.canReturnTaskToActive(task, 'resume recovery for')) {
       this.notify(`Ordinary recovery reconciled Task #${taskId}, but it remains blocked until a Human selects an eligible replacement lead.`);
-      return;
+      return { success: false, reason: 'Task remains blocked pending eligible lead replacement.' };
     }
     task.lifecycle = 'active';
     this.notify(`Ordinary recovery: Resumed Task #${taskId} on same Environment. Interrupted run recorded as history fact.`);
+    return { success: true };
   }
 
   public emergencyForceRelease(
@@ -4083,55 +4429,70 @@ class StateManager {
     taskId: string,
     reason: string,
     acknowledgedRisks: boolean
-  ) {
-    if (!acknowledgedRisks) return;
+  ): { success: boolean; reason?: string } {
+    if (!acknowledgedRisks) return { success: false, reason: 'Risk acknowledgement is required.' };
 
     const env = this.state.environments.find((e) => e.id === envId);
     const task = this.state.tasks.find((t) => t.id === taskId);
-
-    if (task) {
-      task.lifecycle = 'cancelled';
-      task.agentRunLifecycle = 'none';
-      task.leaseLifecycle = 'released';
-      task.forcedReleaseDisposition = {
-        actor: 'Operator (Human Emergency Force Release)',
-        timestamp: new Date().toISOString(),
-        reason,
-        unresolvedFacts: env?.leaseRecovery?.unresolvedFacts ?? ['Unverified host cleanup'],
-        risksAcknowledged: true,
-      };
+    if (!env) return { success: false, reason: `Cannot force release: Environment ${envId} was not found.` };
+    if (!task) return { success: false, reason: `Cannot force release Environment ${envId}: its owning Task was not found.` };
+    if (task.selectedEnvironmentId !== env.id) {
+      const failure = `Cannot force release Environment ${envId}: Task #${taskId} is not bound to this Environment.`;
+      this.notify(failure);
+      return { success: false, reason: failure };
+    }
+    const isRecoveryLifecycle = task.lifecycle === 'recovery' ||
+      (task.lifecycle === 'blocked' && task.leaseLifecycle === 'recovering');
+    if (!isRecoveryLifecycle) {
+      const failure = `Cannot force release Task #${taskId}: only a Task in recovery may use the emergency boundary.`;
+      this.notify(failure);
+      return { success: false, reason: failure };
+    }
+    const leaseCheck = this.checkTaskLease(task, 'force release', 'recovering', true);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    const runStop = this.stopTaskRuns(task, 'Operator (Human Emergency Force Release)');
+    if (!runStop.success) {
+      this.notify(runStop.reason);
+      return runStop;
     }
 
-    if (env) {
-      const unresolvedFacts = env.leaseRecovery?.unresolvedFacts ?? ['Unverified host cleanup'];
-      delete env.activeLeaseHolder;
-      delete env.leaseRecovery;
-      env.workSafety = 'clear';
-      env.trafficLight = 'green';
-      env.trafficLightReason = `Force Released by Operator: "${reason}". Environment reassignable.`;
-      env.forcedReleaseRecord = {
-        actor: 'Operator (Human Emergency Force Release)',
-        timestamp: new Date().toISOString(),
-        reason,
-        unresolvedFacts,
-        risksAcknowledged: true,
-      };
-      env.probeHistory = env.probeHistory || [];
-      env.probeHistory.unshift({
-        id: `pr-fr-${Date.now()}`,
-        timestamp: 'Just now',
-        latencyMs: 0,
-        protocolOk: true,
-        enginesOk: true,
-        capabilitiesOk: true,
-        summary: `EMERGENCY FORCE RELEASE authorized: ${reason}`,
-      });
-    }
+    const unresolvedFacts = [...(env.leaseRecovery?.unresolvedFacts ?? ['Unverified host cleanup'])];
+    const timestamp = new Date().toISOString();
+    task.forcedReleaseDisposition = {
+      actor: 'Operator (Human Emergency Force Release)',
+      timestamp,
+      reason,
+      unresolvedFacts,
+      risksAcknowledged: true,
+    };
+    this.completeTaskEnd(task, 'cancelled', env);
+    env.trafficLightReason = `Force Released by Operator: "${reason}". Environment reassignable.`;
+    env.forcedReleaseRecord = {
+      actor: 'Operator (Human Emergency Force Release)',
+      timestamp,
+      reason,
+      unresolvedFacts,
+      risksAcknowledged: true,
+    };
+    env.probeHistory = env.probeHistory || [];
+    env.probeHistory.unshift({
+      id: `pr-fr-${Date.now()}`,
+      timestamp: 'Just now',
+      latencyMs: 0,
+      protocolOk: true,
+      enginesOk: true,
+      capabilitiesOk: true,
+      summary: `EMERGENCY FORCE RELEASE authorized: ${reason}`,
+    });
 
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId && a.referenceId !== envId);
     this.closeInspector();
 
     this.notify(`EMERGENCY FORCE RELEASE authorized by Operator. Task #${taskId} cancelled with permanent forced release disposition. Environment ${envId} reassignable.`);
+    return { success: true };
   }
 
   // --- Project, Messaging & Routing Actions (ADR-0007, ADR-0008) ---
@@ -5269,6 +5630,10 @@ class StateManager {
   public rejectTaskProposal(taskId: string, reason: string) {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'proposed') return;
+    if (task.leaseLifecycle !== 'none' || task.agentRunLifecycle !== 'none' || task.activeRunId) {
+      this.notify(`Cannot reject Task Proposal #${taskId.replace('task-', '')}: proposal contains an unexpected lease or run fact.`);
+      return;
+    }
 
     task.lifecycle = 'rejected';
     this.notify(`Rejected Task Proposal #${taskId.replace('task-', '')}: ${reason}`);
@@ -5277,6 +5642,15 @@ class StateManager {
   public simulateLeadAutonomousRun(taskId: string, agentId?: string) {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'active' || task.leaseLifecycle !== 'held') return;
+    if (task.agentRunLifecycle === 'running' || task.activeRunId) {
+      this.notify(`Cannot start a sequential run for Task #${taskId}: an active run must settle first.`);
+      return;
+    }
+    const leaseCheck = this.checkTaskLease(task, 'start a sequential run', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return;
+    }
 
     const targetAgentId = agentId || (task.runs.length % 2 === 0 ? 'reviewer' : task.taskLeadId);
     const admission = this.evaluateTaskAdmission(task.id, task.selectedEnvironmentId || '', targetAgentId);
@@ -5344,13 +5718,30 @@ class StateManager {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'active') return;
 
+    const leadEligibility = this.evaluateTaskLeadEligibility(task);
+    if (!leadEligibility.success) {
+      this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
+      this.notify(`Cannot submit completion claim for Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`);
+      return;
+    }
+    const leaseCheck = this.checkTaskLease(task, 'submit completion claim', 'held', false);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return;
+    }
+
     if (task.activeRunId) {
       const run = task.runs.find((r) => r.id === task.activeRunId);
-      if (run) {
-        run.lifecycle = 'completed';
-        run.settledAt = 'Just now';
+      if (!run || run.lifecycle !== 'running') {
+        this.notify(`Cannot submit completion claim for Task #${taskId}: active run pointer is not running.`);
+        return;
       }
+      run.lifecycle = 'completed';
+      run.settledAt = 'Just now';
       delete task.activeRunId;
+    } else if (task.agentRunLifecycle === 'running') {
+      this.notify(`Cannot submit completion claim for Task #${taskId}: active run pointer is missing.`);
+      return;
     }
 
     task.lifecycle = 'awaiting validation';
@@ -5578,28 +5969,30 @@ class StateManager {
     this.notify(`Synchronized evidence for ${env.displayName}. Proved engine stopped; awaiting Human Resume or Discard.`);
   }
 
-  public discardOrdinaryRecovery(taskId: string) {
+  public discardOrdinaryRecovery(taskId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
-
-    task.lifecycle = 'cancelled';
-    task.agentRunLifecycle = 'none';
-    task.leaseLifecycle = 'released';
-    delete task.recoveryReason;
-
-    if (task.selectedEnvironmentId) {
-      const env = this.state.environments.find((e) => e.id === task.selectedEnvironmentId);
-      if (env) {
-        delete env.activeLeaseHolder;
-        delete env.leaseRecovery;
-        env.workSafety = 'clear';
-        env.trafficLight = 'green';
-        env.trafficLightReason = 'Task discarded cleanly · Scratch context recycled by worker · Lease released';
-      }
+    if (!task) return { success: false, reason: 'Task not found.' };
+    if (task.lifecycle === 'cancelled') return { success: true };
+    const isRecoveryLifecycle = task.lifecycle === 'recovery' ||
+      (task.lifecycle === 'blocked' && task.leaseLifecycle === 'recovering');
+    if (!isRecoveryLifecycle) {
+      const reason = `Cannot discard ordinary recovery for Task #${taskId}: lifecycle is ${task.lifecycle}.`;
+      this.notify(reason);
+      return { success: false, reason };
     }
-
-    this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+    const leaseCheck = this.checkTaskLease(task, 'discard ordinary recovery', 'recovering', true);
+    if (!leaseCheck.success) {
+      this.notify(leaseCheck.reason);
+      return leaseCheck;
+    }
+    const runStop = this.stopTaskRuns(task, 'Operator (Human Recovery Discard)');
+    if (!runStop.success) {
+      this.notify(runStop.reason);
+      return runStop;
+    }
+    this.completeTaskEnd(task, 'cancelled', leaseCheck.env);
     this.notify(`Discarded Task #${taskId}. Worker recycled scratch context; Project workspace preserved; Lease released.`);
+    return { success: true };
   }
 
   public simulateRegisterNewPendingHost(platform: 'macos' | 'windows' | 'container' = 'macos') {

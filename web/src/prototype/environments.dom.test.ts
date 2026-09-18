@@ -273,8 +273,10 @@ test('Environments: recovery resolution via Resume vs Discard (safe Task end)', 
 
     assert.equal(task.lifecycle, 'cancelled');
     assert.equal(task.leaseLifecycle, 'released');
+    assert.equal(task.activeRunId, undefined, 'Safe recovery discard clears the active-run pointer');
     assert.equal(env.workSafety, 'clear');
     assert.equal(env.activeLeaseHolder, undefined);
+    assert.equal(env.leaseRecovery, undefined, 'Safe recovery discard clears recovery evidence with the lease');
     assert.equal(env.trafficLight, 'green');
     assert.match(env.trafficLightReason, /Scratch context recycled by worker · Lease released/);
   } finally {
@@ -301,6 +303,21 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     stateManager.selectEnvironment('win-dev-box');
 
     const document = dom.window.document;
+
+    // Force Release is not a generic cancellation escape hatch. A clean,
+    // active-running Task with no matching Environment recovery must remain
+    // untouched.
+    const cleanTask = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-102')!;
+    const rejected = stateManager.emergencyForceRelease(
+      'mac-studio-primary',
+      cleanTask.id,
+      'Mismatched recovery probe',
+      true
+    );
+    assert.equal(rejected.success, false);
+    assert.equal(cleanTask.lifecycle, 'active');
+    assert.equal(cleanTask.agentRunLifecycle, 'running');
+    assert.equal(cleanTask.runs.find((run) => run.id === 'run-205')?.lifecycle, 'running');
 
     // Open Force Release Sheet
     const forceReleaseBtn = document.querySelector('.force-release-btn') as HTMLButtonElement;
@@ -340,6 +357,14 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     typedInput.dispatchEvent(new dom.window.Event('input'));
     assert.equal(confirmBtn.disabled, false, 'Confirm button enabled after typed match');
 
+    // Probe the emergency boundary's stop-before-release ordering with the
+    // recovery fixture's run made active again.
+    const recoveryTask = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-104')!;
+    const recoveryRun = recoveryTask.runs.find((run) => run.id === 'run-206')!;
+    recoveryTask.agentRunLifecycle = 'running';
+    recoveryTask.activeRunId = recoveryRun.id;
+    recoveryRun.lifecycle = 'running';
+
     // Authorize Force Release
     confirmBtn.click();
 
@@ -349,6 +374,8 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
 
     assert.equal(task.lifecycle, 'cancelled');
     assert.equal(task.leaseLifecycle, 'released');
+    assert.equal(task.activeRunId, undefined);
+    assert.equal(task.runs.find((run) => run.id === 'run-206')?.lifecycle, 'stopped', 'Force Release settles an active run first');
     assert.ok(task.forcedReleaseDisposition, 'Task records permanent forced release disposition');
     assert.equal(task.forcedReleaseDisposition.risksAcknowledged, true);
 

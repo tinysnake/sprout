@@ -524,7 +524,7 @@ function renderTaskDetailPage(
           'Discard this Task in recovery? Task context will be recycled, lease released, and Project workspace preserved.'
         )
       ) {
-        stateManager.discardTask(selectedTask.id);
+        stateManager.discardOrdinaryRecovery(selectedTask.id);
       }
     });
 
