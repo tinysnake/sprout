@@ -175,7 +175,7 @@ test('prototype navigates across Feed, Project, Manage, and Primitives with deep
     assert.match(document.querySelector('.manage-content-area')?.textContent ?? '', /Agents & Work Option Preferences/);
 
     (document.querySelector('.sub-nav-tab[data-manage-tab="usage"]') as HTMLButtonElement).click();
-    assert.match(document.querySelector('.manage-content-area')?.textContent ?? '', /Usage & Monetary-Cost Observability/);
+    assert.match(document.querySelector('.manage-content-area')?.textContent ?? '', /Usage & Costs/);
 
     (document.querySelector('.sub-nav-tab[data-manage-tab="settings"]') as HTMLButtonElement).click();
     assert.match(document.querySelector('.manage-content-area')?.textContent ?? '', /General & Operator Settings/);
