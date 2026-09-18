@@ -2380,8 +2380,8 @@ const initialAttentionItems: AttentionItem[] = [
     id: 'att-2',
     severity: 'action_required',
     category: 'task_recovery',
-    title: 'Task #104 in Lease Recovery (Windows Host Offline)',
-    summary: 'Windows worker disconnected during nested Agent run #206. Lease held in recovery; Human action needed in Tasks (Resume, Discard, or Force Release).',
+    title: 'Task #104 in Lease Recovery (Environment Offline)',
+    summary: 'The selected Environment disconnected during nested Agent run #206. The lease remains in recovery; Human action is needed in Tasks (Resume, Discard, or Force Release).',
     projectId: 'proj-minesweeper',
     projectName: 'O7 Minesweeper',
     referenceId: 'task-104',
@@ -2392,7 +2392,7 @@ const initialAttentionItems: AttentionItem[] = [
     targetProjectTab: 'tasks',
     timestamp: '12m ago',
     lifecycleSentence: 'Task recovery · Run interrupted · Lease recovering',
-    attribution: 'Environment worker',
+    attribution: 'Environment recovery',
   },
   {
     id: 'att-3',
@@ -2417,7 +2417,7 @@ const initialAttentionItems: AttentionItem[] = [
     severity: 'attention',
     category: 'env_enrollment',
     title: 'Pending Worker Enrollment: Pending Environment',
-    summary: 'An environment worker connected over private transport and is requesting operator capability approval.',
+    summary: 'An Environment connected over private transport and is requesting operator capability approval.',
     projectId: undefined,
     projectName: 'Infrastructure',
     referenceId: 'env-pending',
@@ -2428,13 +2428,13 @@ const initialAttentionItems: AttentionItem[] = [
     targetManageTab: 'environments',
     timestamp: '5m ago',
     lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-    attribution: 'Environment worker',
+    attribution: 'Environment enrollment',
   },
   {
     id: 'att-5',
     severity: 'attention',
     category: 'env_unhealthy',
-    title: 'Degraded Host: Degraded Environment',
+    title: 'Degraded Environment: Readiness Attention',
     summary: 'Codex engine requires an interactive readiness step. Pi harness ready; GUI automation unavailable.',
     projectId: undefined,
     projectName: 'Infrastructure',
@@ -2445,15 +2445,15 @@ const initialAttentionItems: AttentionItem[] = [
     targetNav: 'manage',
     targetManageTab: 'environments',
     timestamp: '45s ago',
-    lifecycleSentence: 'Host degraded · Codex login required · Clear safety',
-    attribution: 'Environment worker',
+    lifecycleSentence: 'Environment degraded · Codex login required · Clear safety',
+    attribution: 'Environment readiness',
   },
   {
     id: 'att-6',
     severity: 'action_required',
     category: 'env_unhealthy',
     title: 'Protocol Mismatch: Incompatible Environment',
-    summary: 'Worker protocol v1.8 is below required v2.0+. Worker update on host required to admit Tasks.',
+    summary: 'Environment protocol v1.8 is below required v2.0+. A protocol update is required before Tasks can be admitted.',
     projectId: undefined,
     projectName: 'Infrastructure',
     referenceId: 'env-incompatible',
@@ -2464,7 +2464,7 @@ const initialAttentionItems: AttentionItem[] = [
     targetManageTab: 'environments',
     timestamp: '1m ago',
     lifecycleSentence: 'Protocol incompatible · Task admission barred',
-    attribution: 'Environment worker',
+    attribution: 'Environment protocol',
   },
 ];
 
@@ -2493,8 +2493,8 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     relativeTime: '8m ago',
     projectId: 'proj-minesweeper',
     projectName: 'O7 Minesweeper',
-    title: 'Task #102: Designer active turn running on Sound FX Synthesis',
-    subtitle: 'Codex gpt-4o (run-205) executing Web Audio API oscillators on env-ready',
+    title: 'Task #102: Designer active turn running on Responsive HUD & Mobile Touch Controls',
+    subtitle: 'Codex gpt-4o (run-205) implementing mobile touch controls on env-ready',
     badgeKind: 'blue',
     badgeLabel: 'Active Turn',
     actor: { name: "Designer", avatar: "DS", kind: "agent" },
@@ -2510,11 +2510,11 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     relativeTime: '10m ago',
     projectId: undefined,
     projectName: 'Infrastructure',
-    title: 'New Environment Worker Connected',
-    subtitle: 'Private transport · Protocol v1.4 compatible · Requesting enrollment approval',
+    title: 'Pending Environment Connected',
+    subtitle: 'Private transport · Protocol v2.1 compatible · Requesting enrollment approval',
     badgeKind: 'yellow',
     badgeLabel: 'Enrollment',
-    actor: { name: "Pending Environment", avatar: "MB", kind: "worker" },
+    actor: { name: "Environment", avatar: "EN", kind: "worker" },
     targetNav: 'manage',
     targetManageTab: 'environments',
     targetEntityId: 'env-pending',
@@ -2541,11 +2541,11 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     relativeTime: '17m ago',
     projectId: undefined,
     projectName: 'Infrastructure',
-    title: 'Environment Worker heartbeat timed out',
-    subtitle: 'Missed 4 consecutive heartbeat cycles · Task #104 lease placed in recovery',
+    title: 'Environment heartbeat timed out',
+    subtitle: 'Missed 4 consecutive heartbeat cycles · Task #104 lease remains in recovery',
     badgeKind: 'red',
     badgeLabel: 'Degraded',
-    actor: { name: "Environment worker", avatar: "WN", kind: "system" },
+    actor: { name: "Environment", avatar: "EN", kind: "system" },
     targetNav: 'manage',
     targetManageTab: 'environments',
     targetEntityId: 'env-recovery',
@@ -2558,7 +2558,7 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     projectId: 'proj-minesweeper',
     projectName: 'O7 Minesweeper',
     title: 'Wake-Model Assisted Routing Batch #002 settled',
-    subtitle: 'Woke 2 recipients (Programmer, Designer) · Frozen context 1,420 tokens',
+    subtitle: 'Woke 1 recipient (Designer) · Frozen context 1,840 tokens',
     badgeKind: 'green',
     badgeLabel: 'Routing',
     actor: { name: "Wake Model", avatar: "WM", kind: "system" },
@@ -3064,7 +3064,10 @@ class StateManager {
       this.state.selectedTaskId = target.taskId;
       this.state.taskViewMode = 'detail';
     }
-    if (target.envId) this.state.selectedEnvironmentId = target.envId;
+    if (target.envId) {
+      this.state.selectedEnvironmentId = target.envId;
+      this.state.environmentViewMode = 'detail';
+    }
     if (target.agentId) this.state.selectedAgentId = target.agentId;
     this.setPrimaryNav(target.nav, target.projectTab, target.manageTab);
     this.notify(`Deep-linked to ${target.nav} with return context from ${fromLabel}`);
@@ -3223,7 +3226,7 @@ class StateManager {
     this.state.feedStatePreset = preset;
     let attentionItems: AttentionItem[] = [...initialAttentionItems];
     let activeTaskIds: string[] = ['task-102'];
-    let degradedEnvironmentIds: string[] = ['win-dev-box', 'mac-laptop-pending'];
+    let degradedEnvironmentIds: string[] = ['env-recovery', 'env-pending'];
     let logMessage = '';
 
     // Feed presets are review fixtures, not lifecycle commands. Keep them in
@@ -3253,10 +3256,10 @@ class StateManager {
             id: 'att-stale-1',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Stale Heartbeat on mac-studio-primary',
-            summary: 'Heartbeat overdue by 14 minutes. Environment telemetry unconfirmed; agent runs may be proceeding without status confirmation.',
+            title: 'Stale Environment Telemetry',
+            summary: 'Heartbeat overdue by 14 minutes. Environment telemetry is unconfirmed; Agent runs may be proceeding without status confirmation.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-studio-primary',
+            referenceId: 'env-recovery',
             referenceType: 'environment',
             actionLabel: 'Inspect Environment in Envs',
             actionTargetView: 'environments',
@@ -3264,28 +3267,28 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '14m overdue',
             lifecycleSentence: 'Heartbeat overdue 14m · Telemetry stale',
-            attribution: 'Worker mac-studio-primary',
+            attribution: 'Environment telemetry',
           },
           {
             id: 'att-stale-2',
             severity: 'attention',
             category: 'task_recovery',
-            title: 'Unconfirmed Task #101 Lease Status',
-            summary: 'Worker telemetry stale; Task lease status unconfirmed since 14m ago. Operator check advised.',
+            title: 'Unconfirmed Task #104 Lease Status',
+            summary: 'Environment telemetry is stale; Task lease status is unconfirmed since 14m ago. Operator check advised.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'task-101',
+            referenceId: 'task-104',
             referenceType: 'task',
             actionLabel: 'Inspect Lease in Tasks',
             actionTargetView: 'tasks',
             targetNav: 'project',
             targetProjectTab: 'tasks',
             timestamp: '14m ago',
-            lifecycleSentence: 'Task active · Run unconfirmed · Lease stale',
-            attribution: 'Worker mac-studio-primary',
+            lifecycleSentence: 'Task recovery · Run interrupted · Lease recovering',
+            attribution: 'Environment telemetry',
           },
         ];
-        degradedEnvironmentIds = ['mac-studio-primary'];
+        degradedEnvironmentIds = ['env-recovery'];
         logMessage = 'Applied State Matrix Preset: Stale (Stale Telemetry & Unconfirmed Lease)';
         break;
       }
@@ -3295,11 +3298,11 @@ class StateManager {
             id: 'att-pend-1',
             severity: 'info',
             category: 'task_proposed',
-            title: 'Proposed Task #105: High Score Persistence & Leaderboard',
-            summary: 'Planner proposed new task with 3 constraints and 2 verification criteria. Awaiting Human Authorization to begin and acquire Environment lease.',
+            title: 'Proposed Task #105: Particle Fireworks Animation on Game Victory',
+            summary: 'Planner proposed the current Task with one constraint and one verification criterion. Awaiting Human Authorization to begin and acquire an Environment lease.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'task-105',
+            referenceId: 'task-105-prop',
             referenceType: 'task',
             actionLabel: 'Authorize Task in Tasks',
             actionTargetView: 'tasks',
@@ -3313,11 +3316,11 @@ class StateManager {
             id: 'att-pend-2',
             severity: 'info',
             category: 'task_proposed',
-            title: 'Proposed Task #106: Spatial Audio Reverb Engine',
-            summary: 'Designer proposed audio expansion task for custom impulse response filters. Awaiting Human Begin Authorization.',
+            title: 'Proposed Task #106: Spatial Audio Reverb Engine Integration',
+            summary: 'Designer proposed the current Task for custom impulse response filters. Awaiting Human Begin Authorization.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'task-105',
+            referenceId: 'task-106-prop',
             referenceType: 'task',
             actionLabel: 'Authorize Task in Tasks',
             actionTargetView: 'tasks',
@@ -3331,10 +3334,10 @@ class StateManager {
             id: 'att-pend-3',
             severity: 'attention',
             category: 'env_enrollment',
-            title: 'Pending Worker Enrollment: MacBook Air',
-            summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
+            title: 'Pending Worker Enrollment: Pending Environment',
+            summary: 'An Environment connected over private transport and is requesting operator capability approval.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-laptop-pending',
+            referenceId: 'env-pending',
             referenceType: 'environment',
             actionLabel: 'Review Enrollment in Envs',
             actionTargetView: 'environments',
@@ -3342,11 +3345,11 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '5m ago',
             lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-            attribution: 'sprout-wk-macair-e018df33 (Worker)',
+            attribution: 'Environment enrollment',
           },
         ];
         activeTaskIds = [];
-        degradedEnvironmentIds = ['mac-laptop-pending'];
+        degradedEnvironmentIds = ['env-pending'];
         logMessage = 'Applied State Matrix Preset: Pending (Proposed Tasks & Worker Enrollment)';
         break;
       }
@@ -3356,28 +3359,28 @@ class StateManager {
             id: 'att-deg-1',
             severity: 'action_required',
             category: 'env_unhealthy',
-            title: 'Windows Worker Offline (Task #104 Lease Held)',
-            summary: 'Host win-dev-box disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
+            title: 'Environment Offline (Task #104 Lease Held)',
+            summary: 'The Environment disconnected 22m ago while holding Task #104 lease. The lease remains in recovery. Human action is needed in Environments or Tasks.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'win-dev-box',
+            referenceId: 'env-recovery',
             referenceType: 'environment',
-            actionLabel: 'Inspect Host in Envs',
+            actionLabel: 'Inspect Environment in Envs',
             actionTargetView: 'environments',
             targetNav: 'manage',
             targetManageTab: 'environments',
             timestamp: '22m ago',
-            lifecycleSentence: 'Worker offline 22m · Held lease blocked',
-            attribution: 'win-dev-box (Windows Host)',
+            lifecycleSentence: 'Environment offline 22m · Held lease blocked',
+            attribution: 'Environment recovery',
           },
           {
             id: 'att-deg-2',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Codex Engine Login Required on mac-studio-primary',
-            summary: 'Codex engine reports login-required. 1 of 4 engines degraded; Pi, agy, and opencode remain ready.',
+            title: 'Codex Engine Login Required on Degraded Environment',
+            summary: 'Codex engine reports login-required. One of four engines is degraded; other configured engines remain ready.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-studio-primary',
+            referenceId: 'env-degraded',
             referenceType: 'environment',
             actionLabel: 'Inspect Readiness in Envs',
             actionTargetView: 'environments',
@@ -3385,29 +3388,29 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '30m ago',
             lifecycleSentence: '1/4 engine offline (Codex login-required)',
-            attribution: 'mac-studio-primary (Worker)',
+            attribution: 'Environment readiness',
           },
           {
             id: 'att-deg-3',
             severity: 'info',
             category: 'routing_fallback',
-            title: 'Wake-Model Assisted Routing Failure Notice',
-            summary: 'Wake model syntax error in Batch #002; failed open to broadcast all project members per ADR-0007.',
+            title: 'Wake-Model Routing Failure Notice',
+            summary: 'Wake model validation failed in Batch #004; routing failed closed and preserved the input per ADR-0007.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'batch-002',
+            referenceId: 'batch-004',
             referenceType: 'routing_batch',
             actionLabel: 'Inspect Batch in Chat',
             actionTargetView: 'chat',
             targetNav: 'project',
             targetProjectTab: 'chat',
             timestamp: '4m ago',
-            lifecycleSentence: 'Routing batch failed-open · Broadcast delivered',
+            lifecycleSentence: 'Routing batch failed-closed · Input preserved',
             attribution: 'Wake Model (System)',
           },
         ];
-        degradedEnvironmentIds = ['win-dev-box', 'mac-studio-primary'];
-        logMessage = 'Applied State Matrix Preset: Degraded (Offline Host & Engine Degraded)';
+        degradedEnvironmentIds = ['env-recovery', 'env-degraded'];
+        logMessage = 'Applied State Matrix Preset: Degraded (Offline Environment & Engine Degraded)';
         break;
       }
       case 'intervention': {
