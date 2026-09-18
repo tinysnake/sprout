@@ -97,6 +97,14 @@ billing basis, measurement coverage, source, and observation history.
   #62, and #65.
 - The prototype and artifact retain backend and domain obligations even when a
   fact is moved behind details on demand.
+- Header clarity: removed redundant `usage-header-meta` container badge so the
+  title and semantic description occupy full width across all screen widths.
+- Phone mode parity: `.viewport-stage.mode-mobile` styling guarantees full
+  presentation parity between simulated 390px desktop mode and physical mobile
+  fluid mode without depending solely on viewport media queries.
+- Inline foldable detail: clicking `usage-activity-row` opens the activity detail
+  directly beneath the clicked row with an animated rotating chevron and clean
+  toggle behavior, replacing the distant bottom-of-page detail panel.
 
 ### Rejected patterns
 
