@@ -1,4 +1,5 @@
 import { renderIcon } from '../icons.js';
+import { activateOnKeyboard } from '../keyboard.js';
 import { stateManager, type PrototypeState } from '../state.js';
 import type { EnvironmentInstance, EngineDetailInfo } from '../types.js';
 
@@ -182,9 +183,14 @@ function renderEnvironmentMasterList(
 
   environments.forEach((env) => {
     const isSelected = env.id === selectedId;
-    const card = document.createElement('div');
+    const cardShell = document.createElement('div');
+    cardShell.className = 'env-master-card-shell';
+    const card = document.createElement('button');
+    card.type = 'button';
     card.className = `env-master-card ${isSelected ? 'active' : ''}`;
     card.setAttribute('data-env', env.id);
+    card.setAttribute('aria-label', `Open Environment ${env.displayName}`);
+    if (isSelected) card.setAttribute('aria-current', 'page');
 
     const platformIcon = env.platform === 'windows' ? 'terminal' : env.platform === 'container' ? 'box' : 'desktop';
     const trafficLightLabel =
@@ -231,22 +237,30 @@ function renderEnvironmentMasterList(
               : `<span class="badge badge-secondary" style="font-size: 10px;">CLEAR</span>`
           }
         </div>
-        <button class="btn btn-ghost btn-xs quick-probe-btn" title="Request quick live probe" aria-label="Request quick live probe">
-          ${renderIcon('lightning', 12)} Probe
-        </button>
       </div>
     `;
 
-    card.addEventListener('click', () => {
-      stateManager.selectEnvironment(env.id);
-    });
+    const quickProbe = document.createElement('button');
+    quickProbe.type = 'button';
+    quickProbe.className = 'btn btn-ghost btn-xs quick-probe-btn';
+    quickProbe.title = 'Request quick live probe';
+    quickProbe.setAttribute('aria-label', 'Request quick live probe');
+    quickProbe.innerHTML = `${renderIcon('lightning', 12)} Probe`;
 
-    card.querySelector('.quick-probe-btn')?.addEventListener('click', (e) => {
-      e.stopPropagation();
+    cardShell.appendChild(card);
+    cardShell.appendChild(quickProbe);
+
+    const openEnvironment = () => {
+      stateManager.selectEnvironment(env.id);
+    };
+    card.addEventListener('click', openEnvironment);
+    activateOnKeyboard(card, openEnvironment);
+
+    quickProbe.addEventListener('click', () => {
       stateManager.triggerReadinessProbe(env.id);
     });
 
-    listEl.appendChild(card);
+    listEl.appendChild(cardShell);
   });
 
   return listEl;

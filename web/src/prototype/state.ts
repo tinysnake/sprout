@@ -3205,107 +3205,42 @@ class StateManager {
 
   public applyFeedPreset(preset: FeedStatePreset) {
     this.state.feedStatePreset = preset;
+    let attentionItems: AttentionItem[] = [...initialAttentionItems];
+    let activeTaskIds: string[] = ['task-102'];
+    let degradedEnvironmentIds: string[] = ['win-dev-box', 'mac-laptop-pending'];
+    let logMessage = '';
+
+    // Feed presets are review fixtures, not lifecycle commands. Keep them in
+    // an isolated projection so a visual "all clear" example cannot mutate a
+    // Task or Environment that is still authoritative in its source module.
     switch (preset) {
       case 'mixed': {
-        this.state.attentionItems = [...initialAttentionItems];
-        this.state.activityFeedItems = [...initialActivityFeedItems];
-        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
-        if (t101) {
-          t101.lifecycle = 'awaiting validation';
-          t101.agentRunLifecycle = 'completed';
-          t101.leaseLifecycle = 'held';
-        }
-        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
-        if (t102) {
-          t102.lifecycle = 'active';
-          t102.agentRunLifecycle = 'running';
-          t102.leaseLifecycle = 'held';
-        }
-        const t103 = this.state.tasks.find((t) => t.id === 'task-103');
-        if (t103) {
-          t103.lifecycle = 'blocked';
-          t103.agentRunLifecycle = 'stopped';
-          t103.leaseLifecycle = 'held';
-        }
-        const t104 = this.state.tasks.find((t) => t.id === 'task-104');
-        if (t104) {
-          t104.lifecycle = 'recovery';
-          t104.agentRunLifecycle = 'interrupted';
-          t104.leaseLifecycle = 'recovering';
-        }
-        const winEnv = this.state.environments.find((e) => e.id === 'env-recovery');
-        if (winEnv) {
-          winEnv.trafficLight = 'red';
-          winEnv.trafficLightReason = 'Heartbeat timed out 12m ago · Task #104 lease held in unconfirmed recovery';
-          winEnv.connectionState = 'offline';
-        }
-        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
-        if (macStudio) {
-          macStudio.trafficLight = 'green';
-          macStudio.trafficLightReason = 'All 4 engine readiness probes confirmed · Lease held for Task #101';
-          macStudio.connectionState = 'online';
-        }
-        const macLaptop = this.state.environments.find((e) => e.id === 'env-pending');
-        if (macLaptop) {
-          macLaptop.enrollmentStatus = 'pending';
-          macLaptop.trafficLight = 'yellow';
-          macLaptop.trafficLightReason = 'Pending enrollment: Worker requesting capability permissions approval';
-        }
-        this.notify('Applied State Matrix Preset: Mixed (Default Realistic Operations)');
+        logMessage = 'Applied State Matrix Preset: Mixed (Default Realistic Operations)';
         break;
       }
       case 'empty': {
-        this.state.attentionItems = [];
-        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
-        if (t101) { t101.lifecycle = 'completed'; t101.agentRunLifecycle = 'completed'; t101.leaseLifecycle = 'released'; }
-        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
-        if (t102) { t102.lifecycle = 'completed'; t102.agentRunLifecycle = 'completed'; t102.leaseLifecycle = 'released'; }
-        const t103 = this.state.tasks.find((t) => t.id === 'task-103');
-        if (t103) { t103.lifecycle = 'completed'; t103.agentRunLifecycle = 'completed'; t103.leaseLifecycle = 'released'; }
-        const t104 = this.state.tasks.find((t) => t.id === 'task-104');
-        if (t104) { t104.lifecycle = 'completed'; t104.agentRunLifecycle = 'completed'; t104.leaseLifecycle = 'released'; }
-        for (const env of this.state.environments) {
-          env.trafficLight = 'green';
-          env.trafficLightReason = 'All engine readiness probes confirmed · Lease clear';
-          env.connectionState = 'online';
-          if (env.id === 'env-pending') env.enrollmentStatus = 'approved';
-        }
-        this.notify('Applied State Matrix Preset: Empty (All Systems Clear)');
+        attentionItems = [];
+        activeTaskIds = [];
+        degradedEnvironmentIds = [];
+        logMessage = 'Applied State Matrix Preset: Empty (All Systems Clear)';
         break;
       }
       case 'healthy': {
-        this.state.attentionItems = [];
-        const t101 = this.state.tasks.find((t) => t.id === 'task-101');
-        if (t101) {
-          t101.lifecycle = 'active';
-          t101.agentRunLifecycle = 'running';
-          t101.leaseLifecycle = 'held';
-        }
-        const t102 = this.state.tasks.find((t) => t.id === 'task-102');
-        if (t102) {
-          t102.lifecycle = 'active';
-          t102.agentRunLifecycle = 'running';
-          t102.leaseLifecycle = 'held';
-        }
-        for (const env of this.state.environments) {
-          env.trafficLight = 'green';
-          env.trafficLightReason = 'Ready · All engines active · Low latency';
-          env.connectionState = 'online';
-          if (env.id === 'env-pending') env.enrollmentStatus = 'approved';
-        }
-        this.notify('Applied State Matrix Preset: Healthy (Active Work Running Smoothly)');
+        attentionItems = [];
+        degradedEnvironmentIds = [];
+        logMessage = 'Applied State Matrix Preset: Healthy (Active Work Running Smoothly)';
         break;
       }
       case 'stale': {
-        this.state.attentionItems = [
+        attentionItems = [
           {
             id: 'att-stale-1',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Stale Heartbeat on env-ready',
+            title: 'Stale Heartbeat on mac-studio-primary',
             summary: 'Heartbeat overdue by 14 minutes. Environment telemetry unconfirmed; agent runs may be proceeding without status confirmation.',
             projectName: 'Infrastructure',
-            referenceId: 'env-ready',
+            referenceId: 'mac-studio-primary',
             referenceType: 'environment',
             actionLabel: 'Inspect Environment in Envs',
             actionTargetView: 'environments',
@@ -3313,7 +3248,7 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '14m overdue',
             lifecycleSentence: 'Heartbeat overdue 14m · Telemetry stale',
-            attribution: 'Worker env-ready',
+            attribution: 'Worker mac-studio-primary',
           },
           {
             id: 'att-stale-2',
@@ -3331,20 +3266,15 @@ class StateManager {
             targetProjectTab: 'tasks',
             timestamp: '14m ago',
             lifecycleSentence: 'Task active · Run unconfirmed · Lease stale',
-            attribution: 'Worker env-ready',
+            attribution: 'Worker mac-studio-primary',
           },
         ];
-        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
-        if (macStudio) {
-          macStudio.trafficLight = 'yellow';
-          macStudio.trafficLightReason = 'Heartbeat overdue 14m · Unconfirmed telemetry';
-          macStudio.connectionState = 'reconnecting';
-        }
-        this.notify('Applied State Matrix Preset: Stale (Stale Telemetry & Unconfirmed Lease)');
+        degradedEnvironmentIds = ['mac-studio-primary'];
+        logMessage = 'Applied State Matrix Preset: Stale (Stale Telemetry & Unconfirmed Lease)';
         break;
       }
       case 'pending': {
-        this.state.attentionItems = [
+        attentionItems = [
           {
             id: 'att-pend-1',
             severity: 'info',
@@ -3385,10 +3315,10 @@ class StateManager {
             id: 'att-pend-3',
             severity: 'attention',
             category: 'env_enrollment',
-            title: 'Pending Worker Enrollment: Pending Environment',
-            summary: 'An environment worker connected over private transport and is requesting operator capability approval.',
+            title: 'Pending Worker Enrollment: MacBook Air',
+            summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
             projectName: 'Infrastructure',
-            referenceId: 'env-pending',
+            referenceId: 'mac-laptop-pending',
             referenceType: 'environment',
             actionLabel: 'Review Enrollment in Envs',
             actionTargetView: 'environments',
@@ -3396,23 +3326,25 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '5m ago',
             lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-            attribution: 'Environment worker',
+            attribution: 'sprout-wk-macair-e018df33 (Worker)',
           },
         ];
-        this.notify('Applied State Matrix Preset: Pending (Proposed Tasks & Worker Enrollment)');
+        activeTaskIds = [];
+        degradedEnvironmentIds = ['mac-laptop-pending'];
+        logMessage = 'Applied State Matrix Preset: Pending (Proposed Tasks & Worker Enrollment)';
         break;
       }
       case 'degraded': {
-        this.state.attentionItems = [
+        attentionItems = [
           {
             id: 'att-deg-1',
             severity: 'action_required',
             category: 'env_unhealthy',
-            title: 'Environment Worker Offline (Task #104 Lease Held)',
-            summary: 'Host env-recovery disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
+            title: 'Windows Worker Offline (Task #104 Lease Held)',
+            summary: 'Host win-dev-box disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'env-recovery',
+            referenceId: 'win-dev-box',
             referenceType: 'environment',
             actionLabel: 'Inspect Host in Envs',
             actionTargetView: 'environments',
@@ -3420,16 +3352,16 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '22m ago',
             lifecycleSentence: 'Worker offline 22m · Held lease blocked',
-            attribution: 'Environment worker',
+            attribution: 'win-dev-box (Windows Host)',
           },
           {
             id: 'att-deg-2',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Codex Engine Login Required on env-ready',
+            title: 'Codex Engine Login Required on mac-studio-primary',
             summary: 'Codex engine reports login-required. 1 of 4 engines degraded; Pi, agy, and opencode remain ready.',
             projectName: 'Infrastructure',
-            referenceId: 'env-ready',
+            referenceId: 'mac-studio-primary',
             referenceType: 'environment',
             actionLabel: 'Inspect Readiness in Envs',
             actionTargetView: 'environments',
@@ -3437,7 +3369,7 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '30m ago',
             lifecycleSentence: '1/4 engine offline (Codex login-required)',
-            attribution: 'env-ready (Worker)',
+            attribution: 'mac-studio-primary (Worker)',
           },
           {
             id: 'att-deg-3',
@@ -3458,23 +3390,12 @@ class StateManager {
             attribution: 'Wake Model (System)',
           },
         ];
-        const winEnv = this.state.environments.find((e) => e.id === 'env-recovery');
-        if (winEnv) {
-          winEnv.trafficLight = 'red';
-          winEnv.trafficLightReason = 'Heartbeat timed out 22m ago · Task #104 lease held in unconfirmed recovery';
-          winEnv.connectionState = 'offline';
-        }
-        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
-        if (macStudio) {
-          macStudio.trafficLight = 'yellow';
-          macStudio.trafficLightReason = '1/4 engine offline (Codex login-required) · Reconnecting';
-          macStudio.engineReadiness.codex = 'login-required';
-        }
-        this.notify('Applied State Matrix Preset: Degraded (Offline Host & Engine Degraded)');
+        degradedEnvironmentIds = ['win-dev-box', 'mac-studio-primary'];
+        logMessage = 'Applied State Matrix Preset: Degraded (Offline Host & Engine Degraded)';
         break;
       }
       case 'intervention': {
-        this.state.attentionItems = [
+        attentionItems = [
           {
             id: 'att-int-1',
             severity: 'action_required',
@@ -3512,10 +3433,20 @@ class StateManager {
             attribution: 'Programmer (Pi claude-3-5-sonnet)',
           },
         ];
-        this.notify('Applied State Matrix Preset: Intervention (Blockers & Validation Claims)');
+        degradedEnvironmentIds = [];
+        logMessage = 'Applied State Matrix Preset: Intervention (Blockers & Validation Claims)';
         break;
       }
     }
+
+    this.state.feedScenarioSnapshot = {
+      preset,
+      attentionItems: structuredClone(attentionItems),
+      activityFeedItems: structuredClone(initialActivityFeedItems),
+      activeTaskIds: [...activeTaskIds],
+      degradedEnvironmentIds: [...degradedEnvironmentIds],
+    };
+    this.notify(logMessage);
   }
 
   // --- Dialog & Sheet Actions ---

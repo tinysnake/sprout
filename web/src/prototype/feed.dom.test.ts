@@ -245,6 +245,96 @@ test('Feed & Attention: deep-link navigation preserves scope and filter state on
   }
 });
 
+test('Feed presets are isolated snapshots and cannot contradict authoritative recovery state', async () => {
+  const { vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const beforeTasks = structuredClone(stateManager.getSnapshot().tasks);
+    const beforeEnvironments = structuredClone(stateManager.getSnapshot().environments);
+    const recoveryTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-104');
+    const recoveryEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'win-dev-box');
+    assert.equal(recoveryTask?.lifecycle, 'recovery');
+    assert.equal(recoveryEnvironment?.workSafety, 'recovery');
+    assert.ok(recoveryEnvironment?.activeLeaseHolder, 'fixture starts with a held recovery lease');
+    assert.ok(recoveryEnvironment?.leaseRecovery, 'fixture starts with recovery evidence');
+
+    // The old implementation changed the Task to completed/released and the
+    // Environment to green/online here, but left its holder and recovery
+    // evidence behind. A Feed scenario is now explicitly non-mutating.
+    stateManager.applyFeedPreset('empty');
+
+    assert.deepEqual(stateManager.getSnapshot().tasks, beforeTasks, 'Task lifecycle facts remain source-owned');
+    assert.deepEqual(
+      stateManager.getSnapshot().environments,
+      beforeEnvironments,
+      'Environment lease, recovery, holder, and reason facts remain source-owned'
+    );
+    const scenario = stateManager.getSnapshot().feedScenarioSnapshot;
+    assert.ok(scenario, 'Feed stores an isolated scenario snapshot');
+    assert.equal(scenario.preset, 'empty');
+    assert.equal(scenario.attentionItems.length, 0);
+    assert.deepEqual(scenario.activeTaskIds, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed, Environment, and shared shell drill-downs support keyboard activation', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const press = (element: HTMLElement, key: 'Enter' | ' ') => {
+      element.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key, bubbles: true }));
+    };
+
+    stateManager.setViewportMode('desktop');
+    const manageNav = dom.window.document.querySelector(
+      '.desktop-sidebar .sidebar-nav-item[data-nav="manage"]'
+    ) as HTMLButtonElement;
+    assert.ok(manageNav);
+    assert.equal(manageNav.tagName, 'BUTTON');
+    assert.equal(manageNav.tabIndex, 0);
+    press(manageNav, 'Enter');
+    assert.equal(stateManager.getSnapshot().primaryNav, 'manage');
+
+    stateManager.setPrimaryNav('feed');
+    const attentionCard = dom.window.document.querySelector('.attention-card') as HTMLElement;
+    assert.ok(attentionCard);
+    assert.equal(attentionCard.tagName, 'BUTTON');
+    assert.equal(attentionCard.tabIndex, 0);
+    press(attentionCard, ' ');
+    assert.equal(stateManager.getSnapshot().primaryNav, 'project');
+
+    stateManager.setViewportMode('mobile');
+    stateManager.setPrimaryNav('manage', undefined, 'environments');
+    stateManager.closeEnvironmentDetail(false);
+    const environmentCard = dom.window.document.querySelector(
+      '.env-master-card[data-env="mac-studio-primary"]'
+    ) as HTMLElement;
+    assert.ok(environmentCard);
+    assert.equal(environmentCard.tagName, 'BUTTON');
+    assert.equal(environmentCard.tabIndex, 0);
+    press(environmentCard, 'Enter');
+    assert.equal(stateManager.getSnapshot().environmentViewMode, 'detail');
+    assert.ok(dom.window.document.querySelector('.env-detail-card'));
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Feed & Attention: exercises 7-state realistic matrix via top harness control', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {

@@ -753,3 +753,17 @@ export type ActivityFeedItem = {
   targetEntityId?: string | undefined;
   metadata?: Record<string, any> | undefined;
 };
+
+/**
+ * Feed review presets are deliberately isolated presentation fixtures. They
+ * describe what the Feed should show without pretending to be authoritative
+ * Task or Environment state. Source modules remain the authority for those
+ * lifecycle and lease facts.
+ */
+export type FeedScenarioSnapshot = {
+  preset: FeedStatePreset;
+  attentionItems: AttentionItem[];
+  activityFeedItems: ActivityFeedItem[];
+  activeTaskIds: string[];
+  degradedEnvironmentIds: string[];
+};

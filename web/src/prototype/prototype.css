@@ -515,6 +515,11 @@ code {
 }
 
 .sidebar-nav-item {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  font: inherit;
+  text-align: left;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1950,6 +1955,11 @@ code {
 
 /* Attention Cards */
 .attention-card {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  color: var(--text-primary);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-left: 4px solid var(--yellow-attention);
@@ -2027,6 +2037,11 @@ code {
 
 /* Active Work Cards (Aligned with Attention Cards) */
 .active-task-card {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  color: var(--text-primary);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -2069,6 +2084,14 @@ code {
 
 /* Activity Stream Rows */
 .activity-feed-row {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -3321,11 +3344,21 @@ code {
   width: 100%;
 }
 
+.env-master-card-shell {
+  position: relative;
+  width: 100%;
+}
+
 .env-master-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 12px;
+  appearance: none;
+  width: 100%;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: all 0.15s ease;
   display: flex;
@@ -3343,6 +3376,13 @@ code {
   background: var(--bg-surface-elevated);
   border-color: var(--accent-primary);
   box-shadow: 0 0 0 1.5px var(--accent-primary);
+}
+
+.env-master-card-shell .quick-probe-btn {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
 }
 
 .env-master-card-header {

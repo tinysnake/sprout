@@ -1,4 +1,5 @@
 import { renderIcon } from './icons.js';
+import { activateOnKeyboard } from './keyboard.js';
 import { stateManager } from './state.js';
 import type { PrimaryNav, ViewportMode, ProjectTab, ManageTab } from './types.js';
 import { renderFeedView } from './views/feed-view.js';
@@ -146,9 +147,14 @@ export function initPrototype(mountEl: HTMLElement): void {
     const sidebar = document.createElement('aside');
     sidebar.className = 'desktop-sidebar';
 
-    const attentionCount = state.attentionItems.length;
-    const activeTasksCount = state.tasks.filter((t) => t.lifecycle === 'active' || t.lifecycle === 'awaiting validation').length;
-    const hasDegradedEnv = state.environments.some((e) => e.trafficLight === 'red' || e.trafficLight === 'yellow');
+    const feedScenario = state.primaryNav === 'feed' ? state.feedScenarioSnapshot : undefined;
+    const attentionCount = feedScenario?.attentionItems.length ?? state.attentionItems.length;
+    const activeTasksCount = feedScenario
+      ? feedScenario.activeTaskIds.length
+      : state.tasks.filter((t) => t.lifecycle === 'active' || t.lifecycle === 'awaiting validation').length;
+    const hasDegradedEnv = feedScenario
+      ? feedScenario.degradedEnvironmentIds.length > 0
+      : state.environments.some((e) => e.trafficLight === 'red' || e.trafficLight === 'yellow');
 
     sidebar.innerHTML = `
       <div class="sidebar-header">
@@ -162,80 +168,80 @@ export function initPrototype(mountEl: HTMLElement): void {
       <!-- Section: Operations -->
       <div class="sidebar-section-label">OPERATIONS</div>
       <ul class="sidebar-nav">
-        <li class="sidebar-nav-item ${state.primaryNav === 'feed' ? 'active' : ''}" data-nav="feed">
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'feed' ? 'active' : ''}" data-nav="feed"${state.primaryNav === 'feed' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('feed', 16)}
             <span>Feed</span>
           </div>
           ${attentionCount > 0 ? `<span class="nav-badge yellow">${attentionCount}</span>` : ''}
-        </li>
+        </button></li>
       </ul>
 
       <!-- Section: Project -->
       <div class="sidebar-section-label" style="margin-top: 14px;">PROJECT</div>
       <ul class="sidebar-nav">
-        <li class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'overview' ? 'active' : ''}" data-nav="project" data-project-tab="overview">
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'overview' ? 'active' : ''}" data-nav="project" data-project-tab="overview"${state.primaryNav === 'project' && state.projectTab === 'overview' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('overview', 16)}
             <span>Overview & Contract</span>
           </div>
-        </li>
-        <li class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'tasks' ? 'active' : ''}" data-nav="project" data-project-tab="tasks">
+        </button></li>
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'tasks' ? 'active' : ''}" data-nav="project" data-project-tab="tasks"${state.primaryNav === 'project' && state.projectTab === 'tasks' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('tasks', 16)}
             <span>Tasks & Leases</span>
           </div>
           ${activeTasksCount > 0 ? `<span class="nav-badge ${state.tasks.some((t) => t.lifecycle === 'awaiting validation') ? 'purple' : 'blue'}">${activeTasksCount}</span>` : ''}
-        </li>
-        <li class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'chat' ? 'active' : ''}" data-nav="project" data-project-tab="chat">
+        </button></li>
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'project' && state.projectTab === 'chat' ? 'active' : ''}" data-nav="project" data-project-tab="chat"${state.primaryNav === 'project' && state.projectTab === 'chat' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('chat', 16)}
             <span>Project Chat</span>
           </div>
-        </li>
+        </button></li>
       </ul>
 
       <!-- Section: Manage (Gear) -->
       <div class="sidebar-section-label" style="margin-top: 14px;">MANAGE</div>
       <ul class="sidebar-nav">
-        <li class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'environments' ? 'active' : ''}" data-nav="manage" data-manage-tab="environments">
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'environments' ? 'active' : ''}" data-nav="manage" data-manage-tab="environments"${state.primaryNav === 'manage' && state.manageTab === 'environments' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('environments', 16)}
             <span>Environments</span>
           </div>
           <span class="status-dot ${hasDegradedEnv ? 'yellow' : 'green'}"></span>
-        </li>
-        <li class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'agents' ? 'active' : ''}" data-nav="manage" data-manage-tab="agents">
+        </button></li>
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'agents' ? 'active' : ''}" data-nav="manage" data-manage-tab="agents"${state.primaryNav === 'manage' && state.manageTab === 'agents' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('agents', 16)}
             <span>Global Agents</span>
           </div>
           <span class="nav-badge">${state.agents.length}</span>
-        </li>
-        <li class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'usage' ? 'active' : ''}" data-nav="manage" data-manage-tab="usage">
+        </button></li>
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'usage' ? 'active' : ''}" data-nav="manage" data-manage-tab="usage"${state.primaryNav === 'manage' && state.manageTab === 'usage' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('usage', 16)}
             <span>Usage & Costs</span>
           </div>
-        </li>
-        <li class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'settings' ? 'active' : ''}" data-nav="manage" data-manage-tab="settings">
+        </button></li>
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'manage' && state.manageTab === 'settings' ? 'active' : ''}" data-nav="manage" data-manage-tab="settings"${state.primaryNav === 'manage' && state.manageTab === 'settings' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('settings', 16)}
             <span>Settings</span>
           </div>
-        </li>
+        </button></li>
       </ul>
 
       <!-- Section: Design Baseline -->
       <div class="sidebar-section-label" style="margin-top: 14px;">DESIGN BASELINE</div>
       <ul class="sidebar-nav">
-        <li class="sidebar-nav-item ${state.primaryNav === 'primitives' ? 'active' : ''}" data-nav="primitives">
+        <li><button type="button" class="sidebar-nav-item ${state.primaryNav === 'primitives' ? 'active' : ''}" data-nav="primitives"${state.primaryNav === 'primitives' ? ' aria-current="page"' : ''}>
           <div style="display: flex; align-items: center; gap: 8px;">
             ${renderIcon('palette', 16)}
             <span>Interaction Primitives</span>
           </div>
           <span class="nav-badge blue">#61</span>
-        </li>
+        </button></li>
       </ul>
 
       <div class="sidebar-footer">
@@ -247,13 +253,15 @@ export function initPrototype(mountEl: HTMLElement): void {
     `;
 
     sidebar.querySelectorAll('.sidebar-nav-item[data-nav]').forEach((item) => {
-      item.addEventListener('click', (ev) => {
-        const target = ev.currentTarget as HTMLElement;
+      const navigate = () => {
+        const target = item as HTMLElement;
         const nav = target.getAttribute('data-nav') as PrimaryNav;
         const projectTab = target.getAttribute('data-project-tab') as ProjectTab | null;
         const manageTab = target.getAttribute('data-manage-tab') as ManageTab | null;
         stateManager.setPrimaryNav(nav, projectTab ?? undefined, manageTab ?? undefined);
-      });
+      };
+      item.addEventListener('click', navigate);
+      activateOnKeyboard(item as HTMLElement, navigate);
     });
 
     appBody.appendChild(sidebar);
@@ -286,20 +294,20 @@ export function initPrototype(mountEl: HTMLElement): void {
       // Dynamic Sub-Navigation for Project on Mobile
       mobileBottomNav.classList.add('mode-sub-nav');
       mobileBottomNav.innerHTML = `
-        <button class="bottom-nav-item nav-back-btn" data-action="back-to-root" aria-label="Back to Main" title="Back to Main Destinations">
+        <button type="button" class="bottom-nav-item nav-back-btn" data-action="back-to-root" aria-label="Back to Main" title="Back to Main Destinations">
           <span class="bottom-nav-icon">${renderIcon('chevron-left', 18)}</span>
           <span style="font-size: 9px; font-weight: 700;">Back</span>
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-project-tab="overview" aria-label="Overview">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.projectTab === 'overview' ? 'active' : ''}" data-project-tab="overview" aria-label="Overview"${state.projectTab === 'overview' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('overview', 20)}</span>
           <span>Overview</span>
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-project-tab="tasks" aria-label="Tasks">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.projectTab === 'tasks' ? 'active' : ''}" data-project-tab="tasks" aria-label="Tasks"${state.projectTab === 'tasks' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('tasks', 20)}</span>
           <span>Tasks</span>
           ${activeTasksCount > 0 ? `<span class="bottom-nav-badge blue">${activeTasksCount}</span>` : ''}
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-project-tab="chat" aria-label="Chat">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.projectTab === 'chat' ? 'active' : ''}" data-project-tab="chat" aria-label="Chat"${state.projectTab === 'chat' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('chat', 20)}</span>
           <span>Chat</span>
         </button>
@@ -308,25 +316,25 @@ export function initPrototype(mountEl: HTMLElement): void {
       // Dynamic Sub-Navigation for Manage on Mobile
       mobileBottomNav.classList.add('mode-sub-nav');
       mobileBottomNav.innerHTML = `
-        <button class="bottom-nav-item nav-back-btn" data-action="back-to-root" aria-label="Back to Main" title="Back to Main Destinations">
+        <button type="button" class="bottom-nav-item nav-back-btn" data-action="back-to-root" aria-label="Back to Main" title="Back to Main Destinations">
           <span class="bottom-nav-icon">${renderIcon('chevron-left', 18)}</span>
           <span style="font-size: 9px; font-weight: 700;">Back</span>
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.manageTab === 'environments' ? 'active' : ''}" data-manage-tab="environments" aria-label="Envs">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.manageTab === 'environments' ? 'active' : ''}" data-manage-tab="environments" aria-label="Envs"${state.manageTab === 'environments' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('environments', 20)}</span>
           <span>Envs</span>
           ${hasDegradedEnv ? `<span class="bottom-nav-dot red"></span>` : ''}
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.manageTab === 'agents' ? 'active' : ''}" data-manage-tab="agents" aria-label="Agents">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.manageTab === 'agents' ? 'active' : ''}" data-manage-tab="agents" aria-label="Agents"${state.manageTab === 'agents' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('agents', 20)}</span>
           <span>Agents</span>
           <span class="bottom-nav-badge">${state.agents.length}</span>
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.manageTab === 'usage' ? 'active' : ''}" data-manage-tab="usage" aria-label="Usage">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.manageTab === 'usage' ? 'active' : ''}" data-manage-tab="usage" aria-label="Usage"${state.manageTab === 'usage' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('usage', 20)}</span>
           <span>Usage</span>
         </button>
-        <button class="bottom-nav-item sub-nav-tab ${state.manageTab === 'settings' ? 'active' : ''}" data-manage-tab="settings" aria-label="Settings">
+        <button type="button" class="bottom-nav-item sub-nav-tab ${state.manageTab === 'settings' ? 'active' : ''}" data-manage-tab="settings" aria-label="Settings"${state.manageTab === 'settings' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('settings', 20)}</span>
           <span>Settings</span>
         </button>
@@ -334,17 +342,17 @@ export function initPrototype(mountEl: HTMLElement): void {
     } else {
       // Root Top-Level Navigation for Feed & Primitives
       mobileBottomNav.innerHTML = `
-        <button class="bottom-nav-item ${state.primaryNav === 'feed' ? 'active' : ''}" data-nav="feed" aria-label="Feed cross-project landing">
+        <button type="button" class="bottom-nav-item ${state.primaryNav === 'feed' ? 'active' : ''}" data-nav="feed" aria-label="Feed cross-project landing"${state.primaryNav === 'feed' ? ' aria-current="page"' : ''}>
           <span class="bottom-nav-icon">${renderIcon('feed', 20)}</span>
           <span>Feed</span>
           ${attentionCount > 0 ? `<span class="bottom-nav-badge">${attentionCount}</span>` : ''}
         </button>
-        <button class="bottom-nav-item" data-nav="project" aria-label="Project workspace, tasks and chat">
+        <button type="button" class="bottom-nav-item" data-nav="project" aria-label="Project workspace, tasks and chat">
           <span class="bottom-nav-icon">${renderIcon('project', 20)}</span>
           <span>Project</span>
           ${activeTasksCount > 0 ? `<span class="bottom-nav-badge blue">${activeTasksCount}</span>` : ''}
         </button>
-        <button class="bottom-nav-item" data-nav="manage" aria-label="Manage environments, agents, usage and settings">
+        <button type="button" class="bottom-nav-item" data-nav="manage" aria-label="Manage environments, agents, usage and settings">
           <span class="bottom-nav-icon">${renderIcon('manage', 20)}</span>
           <span>Manage</span>
           ${hasDegradedEnv ? `<span class="bottom-nav-dot red"></span>` : ''}
