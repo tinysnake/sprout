@@ -50,23 +50,23 @@ export function renderEnvironmentsView(state: PrototypeState): HTMLElement {
 
     <!-- Filter Row: Modeled after Attention Urgency Pills (Discrete Boxes, Icon Top, Text Bottom, Auto-Fitting Single Row) -->
     <div class="env-filter-boxes" role="group" aria-label="Filter environments by health status">
-      <button class="env-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" title="All (${allEnvs.length})">
+      <button type="button" class="env-filter-box-btn filter-pill ${filter === 'all' ? 'active' : ''}" data-filter="all" aria-pressed="${filter === 'all'}" title="All (${allEnvs.length})">
         <span class="env-filter-box-top"><span class="status-dot purple"></span> ${allEnvs.length}</span>
         <span class="env-filter-box-bottom">All<span class="sr-only"> (${allEnvs.length})</span></span>
       </button>
-      <button class="env-filter-box-btn filter-pill ${filter === 'ready' ? 'active' : ''}" data-filter="ready" title="Ready (${readyCount})">
+      <button type="button" class="env-filter-box-btn filter-pill ${filter === 'ready' ? 'active' : ''}" data-filter="ready" aria-pressed="${filter === 'ready'}" title="Ready (${readyCount})">
         <span class="env-filter-box-top"><span class="status-dot green"></span> ${readyCount}</span>
         <span class="env-filter-box-bottom">Ready<span class="sr-only"> (${readyCount})</span></span>
       </button>
-      <button class="env-filter-box-btn filter-pill ${filter === 'attention' ? 'active' : ''}" data-filter="attention" title="Attention (${attentionCount})">
+      <button type="button" class="env-filter-box-btn filter-pill ${filter === 'attention' ? 'active' : ''}" data-filter="attention" aria-pressed="${filter === 'attention'}" title="Attention (${attentionCount})">
         <span class="env-filter-box-top"><span class="status-dot yellow"></span> ${attentionCount}</span>
         <span class="env-filter-box-bottom">Attention<span class="sr-only"> (${attentionCount})</span></span>
       </button>
-      <button class="env-filter-box-btn filter-pill ${filter === 'action-required' ? 'active' : ''}" data-filter="action-required" title="Action Required (${actionRequiredCount})">
+      <button type="button" class="env-filter-box-btn filter-pill ${filter === 'action-required' ? 'active' : ''}" data-filter="action-required" aria-pressed="${filter === 'action-required'}" title="Action Required (${actionRequiredCount})">
         <span class="env-filter-box-top"><span class="status-dot red"></span> ${actionRequiredCount}</span>
         <span class="env-filter-box-bottom">Action Required<span class="sr-only"> (${actionRequiredCount})</span></span>
       </button>
-      <button class="env-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" title="Archived (${archivedCount})">
+      <button type="button" class="env-filter-box-btn filter-pill ${filter === 'archived' ? 'active' : ''}" data-filter="archived" aria-pressed="${filter === 'archived'}" title="Archived (${archivedCount})">
         <span class="env-filter-box-top"><span class="status-dot neutral"></span> ${archivedCount}</span>
         <span class="env-filter-box-bottom">Archived<span class="sr-only"> (${archivedCount})</span></span>
       </button>
@@ -190,6 +190,8 @@ function renderEnvironmentMasterList(
     card.className = `env-master-card ${isSelected ? 'active' : ''}`;
     card.setAttribute('data-env', env.id);
     card.setAttribute('aria-label', `Open Environment ${env.displayName}`);
+    const cardContextId = `env-master-context-${env.id}`;
+    card.setAttribute('aria-describedby', cardContextId);
     if (isSelected) card.setAttribute('aria-current', 'page');
 
     const platformIcon = env.platform === 'windows' ? 'terminal' : env.platform === 'container' ? 'box' : 'desktop';
@@ -202,6 +204,11 @@ function renderEnvironmentMasterList(
 
     const hasLease = !!env.activeLeaseHolder;
     const isRecovery = env.workSafety === 'recovery' || !!env.leaseRecovery;
+    const holderContext = env.activeLeaseHolder
+      ? `Holder ${env.activeLeaseHolder.holderKind === 'task' ? `Task #${env.activeLeaseHolder.holderId.replace('task-', '')}` : `${env.activeLeaseHolder.holderKind} ${env.activeLeaseHolder.holderId}`} in project ${env.activeLeaseHolder.projectId}${env.activeLeaseHolder.leadAgentName ? `, led by ${env.activeLeaseHolder.leadAgentName}` : ''}`
+      : 'Holder none';
+    const recoveryContext = isRecovery ? 'Recovery required; Lease recovery' : 'Recovery clear';
+    const leaseContext = hasLease ? 'Lease held' : 'Lease clear';
 
     card.innerHTML = `
       <div class="env-master-card-header">
@@ -238,6 +245,7 @@ function renderEnvironmentMasterList(
           }
         </div>
       </div>
+      <span id="${cardContextId}" class="sr-only">Health: ${trafficLightLabel} (${env.trafficLight}). Decisive reason: ${env.trafficLightReason}. Connection ${env.connectionState}; Protocol ${env.protocolVersion} ${env.protocolCompatibility}. ${recoveryContext}; ${leaseContext}; ${holderContext}.</span>
     `;
 
     const quickProbe = document.createElement('button');

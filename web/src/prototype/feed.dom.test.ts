@@ -202,6 +202,56 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
   }
 });
 
+test('Feed filters expose their current selection after rerender', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const document = dom.window.document;
+    const allUrgency = document.querySelector('.urgency-pill-btn[data-severity="all"]') as HTMLButtonElement;
+    const actionUrgency = document.querySelector(
+      '.urgency-pill-btn[data-severity="action_required"]'
+    ) as HTMLButtonElement;
+    assert.equal(allUrgency.getAttribute('aria-pressed'), 'true');
+    assert.equal(actionUrgency.getAttribute('aria-pressed'), 'false');
+
+    actionUrgency.click();
+
+    assert.equal(
+      document.querySelector('.urgency-pill-btn[data-severity="action_required"]')?.getAttribute('aria-pressed'),
+      'true'
+    );
+    assert.equal(
+      document.querySelector('.urgency-pill-btn[data-severity="all"]')?.getAttribute('aria-pressed'),
+      'false'
+    );
+
+    const allActivity = document.querySelector('.activity-filter-pill-btn[data-act-filter="all"]') as HTMLButtonElement;
+    const taskActivity = document.querySelector('.activity-filter-pill-btn[data-act-filter="tasks"]') as HTMLButtonElement;
+    assert.equal(allActivity.getAttribute('aria-pressed'), 'true');
+    assert.equal(taskActivity.getAttribute('aria-pressed'), 'false');
+
+    taskActivity.click();
+
+    assert.equal(
+      document.querySelector('.activity-filter-pill-btn[data-act-filter="tasks"]')?.getAttribute('aria-pressed'),
+      'true'
+    );
+    assert.equal(
+      document.querySelector('.activity-filter-pill-btn[data-act-filter="all"]')?.getAttribute('aria-pressed'),
+      'false'
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Feed & Attention: deep-link navigation preserves scope and filter state on return', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {

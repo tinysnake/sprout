@@ -462,19 +462,19 @@ function renderAttentionSection(state: PrototypeState): HTMLElement {
 
     <!-- 4 Streamlined Urgency Pills (Single Row 4-Column Bar with Top Stat & Bottom Label) -->
     <div class="attention-urgency-pills" role="group" aria-label="Filter attention by urgency tier">
-      <button class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all" title="All (${scopedItems.length})">
+      <button type="button" class="urgency-pill-btn ${state.feedAttentionSeverityFilter === 'all' ? 'active' : ''}" data-severity="all" aria-pressed="${state.feedAttentionSeverityFilter === 'all'}" title="All (${scopedItems.length})">
         <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedItems.length}</span>
         <span class="urgency-pill-bottom" title="All">All</span>
       </button>
-      <button class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required" title="Action Required (${redItems.length})">
+      <button type="button" class="urgency-pill-btn pill-danger ${state.feedAttentionSeverityFilter === 'action_required' ? 'active' : ''}" data-severity="action_required" aria-pressed="${state.feedAttentionSeverityFilter === 'action_required'}" title="Action Required (${redItems.length})">
         <span class="urgency-pill-top"><span class="status-dot red"></span> ${redItems.length}</span>
         <span class="urgency-pill-bottom" title="Action Required">Action Required</span>
       </button>
-      <button class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention" title="Attention (${yellowItems.length})">
+      <button type="button" class="urgency-pill-btn pill-warning ${state.feedAttentionSeverityFilter === 'attention' ? 'active' : ''}" data-severity="attention" aria-pressed="${state.feedAttentionSeverityFilter === 'attention'}" title="Attention (${yellowItems.length})">
         <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${yellowItems.length}</span>
         <span class="urgency-pill-bottom" title="Attention">Attention</span>
       </button>
-      <button class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info" title="Info & Notices (${blueItems.length})">
+      <button type="button" class="urgency-pill-btn pill-info ${state.feedAttentionSeverityFilter === 'info' ? 'active' : ''}" data-severity="info" aria-pressed="${state.feedAttentionSeverityFilter === 'info'}" title="Info & Notices (${blueItems.length})">
         <span class="urgency-pill-top"><span class="status-dot blue"></span> ${blueItems.length}</span>
         <span class="urgency-pill-bottom" title="Info & Notices">Info & Notices</span>
       </button>
@@ -633,23 +633,23 @@ function renderActivityStreamSection(state: PrototypeState): HTMLElement {
 
     <!-- 5 Streamlined Activity Filter Pills (Discrete Cards matching Urgency Pills style) -->
     <div class="activity-filter-pills" role="group" aria-label="Filter activity stream">
-      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'all' ? 'active' : ''}" data-act-filter="all" title="All Activity (${scopedActivities.length})">
+      <button type="button" class="activity-filter-pill-btn ${state.feedActivityFilter === 'all' ? 'active' : ''}" data-act-filter="all" aria-pressed="${state.feedActivityFilter === 'all'}" title="All Activity (${scopedActivities.length})">
         <span class="urgency-pill-top"><span class="status-dot purple"></span> ${scopedActivities.length}</span>
         <span class="urgency-pill-bottom" title="All">All</span>
       </button>
-      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'tasks' ? 'active' : ''}" data-act-filter="tasks" title="Task & Agent Lifecycle (${tasksActivities.length})">
+      <button type="button" class="activity-filter-pill-btn ${state.feedActivityFilter === 'tasks' ? 'active' : ''}" data-act-filter="tasks" aria-pressed="${state.feedActivityFilter === 'tasks'}" title="Task & Agent Lifecycle (${tasksActivities.length})">
         <span class="urgency-pill-top"><span class="status-dot blue"></span> ${tasksActivities.length}</span>
         <span class="urgency-pill-bottom" title="Tasks">Tasks</span>
       </button>
-      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'messages' ? 'active' : ''}" data-act-filter="messages" title="Chat Messages & Routing (${msgActivities.length})">
+      <button type="button" class="activity-filter-pill-btn ${state.feedActivityFilter === 'messages' ? 'active' : ''}" data-act-filter="messages" aria-pressed="${state.feedActivityFilter === 'messages'}" title="Chat Messages & Routing (${msgActivities.length})">
         <span class="urgency-pill-top"><span class="status-dot green"></span> ${msgActivities.length}</span>
         <span class="urgency-pill-bottom" title="Chat">Chat</span>
       </button>
-      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'envs' ? 'active' : ''}" data-act-filter="envs" title="Environment & Host Events (${envActivities.length})">
+      <button type="button" class="activity-filter-pill-btn ${state.feedActivityFilter === 'envs' ? 'active' : ''}" data-act-filter="envs" aria-pressed="${state.feedActivityFilter === 'envs'}" title="Environment & Host Events (${envActivities.length})">
         <span class="urgency-pill-top"><span class="status-dot yellow"></span> ${envActivities.length}</span>
         <span class="urgency-pill-bottom" title="Environments">Envs</span>
       </button>
-      <button class="activity-filter-pill-btn ${state.feedActivityFilter === 'usage' ? 'active' : ''}" data-act-filter="usage" title="Cost & Usage Milestones (${costActivities.length})">
+      <button type="button" class="activity-filter-pill-btn ${state.feedActivityFilter === 'usage' ? 'active' : ''}" data-act-filter="usage" aria-pressed="${state.feedActivityFilter === 'usage'}" title="Cost & Usage Milestones (${costActivities.length})">
         <span class="urgency-pill-top"><span class="status-dot gray"></span> ${costActivities.length}</span>
         <span class="urgency-pill-bottom" title="Cost & Usage">Cost</span>
       </button>
