@@ -49,6 +49,7 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 - Core modules remain independently testable and verifiable.
 - Individual capabilities use observable acceptance checks even though overall MVP readiness is a Human product decision.
 - The product decisions settled by [Map #44](https://github.com/tinysnake/sprout/issues/44), ADR-0006 through ADR-0010, and the retained #61–#68 prototype artifacts are constraints for implementation rather than details for implementation workers to reinvent.
+- The retained prototype is the Production Web structural baseline, not its implementation or backend baseline. ADR-0011 fixes the production Web foundation while Map #70 makes the inheritance contract and M1 starting point explicit before specification.
 
 **Non-goals for M2**:
 
@@ -76,9 +77,10 @@ Map #44 contributed decision evidence, not production evidence:
 - #45–#52 and ADR-0006 through ADR-0010 settle the readiness boundary, Task
   authority, Message and wake routing, management journeys, self-hosted
   operation and recovery, and truthful usage semantics.
-- #61–#68 retain one owner-accepted mobile-first interaction direction for the
+- #61–#68 retain the owner-accepted Production Web structural baseline for the
   shared shell, Feed, Project and Task loop, Chat, Environments, Agents, Usage
-  and Costs, and Settings.
+  and Costs, and Settings. Production substantially preserves that structure
+  while replacing its fixture-backed implementation.
 - The final integrated review on #44 passed the complete retained prototype and
   its domain, privacy, accessibility, responsive, and cross-module checks.
 
@@ -164,7 +166,7 @@ One coherent Web product lets the technical lead perform every routine managemen
 
 - Mobile is a complete operating surface rather than a read-only status view.
 - State distinctions and actions remain usable on narrow touch screens and desktop displays.
-- An owner-reviewed interactive prototype provides primary evidence before the production information architecture is fixed.
+- The owner-reviewed structural baseline is preserved through production Module interfaces and verified on phone and desktop rather than being re-designed during implementation.
 
 ### M2-O7 — Dogfooded local operator MVP
 
@@ -182,9 +184,14 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 ## Current M2 frontier
 
 [Map #44](https://github.com/tinysnake/sprout/issues/44) completed the product-
-direction frontier. The next planning step is to turn its settled decisions into
-buildable production specifications and Tickets without treating the retained
-prototype as backend implementation.
+direction frontier. [Map #70](https://github.com/tinysnake/sprout/issues/70)
+now hardens the M1 and Production Web foundations before those decisions are
+turned into buildable specifications and Tickets.
+
+Map #70 is deliberately pre-specification work. It may reorganize M1 code only
+while preserving observable behaviour, and it validates the Vue/Tailwind Web
+foundation with one Shell plus Manage / Environments structural slice. It does
+not implement new M2 backend capability or migrate every prototype view.
 
 The outcome frontier contains M2-O1 and M2-O5: product-managed collaboration
 setup unlocks the Human-authorized work, routing, and self-hosted-operation paths,
@@ -196,17 +203,25 @@ dogfooding and owner-readiness outcome.
 
 ## Prototype-to-implementation boundary
 
-The focused prototype Tickets in Map #44 are decision artifacts for the operator experience. Accepting a prototype settles the demonstrated interaction patterns, terminology, boundaries, and owner decisions; it does **not** claim that the corresponding production capabilities or backend contracts are implemented.
+The focused prototype Tickets in Map #44 are decision artifacts and the
+Production Web structural baseline for the operator experience. Accepting them
+settles the demonstrated information architecture, responsive hierarchy,
+navigation, interaction patterns, terminology, boundaries, and owner
+decisions. It does **not** make their direct-DOM rendering, fixture state,
+prototype CSS organization, production capabilities, or backend contracts an
+implementation baseline.
 
 Prototype UI simplification is also not backend scope reduction. Hiding, moving into an on-demand inspector, or removing a field or control from a page must not be interpreted as permission to delete the corresponding domain data, lifecycle state, routing metadata, batching and failure evidence, audit/provenance links, API contract, or storage requirement. A backend capability is removed or deferred only by an explicit product decision recorded separately from the visual prototype.
 
 Map #44 satisfied its exit criteria after the owner confirmed the settled
-direction and the final integrated review passed. Wayfinder now hands those
-decisions through `/to-spec` and `/to-tickets`, which create buildable
+direction and the final integrated review passed. Map #70 first extracts the
+structural inheritance and UI-language contract, validates ADR-0011 with a
+representative production Web slice, identifies behaviour-preserving M1
+cleanup, and maps implemented capabilities to M2 gaps. Wayfinder then hands
+those results through `/to-spec` and `/to-tickets`, which create buildable
 implementation Tickets with explicit backend acceptance and links to the
-relevant prototype evidence. Prototype work must not be treated as production
-implementation; implementation Tickets must preserve every backend obligation
-that the prototype only hides or presents on demand.
+relevant prototype evidence. Implementation Tickets must preserve every
+backend obligation that the prototype only hides or presents on demand.
 
 ## Completed medium-term goal
 
