@@ -61,10 +61,35 @@ test('Settings renders the bounded access, compatibility, data, diagnostic, and 
     assert.match(document.body.textContent ?? '', /Environment recovery and Force Release remain in Manage \/ Environments/);
     assert.equal(document.querySelectorAll('[data-settings-state]').length >= 6, true);
     assert.match(document.body.textContent ?? '', /Loading/);
-    assert.match(document.body.textContent ?? '', /Pending owner review/);
+    assert.match(document.body.textContent ?? '', /Human-approved three-category structure/);
     assert.match(document.body.textContent ?? '', /docs\/prototype-settings-operator\.md/);
     assert.doesNotMatch(document.body.textContent ?? '', /\/Users\//);
     assert.doesNotMatch(document.body.textContent ?? '', /C:\\Users/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Settings treats the Human-approved three-category structure as authoritative evidence', async () => {
+  const { document, stateManager, cleanup } = await openSettings();
+  try {
+    const settings = stateManager.getSnapshot().settings;
+    const artifact = await readFile(new URL('../../../docs/prototype-settings-operator.md', import.meta.url), 'utf8');
+    const reviewText = document.querySelector('[data-settings-section="review"]')?.textContent ?? '';
+
+    assert.equal(settings.review.status, 'approved');
+    assert.deepEqual(settings.review.approvedDecisions, [
+      'The Manage > Settings surface uses Access & Security, Instance & System, and Data & Diagnostics as its three operator categories.',
+      'Review evidence and state coverage remain available below the categories without becoming a fourth settings category.',
+      'The Settings surface keeps Environment recovery and Force Release in Manage > Environments.',
+    ]);
+    for (const category of ['Access & Security', 'Instance & System', 'Data & Diagnostics']) {
+      assert.match(reviewText, new RegExp(category.replaceAll('&', '\\&')));
+      assert.match(artifact, new RegExp(category.replaceAll('&', '\\&')));
+    }
+    for (const value of [reviewText, artifact]) {
+      assert.doesNotMatch(value, /Pending owner review|unresolved owner preferences|Unresolved preferences|does not claim owner acceptance/i);
+    }
   } finally {
     await cleanup();
   }
@@ -119,7 +144,7 @@ test('Settings keeps sanitized export and durable-data actions observable withou
   }
 });
 
-test('Settings keeps phone and desktop surfaces equivalent and records unresolved owner preferences', async () => {
+test('Settings keeps phone and desktop surfaces equivalent with approved review evidence', async () => {
   const { document, stateManager, cleanup } = await openSettings();
   try {
     const sectionsBefore = document.querySelectorAll('[data-settings-section]').length;
@@ -128,9 +153,9 @@ test('Settings keeps phone and desktop surfaces equivalent and records unresolve
     assert.equal(document.querySelectorAll('[data-settings-section]').length, sectionsBefore);
     stateManager.setViewportMode('mobile');
     assert.equal(document.querySelector('.viewport-stage')?.classList.contains('mode-mobile'), true);
-    assert.match(document.body.textContent ?? '', /Unresolved preferences/);
-    assert.match(document.body.textContent ?? '', /final fourth-tab label/i);
-    assert.match(document.body.textContent ?? '', /does not claim owner acceptance/i);
+    assert.match(document.body.textContent ?? '', /Approved owner review/);
+    assert.match(document.body.textContent ?? '', /downstream non-goals remain explicit/i);
+    assert.doesNotMatch(document.body.textContent ?? '', /Pending owner review|Unresolved preferences|final fourth-tab label|does not claim owner acceptance/i);
   } finally {
     await cleanup();
   }

@@ -2,8 +2,8 @@
 
 ## Summary
 
-This retained artifact records the first implementation of the bounded General
-and Operator Settings surface inside `Manage`. It reuses the accepted #61
+This retained artifact records the Human-approved bounded General and Operator
+Settings surface inside `Manage`. It reuses the accepted #61
 shell, tokens, touch floor, status language, and progressive-disclosure
 patterns carried through #62, #63, #64, #65, and #66. It preserves ADR-0009
 and models the operational contract without adding backend behavior.
@@ -62,9 +62,9 @@ preserved at the bottom:
 3. **Data & Diagnostics**:
    - Durable data root and database relative location guidance with copy action.
    - Sanitized diagnostic export and host-local offline CLI fallback.
-4. **Owner review and state coverage**:
-   - Retained ADR decisions, unresolved preferences, and 6-state coverage matrix
-     remain available in collapsible review drawers at the bottom.
+4. **Review evidence (not a fourth settings category)**:
+   - The approved decisions and 6-state coverage matrix remain available in
+     collapsible review drawers at the bottom.
 
 All foldable containers follow the Sentinel design convention: SVG chevron
 icons with smooth 90-degree rotation, right-aligned and vertically centered.
@@ -112,7 +112,20 @@ state depends on color alone.
 - Routine Environment and work recovery decisions remain in their authoritative
   Manage surfaces. Settings does not duplicate Force Release.
 
-## 5. Owner review record
+## 5. Human-approved decision record
+
+### Human-approved three-category structure
+
+The Human-approved Settings structure is authoritative for this prototype:
+
+- **Access & Security** contains operator identity, browser sessions, and
+  host-local credential recovery and rotation.
+- **Instance & System** contains compatibility, migration safety, and the Web
+  versus host-local administration boundary.
+- **Data & Diagnostics** contains durable-data guidance and sanitized
+  diagnostics with the host-local fallback.
+- Review evidence and state coverage remain below these three categories; they
+  are not a fourth settings category.
 
 ### Accepted inheritance
 
@@ -130,16 +143,8 @@ state depends on color alone.
 - Raw diagnostic logs or a content-rich opt-in export.
 - Credential or host-network details in the Web surface.
 
-### Unresolved owner preferences
-
-- Final fourth-tab label: `Settings` versus `General`.
-- Whether state-coverage evidence should be visible in a normal review drawer or
-  only in the retained artifact.
-- Final wording and interaction treatment for credential rotation confirmation.
-
-The UI marks this record **Pending owner review** and does not claim that these
-preferences have been accepted. The retained artifact path is
-`docs/prototype-settings-operator.md`.
+The rejected scope remains downstream non-goals for this prototype. The
+retained artifact path is `docs/prototype-settings-operator.md`.
 
 ## 6. Verification contract
 

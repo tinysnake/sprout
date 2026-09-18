@@ -81,10 +81,10 @@ export type OperatorSettingsModel = {
     summary: string;
   }[];
   review: {
-    status: 'pending-owner-review';
+    status: 'approved';
     acceptedPatterns: string[];
     rejectedPatterns: string[];
-    unresolvedDecisions: string[];
+    approvedDecisions: string[];
     artifactPath: string;
   };
 };
@@ -584,6 +584,17 @@ export type UsageSettlementRange = 'today' | '7d' | '30d';
 
 export type UsageObservationState = 'stable' | 'delayed' | 'corrected' | 'pending';
 
+/**
+ * The observed model identity is part of aggregation identity.  A model name
+ * alone is not enough to distinguish a provider route, harness source, or
+ * versioned telemetry contract.
+ */
+export type UsageModelIdentity = {
+  source: string;
+  provider: string;
+  version: string;
+};
+
 export type UsageActivity = {
   id: string;
   kind: UsageActivityKind;
@@ -593,6 +604,7 @@ export type UsageActivity = {
   engine?: EngineKind | undefined;
   model: string;
   provider?: string | undefined;
+  modelIdentity: UsageModelIdentity;
   activityTime: string;
   settlementRange: UsageSettlementRange;
   outcome: UsageActivityOutcome;

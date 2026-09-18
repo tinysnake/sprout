@@ -13,6 +13,12 @@ one pass. The default time range, summary emphasis, and aggregate link density
 remain **unresolved owner preferences**. They are proposed presentation choices,
 not silent product decisions.
 
+The visible summary is split into Work-model Agent runs and Project-owned
+Routing attempts. Each kind has its own duration, known-token, and
+API-equivalent estimate values; no top-level metric combines the two kinds.
+Ongoing activity is called out as provisional observed-so-far evidence rather
+than being included in finalized summary arithmetic.
+
 ## Reused design language
 
 The surface reuses the accepted #61 to #66 conventions:
@@ -38,6 +44,7 @@ Codex and Pi telemetry research:
 | Fact | Prototype representation |
 | --- | --- |
 | Activity identity | `agent_run` or `routing_attempt`, with Project ownership and optional Task or Agent ownership |
+| Model identity | Every activity records the observed source, provider, and version; Model grouping includes all three dimensions in addition to activity kind, engine, and model name. |
 | Token dimensions | Total input, uncached input, cached reads, cache write, output, reasoning output, and provider or engine total. Missing dimensions are absent, not zero. |
 | Token measurement | `complete`, `partial`, or `unavailable`, with the source event named |
 | Duration | Sprout wall duration is separate from optional engine duration. Ongoing duration is labelled observed so far. |
@@ -46,7 +53,7 @@ Codex and Pi telemetry research:
 | Monetary fact | Attributable billed cost remains unavailable for these per-activity interfaces. |
 | API-equivalent valuation | Available, pending, or unavailable. Available values name provider-estimated, harness-calculated, or locally-estimated provenance. |
 | Billing basis | Metered API, subscription-inclusive, or unknown. Subscription-inclusive never becomes a zero bill. |
-| Coverage | Aggregate counts show complete, partial, and unavailable token observations plus available, pending, and unavailable estimates. |
+| Coverage | Every aggregate card shows complete, partial, and unavailable token/duration observations plus available, pending, and unavailable estimates, billed-cost availability, and estimate provenance subtotals. |
 | Observation history | Delayed and corrected observations remain append-only examples with source, status, and supersession note. |
 | Time semantics | Activities group by terminal settlement range. Ongoing work is provisional and not mixed into finalized totals. |
 
@@ -55,15 +62,24 @@ Codex and Pi telemetry research:
 All six views use the same filters and can open the same activity detail
 surface.
 
-1. **Agent run** lists work-model runs and Project-owned Routing attempts with
-   outcome, tokens, model activity duration, estimate state, and provenance.
+1. **Agent run** lists work-model Agent runs only with outcome, tokens, model
+   activity duration, estimate state, and provenance. Project-owned Routing
+   attempts remain in Project, Model, and Time range views.
 2. **Task** groups nested Agent runs and shows model activity time separately
    from Task calendar elapsed time. Routing attempts are explicitly excluded.
-3. **Project** shows work-model and routing-model subtotals side by side.
+3. **Project** shows work-model and routing-model subtotals side by side; no duration, token, or estimate metric is calculated across those subtotals.
 4. **Agent** groups runs across Projects and does not absorb Routing attempts.
-5. **Model** groups by actual provider, engine, model, and activity kind.
-6. **Time range** groups by settlement range and keeps provisional activity
-   distinct from finalized activity.
+5. **Model** groups by the actual source, provider, version, engine, model, and activity kind, and renders that identity as evidence.
+6. **Time range** groups by settlement range and renders separate work-model and Project-owned routing-attempt aggregate cards, so their duration, token, and estimate metrics never combine.
+
+Project, Model, and Time range aggregate cards keep their main metrics compact while exposing a
+details-on-demand coverage block. It names known/partial/unavailable token and duration
+coverage, available/pending/unavailable API-equivalent valuations, attributable billed-cost
+availability, each available estimate provenance, and a mixed-provenance label when more than
+one provenance contributes. Pending and unavailable values are counted as gaps and never as
+numeric zeroes. Ongoing activities render in a separate provisional observed-so-far aggregate
+with observed activity links; finalized aggregates and their constituent links contain only
+settled activities.
 
 Selecting an activity or a constituent link opens details for attribution,
 duration, token dimensions, billed-cost availability, API-equivalent estimate,
@@ -80,8 +96,8 @@ billing basis, measurement coverage, source, and observation history.
 | Interrupted | `act-209` retains partial usage and shows unavailable cost after a worker interruption. |
 | Delayed | `act-207` and `act-210` show pending provider observations rather than invented values. |
 | Corrected | `act-204` retains a superseded local estimate and a later provider estimate in history. |
-| Incomplete | Partial and unavailable dimensions are displayed as unavailable, not zero-filled. |
-| Mixed provenance | The aggregate may sum available USD API-equivalent values but exposes the separate provenance labels in activity detail. |
+| Incomplete | Partial and unavailable dimensions are displayed as unavailable, not zero-filled. A known duration subtotal remains visible with an incomplete/unavailable label when any constituent duration is unavailable. |
+| Mixed provenance | The aggregate may sum available USD API-equivalent values but exposes provenance subtotals and a mixed-provenance label in its coverage evidence. |
 | Routing gap | `act-wake-003` is a failed Routing attempt with unavailable token and cost telemetry, visible as a coverage gap. |
 
 ## Owner review record
