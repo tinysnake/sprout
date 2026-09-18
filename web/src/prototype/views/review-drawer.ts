@@ -42,6 +42,27 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           <div><strong>Rejected in this prototype</strong><span>Budgets, alerts, admission limits, automatic stops, billing-account controls, chart-library choices, candidate harness controls, and unlabelled cost.</span></div>
           <div><strong>Owner unresolved</strong><span>Default time range, summary emphasis, and whether aggregate constituent links should remain visible by default. No preference is silently treated as accepted.</span></div>
         </div>
+
+      <!-- Ticket #68 Acceptance Verification Checklist -->
+      <div class="review-card settings-review-drawer-card">
+        <h4 class="review-section-title" style="color: var(--accent-primary);">
+          ${renderIcon('check', 16)} Ticket #68 General / Operator Settings: First Implementation Review
+        </h4>
+        <div class="review-checklist">
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Operator access boundary:</strong> One operator identity, session inspection and revocation, host-local credential recovery, rotation consequences, and no credential delivery to Agents or Workers.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Compatibility and migration:</strong> Sprout, protocol, schema, supported range, safety-copy, transactional failure, startup blocking, and host-local recovery guidance are represented without Web migration orchestration.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Durability and diagnostics:</strong> Relative durable-data location, migration guard versus backup boundary, sanitized export exclusions, and host-local fallback are visible.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Boundary and state coverage:</strong> Web routine operation is separated from host administration; normal, loading, warning, unavailable, failure, and risk-bearing states remain inspectable on phone and desktop.</span></label>
+          <label class="review-check-item"><input type="checkbox" checked disabled /><span><strong>Retained artifact and owner decisions:</strong> Accepted inheritance, rejected scope, and unresolved owner preferences are recorded in <code>docs/prototype-settings-operator.md</code>. Review is pending and no preference is silently accepted.</span></label>
+        </div>
+        <details class="settings-review-drawer-details">
+          <summary>Show accepted, rejected, and unresolved patterns</summary>
+          <div class="review-list settings-review-drawer-lists">
+            <div><strong>Accepted inheritance</strong><ul><li>#61 shell, tokens, touch floor, semantic states, and Manage hierarchy</li><li>#62 to #66 low-density hierarchy and details-on-demand</li><li>Environment recovery and Force Release remain in Environments</li></ul></div>
+            <div><strong>Rejected scope</strong><ul><li>Web restart, maintenance, backup, restore, onboarding, and public governance controls</li><li>Multi-Human authorization and raw diagnostic export</li></ul></div>
+            <div><strong>Unresolved preferences</strong><ul><li>Final fourth-tab label</li><li>Default visibility of state-coverage evidence</li><li>Credential rotation confirmation wording</li></ul></div>
+          </div>
+        </details>
       </div>
 
       <!-- Ticket #66 Acceptance Verification Checklist -->
