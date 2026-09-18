@@ -47,23 +47,28 @@ owner-review evidence is available on demand.
 
 ## 2. Information architecture
 
-The page follows one operator journey rather than a settings dashboard:
+The page organizes the operational facts and controls into three cohesive
+operator categories accessible via top sub-tabs, with meta review evidence
+preserved at the bottom:
 
-1. **Operator identity and access boundary**: the current authority boundary
-   and browser sessions are visible first.
-2. **Credential recovery and rotation**: consequences remain beside the
-   risk-bearing action and the confirmation is progressive.
-3. **Instance and compatibility**: version and schema facts lead into
-   migration safety and failure visibility on demand.
-4. **Durable data and diagnostics**: relative location, sanitized export, and
-   unreachable-Web fallback share a quieter secondary tier.
-5. **Web versus host-local boundary**: routine product actions and host-owned
-   administration are explicitly separated.
-6. **Owner review and state coverage**: retained decisions remain collapsed so
-   the normal operator path stays focused.
+1. **Access & Security**:
+   - Operator identity and single-operator access boundary facts.
+   - Browser session inspection, individual revocation, and revoke-all-other-sessions.
+   - Host-local credential recovery guidance and progressive risk-gated rotation.
+2. **Instance & System**:
+   - Sprout, protocol, and schema compatibility facts with range enforcement.
+   - Transactional migration safety copy status, failure visibility, and host recovery.
+   - Web routine operations versus host-local administration boundary.
+3. **Data & Diagnostics**:
+   - Durable data root and database relative location guidance with copy action.
+   - Sanitized diagnostic export and host-local offline CLI fallback.
+4. **Owner review and state coverage**:
+   - Retained ADR decisions, unresolved preferences, and 6-state coverage matrix
+     remain available in collapsible review drawers at the bottom.
 
-No candidate scenario selector was added to the product canvas. The complete
-state matrix is retained in the model and presented as review evidence.
+All foldable containers follow the Sentinel design convention: SVG chevron
+icons with smooth 90-degree rotation, right-aligned and vertically centered.
+No candidate scenario selector was added to the product canvas.
 
 ## 3. Model and state matrix
 

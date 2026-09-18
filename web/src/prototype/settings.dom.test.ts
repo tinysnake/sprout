@@ -135,3 +135,39 @@ test('Settings keeps phone and desktop surfaces equivalent and records unresolve
     await cleanup();
   }
 });
+
+test('Settings switches between the three categories (Access, System, Data)', async () => {
+  const { document, stateManager, cleanup } = await openSettings();
+  try {
+    const accessTabBtn = document.querySelector('.settings-sub-tab[data-settings-tab="access"]') as HTMLButtonElement;
+    const systemTabBtn = document.querySelector('.settings-sub-tab[data-settings-tab="system"]') as HTMLButtonElement;
+    const dataTabBtn = document.querySelector('.settings-sub-tab[data-settings-tab="data"]') as HTMLButtonElement;
+    assert.ok(accessTabBtn && systemTabBtn && dataTabBtn);
+
+    // Initial state is 'access'
+    assert.equal(stateManager.getSnapshot().settingsCategoryTab, 'access');
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="access"]')?.classList.contains('is-active'), true);
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="system"]')?.classList.contains('is-active'), false);
+
+    // Click System tab
+    systemTabBtn.click();
+    assert.equal(stateManager.getSnapshot().settingsCategoryTab, 'system');
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="system"]')?.classList.contains('is-active'), true);
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="access"]')?.classList.contains('is-active'), false);
+
+    // Click Data tab
+    dataTabBtn.click();
+    assert.equal(stateManager.getSnapshot().settingsCategoryTab, 'data');
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="data"]')?.classList.contains('is-active'), true);
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="system"]')?.classList.contains('is-active'), false);
+
+    // Click Status strip shortcut for Access
+    const statusAccess = document.querySelector('[data-status-tab="access"]') as HTMLElement;
+    assert.ok(statusAccess);
+    statusAccess.click();
+    assert.equal(stateManager.getSnapshot().settingsCategoryTab, 'access');
+    assert.equal(document.querySelector('.settings-tab-panel[data-settings-tab-panel="access"]')?.classList.contains('is-active'), true);
+  } finally {
+    await cleanup();
+  }
+});

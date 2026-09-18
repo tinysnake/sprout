@@ -31,6 +31,7 @@ import type {
 } from './types.js';
 
 export type { ViewportMode };
+export type SettingsCategoryTab = 'access' | 'system' | 'data';
 export type ActiveTab = 'attention' | 'projects' | 'tasks' | 'environments' | 'agents' | 'usage' | 'onboarding' | 'primitives';
 
 export type EnvironmentEligibilityCheck = {
@@ -243,6 +244,7 @@ export interface PrototypeState {
   reviewDrawerOpen: boolean;
   operator: OperatorIdentity;
   settings: OperatorSettingsModel;
+  settingsCategoryTab: SettingsCategoryTab;
   projects: ProjectItem[];
   agents: AgentDefinition[];
   environments: EnvironmentInstance[];
@@ -2324,6 +2326,7 @@ class StateManager {
       reviewDrawerOpen: false,
       operator: initialOperator,
       settings: initialSettings,
+      settingsCategoryTab: 'access',
       projects: initialProjects,
       agents: initialAgents,
       environments: initialEnvironments,
@@ -2847,6 +2850,11 @@ class StateManager {
   public markDurableDataLocationCopied() {
     this.state.settings.durableData.copyState = 'copied';
     this.notify('Copied the relative durable-data location guidance.');
+  }
+
+  public setSettingsCategoryTab(tab: SettingsCategoryTab) {
+    this.state.settingsCategoryTab = tab;
+    this.notify(`Switched Settings category to ${tab}`);
   }
 
   // --- Feed & Attention Actions (Ticket #62) ---
