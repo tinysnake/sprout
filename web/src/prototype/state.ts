@@ -415,10 +415,14 @@ const initialSettings: OperatorSettingsModel = {
     { key: 'risk', label: 'Risk-bearing', summary: 'Credential rotation revokes other browser sessions and requires host-local recovery if access is lost.' },
   ],
   review: {
-    status: 'pending-owner-review',
+    status: 'approved',
     acceptedPatterns: ['Inherited Settings tab keeps the Manage hierarchy and uses the #61 shell, tokens, touch floor, and status language.', 'Primary facts stay visible; migration, diagnostics, and host boundary detail stays on demand.', 'Environment recovery and Force Release remain in Manage > Environments.'],
     rejectedPatterns: ['No Web restart or maintenance control.', 'No backup or restore orchestration, onboarding wizard, multi-Human authorization, or public deployment governance.', 'No candidate dropdown harness controls or flat advanced-settings dashboard.'],
-    unresolvedDecisions: ['Owner preference for the final fourth-tab label remains open between Settings and General.', 'Owner preference for whether the state matrix is shown by default or only in review detail remains open.', 'Owner preference for credential rotation copy and confirmation wording remains open.'],
+    approvedDecisions: [
+      'The Manage > Settings surface uses Access & Security, Instance & System, and Data & Diagnostics as its three operator categories.',
+      'Review evidence and state coverage remain available below the categories without becoming a fourth settings category.',
+      'The Settings surface keeps Environment recovery and Force Release in Manage > Environments.',
+    ],
     artifactPath: 'docs/prototype-settings-operator.md',
   },
 };

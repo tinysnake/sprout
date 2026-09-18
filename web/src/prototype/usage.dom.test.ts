@@ -84,6 +84,32 @@ test('Usage: presents six views, truthful coverage, and separate work and wake a
   }
 });
 
+test('Usage: the primary Agent run view excludes Project-owned Routing attempts while Project drill-down retains them', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  try {
+    const document = dom.window.document;
+    stateManager.setUsageFilter({ tab: 'run', timeRange: 'all' });
+    const agentRunCount = stateManager.getSnapshot().usageActivities.filter((activity) => activity.kind === 'agent_run').length;
+    const primaryActivityIds = [...document.querySelectorAll<HTMLElement>('.usage-tab-surface [data-usage-activity]')]
+      .map((element) => element.dataset.usageActivity);
+
+    assert.equal(primaryActivityIds.length, agentRunCount);
+    assert.ok(primaryActivityIds.every((id) => id !== 'act-wake-002' && id !== 'act-wake-003'));
+    assert.match(document.querySelector('.usage-list-heading')?.textContent ?? '', /work-model Agent run only/);
+
+    const projectTab = document.querySelector('[data-usage-tab="project"]') as HTMLButtonElement;
+    assert.ok(projectTab);
+    projectTab.click();
+    assert.match(document.querySelector('.usage-tab-surface')?.textContent ?? '', /Routing-model attempts/);
+    const routingActivity = document.querySelector('[data-usage-activity="act-wake-002"]') as HTMLButtonElement;
+    assert.ok(routingActivity);
+    routingActivity.click();
+    assert.match(document.querySelector('.usage-detail-panel')?.textContent ?? '', /Routing attempt/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Usage: all aggregate views preserve kind boundaries and drill down to activity evidence', async () => {
   const { dom, stateManager, cleanup } = await openUsageSurface();
   try {

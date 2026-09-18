@@ -290,10 +290,11 @@ function renderAggregateActivities(activities: UsageActivity[]): string {
 }
 
 function renderRunView(activities: UsageActivity[], state: PrototypeState): string {
+  const agentRunActivities = activities.filter((activity) => activity.kind === 'agent_run');
   return `
     <div class="usage-list-section">
-      <div class="usage-list-heading"><div><h3>Activities</h3><p>Each row is one work-model Agent run or Project-owned Routing attempt.</p></div><span>${activities.length} shown</span></div>
-      ${activities.length > 0 ? `<div class="usage-activity-list">${activities.map((activity) => renderActivityFoldableRow(activity, state)).join('')}</div>` : renderEmptyState()}
+      <div class="usage-list-heading"><div><h3>Agent runs</h3><p>Each row is one work-model Agent run only. Project-owned Routing attempts remain in their Project and routing views.</p></div><span>${agentRunActivities.length} shown</span></div>
+      ${agentRunActivities.length > 0 ? `<div class="usage-activity-list">${agentRunActivities.map((activity) => renderActivityFoldableRow(activity, state)).join('')}</div>` : renderEmptyState()}
     </div>
   `;
 }

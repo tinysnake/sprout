@@ -81,10 +81,10 @@ export type OperatorSettingsModel = {
     summary: string;
   }[];
   review: {
-    status: 'pending-owner-review';
+    status: 'approved';
     acceptedPatterns: string[];
     rejectedPatterns: string[];
-    unresolvedDecisions: string[];
+    approvedDecisions: string[];
     artifactPath: string;
   };
 };
