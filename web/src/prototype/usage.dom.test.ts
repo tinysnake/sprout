@@ -143,6 +143,92 @@ test('Usage: all aggregate views preserve kind boundaries and drill down to acti
   }
 });
 
+test('Usage: time-range aggregate cards keep work and routing totals separate', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  try {
+    const document = dom.window.document;
+    stateManager.setUsageFilter({ tab: 'time', timeRange: 'all' });
+
+    const workCard = document.querySelector<HTMLElement>(
+      '[data-usage-aggregate="true"][data-usage-range="today"][data-usage-kind="agent_run"]'
+    );
+    const routingCard = document.querySelector<HTMLElement>(
+      '[data-usage-aggregate="true"][data-usage-range="today"][data-usage-kind="routing_attempt"]'
+    );
+    assert.ok(workCard);
+    assert.ok(routingCard);
+
+    const workMetrics = workCard.querySelector('.usage-aggregate-metrics')?.textContent ?? '';
+    const routingMetrics = routingCard.querySelector('.usage-aggregate-metrics')?.textContent ?? '';
+    assert.match(workMetrics, /119,300 tokens/);
+    assert.match(workMetrics, /\$0\.2690 available estimate/);
+    assert.doesNotMatch(workMetrics, /1,960 tokens/);
+    assert.match(routingMetrics, /1,960 tokens/);
+    assert.match(routingMetrics, /\$0\.0003 available estimate/);
+    assert.doesNotMatch(routingMetrics, /119,300 tokens/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Usage: model grouping keeps source, provider, and version identity distinct', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  const activities = stateManager.getSnapshot().usageActivities;
+  let variantAdded = false;
+  try {
+    const source = activities.find((activity) => activity.id === 'act-204');
+    assert.ok(source);
+    activities.push({
+      ...source,
+      id: 'act-source-variant',
+      modelIdentity: {
+        source: 'Alternate model gateway',
+        provider: 'OpenAI-compatible provider',
+        version: 'gateway-v2',
+      },
+    });
+    variantAdded = true;
+    stateManager.setUsageFilter({ tab: 'model', timeRange: 'all' });
+
+    const gptGroups = [...dom.window.document.querySelectorAll<HTMLElement>('[data-model-name="gpt-4o"]')];
+    assert.equal(gptGroups.length, 2);
+    assert.ok(gptGroups.some((group) => /Codex telemetry/.test(group.textContent ?? '')));
+    assert.ok(gptGroups.some((group) => /Alternate model gateway/.test(group.textContent ?? '')));
+    assert.ok(gptGroups.some((group) => /OpenAI-compatible provider/.test(group.textContent ?? '')));
+    assert.ok(gptGroups.some((group) => /gateway-v2/.test(group.textContent ?? '')));
+  } finally {
+    if (variantAdded) activities.splice(activities.findIndex((activity) => activity.id === 'act-source-variant'), 1);
+    await cleanup();
+  }
+});
+
+test('Usage: Project, model, and time aggregate cards expose coverage and provenance evidence', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  try {
+    const document = dom.window.document;
+    for (const tab of ['project', 'model', 'time'] as const) {
+      stateManager.setUsageFilter({ tab, timeRange: 'all' });
+      const cards = [...document.querySelectorAll<HTMLElement>('[data-usage-aggregate="true"]')];
+      assert.ok(cards.length > 0, `${tab} has aggregate cards`);
+      for (const card of cards) {
+        const evidence = card.querySelector('.usage-aggregate-coverage');
+        assert.ok(evidence, `${tab} aggregate has coverage evidence`);
+        const text = evidence?.textContent ?? '';
+        assert.match(text, /Token coverage/);
+        assert.match(text, /API-equivalent valuation/);
+        assert.match(text, /Attributable billed cost/);
+        assert.match(text, /pending/);
+        assert.match(text, /unavailable/);
+        assert.match(text, /not zero/);
+      }
+    }
+
+    assert.match(document.body.textContent ?? '', /Mixed-provenance API-equivalent estimate/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Usage: filters show a real empty state, clear safely, and work on the phone layout', async () => {
   const { dom, stateManager, cleanup } = await openUsageSurface();
   try {

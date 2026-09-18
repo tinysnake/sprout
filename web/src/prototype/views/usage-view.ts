@@ -85,6 +85,22 @@ function modelLabel(activity: UsageActivity): string {
   return `${activity.provider ? `${activity.provider} / ` : ''}${activity.model}`;
 }
 
+function modelIdentityLabel(activity: UsageActivity): string {
+  const identity = activity.modelIdentity;
+  return `Source: ${identity.source} / Provider: ${identity.provider} / Version: ${identity.version}`;
+}
+
+function modelGroupKey(activity: UsageActivity): string {
+  return JSON.stringify([
+    activity.kind,
+    activity.engine ?? 'wake-model',
+    activity.model,
+    activity.modelIdentity.source,
+    activity.modelIdentity.provider,
+    activity.modelIdentity.version,
+  ]);
+}
+
 function costLabel(activity: UsageActivity): string {
   const valuation = activity.costValuation;
   if (valuation.apiEquivalentStatus === 'available') {
@@ -187,6 +203,9 @@ function renderActivityDetail(activity: UsageActivity, state: PrototypeState): s
             <div><dt>Task</dt><dd>${escapeHtml(activity.taskId ?? 'Not applicable')}</dd></div>
             <div><dt>Agent</dt><dd>${escapeHtml(agentName(state, activity.agentId))}</dd></div>
             <div><dt>Model</dt><dd>${escapeHtml(modelLabel(activity))}</dd></div>
+            <div><dt>Model source</dt><dd>${escapeHtml(activity.modelIdentity.source)}</dd></div>
+            <div><dt>Model provider</dt><dd>${escapeHtml(activity.modelIdentity.provider)}</dd></div>
+            <div><dt>Model version</dt><dd>${escapeHtml(activity.modelIdentity.version)}</dd></div>
             <div><dt>Session</dt><dd>${activity.sessionMode === 'resumed' ? 'Resumed invocation' : 'New invocation'}</dd></div>
           </dl>
         </div>
@@ -262,13 +281,82 @@ function renderActivityDetail(activity: UsageActivity, state: PrototypeState): s
 }
 
 function aggregateMetrics(activities: UsageActivity[]) {
+  const duration = sumKnown(activities, (activity) => activity.wallDurationMs);
   return {
-    duration: sumKnown(activities, (activity) => activity.wallDurationMs),
+    duration,
+    durationStatus:
+      duration === undefined
+        ? ('unavailable' as const)
+        : activities.some((activity) => activity.durationStatus === 'partial')
+          ? ('partial' as const)
+          : ('complete' as const),
     tokens: sumKnown(activities, (activity) => activity.tokenDimensions.total),
     estimate: sumKnown(activities, (activity) =>
       activity.costValuation.apiEquivalentStatus === 'available' ? activity.costValuation.estimatedUsdMicros : undefined
     ),
   };
+}
+
+function renderAggregateCoverage(activities: UsageActivity[]): string {
+  const tokenComplete = activities.filter((activity) => activity.tokenDimensions.status === 'complete').length;
+  const tokenPartial = activities.filter((activity) => activity.tokenDimensions.status === 'partial').length;
+  const tokenUnavailable = activities.filter((activity) => activity.tokenDimensions.status === 'unavailable').length;
+  const durationKnown = activities.filter(
+    (activity) => activity.durationStatus === 'complete' && activity.wallDurationMs !== undefined
+  ).length;
+  const durationPartial = activities.filter((activity) => activity.durationStatus === 'partial').length;
+  const durationUnavailable = activities.filter((activity) => activity.durationStatus === 'unavailable').length;
+  const valuationAvailable = activities.filter(
+    (activity) => activity.costValuation.apiEquivalentStatus === 'available'
+  ).length;
+  const valuationPending = activities.filter(
+    (activity) => activity.costValuation.apiEquivalentStatus === 'pending'
+  ).length;
+  const valuationUnavailable = activities.filter(
+    (activity) => activity.costValuation.apiEquivalentStatus === 'unavailable'
+  ).length;
+  const billedReported = activities.filter(
+    (activity) => activity.costValuation.attributableBilledCostStatus !== 'unavailable'
+  ).length;
+  const billedUnavailable = activities.length - billedReported;
+  const provenanceCounts = new Map<string, number>();
+  activities
+    .filter(
+      (activity) =>
+        activity.costValuation.apiEquivalentStatus === 'available' && activity.costValuation.provenance !== undefined
+    )
+    .forEach((activity) => {
+      const provenance = activity.costValuation.provenance!;
+      provenanceCounts.set(provenance, (provenanceCounts.get(provenance) ?? 0) + 1);
+    });
+  const provenanceLabels: Record<string, string> = {
+    provider_estimated: 'provider-estimated',
+    harness_calculated: 'harness-calculated',
+    locally_estimated: 'locally-estimated',
+  };
+  const provenanceSummary = [...provenanceCounts.entries()]
+    .map(([provenance, count]) => `${provenanceLabels[provenance] ?? provenance} ${count}`)
+    .join(' / ');
+  const mixedProvenance = provenanceCounts.size > 1;
+
+  return `
+    <div class="usage-aggregate-coverage" aria-label="Aggregate coverage and provenance">
+      <div class="usage-coverage-summary">
+        <span>Token coverage: ${tokenComplete} complete / ${tokenPartial} partial / ${tokenUnavailable} unavailable</span>
+        <span>Duration coverage: ${durationKnown} known / ${durationPartial} partial / ${durationUnavailable} unavailable</span>
+        <span>API-equivalent valuation: ${valuationAvailable} available estimate / ${valuationPending} pending / ${valuationUnavailable} unavailable</span>
+        <span>Attributable billed cost: ${billedReported} reported / ${billedUnavailable} unavailable</span>
+      </div>
+      <details class="usage-aggregate-coverage-details">
+        <summary>Coverage &amp; provenance evidence</summary>
+        <div class="usage-aggregate-coverage-detail">
+          <span>${mixedProvenance ? 'Mixed-provenance API-equivalent estimate' : 'API-equivalent estimate provenance'}: ${escapeHtml(provenanceSummary || 'none available')}</span>
+          <span>Known subtotals exclude pending and unavailable values; unknown values are not zero.</span>
+          <span>Attributable billed cost is kept separate from every API-equivalent estimate.</span>
+        </div>
+      </details>
+    </div>
+  `;
 }
 
 function renderAggregateHeader(title: string, subtitle: string, activities: UsageActivity[]): string {
@@ -277,11 +365,12 @@ function renderAggregateHeader(title: string, subtitle: string, activities: Usag
     <div class="usage-aggregate-header">
       <div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)}</p></div>
       <div class="usage-aggregate-metrics">
-        <span>${escapeHtml(formatDuration(metrics.duration, metrics.duration === undefined ? 'unavailable' : 'complete'))} model time</span>
+        <span>${escapeHtml(formatDuration(metrics.duration, metrics.durationStatus))} model time</span>
         <span>${escapeHtml(formatNumber(metrics.tokens))} tokens</span>
         <span>${escapeHtml(formatUsd(metrics.estimate))} available estimate</span>
       </div>
     </div>
+    ${renderAggregateCoverage(activities)}
   `;
 }
 
@@ -350,7 +439,7 @@ function renderProjectView(activities: UsageActivity[], state: PrototypeState): 
                 .map(([projectId, projectActivities]) => {
                   const work = projectActivities.filter((activity) => activity.kind === 'agent_run');
                   const routing = projectActivities.filter((activity) => activity.kind === 'routing_attempt');
-                  return `<article class="usage-aggregate-row">${renderAggregateHeader(projectName(state, projectId), 'Project total with distinct activity kinds', projectActivities)}<div class="usage-subtotal-grid"><div><span>Work-model Agent runs</span><strong>${work.length} / ${formatUsd(aggregateMetrics(work).estimate)}</strong><small>${coverageText(work)}</small></div><div><span>Routing-model attempts</span><strong>${routing.length} / ${formatUsd(aggregateMetrics(routing).estimate)}</strong><small>${coverageText(routing)}</small></div></div>${renderAggregateActivities(projectActivities)}</article>`;
+                  return `<article class="usage-aggregate-row" data-usage-project="${escapeHtml(projectId)}"><div class="usage-aggregate-header"><div><h3>${escapeHtml(projectName(state, projectId))}</h3><p>Project-owned work and routing totals remain separate.</p></div><span class="usage-project-count">${projectActivities.length} activities</span></div><div class="usage-subtotal-grid">${renderProjectKindCard('Work-model Agent runs', 'agent_run', work)}${renderProjectKindCard('Routing-model attempts', 'routing_attempt', routing)}</div></article>`;
                 })
                 .join('')
             : renderEmptyState()
@@ -358,6 +447,10 @@ function renderProjectView(activities: UsageActivity[], state: PrototypeState): 
       </div>
     </div>
   `;
+}
+
+function renderProjectKindCard(title: string, kind: UsageActivityKind, activities: UsageActivity[]): string {
+  return `<section class="usage-subtotal-card" data-usage-aggregate="true" data-usage-kind="${kind}">${renderAggregateHeader(title, `${activityKindLabel(kind)} subtotal`, activities)}${renderAggregateActivities(activities)}</section>`;
 }
 
 function renderAgentView(activities: UsageActivity[], state: PrototypeState): string {
@@ -387,7 +480,7 @@ function renderAgentView(activities: UsageActivity[], state: PrototypeState): st
 function renderModelView(activities: UsageActivity[]): string {
   const groups = new Map<string, UsageActivity[]>();
   activities.forEach((activity) => {
-    const key = `${activity.kind}:${activity.engine ?? 'wake'}:${activity.model}`;
+    const key = modelGroupKey(activity);
     groups.set(key, [...(groups.get(key) ?? []), activity]);
   });
   return `
@@ -397,9 +490,9 @@ function renderModelView(activities: UsageActivity[]): string {
         ${
           groups.size > 0
             ? [...groups.entries()]
-                .map(([, modelActivities]) => {
+                .map(([key, modelActivities]) => {
                   const first = modelActivities[0]!;
-                  return `<article class="usage-aggregate-row">${renderAggregateHeader(modelLabel(first), `${activityKindLabel(first.kind)} / ${first.engine ?? 'wake model'}`, modelActivities)}${renderAggregateActivities(modelActivities)}</article>`;
+                  return `<article class="usage-aggregate-row" data-usage-aggregate="true" data-model-name="${escapeHtml(first.model)}" data-model-key="${escapeHtml(key)}">${renderAggregateHeader(modelLabel(first), `${activityKindLabel(first.kind)} / ${first.engine ?? 'wake model'} / ${escapeHtml(modelIdentityLabel(first))}`, modelActivities)}${renderAggregateActivities(modelActivities)}</article>`;
                 })
                 .join('')
             : renderEmptyState()
@@ -420,12 +513,28 @@ function renderTimeView(activities: UsageActivity[]): string {
         ${
           [...groups.entries()]
             .sort(([left], [right]) => rangeRank[left as UsageActivity['settlementRange']] - rangeRank[right as UsageActivity['settlementRange']])
-            .map(([range, rangeActivities]) => `<article class="usage-aggregate-row">${renderAggregateHeader(labels[range] ?? range, 'Delayed observations update the original settlement range', rangeActivities)}<div class="usage-time-coverage"><span>${coverageText(rangeActivities)}</span><span>${costCoverageText(rangeActivities)}</span><span>${rangeActivities.some((activity) => activity.outcome === 'ongoing') ? 'Ongoing activity shown separately from finalized totals' : 'Finalized activities only'}</span></div>${renderAggregateActivities(rangeActivities)}</article>`)
+            .map(([range, rangeActivities]) => {
+              const work = rangeActivities.filter((activity) => activity.kind === 'agent_run');
+              const routing = rangeActivities.filter((activity) => activity.kind === 'routing_attempt');
+              const settlementRange = range as UsageActivity['settlementRange'];
+              return `<article class="usage-time-range"><div class="usage-time-range-heading"><h3>${escapeHtml(labels[range] ?? range)}</h3><p>Settlement range; work and routing activity are separate aggregates.</p></div><div class="usage-aggregate-list usage-time-aggregate-list">${renderTimeAggregateCard(settlementRange, 'agent_run', work)}${renderTimeAggregateCard(settlementRange, 'routing_attempt', routing)}</div></article>`;
+            })
             .join('') || renderEmptyState()
         }
       </div>
     </div>
   `;
+}
+
+function renderTimeAggregateCard(
+  range: UsageActivity['settlementRange'],
+  kind: UsageActivityKind,
+  activities: UsageActivity[]
+): string {
+  const ongoingNote = activities.some((activity) => activity.outcome === 'ongoing')
+    ? 'Ongoing activity shown separately from finalized totals.'
+    : 'Finalized activities only.';
+  return `<article class="usage-aggregate-row" data-usage-aggregate="true" data-usage-range="${range}" data-usage-kind="${kind}">${renderAggregateHeader(`${range === 'today' ? 'Today' : range === '7d' ? 'Previous 7 days' : 'Previous 30 days'} — ${kind === 'agent_run' ? 'Work-model Agent runs' : 'Project-owned Routing attempts'}`, `${activityKindLabel(kind)} / ${ongoingNote}`, activities)}${renderAggregateActivities(activities)}</article>`;
 }
 
 function renderEmptyState(): string {

@@ -4257,6 +4257,39 @@ code {
   text-align: right;
 }
 
+.usage-aggregate-coverage {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.usage-coverage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  line-height: 1.35;
+}
+
+.usage-aggregate-coverage-details {
+  margin-top: 5px;
+}
+
+.usage-aggregate-coverage-details summary {
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.usage-aggregate-coverage-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  margin-top: 5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .usage-subtotal-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4275,6 +4308,25 @@ code {
 
 .usage-subtotal-grid > div:last-child {
   border-color: var(--purple-agent);
+}
+
+.usage-subtotal-card {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+}
+
+.usage-subtotal-card .usage-aggregate-header {
+  gap: 8px;
+}
+
+.usage-project-count {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .usage-subtotal-grid span,
@@ -4350,6 +4402,30 @@ code {
   flex-wrap: wrap;
   gap: 6px 12px;
   margin-top: 10px;
+}
+
+.usage-time-range {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-elevated);
+}
+
+.usage-time-range-heading {
+  padding: 12px 12px 0;
+}
+
+.usage-time-range-heading h3 {
+  font-size: 13px;
+}
+
+.usage-time-range-heading p {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.usage-time-aggregate-list {
+  padding-top: 8px;
 }
 
 .usage-boundary-note {
