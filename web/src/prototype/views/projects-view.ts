@@ -704,7 +704,7 @@ function renderNewProjectModal(parentEl: HTMLElement) {
       goalInput.value.trim(),
       rules,
       ['programmer', 'reviewer'],
-      ['mac-studio-primary']
+      ['env-ready']
     );
     modal.remove();
   });
@@ -902,7 +902,7 @@ function renderBindEnvironmentModal(
       const env = state.environments.find((e) => e.id === envSelect.value);
       const root =
         env?.workspaceRoots[0] ||
-        (env?.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
+        'workspace-root';
       const result = stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
       if (result.success) modal.remove();
       else if (result.reason) window.alert(result.reason);

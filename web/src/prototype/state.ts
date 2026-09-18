@@ -335,7 +335,6 @@ const initialOperator: OperatorIdentity = {
   sessionCount: 2,
   connectionState: 'online',
   transport: 'private-overlay',
-  overlayAddress: '100.64.0.4:5174',
 };
 
 const initialSettings: OperatorSettingsModel = {
@@ -389,8 +388,8 @@ const initialSettings: OperatorSettingsModel = {
     hostGuidance: 'Migration runs on the stopped host. Web does not restore, downgrade, or serve partially migrated state.',
   },
   durableData: {
-    rootLocation: '~/.sprout/',
-    databaseLocation: '~/.sprout/sprout.db',
+    rootLocation: 'host-local application data root',
+    databaseLocation: 'database file under the host-local data root',
     components: ['SQLite database', 'WAL and shared-memory files', 'Migration safety copy', 'Host-local troubleshooting logs'],
     backupBoundary: 'This location is guidance for host-managed backup. It is not a Web backup or restore workflow.',
     copyState: 'idle',
@@ -702,14 +701,14 @@ const initialAgents: AgentDefinition[] = [
 
 const initialEnvironments: EnvironmentInstance[] = [
   {
-    id: 'mac-studio-primary',
-    displayName: 'macOS Studio Host (M2 Max)',
+    id: 'env-ready',
+    displayName: 'Ready Environment',
     platform: 'macos',
-    hostUser: 'mac-operator',
+    hostUser: 'local user context',
     trafficLight: 'green',
     trafficLightReason: 'All capabilities permitted · Engines authenticated · Lease held by Task #101',
     enrollmentStatus: 'approved',
-    workerIdentityKey: 'sprout-wk-mac-7f89a1c2',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'online',
     lastConfirmedTime: '10s ago',
     connectionAgeSec: 10,
@@ -728,13 +727,13 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: 'ready',
     },
     engineDetails: {
-      codex: { version: 'v0.18.2', authStatus: 'authenticated', modelAvailability: 'gpt-4o, gpt-4o-mini', notes: 'OAuth session active on host' },
-      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Claude token validated' },
+      codex: { version: 'v0.18.2', authStatus: 'authenticated', modelAvailability: 'gpt-4o, gpt-4o-mini', notes: 'Readiness confirmed on worker' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Readiness confirmed on worker' },
       agy: { version: 'v1.4.0', authStatus: 'authenticated', modelAvailability: 'gemini-1.5-pro', notes: 'Config hook installed' },
       opencode: { version: 'v0.8.0', authStatus: 'authenticated', modelAvailability: 'deepseek-coder-v2', notes: 'Local harness ready' },
     },
     workSafety: 'clear',
-    workspaceRoots: ['~/workspace/sprout-projects'],
+    workspaceRoots: ['workspace-root'],
     activeLeaseHolder: {
       holderKind: 'task',
       holderId: 'task-101',
@@ -744,19 +743,19 @@ const initialEnvironments: EnvironmentInstance[] = [
       leadAgentName: 'Programmer',
     },
     probeHistory: [
-      { id: 'pr-mac-1', timestamp: '10s ago', latencyMs: 14, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Readiness probe confirmed: 4 engines ready, TLS/WSS latency 14ms' },
-      { id: 'pr-mac-2', timestamp: '5m ago', latencyMs: 16, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Periodic heartbeat confirmed: Protocol v2.1 compatible' },
+      { id: 'pr-ready-1', timestamp: '10s ago', latencyMs: 14, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Readiness probe confirmed: 4 engines ready, TLS/WSS latency 14ms' },
+      { id: 'pr-ready-2', timestamp: '5m ago', latencyMs: 16, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Periodic heartbeat confirmed: Protocol v2.1 compatible' },
     ],
   },
   {
-    id: 'win-dev-box',
-    displayName: 'Windows Dev Host (Core i9)',
+    id: 'env-recovery',
+    displayName: 'Recovery Environment',
     platform: 'windows',
-    hostUser: 'win-operator',
+    hostUser: 'local user context',
     trafficLight: 'red',
     trafficLightReason: 'Worker offline for 14 minutes · Lease recovery required (interrupted run #206)',
     enrollmentStatus: 'approved',
-    workerIdentityKey: 'sprout-wk-win-3b44c8d9',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'offline',
     lastConfirmedTime: '14m ago',
     connectionAgeSec: 840,
@@ -775,13 +774,13 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: 'unknown',
     },
     engineDetails: {
-      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Engine session expired on Windows host' },
-      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Pi harness authenticated' },
+      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Interactive readiness step required' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Readiness confirmed on worker' },
       agy: { version: 'missing', authStatus: 'uninstalled', modelAvailability: 'none', notes: 'Not installed on host' },
       opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown', notes: 'Host worker unprobed' },
     },
     workSafety: 'recovery',
-    workspaceRoots: ['C:\\SproutWorkspaces'],
+    workspaceRoots: ['workspace-root'],
     activeLeaseHolder: {
       holderKind: 'task',
       holderId: 'task-104',
@@ -796,24 +795,24 @@ const initialEnvironments: EnvironmentInstance[] = [
       interruptedRunAgent: 'Programmer',
       unresolvedFacts: [
         'Host worker offline: engine process stop cannot be confirmed over carrier',
-        'Temporary task scratch context directory unrecycled on Windows host',
+        'Temporary task scratch context directory unrecycled on worker host',
         'Settlement telemetry uncollected for last 2 turns of turn execution',
       ],
     },
     probeHistory: [
-      { id: 'pr-win-1', timestamp: '14m ago', latencyMs: 320, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe failed: Connection timed out after 320ms' },
-      { id: 'pr-win-2', timestamp: '45m ago', latencyMs: 24, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Probe confirmed: All harnesses online prior to disconnect' },
+      { id: 'pr-recovery-1', timestamp: '14m ago', latencyMs: 320, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe failed: Connection timed out after 320ms' },
+      { id: 'pr-recovery-2', timestamp: '45m ago', latencyMs: 24, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Probe confirmed: All harnesses online prior to disconnect' },
     ],
   },
   {
-    id: 'mac-laptop-pending',
-    displayName: 'MacBook Air Onboarding',
+    id: 'env-pending',
+    displayName: 'Pending Environment',
     platform: 'macos',
-    hostUser: 'traveler-user',
+    hostUser: 'local user context',
     trafficLight: 'yellow',
-    trafficLightReason: 'Pending enrollment approval by operator · Worker key verified',
+    trafficLightReason: 'Pending enrollment approval by operator · Worker identity verified',
     enrollmentStatus: 'pending',
-    workerIdentityKey: 'sprout-wk-macair-e018df33',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'reconnecting',
     lastConfirmedTime: 'Just now',
     connectionAgeSec: 2,
@@ -838,20 +837,20 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
     },
     workSafety: 'clear',
-    workspaceRoots: ['~/projects/mobile-work'],
+    workspaceRoots: ['workspace-root'],
     probeHistory: [
-      { id: 'pr-air-1', timestamp: 'Just now', latencyMs: 12, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Bootstrap enrollment probe: Host public key verified over TLS/WSS' },
+      { id: 'pr-pending-1', timestamp: 'Just now', latencyMs: 12, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Bootstrap enrollment probe: Worker identity verified over private transport' },
     ],
   },
   {
-    id: 'linux-container-ci',
-    displayName: 'Linux Container CI (Docker)',
+    id: 'env-degraded',
+    displayName: 'Degraded Environment',
     platform: 'container',
-    hostUser: 'ci-runner',
+    hostUser: 'local user context',
     trafficLight: 'yellow',
     trafficLightReason: 'Degraded · Codex engine login required · GUI automation unavailable',
     enrollmentStatus: 'approved',
-    workerIdentityKey: 'sprout-wk-ci-9a882d14',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'online',
     lastConfirmedTime: '45s ago',
     connectionAgeSec: 45,
@@ -870,26 +869,26 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: 'ready',
     },
     engineDetails: {
-      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Codex credentials expired in container' },
-      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'API key mounted in container' },
+      codex: { version: 'v0.18.2', authStatus: 'login-required', modelAvailability: 'gpt-4o', notes: 'Interactive readiness step required' },
+      pi: { version: 'v0.3.1', authStatus: 'authenticated', modelAvailability: 'claude-3-5-sonnet', notes: 'Readiness confirmed on worker' },
       agy: { version: 'v1.4.0', authStatus: 'authenticated', modelAvailability: 'gemini-1.5-flash', notes: 'Local CLI ready' },
       opencode: { version: 'v0.8.0', authStatus: 'authenticated', modelAvailability: 'deepseek-coder-v2', notes: 'Local model weights cached' },
     },
     workSafety: 'clear',
-    workspaceRoots: ['/var/sprout/workspaces'],
+    workspaceRoots: ['workspace-root'],
     probeHistory: [
-      { id: 'pr-ci-1', timestamp: '45s ago', latencyMs: 8, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe degraded: Codex requires interactive auth on host' },
+      { id: 'pr-degraded-1', timestamp: '45s ago', latencyMs: 8, protocolOk: true, enginesOk: false, capabilitiesOk: true, summary: 'Probe degraded: Codex requires an interactive readiness step' },
     ],
   },
   {
-    id: 'mac-mini-mismatch',
-    displayName: 'Mac mini (Legacy Worker)',
+    id: 'env-incompatible',
+    displayName: 'Incompatible Environment',
     platform: 'macos',
-    hostUser: 'mac-operator',
+    hostUser: 'local user context',
     trafficLight: 'red',
     trafficLightReason: 'Protocol incompatible: worker protocol v1.8 is below required v2.0+',
     enrollmentStatus: 'approved',
-    workerIdentityKey: 'sprout-wk-mini-4f11e99c',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'online',
     lastConfirmedTime: '1m ago',
     connectionAgeSec: 60,
@@ -915,20 +914,20 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
     },
     workSafety: 'clear',
-    workspaceRoots: ['~/workspace/legacy'],
+    workspaceRoots: ['workspace-root'],
     probeHistory: [
-      { id: 'pr-mini-1', timestamp: '1m ago', latencyMs: 16, protocolOk: false, enginesOk: true, capabilitiesOk: true, summary: 'Probe incompatible: Protocol version mismatch (v1.8 < v2.0)' },
+      { id: 'pr-incompatible-1', timestamp: '1m ago', latencyMs: 16, protocolOk: false, enginesOk: true, capabilitiesOk: true, summary: 'Probe incompatible: Protocol version mismatch (v1.8 < v2.0)' },
     ],
   },
   {
-    id: 'win-workstation-archived',
-    displayName: 'Windows Workstation (Archived)',
+    id: 'env-archived',
+    displayName: 'Archived Environment',
     platform: 'windows',
-    hostUser: 'win-operator',
+    hostUser: 'local user context',
     trafficLight: 'yellow',
     trafficLightReason: 'Archived instance · Enrollment preserved · No active work admitted',
     enrollmentStatus: 'archived',
-    workerIdentityKey: 'sprout-wk-win-arch-6c77a44b',
+    workerIdentityKey: 'identity-withheld',
     connectionState: 'offline',
     lastConfirmedTime: '3d ago',
     connectionAgeSec: 259200,
@@ -947,7 +946,7 @@ const initialEnvironments: EnvironmentInstance[] = [
       opencode: 'ready',
     },
     workSafety: 'clear',
-    workspaceRoots: ['D:\\SproutDev'],
+    workspaceRoots: ['workspace-root'],
     probeHistory: [
       { id: 'pr-arch-1', timestamp: '3d ago', latencyMs: 22, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'Last probe before archive: all clear' },
     ],
@@ -1029,14 +1028,14 @@ const initialProjects: ProjectItem[] = [
     ],
     boundEnvironmentWorkspaces: [
       {
-        environmentId: 'mac-studio-primary',
-        workspaceRoot: '~/workspace/sprout-projects',
+        environmentId: 'env-ready',
+        workspaceRoot: 'workspace-root',
         relativeWorkspacePath: 'minesweeper-threejs',
         isPrepared: true,
       },
       {
-        environmentId: 'win-dev-box',
-        workspaceRoot: 'C:\\SproutWorkspaces',
+        environmentId: 'env-recovery',
+        workspaceRoot: 'workspace-root',
         relativeWorkspacePath: 'minesweeper-threejs',
         isPrepared: true,
       },
@@ -1072,8 +1071,8 @@ const initialProjects: ProjectItem[] = [
     createdAt: '3 days ago',
     goal: 'Prototype dynamic ray-traced ambient lighting for mobile and desktop room scenes.',
     rules: [
-      'Maintain stable 60fps on M2 Max and Core i9 platforms.',
-      'All lighting baking jobs execute on Windows Dev Host.',
+      'Maintain stable 60fps across supported desktop and mobile-capable platforms.',
+      'All lighting baking jobs execute on Recovery Environment.',
     ],
     completionGuidance: 'Lightmap artifacts bakes cleanly with zero UV overlap warnings.',
     wakePolicy: 'explicit-only',
@@ -1111,8 +1110,8 @@ const initialProjects: ProjectItem[] = [
     ],
     boundEnvironmentWorkspaces: [
       {
-        environmentId: 'win-dev-box',
-        workspaceRoot: 'C:\\SproutWorkspaces',
+        environmentId: 'env-recovery',
+        workspaceRoot: 'workspace-root',
         relativeWorkspacePath: 'unity-lighting-system',
         isPrepared: true,
       },
@@ -1163,8 +1162,8 @@ const initialProjects: ProjectItem[] = [
     ],
     boundEnvironmentWorkspaces: [
       {
-        environmentId: 'mac-studio-primary',
-        workspaceRoot: '~/workspace/sprout-projects',
+        environmentId: 'env-ready',
+        workspaceRoot: 'workspace-root',
         relativeWorkspacePath: 'docs-portal',
         isPrepared: true,
       },
@@ -1180,7 +1179,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'planner',
     proposerKind: 'agent',
     createdAt: '35m ago',
-    selectedEnvironmentId: 'mac-studio-primary',
+    selectedEnvironmentId: 'env-ready',
     taskLeadId: 'programmer',
     lifecycle: 'awaiting validation',
     agentRunLifecycle: 'completed',
@@ -1250,7 +1249,7 @@ const initialTasks: TaskItem[] = [
           billingBasis: 'metered_api',
         },
         events: [
-          { time: '32m ago', kind: 'status_change', summary: 'Run admitted on mac-studio-primary using Task-held lease' },
+          { time: '32m ago', kind: 'status_change', summary: 'Run admitted on env-ready using Task-held lease' },
           { time: '31m ago', kind: 'tool_call', summary: 'read templates/o7-minesweeper/src/main.js' },
           { time: '30m ago', kind: 'tool_call', summary: 'edit templates/o7-minesweeper/src/board.js' },
           { time: '28m ago', kind: 'text_delta', summary: 'Implemented raycaster touch handler.' },
@@ -1303,7 +1302,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'op-primary',
     proposerKind: 'human',
     createdAt: '15m ago',
-    selectedEnvironmentId: 'mac-studio-primary',
+    selectedEnvironmentId: 'env-ready',
     taskLeadId: 'designer',
     lifecycle: 'active',
     agentRunLifecycle: 'running',
@@ -1334,7 +1333,7 @@ const initialTasks: TaskItem[] = [
         lifecycle: 'running',
         startedAt: '2m ago',
         events: [
-          { time: '2m ago', kind: 'status_change', summary: 'Run admitted under Task-held lease on mac-studio-primary' },
+          { time: '2m ago', kind: 'status_change', summary: 'Run admitted under Task-held lease on env-ready' },
           { time: '1m ago', kind: 'tool_call', summary: 'read templates/o7-minesweeper/src/style.css' },
           { time: 'Just now', kind: 'text_delta', summary: 'Structuring responsive HUD container CSS.' },
         ],
@@ -1347,7 +1346,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'planner',
     proposerKind: 'agent',
     createdAt: '1 hour ago',
-    selectedEnvironmentId: 'mac-studio-primary',
+    selectedEnvironmentId: 'env-ready',
     taskLeadId: 'programmer',
     lifecycle: 'blocked',
     agentRunLifecycle: 'none',
@@ -1365,7 +1364,7 @@ const initialTasks: TaskItem[] = [
     historyVersions: [],
     activeBlocker: {
       id: 'blocker-103',
-      reason: 'Audio asset directory requires operator uncompress permission on mac-studio-primary.',
+      reason: 'Audio asset directory requires operator uncompress permission on env-ready.',
       requiredNextAction: 'Operator must grant folder extraction capability or provide sample assets.',
       responsibleActor: 'Operator (Human)',
       whoAdvancesWhenCleared: 'Lead Programmer (Agent)',
@@ -1379,7 +1378,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'planner',
     proposerKind: 'agent',
     createdAt: '50m ago',
-    selectedEnvironmentId: 'win-dev-box',
+    selectedEnvironmentId: 'env-recovery',
     taskLeadId: 'programmer',
     lifecycle: 'recovery',
     agentRunLifecycle: 'interrupted',
@@ -1390,7 +1389,7 @@ const initialTasks: TaskItem[] = [
       createdAt: '50m ago',
       createdBy: 'Planner',
       title: 'DirectX 12 Shader Compilation Pipeline',
-      goal: 'Precompile HLSL shaders on Windows host for native performance comparison.',
+      goal: 'Precompile HLSL shaders on the worker host for native performance comparison.',
       constraints: ['Must compile cleanly with dxc.exe.'],
       validationCriteria: ['Shader bytecode verified.'],
       taskLeadId: 'programmer',
@@ -1410,11 +1409,11 @@ const initialTasks: TaskItem[] = [
         lifecycle: 'interrupted',
         startedAt: '48m ago',
         settledAt: '14m ago',
-        interruptionReason: 'Worker channel lost while Codex process was running on Windows host.',
+        interruptionReason: 'Worker channel lost while Codex process was running on the worker host.',
         events: [
           { time: '48m ago', kind: 'status_change', summary: 'Run started' },
           { time: '46m ago', kind: 'tool_call', summary: 'bash dxc.exe -T ps_6_0 shader.hlsl' },
-          { time: '14m ago', kind: 'status_change', summary: 'INTERRUPTED: Windows Worker disconnected unexpectedly' },
+          { time: '14m ago', kind: 'status_change', summary: 'INTERRUPTED: Worker disconnected unexpectedly' },
         ],
       },
     ],
@@ -1471,7 +1470,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'op-primary',
     proposerKind: 'human',
     createdAt: '1 hour ago',
-    selectedEnvironmentId: 'win-dev-box',
+    selectedEnvironmentId: 'env-recovery',
     taskLeadId: 'programmer',
     lifecycle: 'proposed',
     agentRunLifecycle: 'none',
@@ -1481,7 +1480,7 @@ const initialTasks: TaskItem[] = [
       createdAt: '1 hour ago',
       createdBy: 'Operator (Human)',
       title: 'Bake Progressive Lightmaps for Room Scene',
-      goal: 'Generate 2048x2048 progressive GPU lightmaps on Windows Dev Host.',
+      goal: 'Generate 2048x2048 progressive GPU lightmaps on Recovery Environment.',
       constraints: ['DirectX 12 backend with RTX acceleration.'],
       validationCriteria: ['Zero dark spot artifacts in corner probe samples.'],
       taskLeadId: 'programmer',
@@ -1495,7 +1494,7 @@ const initialTasks: TaskItem[] = [
     proposerId: 'op-primary',
     proposerKind: 'human',
     createdAt: '4 days ago',
-    selectedEnvironmentId: 'mac-studio-primary',
+    selectedEnvironmentId: 'env-ready',
     taskLeadId: 'designer',
     lifecycle: 'completed',
     agentRunLifecycle: 'completed',
@@ -1708,7 +1707,7 @@ const initialMessages: MessageItem[] = [
     authorKind: 'agent',
     authorDisplayName: "Researcher", authorAvatar: "RS",
     timestamp: '1 day ago',
-    content: 'Baseline WebGL benchmarks completed: 60fps steady on M2 Max, 45fps on Intel Iris.',
+    content: 'Baseline WebGL benchmarks completed: 60fps steady on the ready environment, 45fps on the compatibility environment.',
     disposition: 'informational',
     agentAttribution: { configVersionUsed: 1, engineUsed: 'pi', modelUsed: 'claude-3-5-sonnet', effortUsed: 'medium' },
   },
@@ -2377,7 +2376,7 @@ const initialAttentionItems: AttentionItem[] = [
     targetProjectTab: 'tasks',
     timestamp: '12m ago',
     lifecycleSentence: 'Task recovery · Run interrupted · Lease recovering',
-    attribution: 'Worker Host (sprout-wk-windev-a19)',
+    attribution: 'Environment worker',
   },
   {
     id: 'att-3',
@@ -2401,11 +2400,11 @@ const initialAttentionItems: AttentionItem[] = [
     id: 'att-4',
     severity: 'attention',
     category: 'env_enrollment',
-    title: 'Pending Worker Enrollment: MacBook Air',
-    summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
+    title: 'Pending Worker Enrollment: Pending Environment',
+    summary: 'An environment worker connected over private transport and is requesting operator capability approval.',
     projectId: undefined,
     projectName: 'Infrastructure',
-    referenceId: 'mac-laptop-pending',
+    referenceId: 'env-pending',
     referenceType: 'environment',
     actionLabel: 'Review Enrollment in Envs',
     actionTargetView: 'environments',
@@ -2413,17 +2412,17 @@ const initialAttentionItems: AttentionItem[] = [
     targetManageTab: 'environments',
     timestamp: '5m ago',
     lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-    attribution: 'sprout-wk-macair-e018df33 (Worker)',
+    attribution: 'Environment worker',
   },
   {
     id: 'att-5',
     severity: 'attention',
     category: 'env_unhealthy',
-    title: 'Degraded Host: Linux Container CI',
-    summary: 'Codex engine credentials expired in container. Pi harness ready; GUI automation unavailable.',
+    title: 'Degraded Host: Degraded Environment',
+    summary: 'Codex engine requires an interactive readiness step. Pi harness ready; GUI automation unavailable.',
     projectId: undefined,
     projectName: 'Infrastructure',
-    referenceId: 'linux-container-ci',
+    referenceId: 'env-degraded',
     referenceType: 'environment',
     actionLabel: 'Inspect Environment in Envs',
     actionTargetView: 'environments',
@@ -2431,17 +2430,17 @@ const initialAttentionItems: AttentionItem[] = [
     targetManageTab: 'environments',
     timestamp: '45s ago',
     lifecycleSentence: 'Host degraded · Codex login required · Clear safety',
-    attribution: 'sprout-wk-ci-9a882d14 (Worker)',
+    attribution: 'Environment worker',
   },
   {
     id: 'att-6',
     severity: 'action_required',
     category: 'env_unhealthy',
-    title: 'Protocol Mismatch: Mac mini (Legacy Worker)',
+    title: 'Protocol Mismatch: Incompatible Environment',
     summary: 'Worker protocol v1.8 is below required v2.0+. Worker update on host required to admit Tasks.',
     projectId: undefined,
     projectName: 'Infrastructure',
-    referenceId: 'mac-mini-mismatch',
+    referenceId: 'env-incompatible',
     referenceType: 'environment',
     actionLabel: 'Inspect Protocol in Envs',
     actionTargetView: 'environments',
@@ -2449,7 +2448,7 @@ const initialAttentionItems: AttentionItem[] = [
     targetManageTab: 'environments',
     timestamp: '1m ago',
     lifecycleSentence: 'Protocol incompatible · Task admission barred',
-    attribution: 'sprout-wk-mini-4f11e99c (Worker)',
+    attribution: 'Environment worker',
   },
 ];
 
@@ -2479,7 +2478,7 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     projectId: 'proj-minesweeper',
     projectName: 'O7 Minesweeper',
     title: 'Task #102: Designer active turn running on Sound FX Synthesis',
-    subtitle: 'Codex gpt-4o (run-205) executing Web Audio API oscillators on mac-studio-primary',
+    subtitle: 'Codex gpt-4o (run-205) executing Web Audio API oscillators on env-ready',
     badgeKind: 'blue',
     badgeLabel: 'Active Turn',
     actor: { name: "Designer", avatar: "DS", kind: "agent" },
@@ -2495,14 +2494,14 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     relativeTime: '10m ago',
     projectId: undefined,
     projectName: 'Infrastructure',
-    title: 'New Worker Connected: sprout-wk-macair-e018df33',
-    subtitle: 'Private Overlay transport · Protocol v1.4 compatible · Requesting enrollment approval',
+    title: 'New Environment Worker Connected',
+    subtitle: 'Private transport · Protocol v1.4 compatible · Requesting enrollment approval',
     badgeKind: 'yellow',
     badgeLabel: 'Enrollment',
-    actor: { name: "MacBook Air", avatar: "MB", kind: "worker" },
+    actor: { name: "Pending Environment", avatar: "MB", kind: "worker" },
     targetNav: 'manage',
     targetManageTab: 'environments',
-    targetEntityId: 'mac-laptop-pending',
+    targetEntityId: 'env-pending',
   },
   {
     id: 'act-4',
@@ -2526,14 +2525,14 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     relativeTime: '17m ago',
     projectId: undefined,
     projectName: 'Infrastructure',
-    title: 'Worker win-dev-box heartbeat timed out',
+    title: 'Environment Worker heartbeat timed out',
     subtitle: 'Missed 4 consecutive heartbeat cycles · Task #104 lease placed in recovery',
     badgeKind: 'red',
     badgeLabel: 'Degraded',
-    actor: { name: "Worker win-dev-box", avatar: "WN", kind: "system" },
+    actor: { name: "Environment worker", avatar: "WN", kind: "system" },
     targetNav: 'manage',
     targetManageTab: 'environments',
-    targetEntityId: 'win-dev-box',
+    targetEntityId: 'env-recovery',
   },
   {
     id: 'act-6',
@@ -2618,7 +2617,7 @@ class StateManager {
       selectedProjectId: 'proj-minesweeper',
       selectedScopeKind: 'project-channel',
       selectedTaskId: 'task-101',
-      selectedEnvironmentId: 'mac-studio-primary',
+      selectedEnvironmentId: 'env-ready',
       selectedAgentId: 'programmer',
       returnContext: null,
       activeDialog: null,
@@ -3234,19 +3233,19 @@ class StateManager {
           t104.agentRunLifecycle = 'interrupted';
           t104.leaseLifecycle = 'recovering';
         }
-        const winEnv = this.state.environments.find((e) => e.id === 'win-dev-box');
+        const winEnv = this.state.environments.find((e) => e.id === 'env-recovery');
         if (winEnv) {
           winEnv.trafficLight = 'red';
           winEnv.trafficLightReason = 'Heartbeat timed out 12m ago · Task #104 lease held in unconfirmed recovery';
           winEnv.connectionState = 'offline';
         }
-        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
         if (macStudio) {
           macStudio.trafficLight = 'green';
           macStudio.trafficLightReason = 'All 4 engine readiness probes confirmed · Lease held for Task #101';
           macStudio.connectionState = 'online';
         }
-        const macLaptop = this.state.environments.find((e) => e.id === 'mac-laptop-pending');
+        const macLaptop = this.state.environments.find((e) => e.id === 'env-pending');
         if (macLaptop) {
           macLaptop.enrollmentStatus = 'pending';
           macLaptop.trafficLight = 'yellow';
@@ -3269,7 +3268,7 @@ class StateManager {
           env.trafficLight = 'green';
           env.trafficLightReason = 'All engine readiness probes confirmed · Lease clear';
           env.connectionState = 'online';
-          if (env.id === 'mac-laptop-pending') env.enrollmentStatus = 'approved';
+          if (env.id === 'env-pending') env.enrollmentStatus = 'approved';
         }
         this.notify('Applied State Matrix Preset: Empty (All Systems Clear)');
         break;
@@ -3292,7 +3291,7 @@ class StateManager {
           env.trafficLight = 'green';
           env.trafficLightReason = 'Ready · All engines active · Low latency';
           env.connectionState = 'online';
-          if (env.id === 'mac-laptop-pending') env.enrollmentStatus = 'approved';
+          if (env.id === 'env-pending') env.enrollmentStatus = 'approved';
         }
         this.notify('Applied State Matrix Preset: Healthy (Active Work Running Smoothly)');
         break;
@@ -3303,10 +3302,10 @@ class StateManager {
             id: 'att-stale-1',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Stale Heartbeat on mac-studio-primary',
+            title: 'Stale Heartbeat on env-ready',
             summary: 'Heartbeat overdue by 14 minutes. Environment telemetry unconfirmed; agent runs may be proceeding without status confirmation.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-studio-primary',
+            referenceId: 'env-ready',
             referenceType: 'environment',
             actionLabel: 'Inspect Environment in Envs',
             actionTargetView: 'environments',
@@ -3314,7 +3313,7 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '14m overdue',
             lifecycleSentence: 'Heartbeat overdue 14m · Telemetry stale',
-            attribution: 'Worker mac-studio-primary',
+            attribution: 'Worker env-ready',
           },
           {
             id: 'att-stale-2',
@@ -3332,10 +3331,10 @@ class StateManager {
             targetProjectTab: 'tasks',
             timestamp: '14m ago',
             lifecycleSentence: 'Task active · Run unconfirmed · Lease stale',
-            attribution: 'Worker mac-studio-primary',
+            attribution: 'Worker env-ready',
           },
         ];
-        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
         if (macStudio) {
           macStudio.trafficLight = 'yellow';
           macStudio.trafficLightReason = 'Heartbeat overdue 14m · Unconfirmed telemetry';
@@ -3386,10 +3385,10 @@ class StateManager {
             id: 'att-pend-3',
             severity: 'attention',
             category: 'env_enrollment',
-            title: 'Pending Worker Enrollment: MacBook Air',
-            summary: 'Worker sprout-wk-macair-e018df33 connected over Private Overlay and is requesting operator capability approval.',
+            title: 'Pending Worker Enrollment: Pending Environment',
+            summary: 'An environment worker connected over private transport and is requesting operator capability approval.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-laptop-pending',
+            referenceId: 'env-pending',
             referenceType: 'environment',
             actionLabel: 'Review Enrollment in Envs',
             actionTargetView: 'environments',
@@ -3397,7 +3396,7 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '5m ago',
             lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-            attribution: 'sprout-wk-macair-e018df33 (Worker)',
+            attribution: 'Environment worker',
           },
         ];
         this.notify('Applied State Matrix Preset: Pending (Proposed Tasks & Worker Enrollment)');
@@ -3409,11 +3408,11 @@ class StateManager {
             id: 'att-deg-1',
             severity: 'action_required',
             category: 'env_unhealthy',
-            title: 'Windows Worker Offline (Task #104 Lease Held)',
-            summary: 'Host win-dev-box disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
+            title: 'Environment Worker Offline (Task #104 Lease Held)',
+            summary: 'Host env-recovery disconnected 22m ago while holding Task #104 lease. Lease is in unconfirmed recovery. Human action needed in Envs or Tasks.',
             projectId: 'proj-minesweeper',
             projectName: 'O7 Minesweeper',
-            referenceId: 'win-dev-box',
+            referenceId: 'env-recovery',
             referenceType: 'environment',
             actionLabel: 'Inspect Host in Envs',
             actionTargetView: 'environments',
@@ -3421,16 +3420,16 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '22m ago',
             lifecycleSentence: 'Worker offline 22m · Held lease blocked',
-            attribution: 'win-dev-box (Windows Host)',
+            attribution: 'Environment worker',
           },
           {
             id: 'att-deg-2',
             severity: 'attention',
             category: 'env_unhealthy',
-            title: 'Codex Engine Login Required on mac-studio-primary',
+            title: 'Codex Engine Login Required on env-ready',
             summary: 'Codex engine reports login-required. 1 of 4 engines degraded; Pi, agy, and opencode remain ready.',
             projectName: 'Infrastructure',
-            referenceId: 'mac-studio-primary',
+            referenceId: 'env-ready',
             referenceType: 'environment',
             actionLabel: 'Inspect Readiness in Envs',
             actionTargetView: 'environments',
@@ -3438,7 +3437,7 @@ class StateManager {
             targetManageTab: 'environments',
             timestamp: '30m ago',
             lifecycleSentence: '1/4 engine offline (Codex login-required)',
-            attribution: 'mac-studio-primary (Worker)',
+            attribution: 'env-ready (Worker)',
           },
           {
             id: 'att-deg-3',
@@ -3459,13 +3458,13 @@ class StateManager {
             attribution: 'Wake Model (System)',
           },
         ];
-        const winEnv = this.state.environments.find((e) => e.id === 'win-dev-box');
+        const winEnv = this.state.environments.find((e) => e.id === 'env-recovery');
         if (winEnv) {
           winEnv.trafficLight = 'red';
           winEnv.trafficLightReason = 'Heartbeat timed out 22m ago · Task #104 lease held in unconfirmed recovery';
           winEnv.connectionState = 'offline';
         }
-        const macStudio = this.state.environments.find((e) => e.id === 'mac-studio-primary');
+        const macStudio = this.state.environments.find((e) => e.id === 'env-ready');
         if (macStudio) {
           macStudio.trafficLight = 'yellow';
           macStudio.trafficLightReason = '1/4 engine offline (Codex login-required) · Reconnecting';
@@ -5651,7 +5650,7 @@ class StateManager {
     for (const envId of boundEnvIds) {
       const env = this.state.environments.find((e) => e.id === envId);
       if (env) {
-        const root = env.workspaceRoots[0] || (env.platform === 'windows' ? 'C:\\SproutWorkspaces' : '~/workspace/sprout-projects');
+        const root = env.workspaceRoots[0] || 'workspace-root';
         boundEnvironmentWorkspaces.push({
           environmentId: env.id,
           workspaceRoot: root,
@@ -6550,17 +6549,17 @@ class StateManager {
   }
 
   public simulateRegisterNewPendingHost(platform: 'macos' | 'windows' | 'container' = 'macos') {
-    const newId = `host-node-${Date.now().toString().slice(-4)}`;
-    const newName = platform === 'windows' ? 'Windows Studio Host (RTX)' : platform === 'container' ? 'Edge Linux Node' : 'Mac Studio Max (Second)';
-    const newKey = `sprout-wk-${newId}`;
+    const newId = `environment-${this.state.environments.length + 1}`;
+    const newName = 'Pending Environment';
+    const newKey = 'identity-withheld';
 
     const newEnv: EnvironmentInstance = {
       id: newId,
       displayName: newName,
       platform,
-      hostUser: platform === 'windows' ? 'win-operator' : 'mac-operator',
+      hostUser: 'local user context',
       trafficLight: 'yellow',
-      trafficLightReason: 'Pending enrollment approval by operator · Worker public key verified',
+      trafficLightReason: 'Pending enrollment approval by operator · Worker identity verified',
       enrollmentStatus: 'pending',
       workerIdentityKey: newKey,
       connectionState: 'online',
@@ -6587,9 +6586,9 @@ class StateManager {
         opencode: { version: 'unknown', authStatus: 'unknown', modelAvailability: 'unknown' },
       },
       workSafety: 'clear',
-      workspaceRoots: [platform === 'windows' ? 'C:\\SproutWorkspaces' : '~/workspace/sprout-projects'],
+      workspaceRoots: ['workspace-root'],
       probeHistory: [
-        { id: `pr-${Date.now()}`, timestamp: 'Just now', latencyMs: 11, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'New host bootstrap connection: Key verified over TLS/WSS' },
+        { id: `pr-${Date.now()}`, timestamp: 'Just now', latencyMs: 11, protocolOk: true, enginesOk: true, capabilitiesOk: true, summary: 'New worker bootstrap connection: Identity verified over private transport' },
       ],
     };
 
@@ -6601,7 +6600,7 @@ class StateManager {
       severity: 'attention',
       category: 'env_enrollment',
       title: `Pending Worker Enrollment: ${newName}`,
-      summary: `Worker ${newKey} connected and is requesting operator capability approval.`,
+      summary: 'An environment worker connected over private transport and is requesting operator capability approval.',
       referenceId: newId,
       referenceType: 'environment',
       actionLabel: 'Review Enrollment in Envs',
@@ -6610,10 +6609,10 @@ class StateManager {
       targetManageTab: 'environments',
       timestamp: 'Just now',
       lifecycleSentence: 'Enrollment pending · Protocol compatible · 0 leases',
-      attribution: `${newKey} (Worker)`,
+      attribution: 'Environment worker',
     });
 
-    this.notify(`New host ${newName} connected in pending enrollment.`);
+    this.notify(`New environment connected in pending enrollment.`);
   }
 
   // --- Preset Scenario Jumpers for Owner Review ---
@@ -6775,45 +6774,45 @@ class StateManager {
         this.notify('Loaded Scenario: Shared Interaction Primitives & State Language Testbed');
         break;
       case 'env-healthy-macos':
-        this.selectEnvironment('mac-studio-primary');
+        this.selectEnvironment('env-ready');
         this.setPrimaryNav('manage', undefined, 'environments');
-        this.notify('Loaded Scenario: macOS Studio Host (Green: Ready · Lease Held)');
+        this.notify('Loaded Scenario: Ready Environment (Green: Ready · Lease Held)');
         break;
       case 'env-recovery-win':
-        this.selectEnvironment('win-dev-box');
+        this.selectEnvironment('env-recovery');
         this.setPrimaryNav('manage', undefined, 'environments');
-        this.notify('Loaded Scenario: Windows Dev Host in Lease Recovery (Red: Action Required)');
+        this.notify('Loaded Scenario: Recovery Environment in Lease Recovery (Red: Action Required)');
         break;
       case 'env-pending-macair':
-        this.selectEnvironment('mac-laptop-pending');
+        this.selectEnvironment('env-pending');
         this.setPrimaryNav('manage', undefined, 'environments');
-        this.notify('Loaded Scenario: MacBook Air Pending Enrollment Approval (Yellow: Attention)');
+        this.notify('Loaded Scenario: Pending Environment Pending Enrollment Approval (Yellow: Attention)');
         break;
       case 'env-degraded-login':
-        this.selectEnvironment('linux-container-ci');
+        this.selectEnvironment('env-degraded');
         this.setPrimaryNav('manage', undefined, 'environments');
-        this.notify('Loaded Scenario: Linux Container Degraded Engine Login (Yellow: Attention)');
+        this.notify('Loaded Scenario: Degraded Environment Engine Login (Yellow: Attention)');
         break;
       case 'env-protocol-mismatch':
-        this.selectEnvironment('mac-mini-mismatch');
+        this.selectEnvironment('env-incompatible');
         this.setPrimaryNav('manage', undefined, 'environments');
         this.notify('Loaded Scenario: Legacy Worker Protocol Mismatch (Red: Action Required)');
         break;
       case 'env-force-release-flow':
-        this.selectEnvironment('win-dev-box');
+        this.selectEnvironment('env-recovery');
         this.setPrimaryNav('manage', undefined, 'environments');
-        this.openInspector('force-release', 'win-dev-box');
+        this.openInspector('force-release', 'env-recovery');
         this.notify('Loaded Scenario: Emergency Force Release Flow (Typed Confirmation & Risk Checklist)');
         break;
       case 'env-reconnect-reconcile':
-        this.selectEnvironment('win-dev-box');
-        this.triggerSimulatedWorkerReconnect('win-dev-box');
-        this.reconcileEnvironmentEvidence('win-dev-box');
+        this.selectEnvironment('env-recovery');
+        this.triggerSimulatedWorkerReconnect('env-recovery');
+        this.reconcileEnvironmentEvidence('env-recovery');
         this.setPrimaryNav('manage', undefined, 'environments');
         this.notify('Loaded Scenario: Reconnect & Evidence Reconciliation Flow');
         break;
       case 'env-archived':
-        this.selectEnvironment('win-workstation-archived');
+        this.selectEnvironment('env-archived');
         this.setPrimaryNav('manage', undefined, 'environments');
         this.notify('Loaded Scenario: Archived Environment Instance (Read-Only State)');
         break;

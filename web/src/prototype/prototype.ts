@@ -241,7 +241,7 @@ export function initPrototype(mountEl: HTMLElement): void {
       <div class="sidebar-footer">
         <div>Operator: <strong>${state.operator.name}</strong></div>
         <div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-top: 2px;">
-          ${state.operator.overlayAddress ?? '100.64.0.4:5174'}
+          ${state.operator.overlayAddress ?? 'private transport configured'}
         </div>
       </div>
     `;

@@ -35,7 +35,7 @@ async function setupPrototypeDom() {
     root: fileURLToPath(new URL('../..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
   });
 
@@ -69,7 +69,7 @@ test('Environments: renders 6 independent health dimensions and mandatory textua
 
     // Navigate to Manage > Environments
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('mac-studio-primary');
+    stateManager.selectEnvironment('env-ready');
 
     const document = dom.window.document;
 
@@ -124,9 +124,9 @@ test('Environments: approving pending enrollment updates status, connectivity, a
     assert.ok(appMount);
     initPrototype(appMount);
 
-    // Select pending MacBook Air environment
+    // Select the pending environment fixture
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('mac-laptop-pending');
+    stateManager.selectEnvironment('env-pending');
 
     const document = dom.window.document;
 
@@ -143,7 +143,7 @@ test('Environments: approving pending enrollment updates status, connectivity, a
 
     // Verify Transition to Approved & Green
     const updatedSnap = stateManager.getSnapshot();
-    const approvedEnv = updatedSnap.environments.find((e) => e.id === 'mac-laptop-pending')!;
+    const approvedEnv = updatedSnap.environments.find((e) => e.id === 'env-pending')!;
     assert.equal(approvedEnv.enrollmentStatus, 'approved');
     assert.equal(approvedEnv.trafficLight, 'green');
     assert.equal(approvedEnv.connectionState, 'online');
@@ -168,7 +168,7 @@ test('Environments: live readiness probe updates timestamp, latency, and probe e
     initPrototype(appMount);
 
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('mac-studio-primary');
+    stateManager.selectEnvironment('env-ready');
 
     const document = dom.window.document;
 
@@ -176,7 +176,7 @@ test('Environments: live readiness probe updates timestamp, latency, and probe e
     assert.ok(probeBtn, 'Readiness probe button rendered');
     probeBtn.click();
 
-    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.lastConfirmedTime, 'Just now');
     assert.equal(env.connectionAgeSec, 0);
     assert.ok(env.probeHistory && env.probeHistory.length > 0, 'Probe history record added');
@@ -200,7 +200,7 @@ test('Environments: worker disconnect, reconnect, and reconciliation transition 
     initPrototype(appMount);
 
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('mac-studio-primary');
+    stateManager.selectEnvironment('env-ready');
 
     const document = dom.window.document;
 
@@ -209,7 +209,7 @@ test('Environments: worker disconnect, reconnect, and reconciliation transition 
     assert.ok(disconnectBtn, 'Disconnect button rendered');
     disconnectBtn.click();
 
-    let env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    let env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.connectionState, 'offline');
     assert.equal(env.trafficLight, 'red');
     assert.equal(env.workSafety, 'recovery');
@@ -220,7 +220,7 @@ test('Environments: worker disconnect, reconnect, and reconciliation transition 
     assert.ok(reconnectBtn, 'Reconnect button rendered');
     reconnectBtn.click();
 
-    env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.connectionState, 'online');
     assert.equal(env.workSafety, 'reconciling');
 
@@ -229,7 +229,7 @@ test('Environments: worker disconnect, reconnect, and reconciliation transition 
     assert.ok(reconcileBtn, 'Reconcile evidence button rendered');
     reconcileBtn.click();
 
-    env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.workSafety, 'recovery');
     assert.ok(env.leaseRecovery?.reconciledEvidence, 'Evidence synchronized');
     assert.equal(env.leaseRecovery.reconciledEvidence.engineSessionStopped, true);
@@ -252,9 +252,9 @@ test('Environments: recovery resolution via Resume vs Discard (safe Task end)', 
     assert.ok(appMount);
     initPrototype(appMount);
 
-    // Select Windows Dev Host (in recovery for Task #104)
+    // Select Recovery Environment (in recovery for Task #104)
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('win-dev-box');
+    stateManager.selectEnvironment('env-recovery');
 
     const document = dom.window.document;
 
@@ -268,7 +268,7 @@ test('Environments: recovery resolution via Resume vs Discard (safe Task end)', 
     assert.ok(discardBtn, 'Discard recovery button rendered');
     discardBtn.click();
 
-    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'win-dev-box')!;
+    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-recovery')!;
     const task = stateManager.getSnapshot().tasks.find((t) => t.id === 'task-104')!;
 
     assert.equal(task.lifecycle, 'cancelled');
@@ -298,9 +298,9 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     assert.ok(appMount);
     initPrototype(appMount);
 
-    // Select Windows Dev Host in recovery
+    // Select Recovery Environment in recovery
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('win-dev-box');
+    stateManager.selectEnvironment('env-recovery');
 
     const document = dom.window.document;
 
@@ -309,7 +309,7 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     // untouched.
     const cleanTask = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-102')!;
     const rejected = stateManager.emergencyForceRelease(
-      'mac-studio-primary',
+      'env-ready',
       cleanTask.id,
       'Mismatched recovery probe',
       true
@@ -369,7 +369,7 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     confirmBtn.click();
 
     // Verify Environment is force-released, task permanently cancelled with forced release disposition
-    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'win-dev-box')!;
+    const env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-recovery')!;
     const task = stateManager.getSnapshot().tasks.find((t) => t.id === 'task-104')!;
 
     assert.equal(task.lifecycle, 'cancelled');
@@ -405,7 +405,7 @@ test('Environments: Capability permission toggling and unenroll safety check', a
     initPrototype(appMount);
 
     stateManager.setPrimaryNav('manage', undefined, 'environments');
-    stateManager.selectEnvironment('mac-studio-primary');
+    stateManager.selectEnvironment('env-ready');
 
     const document = dom.window.document;
 
@@ -414,12 +414,12 @@ test('Environments: Capability permission toggling and unenroll safety check', a
     assert.ok(guiBtn);
     guiBtn.click();
 
-    let env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    let env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.capabilityPermissions.guiAutomation, true);
 
     // Unenroll attempt while active lease is held should be refused
-    stateManager.unenrollEnvironment('mac-studio-primary');
-    env = stateManager.getSnapshot().environments.find((e) => e.id === 'mac-studio-primary')!;
+    stateManager.unenrollEnvironment('env-ready');
+    env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-ready')!;
     assert.equal(env.enrollmentStatus, 'approved', 'Cannot unenroll while active lease held');
   } finally {
     await cleanup();
@@ -448,7 +448,7 @@ test('Environments: Phone and desktop responsive parity & drill-down navigation'
     const document = dom.window.document;
 
     // Master list rendered
-    const card = document.querySelector('.env-master-card[data-env="mac-studio-primary"]') as HTMLElement;
+    const card = document.querySelector('.env-master-card[data-env="env-ready"]') as HTMLElement;
     assert.ok(card, 'Master card rendered in mobile list');
     card.click();
 
@@ -487,13 +487,16 @@ test('Environments: Strict privacy boundary ensures no private host paths or cre
     stateManager.setPrimaryNav('manage', undefined, 'environments');
 
     const text = dom.window.document.body.textContent ?? '';
+    const snapshot = stateManager.getSnapshot();
 
-    // Verify strict absence of private local paths and IP addresses
-    assert.equal(text.includes('/Users/snake'), false, 'No private macOS home path in DOM');
-    assert.equal(text.includes('C:\\Users\\'), false, 'No private Windows user path in DOM');
-    assert.equal(text.includes('192.168.'), false, 'No LAN IP addresses in DOM');
-    assert.equal(text.includes('sk-ant-'), false, 'No Anthropic API keys in DOM');
-    assert.equal(text.includes('sk-proj-'), false, 'No OpenAI API keys in DOM');
+    // Verify strict absence of concrete local paths, network addresses, or credentials.
+    assert.doesNotMatch(text, /(?:^|[^A-Za-z])(?:~\/|\/(?:Users|home|var)\/|[A-Za-z]:\\)/, 'No local filesystem path in DOM');
+    assert.doesNotMatch(text, /(?:10\.|127\.0\.0\.1|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d)\.)/, 'No private network address in DOM');
+    assert.doesNotMatch(text, /(?:api[_-]?key|secret|private[_-]?key|password|token)\s*[:=]\s*\S+/i, 'No credential-shaped value in DOM');
+    assert.equal(snapshot.operator.overlayAddress, undefined, 'Fixture does not retain a concrete transport address');
+    assert.ok(snapshot.environments.every((environment) => environment.workerIdentityKey === 'identity-withheld'), 'Fixture withholds worker identity values');
+    assert.ok(snapshot.environments.every((environment) => environment.workspaceRoots.every((root) => root === 'workspace-root')), 'Fixture uses a neutral workspace root');
+    assert.doesNotMatch(JSON.stringify(snapshot), /(?:100\.64\.|192\.168\.|\/Users\/|C:\\Users\\|sprout-wk-|api[_-]?key\s*[:=])/i, 'Fixture state has no concrete host-boundary values');
   } finally {
     await cleanup();
   }

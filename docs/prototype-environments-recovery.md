@@ -4,13 +4,13 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Environment Management, Health Facts, Lease Safety, Reconciliation, and Recovery** in the Sprout M2 Local Operator product (Ticket #65, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), Multi-View Project baseline (#63), and Chat Scopes baseline (#64), preserving the task-held lease guarantees settled in ADR-0005, task authority in ADR-0006, management journeys in ADR-0008, and self-hosted operation and recovery promises in ADR-0009.
 
-The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html` on `0.0.0.0:41000`), with full DOM test coverage in `web/src/prototype/environments.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/environments.dom.test.ts`.
 
 ---
 
 ## 1. Information Architecture & Navigation Topology
 
-In Sprout M2, Environments represent host-local worker instances (macOS Studio, Windows Dev Box, MacBook Air, Container CI nodes) running under the local operator's user session. Environments live within the `Manage > Environments` destination with 100% desktop/phone capability parity:
+In Sprout M2, Environments represent host-local worker instances (ready, recovery, pending, and container environments) running under the local operator's user session. Environments live within the `Manage > Environments` destination with 100% desktop/phone capability parity:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -21,7 +21,7 @@ In Sprout M2, Environments represent host-local worker instances (macOS Studio, 
 │ ├── DESKTOP SPLIT LAYOUT (Master / Detail)                                  │
 │ │   ├── Left Master Column (340px): Filterable Environment Cards List       │
 │ │   │   ├── Platform Icon (macOS / Windows / Container)                     │
-│ │   │   ├── Display Name & Neutral Host Context (e.g. mac-operator)         │
+│ │   │   ├── Display Name & Neutral Host Context (e.g. neutral user context)  │
 │ │   │   ├── Traffic Light Badge (Green Ready / Yellow Attention / Red Action)│
 │ │   │   ├── 2-Line Decisive Text Reason Snippet                             │
 │ │   │   └── Compact Metric Chips (Connection, Protocol Version, Lease State)│
@@ -54,7 +54,7 @@ Per **ADR-0009**, Sprout never collapses installation, authentication, compatibi
 │ 6 INDEPENDENT HEALTH DIMENSIONS (ADR-0009)                                  │
 ├──────────────────────┬──────────────────────────────────────────────────────┤
 │ 1. Enrollment Status │ `approved` · `pending` · `revoked` · `archived`      │
-│                      │ Opaque public key fingerprint (sprout-wk-mac-7f89...)│
+│                      │ Opaque worker identity (value withheld in Web UI)    │
 ├──────────────────────┼──────────────────────────────────────────────────────┤
 │ 2. Carrier Connection│ `online` · `reconnecting` · `offline` · `never conn` │
 │                      │ Last confirmed timestamp + connection age in seconds │
@@ -80,7 +80,7 @@ Color is never used in isolation. Every Environment instance presents a mandator
 - **Green — Ready**: Approved enrollment, carrier online, protocol compatible, all required capabilities permitted, required engines authenticated, work safety clear.
   - *Example:* `"All capabilities permitted · Engines authenticated · Lease held by Task #101"`
 - **Yellow — Attention / Degraded**: Pending enrollment approval, first connection, transient reconnect, stale probe, or non-required engine missing / login-required.
-  - *Example:* `"Pending enrollment approval by operator · Worker key verified"`
+  - *Example:* `"Pending enrollment approval by operator · Worker identity verified"`
   - *Example:* `"Degraded · Codex engine login required · GUI automation unavailable"`
 - **Red — Action Required / Unavailable**: Worker offline, identity revoked, protocol incompatible, required engine unavailable, or work safety in `recovery`.
   - *Example:* `"Worker offline for 14 minutes · Lease recovery required (interrupted run #206)"`
@@ -110,7 +110,7 @@ ADR-0005 establishes that **a Task acquires one Environment lease at Task begin 
 1. **Holding Unit is the Task, Not the Run**: Nested `AgentRun`s start and settle inside the Task's lease reservation. Idle intervals between runs, blocker states, and "Awaiting human validation" gaps **retain the lease continuously**.
 2. **No Timeout-Driven Silent Reassignment**: Losing a worker connection or pausing a task never makes the environment acquirable by another Task. Unfinished work is protected over capacity utilization.
 3. **Project Workspace vs. Task Scratch Context**:
-   - **Project Workspace**: Durable git repository, build artifacts, and caches on host (`~/workspace/sprout-projects/minesweeper-threejs`). Persists across tasks and runs; **never deleted at Task end**.
+   - **Project Workspace**: Durable git repository, build artifacts, and caches on the host at a neutral workspace root plus project-relative directory. Persists across tasks and runs; **never deleted at Task end**.
    - **Task Scratch Context**: Ephemeral Sprout context directory created at Task begin. Recycled by the worker at Task end.
 
 ---
@@ -178,9 +178,9 @@ To prevent early self-hosted recovery defects from locking an operator out of an
 ## 6. Strict Privacy & Host Fact Boundaries (AGENTS.md & ADR-0008)
 
 To ensure privacy, multi-host portability, and clean abstraction:
-- **No Local User Home Paths**: The UI uses neutral relative paths (`~/workspace/sprout-projects`, `C:\SproutWorkspaces`, `/var/sprout/workspaces`) and never reveals host usernames like `/Users/<name>` or `C:\Users\<name>`.
-- **No Private Credentials**: API tokens, OAuth cookies, SSH keys, and host private keys remain strictly on the host. Web presents only neutral readiness statuses (`ready`, `login-required`, `missing`) and public key fingerprints (`sprout-wk-mac-7f89a1c2`).
-- **No Private LAN IP Topology**: Transport is identified by standard CGNAT overlay addresses (`100.64.0.4:5174`) or loopback (`127.0.0.1:41000`).
+- **No Local User Home Paths**: The UI uses a neutral relative workspace label and never reveals host usernames or absolute filesystem roots.
+- **No Private Credentials**: API tokens, OAuth cookies, SSH keys, and host private keys remain strictly on the host. Web presents only neutral readiness statuses (`ready`, `login-required`, `missing`) and an opaque worker identity whose value is not displayed.
+- **No Private Network Topology**: Transport is represented only as a private transport or loopback boundary; addresses and bindings are not displayed.
 
 ---
 
@@ -190,14 +190,14 @@ The prototype provides 100% interactive parity across 390px mobile screens and w
 
 | Scenario / State | Platform | Traffic Light | Connection | Work Safety | Key Interactive Features |
 |---|---|---|---|---|---|
-| **macOS Studio Host (M2 Max)** | macOS | Green: Ready | Online (10s) | Clear (Task #101 held) | Live probe request, permission toggles, engine breakdown, bound workspace unbind safety. |
-| **Windows Dev Box (Core i9)** | Windows | Red: Action Required | Offline (14m) | Recovery (Task #104) | Recovery Alert Box, unresolved facts, Resume, Discard (safe Task end), Emergency Force Release. |
-| **MacBook Air Onboarding** | macOS | Yellow: Attention | Reconnecting | Clear (0 leases) | Pending enrollment approval button, key verification, bootstrap registration simulation. |
-| **Linux Container CI (Docker)** | Container | Yellow: Attention | Online (45s) | Clear (0 leases) | Degraded engine status (Codex login-required), missing GUI automation badge, probe latency. |
-| **Mac mini (Legacy Worker)** | macOS | Red: Action Required | Online (1m) | Clear (0 leases) | Protocol version mismatch guidance (v1.8 < v2.0+ required), upgrade instructions banner. |
-| **Windows Workstation (Archived)** | Windows | Yellow: Attention | Offline (3d) | Clear (0 leases) | Archived instance state, work admission disabled, Restore Instance button. |
-| **Emergency Force Release Flow** | Windows | Red → Green | Offline | Recovery → Clear | Warning banner, unresolved facts, reason input, risk checkbox, typed `FORCE RELEASE` confirmation. |
-| **Reconnect & Reconcile Flow** | Windows | Red → Yellow → Red | Online | Reconciling → Recovery | Sockets reconnect, evidence synchronization (4 events, engine stopped proof), Resume vs Discard. |
+| **Ready Environment** | macOS | Green: Ready | Online (10s) | Clear (Task #101 held) | Live probe request, permission toggles, engine breakdown, bound workspace unbind safety. |
+| **Recovery Environment** | Windows | Red: Action Required | Offline (14m) | Recovery (Task #104) | Recovery Alert Box, unresolved facts, Resume, Discard (safe Task end), Emergency Force Release. |
+| **Pending Environment** | macOS | Yellow: Attention | Reconnecting | Clear (0 leases) | Pending enrollment approval button, identity verification, bootstrap registration simulation. |
+| **Degraded Environment** | Container | Yellow: Attention | Online (45s) | Clear (0 leases) | Degraded engine status (Codex login-required), missing GUI automation badge, probe latency. |
+| **Incompatible Environment** | macOS | Red: Action Required | Online (1m) | Clear (0 leases) | Protocol version mismatch guidance (v1.8 < v2.0+ required), upgrade instructions banner. |
+| **Archived Environment** | Windows | Yellow: Attention | Offline (3d) | Clear (0 leases) | Archived instance state, work admission disabled, Restore Instance button. |
+| **Emergency Force Release Flow** | Environment | Red → Green | Offline | Recovery → Clear | Warning banner, unresolved facts, reason input, risk checkbox, typed `FORCE RELEASE` confirmation. |
+| **Reconnect & Reconcile Flow** | Environment | Red → Yellow → Red | Online | Reconciling → Recovery | Channel reconnects, evidence synchronization (4 events, engine stopped proof), Resume vs Discard. |
 
 ---
 

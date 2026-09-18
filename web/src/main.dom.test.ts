@@ -117,7 +117,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       status: 'in-progress',
       taskContextState: 'ready',
       assignedAgentId: 'pi-agent',
-      environmentInstanceId: 'mac-1',
+      environmentInstanceId: 'env-1',
       environmentLeaseId: 'lease-stop',
       environmentLifecycleState: 'running',
       activeRunId: 'run-stop',
@@ -127,7 +127,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       status: 'blocked',
       taskContextState: 'recovery-retained',
       assignedAgentId: 'pi-agent',
-      environmentInstanceId: 'mac-2',
+      environmentInstanceId: 'env-2',
       environmentLeaseId: 'lease-resume',
       environmentLifecycleState: 'recovery',
       recoveryState: 'running',
@@ -136,7 +136,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       status: 'blocked',
       taskContextState: 'cleanup-needs-recovery',
       assignedAgentId: 'pi-agent',
-      environmentInstanceId: 'mac-3',
+      environmentInstanceId: 'env-3',
       environmentLeaseId: 'lease-discard',
       environmentLifecycleState: 'recovery',
       recoveryState: 'ending',
@@ -145,7 +145,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       status: 'in-progress',
       taskContextState: 'ready',
       assignedAgentId: 'pi-agent',
-      environmentInstanceId: 'mac-4',
+      environmentInstanceId: 'env-4',
       environmentLeaseId: 'lease-cleanup',
       environmentLifecycleState: 'idle',
     })],
@@ -153,7 +153,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       status: 'in-progress',
       taskContextState: 'ready',
       assignedAgentId: 'pi-agent',
-      environmentInstanceId: 'mac-5',
+      environmentInstanceId: 'env-5',
       environmentLeaseId: 'lease-end',
       environmentLifecycleState: 'idle',
     })],
@@ -215,7 +215,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       return response({ task: tasks.get('task-stop')!.task, runId: 'run-corrected' }, 202);
     }
     if (path === '/api/tasks/task-conflict/begin' && method === 'POST') {
-      conflictResponse = response({ error: 'environment mac-1 is unavailable: held by task-owner (recovering)' }, 409);
+      conflictResponse = response({ error: 'environment env-1 is unavailable: held by task-owner (recovering)' }, 409);
       return conflictResponse;
     }
     if (path === '/api/tasks/task-resume/recovery' && method === 'POST') {
@@ -272,7 +272,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     root: fileURLToPath(new URL('..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
   });
 
   try {
@@ -298,7 +298,7 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
       id: 'run-stop', agentId: 'pi-agent', prompt: 'Initial step', status: 'stopped', events: [],
     });
     await eventually(() => taskText(document, 'task-stop').includes('Activity: Task active · Agent idle'), 'retained idle Task');
-    assert.match(taskText(document, 'task-stop'), /Task lease: mac-1 retained by Task \(blocked\)/);
+    assert.match(taskText(document, 'task-stop'), /Task lease: env-1 retained by Task \(blocked\)/);
 
     // Completed history arrives on the same run stream as live updates. The
     // inspector keeps duration and provider metrics visible for either source.

@@ -205,7 +205,7 @@ function renderEnvironmentMasterList(
           </div>
           <div>
             <strong class="env-title" style="font-size: 13px; color: var(--text-primary); display: block;">${env.displayName}</strong>
-            <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${env.hostUser} · ${env.workerIdentityKey.slice(0, 16)}</span>
+            <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">Local user context · Enrolled identity</span>
           </div>
         </div>
         <span class="status-dot ${env.trafficLight}" title="${trafficLightLabel}" aria-label="${trafficLightLabel}"></span>
@@ -337,7 +337,7 @@ function renderEnvironmentDetailCard(
           <div class="dimension-item">
             <div class="dimension-item-top">
               <span class="dimension-item-label">1. Enrollment</span>
-              <span class="dimension-item-sub">${env.workerIdentityKey.slice(0, 14)}...</span>
+              <span class="dimension-item-sub">Opaque identity withheld</span>
             </div>
             <div class="dimension-item-action">
               <span class="badge ${env.enrollmentStatus === 'approved' ? 'badge-success' : env.enrollmentStatus === 'pending' ? 'badge-warning' : 'badge-danger'}">
@@ -823,8 +823,8 @@ function openBootstrapGuideDialog() {
     subtitle: 'macOS & Windows Service Setup under ADR-0008 & ADR-0009',
     bodyText: `
 <strong>1. Install Sprout Worker Binary:</strong><br/>
-• macOS: Download <code>sprout-worker-darwin-arm64</code> to <code>~/.local/bin/</code> and register as a user login item via launchd.<br/>
-• Windows: Download <code>sprout-worker-windows-x64.exe</code> and register as a logon-triggered Scheduled Task.<br/><br/>
+• macOS: Install the worker using the host's supported package method and register it as a user login item.<br/>
+• Windows: Install the worker using the host's supported package method and register it as a logon-triggered task.<br/><br/>
 
 <strong>2. Key Generation & Privacy Isolation:</strong><br/>
 • The worker generates a private key on the host. The private key never leaves the host.<br/>
@@ -847,11 +847,11 @@ function openRegisterHostDialog() {
     id: 'dlg-register-host',
     kind: 'modal-dialog',
     title: 'Register New Host Environment',
-    subtitle: 'Simulate pending worker bootstrap connection over Private Overlay',
+    subtitle: 'Simulate pending worker bootstrap connection over private transport',
     bodyText: `
 To enroll a new host machine into Sprout, execute this command on the target host in your operator user session:<br/><br/>
 
-<pre style="background: var(--bg-surface-elevated); padding: 8px 10px; border-radius: 4px; font-size: 11px; color: var(--accent-primary); overflow-x: auto;">sprout worker enroll --overlay 100.64.0.4:5174</pre><br/>
+<pre style="background: var(--bg-surface-elevated); padding: 8px 10px; border-radius: 4px; font-size: 11px; color: var(--accent-primary); overflow-x: auto;">sprout worker enroll --private-transport</pre><br/>
 
 Simulate a new incoming worker connection now to test the operator pending approval journey.
     `,
