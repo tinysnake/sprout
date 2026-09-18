@@ -138,8 +138,8 @@ test('Environments: health filters and selected master cards expose accessible c
     assert.equal(document.querySelector('.env-filter-box-btn[data-filter="all"]')?.getAttribute('aria-pressed'), 'false');
 
     stateManager.setEnvironmentFilter('all');
-    stateManager.selectEnvironment('win-dev-box');
-    const card = document.querySelector('.env-master-card[data-env="win-dev-box"]') as HTMLButtonElement;
+    stateManager.selectEnvironment('env-recovery');
+    const card = document.querySelector('.env-master-card[data-env="env-recovery"]') as HTMLButtonElement;
     assert.ok(card);
     assert.equal(card.getAttribute('aria-current'), 'page');
 
