@@ -47,6 +47,13 @@ type PendingProjectedReply = {
   agentId: string;
   projectId: string;
   timer: ReturnType<typeof setTimeout>;
+  onCancel: (cancellation: PendingReplyCancellation) => void;
+};
+
+type PendingReplyCancellation = {
+  responsibleKind: 'agent' | 'project';
+  responsibleId: string;
+  reason: string;
 };
 
 type CollaborationEligibility = {
@@ -2240,7 +2247,8 @@ class StateManager {
     projectId: string,
     agentId: string,
     delayMs: number,
-    emit: (agent: AgentDefinition) => void
+    emit: (agent: AgentDefinition) => void,
+    onCancel: (cancellation: PendingReplyCancellation) => void
   ) {
     const pendingReplyId = `pending-projected-reply-${this.nextPendingProjectedReplyId++}`;
     const timer = setTimeout(() => {
@@ -2252,29 +2260,60 @@ class StateManager {
       // recheck makes a callback that was already queued fail closed as well.
       const agent = this.state.agents.find((candidate) => candidate.id === pendingReply.agentId);
       const project = this.state.projects.find((candidate) => candidate.id === pendingReply.projectId);
-      if (!agent || agent.status !== 'active' || !project || project.status !== 'active') return;
+      if (!project || project.status !== 'active') {
+        pendingReply.onCancel({
+          responsibleKind: 'project',
+          responsibleId: pendingReply.projectId,
+          reason: `Cancelled because Project "${project?.displayName ?? pendingReply.projectId}" is unavailable before reply settlement. No reply was emitted and the admitted work will not replay.`,
+        });
+        return;
+      }
+      if (!agent || agent.status !== 'active') {
+        pendingReply.onCancel({
+          responsibleKind: 'agent',
+          responsibleId: pendingReply.agentId,
+          reason: `Cancelled because Agent "${agent?.displayName ?? pendingReply.agentId}" is unavailable before reply settlement. No reply was emitted and the admitted work will not replay.`,
+        });
+        return;
+      }
       emit(agent);
     }, delayMs);
-    this.pendingProjectedReplies.set(pendingReplyId, { agentId, projectId, timer });
+    this.pendingProjectedReplies.set(pendingReplyId, { agentId, projectId, timer, onCancel });
   }
 
-  private cancelPendingProjectedReplies(agentId: string): number {
+  private cancelPendingProjectedReplies(
+    agentId: string,
+    agentDisplayName: string
+  ): number {
     let cancelled = 0;
     for (const [pendingReplyId, pendingReply] of this.pendingProjectedReplies) {
       if (pendingReply.agentId !== agentId) continue;
       clearTimeout(pendingReply.timer);
       this.pendingProjectedReplies.delete(pendingReplyId);
+      pendingReply.onCancel({
+        responsibleKind: 'agent',
+        responsibleId: agentId,
+        reason: `Cancelled because Agent "${agentDisplayName}" was archived before reply settlement. No reply was emitted and the admitted work will not replay.`,
+      });
       cancelled += 1;
     }
     return cancelled;
   }
 
-  private cancelProjectPendingProjectedReplies(projectId: string): number {
+  private cancelProjectPendingProjectedReplies(
+    projectId: string,
+    projectDisplayName: string
+  ): number {
     let cancelled = 0;
     for (const [pendingReplyId, pendingReply] of this.pendingProjectedReplies) {
       if (pendingReply.projectId !== projectId) continue;
       clearTimeout(pendingReply.timer);
       this.pendingProjectedReplies.delete(pendingReplyId);
+      pendingReply.onCancel({
+        responsibleKind: 'project',
+        responsibleId: projectId,
+        reason: `Cancelled because Project "${projectDisplayName}" was archived before reply settlement. No reply was emitted and the admitted work will not replay.`,
+      });
       cancelled += 1;
     }
     return cancelled;
@@ -3171,7 +3210,7 @@ class StateManager {
       return { success: false, reason: msg };
     }
 
-    const cancelledReplyCount = this.cancelPendingProjectedReplies(agentId);
+    const cancelledReplyCount = this.cancelPendingProjectedReplies(agentId, agent.displayName);
     agent.status = 'archived';
     this.notify(
       `Archived Agent "${agent.displayName}".${
@@ -3514,9 +3553,27 @@ class StateManager {
     newConstraints: string[],
     newValidationCriteria: string[],
     newLeadId: string
-  ) {
+  ): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
+    if (!task) return { success: false, reason: 'Task not found.' };
+    const project = this.state.projects.find((candidate) => candidate.id === task.projectId);
+    if (!project || project.status !== 'active') {
+      const reason = 'Cannot revise Task content while its Project is unavailable.';
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const lead = this.state.agents.find((candidate) => candidate.id === newLeadId);
+    const leadMembership = project.memberships.find(
+      (membership) =>
+        membership.memberId === newLeadId &&
+        membership.memberKind === 'agent' &&
+        membership.status === 'active'
+    );
+    if (!lead || lead.status !== 'active' || !leadMembership) {
+      const reason = `Cannot revise Task responsibility: lead "${newLeadId}" must be an active global Agent with current active Project membership. Existing content and lead remain unchanged.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
     task.historyVersions.push({ ...task.currentVersion });
     const nextVer = task.currentVersion.version + 1;
@@ -3532,13 +3589,24 @@ class StateManager {
       changeNote: `Version ${nextVer} created by operator.`,
     };
     task.taskLeadId = newLeadId;
+    if (task.activeBlocker?.id.startsWith('blocker-lead-')) {
+      delete task.activeBlocker;
+      if (task.lifecycle === 'blocked' && task.leaseLifecycle === 'held') {
+        task.lifecycle = 'active';
+      }
+    }
 
     this.notify(`Created Task content version v${nextVer} for Task #${taskId}. Active runs continue on prior version; future runs will use v${nextVer}.`);
+    return { success: true };
   }
 
   public resolveBlocker(taskId: string) {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || !task.activeBlocker) return;
+    if (task.lifecycle === 'proposed') {
+      this.notify(`Cannot clear proposal blocker for Task #${taskId} without selecting an eligible lead. Proposal still holds no lease and admits no run.`);
+      return;
+    }
 
     delete task.activeBlocker;
     task.lifecycle = 'active';
@@ -4025,6 +4093,14 @@ class StateManager {
           };
           this.state.messages.push(replyMsg);
           this.notify(`Projected reply from ${agent.displayName} received (Non-routing; cannot loop-wake).`);
+        }, (cancellation) => {
+          if (target.status !== 'admitted') return;
+          target.status = 'cancelled';
+          target.reason = cancellation.reason;
+          target.terminalResponsibility = {
+            kind: cancellation.responsibleKind,
+            id: cancellation.responsibleId,
+          };
         });
       }
       const failedTargets = deterministicRoutingOutcomes.filter((outcome) => outcome.status === 'failed');
@@ -4115,6 +4191,25 @@ class StateManager {
         };
         this.state.messages.push(replyMsg);
         this.notify(`Routing batch ${batchId} settled. Projected reply emitted with non-routing disposition.`);
+      }, (cancellation) => {
+        if (batch.status !== 'evaluating' && batch.status !== 'open') return;
+        batch.status = 'failed-closed';
+        batch.closedAt = 'Just now';
+        batch.failureReason = cancellation.reason;
+        batch.terminalResponsibility = {
+          kind: cancellation.responsibleKind,
+          id: cancellation.responsibleId,
+        };
+        batch.decisions = batch.decisions.map((decision) =>
+          decision.status === 'selected'
+            ? { ...decision, status: 'failed', rationale: cancellation.reason }
+            : decision
+        );
+        batch.resultingWakeRequests = batch.resultingWakeRequests?.map((wakeRequest) =>
+          wakeRequest.admissionStatus === 'admitted'
+            ? { ...wakeRequest, admissionStatus: 'failed', failureReason: cancellation.reason }
+            : wakeRequest
+        );
       });
 
       this.notify(`Sent unaddressed message. Collected into 30s routing batch ${batchId}.`);
@@ -4268,11 +4363,26 @@ class StateManager {
       return { success: false, reason };
     }
 
-    const archivedAgent = selectedAgentIds
-      .map((agentId) => this.state.agents.find((agent) => agent.id === agentId))
-      .find((agent) => agent?.status === 'archived');
-    if (archivedAgent) {
-      const reason = `Cannot create Project with Agent "${archivedAgent.displayName}": archived Agents cannot receive new Project memberships. Restore the Agent first (ADR-0008).`;
+    const invalidAgentId = selectedAgentIds.find((agentId) => {
+      const agent = this.state.agents.find((candidate) => candidate.id === agentId);
+      return !agent || agent.status !== 'active';
+    });
+    if (invalidAgentId) {
+      const invalidAgent = this.state.agents.find((agent) => agent.id === invalidAgentId);
+      const reason = invalidAgent
+        ? `Cannot create Project with Agent "${invalidAgent.displayName}": archived Agents cannot receive new Project memberships. Restore the Agent first (ADR-0008).`
+        : `Cannot create Project with unknown Agent "${invalidAgentId}": every requested membership must resolve to an active global Agent.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    const unavailableEnvironmentId = boundEnvIds.find((envId) => {
+      const env = this.state.environments.find((candidate) => candidate.id === envId);
+      return !env || env.enrollmentStatus !== 'approved';
+    });
+    if (unavailableEnvironmentId) {
+      const env = this.state.environments.find((candidate) => candidate.id === unavailableEnvironmentId);
+      const reason = `Cannot create Project with Environment "${env?.displayName ?? unavailableEnvironmentId}": a current approved enrollment is required for new Project assignment (ADR-0008).`;
       this.notify(reason);
       return { success: false, reason };
     }
@@ -4384,7 +4494,7 @@ class StateManager {
       return;
     }
 
-    const cancelledReplyCount = this.cancelProjectPendingProjectedReplies(projectId);
+    const cancelledReplyCount = this.cancelProjectPendingProjectedReplies(projectId, project.displayName);
     project.status = 'archived';
     this.notify(
       `Archived Project "${project.displayName}". Channels are now read-only; history and workspaces preserved.${
@@ -4400,7 +4510,69 @@ class StateManager {
     if (!project) return;
 
     project.status = 'active';
-    this.notify(`Restored Project "${project.displayName}" to active status.`);
+    const environments = project.boundEnvironmentWorkspaces.map((binding) => {
+      const env = this.state.environments.find((candidate) => candidate.id === binding.environmentId);
+      if (!env) {
+        return {
+          environmentId: binding.environmentId,
+          status: 'unavailable' as const,
+          reason: 'Bound Environment record was not found.',
+        };
+      }
+      if (!binding.isPrepared) {
+        return {
+          environmentId: binding.environmentId,
+          status: 'unavailable' as const,
+          reason: 'Project workspace is not prepared on this Environment.',
+        };
+      }
+
+      const environmentEligibility = checkEnvironmentEligibility(env);
+      if (!environmentEligibility.isEligible) {
+        return {
+          environmentId: binding.environmentId,
+          status: 'unavailable' as const,
+          reason: environmentEligibility.reason ?? 'Environment is unavailable for work admission.',
+        };
+      }
+
+      const activeAgentMemberIds = project.memberships
+        .filter((membership) => membership.memberKind === 'agent' && membership.status === 'active')
+        .map((membership) => membership.memberId);
+      const compatibleAgent = activeAgentMemberIds.find(
+        (agentId) => this.evaluateAdmissionFallback(agentId, binding.environmentId)?.selectedOption
+      );
+      if (!compatibleAgent) {
+        return {
+          environmentId: binding.environmentId,
+          status: 'unavailable' as const,
+          reason: 'No active Project Agent has a configured, ready engine and model on this Environment.',
+        };
+      }
+
+      return {
+        environmentId: binding.environmentId,
+        status: 'compatible' as const,
+        reason: `Prepared workspace and compatible work option confirmed for Agent "${compatibleAgent}".`,
+      };
+    });
+    const readyCount = environments.filter((result) => result.status === 'compatible').length;
+    const status = readyCount > 0 ? 'ready' as const : 'unavailable' as const;
+    const summary =
+      status === 'ready'
+        ? `Restore compatibility check: ${readyCount} of ${environments.length} bound Environment(s) can admit Project work.`
+        : project.boundEnvironmentWorkspaces.length === 0
+          ? 'Restore compatibility check: Project restored without a bound Environment; Task begin remains unavailable.'
+          : 'Restore compatibility check: no bound Environment can currently admit Project work; Task begin remains unavailable.';
+    project.compatibilityHistory ??= [];
+    project.compatibilityHistory.unshift({
+      evaluatedAt: 'Just now',
+      trigger: 'restore',
+      status,
+      summary,
+      environments,
+    });
+    this.notify(`Restored Project "${project.displayName}" to active status. ${summary}`);
   }
 
   public addProjectMembership(
@@ -4499,11 +4671,20 @@ class StateManager {
 
     // Check if active tasks depend on this lead
     const activeTasksWithLead = this.state.tasks.filter(
-      (t) => t.projectId === projectId && t.taskLeadId === memberId && t.lifecycle !== 'completed' && t.lifecycle !== 'cancelled'
+      (t) =>
+        t.projectId === projectId &&
+        t.taskLeadId === memberId &&
+        t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'cancelled' &&
+        t.lifecycle !== 'rejected' &&
+        t.lifecycle !== 'withdrawn'
     );
     if (activeTasksWithLead.length > 0) {
       for (const t of activeTasksWithLead) {
-        t.lifecycle = 'blocked';
+        // An unapproved proposal remains a proposal and therefore owns no
+        // resources. Its blocker records that the proposed responsibility is
+        // no longer admissible without pretending the Task has begun.
+        if (t.lifecycle !== 'proposed') t.lifecycle = 'blocked';
         t.activeBlocker = {
           id: `blocker-lead-${Date.now()}`,
           reason: `Task lead ${member.displayName} membership ended in project.`,
@@ -4566,9 +4747,20 @@ class StateManager {
     envId: string,
     workspaceRoot: string,
     relativePath: string
-  ) {
+  ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+    if (project.status !== 'active') {
+      const reason = `Cannot bind an Environment to archived Project "${project.displayName}". Existing bindings and history remain preserved.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    const env = this.state.environments.find((candidate) => candidate.id === envId);
+    if (!env || env.enrollmentStatus !== 'approved') {
+      const reason = `Cannot bind Environment "${env?.displayName ?? envId}": a current approved enrollment is required for new Project assignment (ADR-0008).`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
 
     const existing = project.boundEnvironmentWorkspaces.find((b) => b.environmentId === envId);
     if (existing) {
@@ -4576,7 +4768,7 @@ class StateManager {
       existing.relativeWorkspacePath = relativePath;
       existing.isPrepared = true;
       this.notify(`Updated workspace binding on ${envId} for Project "${project.displayName}".`);
-      return;
+      return { success: true };
     }
 
     project.boundEnvironmentWorkspaces.push({
@@ -4586,6 +4778,7 @@ class StateManager {
       isPrepared: true,
     });
     this.notify(`Bound Environment ${envId} (${relativePath}) to Project "${project.displayName}". Workspace prepared.`);
+    return { success: true };
   }
 
   public switchProjectWorkspacePath(
@@ -4595,6 +4788,10 @@ class StateManager {
   ) {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return;
+    if (project.status !== 'active') {
+      this.notify(`Cannot change a workspace binding in archived Project "${project.displayName}". Existing binding history remains preserved.`);
+      return;
+    }
 
     // Safety check: Cannot change workspace while active run or held lease on this environment
     const activeTask = this.state.tasks.find(
@@ -4619,6 +4816,10 @@ class StateManager {
   public unbindEnvironmentFromProject(projectId: string, envId: string) {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return;
+    if (project.status !== 'active') {
+      this.notify(`Cannot unbind an Environment from archived Project "${project.displayName}". Existing binding history remains preserved.`);
+      return;
+    }
 
     // Safety check
     const activeTask = this.state.tasks.find(
@@ -4654,11 +4855,54 @@ class StateManager {
       return { success: false, reason };
     }
 
+    const resolvedProposerId = proposerId ?? (proposerKind === 'human' ? this.state.operator.id : undefined);
+    let proposerDisplayName: string;
+    if (proposerKind === 'human') {
+      if (resolvedProposerId !== this.state.operator.id) {
+        const reason = 'Cannot create Task proposal: the Human proposer must be the current Operator identity.';
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      proposerDisplayName = 'Operator (Human)';
+    } else {
+      if (!resolvedProposerId) {
+        const reason = 'Cannot create Agent Task proposal without an explicit proposer identity.';
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      const proposer = this.state.agents.find((candidate) => candidate.id === resolvedProposerId);
+      const proposerMembership = project.memberships.find(
+        (membership) =>
+          membership.memberId === resolvedProposerId &&
+          membership.memberKind === 'agent' &&
+          membership.status === 'active'
+      );
+      if (!proposer || proposer.status !== 'active' || !proposerMembership) {
+        const reason = `Cannot create Task proposal for Agent proposer "${resolvedProposerId}": an active global Agent and current active Project membership are required (ADR-0006/0008).`;
+        this.notify(reason);
+        return { success: false, reason };
+      }
+      proposerDisplayName = `${proposer.displayName} (Agent)`;
+    }
+
+    const lead = this.state.agents.find((candidate) => candidate.id === leadId);
+    const leadMembership = project.memberships.find(
+      (membership) =>
+        membership.memberId === leadId &&
+        membership.memberKind === 'agent' &&
+        membership.status === 'active'
+    );
+    if (!lead || lead.status !== 'active' || !leadMembership) {
+      const reason = `Task proposal is non-admissible: proposed lead "${leadId}" must be an active global Agent with current active Project membership. Select an eligible lead; no responsibility, lease, or run was recorded.`;
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
     const newId = `task-${Date.now().toString().slice(-3)}`;
     const newProp: TaskItem = {
       id: newId,
       projectId,
-      proposerId: proposerId || (proposerKind === 'human' ? this.state.operator.id : 'planner'),
+      proposerId: resolvedProposerId,
       proposerKind,
       createdAt: 'Just now',
       taskLeadId: leadId,
@@ -4668,7 +4912,7 @@ class StateManager {
       currentVersion: {
         version: 1,
         createdAt: 'Just now',
-        createdBy: proposerKind === 'human' ? 'Operator (Human)' : `${leadId} (Agent)`,
+        createdBy: proposerDisplayName,
         title: title.trim(),
         goal: goal.trim(),
         constraints: constraints.length > 0 ? constraints : ['Follow project rules.'],

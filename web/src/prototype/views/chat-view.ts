@@ -120,7 +120,7 @@ export function renderProjectChat(
           <span>Project Channels</span>
         </div>
         <div class="chat-cards-list">
-          <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" aria-selected="${isGeneralActive}">
+          <div class="chat-scope-card ${isGeneralActive ? 'active' : ''}" data-kind="project-channel" role="tab" tabindex="0" aria-selected="${isGeneralActive}">
             <div class="chat-card-avatar-wrap">
               <div class="chat-card-avatar icon-avatar">
                 ${renderIcon('chat', 16)}
@@ -166,7 +166,7 @@ export function renderProjectChat(
                     const unreadCount = unreadMap[w.id] || 0;
                     const isDisbanded = w.status === 'disbanded';
                     return `
-                      <div class="chat-scope-card ${isActive ? 'active' : ''} ${isDisbanded ? 'card-disbanded' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" aria-selected="${isActive}">
+                      <div class="chat-scope-card ${isActive ? 'active' : ''} ${isDisbanded ? 'card-disbanded' : ''}" data-kind="working-group-channel" data-id="${w.id}" role="tab" tabindex="0" aria-selected="${isActive}">
                         <div class="chat-card-avatar-wrap">
                           <div class="chat-card-avatar icon-avatar ${isDisbanded ? 'avatar-muted' : ''}">
                             ${renderIcon('users', 16)}
@@ -212,7 +212,7 @@ export function renderProjectChat(
               const isArchived = agent?.status === 'archived';
               const isEnded = m.status === 'ended' || isArchived;
               return `
-                <div class="chat-scope-card ${isActive ? 'active' : ''} ${isEnded ? 'card-ended' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" aria-selected="${isActive}">
+                <div class="chat-scope-card ${isActive ? 'active' : ''} ${isEnded ? 'card-ended' : ''}" data-kind="direct-message" data-id="${m.memberId}" role="tab" tabindex="0" aria-selected="${isActive}">
                   <div class="chat-card-avatar-wrap">
                     <div class="chat-card-avatar agent-avatar ${isEnded ? 'avatar-muted' : ''}">
                       ${m.avatar || renderIcon('bot', 16)}
@@ -373,11 +373,18 @@ export function renderProjectChat(
 
   // Scope Card Click Listeners (Select Scope / Open Detail)
   chatViewEl.querySelectorAll('.chat-scope-card').forEach((card) => {
-    card.addEventListener('click', (ev) => {
-      const target = ev.currentTarget as HTMLElement;
+    const activateScope = () => {
+      const target = card as HTMLElement;
       const kind = target.getAttribute('data-kind') as any;
       const id = target.getAttribute('data-id') || undefined;
       stateManager.openChatDetail(kind, id);
+    };
+    card.addEventListener('click', activateScope);
+    card.addEventListener('keydown', (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== 'Enter' && key !== ' ') return;
+      event.preventDefault();
+      activateScope();
     });
   });
 
@@ -475,6 +482,7 @@ export function renderProjectChat(
                   <div style="font-size: 10px; color: var(--text-muted);">
                     Unaddressed input evaluated under wake-model-assisted policy (30s collection window).
                   </div>
+                  ${batch?.failureReason ? `<div style="font-size: 10px; color: var(--red-action);">${batch.failureReason}</div>` : ''}
                   <button class="btn btn-secondary btn-sm msg-popup-inspect-btn msg-routing-tag" data-batch="${msg.routingCausalChainId}" style="width: 100%; justify-content: center; gap: 6px; font-size: 11px; margin-top: 2px; cursor: pointer;">
                     ${renderIcon('lightning', 12)} Inspect Causal Routing Chain
                   </button>
@@ -485,7 +493,9 @@ export function renderProjectChat(
                       ${renderIcon('check', 12)} Deterministic Addressing
                     </div>
                     <div style="font-size: 10px; color: var(--text-muted);">
-                      Direct DM, exact @mention, or @all broadcast admitted immediately, bypassing wake policy and collection windows.
+                      ${msg.deterministicRoutingOutcomes?.some((outcome) => outcome.status === 'cancelled')
+                        ? 'Deterministic addressing bypassed wake-model judgement, then archived responsibility cancelled admitted work before reply settlement.'
+                        : 'Direct DM, exact @mention, or @all broadcast evaluated immediately, bypassing wake policy and collection windows.'}
                     </div>
                     ${
                       msg.deterministicRoutingOutcomes?.length
@@ -493,8 +503,9 @@ export function renderProjectChat(
                             ${msg.deterministicRoutingOutcomes
                               .map(
                                 (outcome) => `<div style="font-size: 10px; color: ${outcome.status === 'admitted' ? 'var(--green-ready)' : 'var(--red-action)'};">
-                                  <strong>@${outcome.targetDisplayName ?? outcome.targetAgentId}</strong> · ${outcome.status === 'admitted' ? 'Admitted' : 'Failed closed'}<br />
+                                  <strong>@${outcome.targetDisplayName ?? outcome.targetAgentId}</strong> · ${outcome.status === 'admitted' ? 'Admitted' : outcome.status === 'cancelled' ? 'Cancelled' : 'Failed closed'}<br />
                                   <span style="color: var(--text-muted);">${outcome.reason}</span>
+                                  ${outcome.terminalResponsibility ? `<br /><span style="color: var(--text-muted);">Responsible ${outcome.terminalResponsibility.kind}: <code>${outcome.terminalResponsibility.id}</code></span>` : ''}
                                 </div>`
                               )
                               .join('')}
@@ -845,6 +856,8 @@ export function renderRoutingInspectorModal(
             <div style="font-size: 11px; color: var(--text-secondary);">
               <strong>Inputs in Batch:</strong> ${batch.inputMessageIds.map((id) => `<code>${id}</code>`).join(', ')}
             </div>
+            ${batch.failureReason ? `<div style="font-size: 11px; color: var(--red-action);"><strong>Terminal outcome:</strong> ${batch.failureReason}</div>` : ''}
+            ${batch.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted);"><strong>Responsible ${batch.terminalResponsibility.kind}:</strong> <code>${batch.terminalResponsibility.id}</code></div>` : ''}
           </div>
 
           <!-- 2. Bounded Context Manifest & Strict Privacy Guarantees (ADR-0007) -->
@@ -948,13 +961,13 @@ export function renderRoutingInspectorModal(
                       <div style="background: var(--bg-surface); padding: 8px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); font-size: 12px;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                           <strong>WakeRequest: <code>${w.wakeRequestId}</code></strong>
-                          <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
+                          <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : w.admissionStatus === 'failed' ? 'red' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
                         </div>
                         <div style="font-size: 11px; color: var(--text-secondary); margin-top: 3px;">
                           Target Agent: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                         </div>
                         <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
-                          Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.
+                          ${w.failureReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
                         </div>
                       </div>
                     `

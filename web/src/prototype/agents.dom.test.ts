@@ -882,6 +882,10 @@ test('Task and Project admission: archived Agents cannot receive new membership 
     assert.equal(createResult.success, false);
     assert.match(createResult.reason ?? '', /archived/i);
     assert.equal(stateManager.getSnapshot().projects.length, projectCount);
+    const unknownCreateResult = stateManager.createProject('Unknown Agent Rejection', '', [], ['not-an-agent']);
+    assert.equal(unknownCreateResult.success, false);
+    assert.match(unknownCreateResult.reason ?? '', /unknown Agent/i);
+    assert.equal(stateManager.getSnapshot().projects.length, projectCount);
 
     // F-66-04 page path filters archived historical members, while direct Task
     // admission refuses the same Agent before creating a run.
@@ -1277,11 +1281,18 @@ test('Collaboration admission: wake selection and archived-Project callbacks fai
       ).success,
       true
     );
+    const pendingDirectMessage = stateManager.getSnapshot().messages.at(-1)!;
     stateManager.archiveProject(secondaryProjectId);
     assert.equal(
       stateManager.getSnapshot().projects.find((project) => project.id === secondaryProjectId)?.status,
       'archived'
     );
+    assert.equal(pendingDirectMessage.deterministicRoutingOutcomes?.[0]?.status, 'cancelled');
+    assert.deepEqual(pendingDirectMessage.deterministicRoutingOutcomes?.[0]?.terminalResponsibility, {
+      kind: 'project',
+      id: secondaryProjectId,
+    });
+    assert.match(pendingDirectMessage.deterministicRoutingOutcomes?.[0]?.reason ?? '', /Project.*archived.*will not replay/i);
     const messageCountAtArchive = stateManager.getSnapshot().messages.length;
     assert.equal(messageCountAtArchive, beforeDirect + 1);
     await new Promise((resolve) => setTimeout(resolve, 900));
@@ -1335,6 +1346,319 @@ test('Archived Projects: direct state entry points cannot add Agent membership o
     stateManager.restoreProject(projectId);
     assert.equal(stateManager.restoreProjectMembership(projectId, 'designer').success, true);
     assert.equal(designerMembership.status, 'active', 'Membership restore becomes available after Project restore');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Task proposals: state boundary rejects forged authority and unavailable lead responsibility', async () => {
+  const { vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const projectId = 'proj-minesweeper';
+    const initialTaskCount = stateManager.getSnapshot().tasks.length;
+    const propose = (leadId: string, proposerKind: 'human' | 'agent', proposerId?: string) =>
+      stateManager.createTaskProposal(
+        projectId,
+        `Boundary proposal ${leadId} ${proposerId ?? 'operator'}`,
+        'Prove proposal authority without admitting resources.',
+        [],
+        [],
+        leadId,
+        proposerKind,
+        proposerId
+      );
+
+    const forgedHuman = propose('programmer', 'human', 'forged-human');
+    assert.equal(forgedHuman.success, false);
+    assert.match(forgedHuman.reason ?? '', /current Operator identity/i);
+
+    const missingAgentIdentity = propose('programmer', 'agent');
+    assert.equal(missingAgentIdentity.success, false);
+    assert.match(missingAgentIdentity.reason ?? '', /explicit proposer identity/i);
+
+    const archivedProposer = propose('programmer', 'agent', 'legacy-coder');
+    assert.equal(archivedProposer.success, false);
+    assert.match(archivedProposer.reason ?? '', /active global Agent.*active Project membership/i);
+
+    const endedProposer = propose('programmer', 'agent', 'researcher');
+    assert.equal(endedProposer.success, false);
+    assert.match(endedProposer.reason ?? '', /active global Agent.*active Project membership/i);
+
+    for (const invalidLead of ['not-an-agent', 'researcher', 'legacy-coder']) {
+      const result = propose(invalidLead, 'human');
+      assert.equal(result.success, false, `${invalidLead} cannot be persisted as valid Task responsibility`);
+      assert.match(result.reason ?? '', /non-admissible.*active global Agent.*active Project membership/i);
+    }
+    assert.equal(stateManager.getSnapshot().tasks.length, initialTaskCount, 'Rejected authority facts do not create Tasks');
+
+    const validProposal = propose('programmer', 'agent', 'planner');
+    assert.equal(validProposal.success, true);
+    const created = stateManager
+      .getSnapshot()
+      .tasks.find((task) => task.currentVersion.title.includes('Boundary proposal programmer planner'))!;
+    assert.ok(created);
+    assert.equal(created.proposerId, 'planner');
+    assert.equal(created.currentVersion.createdBy, 'Planner (Agent)');
+    assert.equal(created.lifecycle, 'proposed');
+    assert.equal(created.leaseLifecycle, 'none');
+    assert.equal(created.agentRunLifecycle, 'none');
+    assert.equal(created.runs.length, 0, 'Proposal creation never admits resources or starts a run');
+
+    const versionBeforeInvalidLead = created.currentVersion.version;
+    const invalidRevision = stateManager.updateTaskContentVersion(
+      created.id,
+      'Forged replacement lead',
+      created.currentVersion.goal,
+      created.currentVersion.constraints,
+      created.currentVersion.validationCriteria,
+      'legacy-coder'
+    );
+    assert.equal(invalidRevision.success, false);
+    assert.match(invalidRevision.reason ?? '', /active global Agent.*active Project membership/i);
+    assert.equal(created.currentVersion.version, versionBeforeInvalidLead);
+    assert.equal(created.taskLeadId, 'programmer', 'Rejected revision cannot overwrite valid responsibility');
+
+    assert.equal(stateManager.endProjectMembership(projectId, 'programmer').success, true);
+    assert.equal(created.lifecycle, 'proposed', 'Unavailable proposal lead does not imply that Task begin occurred');
+    assert.ok(created.activeBlocker);
+    assert.match(created.activeBlocker?.reason ?? '', /lead Programmer membership ended/i);
+    assert.equal(created.leaseLifecycle, 'none');
+    assert.equal(created.runs.length, 0);
+    stateManager.resolveBlocker(created.id);
+    assert.equal(created.lifecycle, 'proposed', 'Generic blocker resolution cannot bypass approve-and-begin');
+    assert.ok(created.activeBlocker, 'Lead blocker remains until Human selects an eligible replacement');
+    const replacementRevision = stateManager.updateTaskContentVersion(
+      created.id,
+      created.currentVersion.title,
+      created.currentVersion.goal,
+      created.currentVersion.constraints,
+      created.currentVersion.validationCriteria,
+      'designer'
+    );
+    assert.equal(replacementRevision.success, true);
+    assert.equal(created.lifecycle, 'proposed');
+    assert.equal(created.taskLeadId, 'designer');
+    assert.equal(created.activeBlocker, undefined, 'Human replacement clears only the lead blocker');
+    assert.equal(created.leaseLifecycle, 'none');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project restore: compatibility outcomes are durable and later Task begin still fails closed', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const projectId = 'proj-docs-portal';
+    const project = stateManager.getSnapshot().projects.find((candidate) => candidate.id === projectId)!;
+    const env = stateManager.getSnapshot().environments.find((candidate) => candidate.id === 'mac-studio-primary')!;
+    assert.equal(project.status, 'archived');
+
+    env.enrollmentStatus = 'archived';
+    env.connectionState = 'offline';
+    const projectCount = stateManager.getSnapshot().projects.length;
+    const createWithArchivedEnvironment = stateManager.createProject(
+      'Unavailable Environment Assignment',
+      '',
+      [],
+      [],
+      [env.id]
+    );
+    assert.equal(createWithArchivedEnvironment.success, false);
+    assert.match(createWithArchivedEnvironment.reason ?? '', /approved enrollment.*Project assignment/i);
+    assert.equal(stateManager.getSnapshot().projects.length, projectCount);
+    const archivedBindingCount = project.boundEnvironmentWorkspaces.length;
+    const bindToArchivedProject = stateManager.bindEnvironmentToProject(
+      projectId,
+      'mac-mini-mismatch',
+      '~/workspace/sprout-projects',
+      'must-not-bind'
+    );
+    assert.equal(bindToArchivedProject.success, false);
+    assert.match(bindToArchivedProject.reason ?? '', /archived Project/i);
+    assert.equal(project.boundEnvironmentWorkspaces.length, archivedBindingCount);
+
+    stateManager.restoreProject(projectId);
+    assert.equal(project.status, 'active', 'A Project can be restored for read/write management without implying work readiness');
+    assert.equal(project.compatibilityHistory?.[0]?.status, 'unavailable');
+    assert.match(project.compatibilityHistory?.[0]?.summary ?? '', /no bound Environment.*Task begin remains unavailable/i);
+    assert.match(project.compatibilityHistory?.[0]?.environments[0]?.reason ?? '', /not approved|archived/i);
+    stateManager.selectProject(projectId);
+    stateManager.setPrimaryNav('project', 'overview');
+    assert.match(
+      dom.window.document.querySelector('.project-restore-compatibility')?.textContent ?? '',
+      /unavailable[\s\S]*Task begin remains unavailable/i,
+      'Latest restore compatibility fact is visible without implying Project work readiness'
+    );
+
+    stateManager.archiveProject(projectId);
+    env.enrollmentStatus = 'approved';
+    env.connectionState = 'online';
+    env.protocolCompatibility = 'compatible';
+    env.workSafety = 'clear';
+    stateManager.restoreProject(projectId);
+    assert.equal(project.compatibilityHistory?.[0]?.status, 'ready');
+    assert.equal(project.compatibilityHistory?.[1]?.status, 'unavailable', 'Prior restore evidence remains reviewable');
+
+    env.protocolCompatibility = 'incompatible';
+    env.protocolMismatchDetail = 'Worker protocol became incompatible after restore.';
+    const proposalResult = stateManager.createTaskProposal(
+      projectId,
+      'Restore admission probe',
+      'Later Begin must re-evaluate current Environment facts.',
+      [],
+      [],
+      'designer'
+    );
+    assert.equal(proposalResult.success, true);
+    const proposal = stateManager
+      .getSnapshot()
+      .tasks.find((task) => task.currentVersion.title === 'Restore admission probe')!;
+    const beginResult = stateManager.approveAndBeginProposal(proposal.id, env.id, 'designer');
+    assert.equal(beginResult.success, false);
+    assert.match(beginResult.reason ?? '', /protocol incompatible/i);
+    assert.equal(proposal.lifecycle, 'proposed');
+    assert.equal(proposal.leaseLifecycle, 'none');
+    assert.equal(proposal.runs.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Routing cancellation: Agent and Project archive write durable terminal outcomes without replies', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const agentProjectId = 'proj-minesweeper';
+    const agentMessageCount = stateManager.getSnapshot().messages.length;
+    assert.equal(
+      stateManager.sendMessage(agentProjectId, { kind: 'project-channel' }, '@reviewer terminal cancellation evidence').success,
+      true
+    );
+    const addressedMessage = stateManager.getSnapshot().messages.at(-1)!;
+    assert.equal(addressedMessage.deterministicRoutingOutcomes?.[0]?.status, 'admitted');
+    assert.equal(stateManager.archiveAgent('reviewer').success, true);
+    assert.equal(addressedMessage.deterministicRoutingOutcomes?.[0]?.status, 'cancelled');
+    assert.deepEqual(addressedMessage.deterministicRoutingOutcomes?.[0]?.terminalResponsibility, {
+      kind: 'agent',
+      id: 'reviewer',
+    });
+    assert.match(addressedMessage.deterministicRoutingOutcomes?.[0]?.reason ?? '', /Agent.*archived.*no reply.*will not replay/i);
+    stateManager.selectProject(agentProjectId);
+    stateManager.setPrimaryNav('project', 'chat');
+    stateManager.openChatDetail('project-channel');
+    const routingEvidenceButton = dom.window.document.querySelector<HTMLButtonElement>(
+      `.msg-info-trigger-btn[data-msg-id="${addressedMessage.id}"]`
+    );
+    assert.ok(routingEvidenceButton);
+    routingEvidenceButton.click();
+    const terminalEvidence = dom.window.document.querySelector('.projected-reply-popup')?.textContent ?? '';
+    assert.match(terminalEvidence, /Cancelled/);
+    assert.match(terminalEvidence, /Responsible agent.*reviewer/i);
+    assert.doesNotMatch(terminalEvidence, /@Reviewer\s*·\s*Admitted/i);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(stateManager.getSnapshot().messages.length, agentMessageCount + 1, 'Cancelled Agent work emits no reply');
+
+    const projectId = 'proj-docs-portal';
+    stateManager.restoreProject(projectId);
+    stateManager.setProjectWakePolicy(projectId, 'wake-model-assisted');
+    const beforeWake = stateManager.getSnapshot().messages.length;
+    assert.equal(
+      stateManager.sendMessage(projectId, { kind: 'project-channel' }, 'Evaluate this, then archive the Project').success,
+      true
+    );
+    const batch = stateManager.getSnapshot().routingBatches[0]!;
+    assert.equal(batch.status, 'evaluating');
+    stateManager.archiveProject(projectId);
+    assert.equal(batch.status, 'failed-closed');
+    assert.deepEqual(batch.terminalResponsibility, { kind: 'project', id: projectId });
+    assert.equal(batch.decisions[0]?.status, 'failed');
+    assert.equal(batch.resultingWakeRequests?.[0]?.admissionStatus, 'failed');
+    assert.match(batch.failureReason ?? '', /Project.*archived.*no reply.*will not replay/i);
+    assert.match(batch.resultingWakeRequests?.[0]?.failureReason ?? '', /Project.*archived/i);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    assert.equal(stateManager.getSnapshot().messages.length, beforeWake + 1, 'Cancelled wake batch emits no reply');
+    assert.equal(batch.status, 'failed-closed', 'Terminal batch cannot silently replay after its timer window');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Keyboard parity: Agent cards, chat scopes, and foldable details activate with Enter and Space', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('manage', undefined, 'agents');
+    stateManager.setViewportMode('desktop');
+    let card = dom.window.document.querySelector<HTMLElement>('.agent-master-card[data-agent-id="sentinel"]')!;
+    assert.equal(card.getAttribute('tabindex'), '0');
+    assert.equal(card.getAttribute('role'), 'button');
+    card.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    assert.equal(stateManager.getSnapshot().selectedAgentId, 'sentinel');
+
+    card = dom.window.document.querySelector<HTMLElement>('.agent-master-card[data-agent-id="programmer"]')!;
+    card.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    assert.equal(stateManager.getSnapshot().selectedAgentId, 'programmer');
+
+    const foldable = dom.window.document.querySelector<HTMLElement>('#foldable-env-compat')!;
+    const foldableHeader = foldable.querySelector<HTMLElement>('.foldable-header')!;
+    foldableHeader.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    assert.equal(foldable.classList.contains('open'), true);
+    assert.equal(foldableHeader.getAttribute('aria-expanded'), 'true');
+    foldableHeader.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    assert.equal(foldable.classList.contains('open'), false);
+    assert.equal(foldableHeader.getAttribute('aria-expanded'), 'false');
+
+    stateManager.setPrimaryNav('project', 'chat');
+    let scopeCard = dom.window.document.querySelector<HTMLElement>('.chat-scope-card[data-kind="working-group-channel"]')!;
+    assert.equal(scopeCard.getAttribute('tabindex'), '0');
+    scopeCard.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    assert.equal(stateManager.getSnapshot().selectedScopeKind, 'working-group-channel');
+
+    scopeCard = dom.window.document.querySelector<HTMLElement>('.chat-scope-card[data-kind="direct-message"][data-id="programmer"]')!;
+    scopeCard.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    assert.equal(stateManager.getSnapshot().selectedScopeKind, 'direct-message');
+    assert.equal(stateManager.getSnapshot().selectedDirectMessagePeerId, 'programmer');
+
+    stateManager.setPrimaryNav('project', 'tasks');
+    stateManager.openTaskDetail('task-101');
+    const lifecycleToggle = dom.window.document.querySelector<HTMLElement>('#lifecycle-fold-toggle')!;
+    assert.equal(lifecycleToggle.getAttribute('tabindex'), '0');
+    lifecycleToggle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    assert.equal(lifecycleToggle.getAttribute('aria-expanded'), 'true');
+    lifecycleToggle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    assert.equal(lifecycleToggle.getAttribute('aria-expanded'), 'false');
   } finally {
     await cleanup();
   }

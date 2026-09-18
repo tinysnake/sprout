@@ -127,8 +127,14 @@ export type MessageItem = {
     | {
         targetAgentId: string;
         targetDisplayName?: string | undefined;
-        status: 'admitted' | 'failed';
+        status: 'admitted' | 'failed' | 'cancelled';
         reason: string;
+        terminalResponsibility?:
+          | {
+              kind: 'agent' | 'project';
+              id: string;
+            }
+          | undefined;
       }[]
     | undefined;
   agentAttribution?: AgentExecutionAttribution | undefined;
@@ -180,6 +186,11 @@ export type ResultingWakeRequestRecord = {
   failureReason?: string | undefined;
 };
 
+export type RoutingTerminalResponsibility = {
+  kind: 'agent' | 'project';
+  id: string;
+};
+
 export type RoutingBatch = {
   id: string;
   projectId: string;
@@ -209,6 +220,7 @@ export type RoutingBatch = {
   resultingWakeRequestIds: string[];
   resultingWakeRequests?: ResultingWakeRequestRecord[] | undefined;
   failureReason?: string | undefined;
+  terminalResponsibility?: RoutingTerminalResponsibility | undefined;
 };
 
 export type TaskLifecycleState =
@@ -458,6 +470,19 @@ export type ProjectItem = {
   }[];
   workingGroups: WorkingGroup[];
   status: 'active' | 'archived';
+  compatibilityHistory?:
+    | {
+        evaluatedAt: string;
+        trigger: 'restore';
+        status: 'ready' | 'unavailable';
+        summary: string;
+        environments: {
+          environmentId: string;
+          status: 'compatible' | 'unavailable';
+          reason: string;
+        }[];
+      }[]
+    | undefined;
 };
 
 export type UsageActivityKind = 'agent_run' | 'routing_attempt';

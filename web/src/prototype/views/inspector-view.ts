@@ -43,6 +43,8 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
           <div><strong>Collection Window:</strong> ${batch?.openedAt} → ${batch?.closedAt} (${batch?.collectionWindowDurationSec ?? 30}s fixed window)</div>
           <div><strong>Wake Evaluation Model:</strong> <code>${batch?.wakeModel ?? 'gpt-4o-mini'}</code> (Attempt ${batch?.attemptsCount ?? 1} of 2)</div>
           <div><strong>Inputs in Batch:</strong> ${batch?.inputMessageIds.map((id) => `<code>${id}</code>`).join(', ') ?? 'none'}</div>
+          ${batch?.failureReason ? `<div style="color: var(--red-action);"><strong>Terminal outcome:</strong> ${batch.failureReason}</div>` : ''}
+          ${batch?.terminalResponsibility ? `<div><strong>Responsible ${batch.terminalResponsibility.kind}:</strong> <code>${batch.terminalResponsibility.id}</code></div>` : ''}
         </div>
 
         <!-- 2. Frozen Context Bounds & Privacy Exclusions -->
@@ -126,11 +128,12 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
                   <div style="background: var(--bg-surface-elevated); padding: 10px; border-radius: var(--radius-sm); font-size: 12px; border: 1px solid var(--border-subtle);">
                     <div style="display: flex; justify-content: space-between;">
                       <strong>WakeRequest: <code>${w.wakeRequestId}</code></strong>
-                      <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
+                      <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : w.admissionStatus === 'failed' ? 'red' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
                     </div>
                     <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">
                       Target: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                     </div>
+                    ${w.failureReason ? `<div style="font-size: 10px; color: var(--red-action); margin-top: 2px;">${w.failureReason}</div>` : ''}
                   </div>
                 `
                   )

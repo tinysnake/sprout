@@ -153,7 +153,7 @@ Archiving an Agent is non-destructive (ADR-0008):
 - **Archive Effects**:
   - Bars new Project memberships, chat messages, and Task runs.
   - Exact Project-channel mentions fail closed for an archived target, retain visible per-target routing evidence, and never silently wake a different Agent.
-  - Cancels pending projected replies for the archived Agent; callbacks independently recheck Agent and Project state before appending a reply.
+  - Cancels pending projected replies for the archived Agent; callbacks independently recheck Agent and Project state before appending a reply, and durable routing evidence records the responsible archived Agent or Project plus the terminal reason.
   - Retains all private memory entries, past chat messages, Task run facts, and engine session slots.
   - Re-activable at any time via "Restore Agent".
 
@@ -181,13 +181,14 @@ The prototype demonstrates realistic data covering all 5 canonical states:
   3. *Detail View Navigation*: In mobile/single-column view, selecting an agent navigates to a focused, dedicated level-2 full-screen detail panel with a traditional non-floating back header (`[ ← Back ]` + status dot + title) without retaining the list header or filter row.
   4. *Unified Metadata Grid*: Agent metadata (Stable Identity, Private Memory) formatted as a matching 2x2 grid to prevent horizontal overflow on narrow screens; redundant Status & Version / Project count tiles removed in favor of the status banner and foldable sections.
   5. *Work Option Management & Invariant Protection*: Full interactive support for adding options, reordering across devices (desktop drag-and-drop, mobile touch move buttons, and keyboard ArrowUp/Down), automatic version incrementing, and deleting options (with minimum 1 option invariant protection).
-  6. *Foldable Progressive Disclosure*: Environment Compatibility & Admission Evaluation, Project Memberships, Version Changelog, and Historical Run Attribution are presented as collapsed foldable boxes, expanding on demand to keep the default view focused on identity and next actions.
+  6. *Foldable Progressive Disclosure*: Environment Compatibility & Admission Evaluation, Project Memberships, Version Changelog, and Historical Run Attribution are presented as collapsed foldable boxes, expanding by pointer, Enter, or Space to keep the default view focused on identity and next actions.
   7. *Pre-Acceptance Fallback Simulator*: Interactive tool allows testing how Sprout evaluates run admission across enrolled environments in real-time.
   8. *Safety-Guarded Archiving*: Archiving independently validates that the agent is not executing active runs and is not leading unfinished tasks; displays clear explanation of non-destructive attribution preservation.
   9. *Top Control Bar Streamlining*: Zero space-occupying candidate select dropdowns; clean visual hierarchy following `design-taste-frontend` taste principles.
   10. *Concise Status Banner*: Agent detail top banner shows only the status label and concise version/state chip; the verbose narrative fact paragraph was removed.
   11. *No Search Box*: The Agents header has no search input; the 5 status filter pills are the only list-narrowing control, matching the Environments surface.
   12. *Repo-Standard Modal Primitives*: Create Agent, Agent Architecture Guide, Edit Agent, Edit Standing Instructions, Add Work Option, Archive Agent, and Run Attribution Trace dialogs use the shared `proto-modal-*` overlay/dialog/header/body/footer primitives from the accepted #61 baseline, so they render as centered, dimmed-backdrop modals with a legible title, fields, and Cancel/Confirm actions on both phone and desktop.
+  13. *Keyboard Navigation Parity*: Agent master cards and Project, Working Group, and direct-message scope cards are focusable and activate with Enter or Space without adding controls or default visual density.
 - **Verification Command**:
   ```bash
   npm run typecheck && node --test 'src/**/*.test.ts' 'web/src/**/*.test.ts'

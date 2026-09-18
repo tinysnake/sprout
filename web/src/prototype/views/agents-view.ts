@@ -248,6 +248,10 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
       const card = document.createElement('div');
       card.className = `agent-master-card ${isSelected ? 'active' : ''}`;
       card.setAttribute('data-agent-id', agent.id);
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('aria-label', `Open Agent ${agent.displayName}`);
+      card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
 
       card.innerHTML = `
         <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
@@ -292,8 +296,14 @@ export function renderAgentsView(state: PrototypeState): HTMLElement {
         </div>
       `;
 
-      card.addEventListener('click', () => {
+      const selectAgent = () => {
         stateManager.selectAgent(agent.id);
+      };
+      card.addEventListener('click', selectAgent);
+      card.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        selectAgent();
       });
 
       cardList.appendChild(card);
@@ -774,14 +784,21 @@ function renderAgentDetailCard(
     </div>
   `;
 
-  // Foldable Accordion Headers Click Handler
+  // Foldable Accordion Headers provide equivalent pointer and keyboard activation.
   detailCard.querySelectorAll('.foldable-header').forEach((header) => {
-    header.addEventListener('click', (ev) => {
-      const card = (ev.currentTarget as HTMLElement).closest('.foldable-card');
+    const toggleFoldable = () => {
+      const card = header.closest('.foldable-card');
       if (card) {
         const isOpen = card.classList.toggle('open');
         header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
       }
+    };
+    header.addEventListener('click', toggleFoldable);
+    header.addEventListener('keydown', (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== 'Enter' && key !== ' ') return;
+      event.preventDefault();
+      toggleFoldable();
     });
   });
 

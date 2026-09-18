@@ -227,7 +227,7 @@ function renderTaskDetailPage(
   }
 
   lifecycleCard.innerHTML = `
-    <div class="lifecycle-fold-header lifecycle-sentence-row" id="lifecycle-fold-toggle" role="button" aria-expanded="false" title="Click to expand/collapse lifecycle facts">
+    <div class="lifecycle-fold-header lifecycle-sentence-row" id="lifecycle-fold-toggle" role="button" tabindex="0" aria-expanded="false" title="Expand or collapse lifecycle facts">
       <div class="lifecycle-sentence-text">
         ${renderIcon('settings', 14)}
         <span>${lifecycleSentence}</span>
@@ -267,10 +267,17 @@ function renderTaskDetailPage(
     </div>
   `;
 
-  lifecycleCard.querySelector('#lifecycle-fold-toggle')?.addEventListener('click', () => {
+  const lifecycleToggle = lifecycleCard.querySelector('#lifecycle-fold-toggle');
+  const toggleLifecycleDetails = () => {
     const isExpanded = lifecycleCard.classList.toggle('expanded');
-    const toggle = lifecycleCard.querySelector('#lifecycle-fold-toggle');
-    if (toggle) toggle.setAttribute('aria-expanded', String(isExpanded));
+    lifecycleToggle?.setAttribute('aria-expanded', String(isExpanded));
+  };
+  lifecycleToggle?.addEventListener('click', toggleLifecycleDetails);
+  lifecycleToggle?.addEventListener('keydown', (event) => {
+    const key = (event as KeyboardEvent).key;
+    if (key !== 'Enter' && key !== ' ') return;
+    event.preventDefault();
+    toggleLifecycleDetails();
   });
 
   container.appendChild(lifecycleCard);

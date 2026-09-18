@@ -198,6 +198,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
       t.lifecycle === 'recovery' ||
       t.lifecycle === 'Task pause requested'
   );
+  const latestCompatibilityCheck = project.compatibilityHistory?.[0];
 
   overviewEl.innerHTML = `
     <!-- 1. Project Contract & Purpose Card -->
@@ -273,6 +274,22 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             ? `<div style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--yellow-attention); font-size: 11px; color: var(--yellow-attention); display: flex; align-items: center; gap: 6px;">
                 ${renderIcon('alert', 14)}
                 <span><strong>Archive Safely Blocked:</strong> Task #${activeTask.id.replace('task-', '')} (${activeTask.lifecycle}, lease ${activeTask.leaseLifecycle}) is currently active. Settle or discard active work before archiving.</span>
+              </div>`
+            : ''
+        }
+        ${
+          latestCompatibilityCheck
+            ? `<div class="project-restore-compatibility" style="background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid ${latestCompatibilityCheck.status === 'ready' ? 'var(--green-ready)' : 'var(--red-action)'}; font-size: 11px; color: var(--text-secondary);">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <strong style="color: var(--text-primary);">Latest restore compatibility check</strong>
+                  <span class="status-pill ${latestCompatibilityCheck.status === 'ready' ? 'green' : 'red'}" style="font-size: 9px;">${latestCompatibilityCheck.status}</span>
+                </div>
+                <div style="margin-top: 3px;">${latestCompatibilityCheck.summary}</div>
+                ${latestCompatibilityCheck.environments
+                  .map(
+                    (result) => `<div style="margin-top: 2px; color: var(--text-muted);"><code>${result.environmentId}</code> · ${result.status}: ${result.reason}</div>`
+                  )
+                  .join('')}
               </div>`
             : ''
         }
@@ -827,7 +844,9 @@ function renderBindEnvironmentModal(
   modal.className = 'proto-modal-backdrop';
 
   const unassignedEnvs = state.environments.filter(
-    (e) => !project.boundEnvironmentWorkspaces.some((b) => b.environmentId === e.id)
+    (e) =>
+      e.enrollmentStatus === 'approved' &&
+      !project.boundEnvironmentWorkspaces.some((b) => b.environmentId === e.id)
   );
 
   modal.innerHTML = `
@@ -882,8 +901,9 @@ function renderBindEnvironmentModal(
       const root =
         env?.workspaceRoots[0] ||
         (env?.platform === 'windows' ? 'C:\\SproutWorkspaces' : '/Users/workspace/sprout-projects');
-      stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
-      modal.remove();
+      const result = stateManager.bindEnvironmentToProject(project.id, envSelect.value, root, pathInput.value.trim());
+      if (result.success) modal.remove();
+      else if (result.reason) window.alert(result.reason);
     }
   });
 
