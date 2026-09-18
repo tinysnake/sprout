@@ -1744,6 +1744,36 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
           { wakeRequestId: 'wake-pre-waiting', targetAgentId: 'designer', admissionStatus: 'waiting_capacity' },
           { wakeRequestId: 'wake-pre-admitted', targetAgentId: 'designer', admissionStatus: 'admitted' },
         ],
+      },
+      {
+        id: 'batch-pre-existing-settled-stale-wakes',
+        projectId,
+        openedAt: '2m ago',
+        closedAt: '90s ago',
+        inputMessageIds: ['msg-pre-existing-settled'],
+        status: 'settled',
+        attemptsCount: 1,
+        wakeModel: 'gpt-4o-mini',
+        frozenContextSummary: {
+          tokenCount: 640,
+          projectRulesIncluded: true,
+          recentMessagesCount: 2,
+          tasksSummariesCount: 0,
+          truncated: false,
+        },
+        decisions: [
+          {
+            messageId: 'msg-pre-existing-settled',
+            targetAgentId: 'designer',
+            status: 'selected',
+            rationale: 'Persisted settled parent with incomplete per-request evidence.',
+          },
+        ],
+        resultingWakeRequestIds: ['wake-settled-pending', 'wake-settled-admitted'],
+        resultingWakeRequests: [
+          { wakeRequestId: 'wake-settled-pending', targetAgentId: 'designer', admissionStatus: 'pending' },
+          { wakeRequestId: 'wake-settled-admitted', targetAgentId: 'designer', admissionStatus: 'admitted' },
+        ],
       }
     );
     const beforeWake = stateManager.getSnapshot().messages.length;
@@ -1775,9 +1805,32 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     assert.equal(preExistingEvaluating.decisions[0]?.status, 'failed');
     for (const wakeRequest of preExistingEvaluating.resultingWakeRequests ?? []) {
       assert.equal(wakeRequest.admissionStatus, 'failed');
+      assert.equal(wakeRequest.terminalStatus, 'failed-closed');
       assert.deepEqual(wakeRequest.terminalResponsibility, { kind: 'project', id: projectId });
       assert.match(wakeRequest.failureReason ?? '', /Project.*archived/i);
+      assert.ok(wakeRequest.terminalTimestamp);
     }
+    const preExistingSettled = routingBatches.find(
+      (candidate) => candidate.id === 'batch-pre-existing-settled-stale-wakes'
+    )!;
+    assert.equal(preExistingSettled.status, 'settled', 'Settled parent history remains unchanged');
+    for (const wakeRequest of preExistingSettled.resultingWakeRequests ?? []) {
+      assert.equal(wakeRequest.terminalStatus, 'failed-closed');
+      assert.deepEqual(wakeRequest.terminalResponsibility, { kind: 'project', id: projectId });
+      assert.match(wakeRequest.failureReason ?? '', /Project.*archived/i);
+      assert.ok(wakeRequest.terminalTimestamp);
+    }
+    stateManager.openInspector('routing', preExistingSettled.id);
+    const settledSheetEvidence = dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '';
+    assert.match(settledSheetEvidence, /batch-pre-existing-settled-stale-wakes/);
+    const settledSheetStatuses = Array.from(dom.window.document.querySelectorAll('.inspector-sheet .status-pill')).map(
+      (element) => element.textContent?.trim()
+    );
+    assert.equal(
+      settledSheetStatuses.some((status) => ['admitted', 'evaluating', 'pending', 'waiting_capacity'].includes(status ?? '')),
+      false,
+      'Settled-parent archive evidence exposes terminal WakeRequest statuses only'
+    );
 
     stateManager.openInspector('routing', preExistingEvaluating.id);
     const sheetEvidence = dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '';
@@ -1810,6 +1863,141 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     await new Promise((resolve) => setTimeout(resolve, 1300));
     assert.equal(stateManager.getSnapshot().messages.length, beforeWake + 1, 'Cancelled wake batch emits no reply');
     assert.equal(batch.status, 'failed-closed', 'Terminal batch cannot silently replay after its timer window');
+    const { renderRoutingInspectorModal: renderSettledRoutingInspectorModal } = (await vite.ssrLoadModule(
+      '/src/prototype/views/chat-view.ts'
+    )) as typeof import('./views/chat-view.js');
+    renderSettledRoutingInspectorModal(appMount, stateManager.getSnapshot(), preExistingSettled.id);
+    const settledChatEvidence = Array.from(dom.window.document.querySelectorAll('.proto-modal-dialog'))
+      .at(-1)?.textContent ?? '';
+    assert.match(settledChatEvidence, /batch-pre-existing-settled-stale-wakes/);
+    const settledChatStatuses = Array.from(
+      Array.from(dom.window.document.querySelectorAll('.proto-modal-dialog')).at(-1)?.querySelectorAll('.status-pill') ?? []
+    ).map((element) => element.textContent?.trim());
+    assert.equal(
+      settledChatStatuses.some((status) => ['admitted', 'evaluating', 'pending', 'waiting_capacity'].includes(status ?? '')),
+      false,
+      'Settled-parent chat evidence exposes terminal WakeRequest statuses only'
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Dynamic wake settlement records the complete WakeRequest to run to projected-reply chain', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const { renderRoutingInspectorModal } = (await vite.ssrLoadModule(
+      '/src/prototype/views/chat-view.ts'
+    )) as typeof import('./views/chat-view.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    const projectId = 'proj-docs-portal';
+    stateManager.restoreProject(projectId);
+    stateManager.setProjectWakePolicy(projectId, 'wake-model-assisted');
+    const beforeMessages = stateManager.getSnapshot().messages.length;
+    assert.equal(
+      stateManager.sendMessage(projectId, { kind: 'project-channel' }, 'Please review this unaddressed design note.').success,
+      true
+    );
+
+    const batch = stateManager.getSnapshot().routingBatches[0]!;
+    const wakeRequest = batch.resultingWakeRequests?.[0]!;
+    assert.equal(wakeRequest.admissionStatus, 'admitted');
+    assert.equal(wakeRequest.terminalStatus, undefined);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+
+    const reply = stateManager.getSnapshot().messages.at(-1)!;
+    assert.equal(batch.status, 'settled');
+    assert.equal(wakeRequest.terminalStatus, 'settled');
+    assert.equal(wakeRequest.terminalResponsibility?.kind, 'agent');
+    assert.equal(wakeRequest.terminalResponsibility?.id, wakeRequest.targetAgentId);
+    assert.equal(wakeRequest.terminalReason, 'Agent run settled and its projected reply was persisted.');
+    assert.ok(wakeRequest.terminalTimestamp);
+    assert.ok(wakeRequest.linkedRunId);
+    assert.equal(wakeRequest.projectedReplyId, reply.id);
+    assert.equal(reply.projectedReplyMeta?.wakeRequestId, wakeRequest.wakeRequestId);
+    assert.equal(reply.projectedReplyMeta?.runId, wakeRequest.linkedRunId);
+    assert.equal(reply.routingCausalChainId, batch.id);
+    assert.equal(stateManager.getSnapshot().messages.length, beforeMessages + 2);
+    renderRoutingInspectorModal(appMount, stateManager.getSnapshot(), batch.id);
+    const inspectorEvidence = dom.window.document.querySelector('.proto-modal-dialog')?.textContent ?? '';
+    assert.match(inspectorEvidence, /settled/);
+    assert.match(inspectorEvidence, new RegExp(wakeRequest.linkedRunId!));
+    assert.match(inspectorEvidence, new RegExp(wakeRequest.projectedReplyId!));
+    assert.doesNotMatch(inspectorEvidence, /WakeRequest:.*admitted/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Archived Project management mutations fail closed in state and DOM, then work after restore', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { renderWorkingGroupDetailsModal } = (await vite.ssrLoadModule(
+      '/src/prototype/views/chat-view.ts'
+    )) as typeof import('./views/chat-view.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    const projectId = 'proj-docs-portal';
+    const project = stateManager.getSnapshot().projects.find((candidate) => candidate.id === projectId)!;
+    stateManager.restoreProject(projectId);
+    const createdGroup = stateManager.createWorkingGroup(projectId, 'Archive guard WG', ['designer']);
+    assert.equal(createdGroup.success, true);
+    const workingGroup = project.workingGroups.at(-1)!;
+    stateManager.archiveProject(projectId);
+    assert.equal(project.status, 'archived');
+
+    const membership = project.memberships.find((candidate) => candidate.memberId === 'designer')!;
+    const originalResponsibilities = membership.responsibilities;
+    const originalInstructions = membership.collaborationInstructions;
+    const originalGoal = project.goal;
+    const originalRules = [...project.rules];
+    const originalPolicy = project.wakePolicy;
+
+    const editResult = stateManager.editProjectMembership(projectId, 'designer', 'forged responsibility', 'forged instructions');
+    const endResult = stateManager.endProjectMembership(projectId, 'designer');
+    const contractResult = stateManager.updateProjectContract(projectId, 'forged goal', ['forged rule']);
+    const policyResult = stateManager.setProjectWakePolicy(projectId, 'wake-model-assisted');
+    const disbandResult = stateManager.disbandWorkingGroup(projectId, workingGroup.id);
+    for (const result of [editResult, endResult, contractResult, policyResult, disbandResult]) {
+      assert.equal(result.success, false);
+      assert.match(result.reason ?? '', /archived Project.*Restore the Project first/i);
+    }
+    assert.equal(membership.status, 'active');
+    assert.equal(membership.responsibilities, originalResponsibilities);
+    assert.equal(membership.collaborationInstructions, originalInstructions);
+    assert.equal(project.goal, originalGoal);
+    assert.deepEqual(project.rules, originalRules);
+    assert.equal(project.wakePolicy, originalPolicy);
+    assert.equal(workingGroup.status, 'active');
+
+    stateManager.selectProject(projectId);
+    stateManager.setPrimaryNav('project', 'overview');
+    assert.equal((dom.window.document.querySelector('.edit-contract-btn') as HTMLButtonElement).disabled, true);
+    assert.equal((dom.window.document.querySelector('.toggle-policy-btn') as HTMLButtonElement).disabled, true);
+    assert.equal((dom.window.document.querySelector('.add-member-btn') as HTMLButtonElement).disabled, true);
+    assert.equal((dom.window.document.querySelector('.bind-env-btn') as HTMLButtonElement).disabled, true);
+
+    stateManager.setPrimaryNav('project', 'chat');
+    stateManager.openChatDetail('working-group-channel', workingGroup.id);
+    renderWorkingGroupDetailsModal(dom.window.document.getElementById('app')!, stateManager.getSnapshot(), project, workingGroup);
+    assert.equal((dom.window.document.querySelector('.btn-disband-wg') as HTMLButtonElement).disabled, true);
+
+    stateManager.restoreProject(projectId);
+    assert.equal(stateManager.editProjectMembership(projectId, 'designer', 'restored responsibility').success, true);
+    assert.equal(stateManager.setProjectWakePolicy(projectId, 'wake-model-assisted').success, true);
+    assert.equal(stateManager.disbandWorkingGroup(projectId, workingGroup.id).success, true);
   } finally {
     await cleanup();
   }

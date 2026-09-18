@@ -180,11 +180,19 @@ export type PrivacyBoundaryManifest = {
 export type ResultingWakeRequestRecord = {
   wakeRequestId: string;
   targetAgentId: string;
-  admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed';
+  /**
+   * Admission is a historical fact.  Keep the legacy `failed` value for
+   * migrated fixtures, but do not use it as the request's complete terminal
+   * state; `terminalStatus` is the durable lifecycle outcome below.
+   */
+  admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed' | 'cancelled' | 'failed-closed';
   linkedRunId?: string | undefined;
   projectedReplyId?: string | undefined;
   failureReason?: string | undefined;
   terminalResponsibility?: RoutingTerminalResponsibility | undefined;
+  terminalStatus?: 'settled' | 'cancelled' | 'failed-closed' | undefined;
+  terminalReason?: string | undefined;
+  terminalTimestamp?: string | undefined;
 };
 
 export type RoutingTerminalResponsibility = {

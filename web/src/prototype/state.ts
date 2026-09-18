@@ -22,6 +22,7 @@ import type {
   ProjectTab,
   ReturnContext,
   RoutingBatch,
+  ResultingWakeRequestRecord,
   TaskItem,
   ThemeMode,
   UsageActivity,
@@ -55,6 +56,28 @@ type PendingReplyCancellation = {
   responsibleId: string;
   reason: string;
 };
+
+type WakeRequestTerminalStatus = NonNullable<ResultingWakeRequestRecord['terminalStatus']>;
+
+function terminalTimestamp(): string {
+  return new Date().toISOString();
+}
+
+/**
+ * Returns the status that should be shown for a WakeRequest.  Older persisted
+ * fixtures only have admissionStatus, so a completed run/reply pair is
+ * interpreted as settled without rewriting that historical fixture in-place.
+ */
+export function getWakeRequestDisplayStatus(
+  wakeRequest: ResultingWakeRequestRecord
+): ResultingWakeRequestRecord['admissionStatus'] | WakeRequestTerminalStatus {
+  if (wakeRequest.terminalStatus) return wakeRequest.terminalStatus;
+  if (wakeRequest.admissionStatus === 'failed-closed' || wakeRequest.admissionStatus === 'cancelled') {
+    return wakeRequest.admissionStatus;
+  }
+  if (wakeRequest.linkedRunId && wakeRequest.projectedReplyId) return 'settled';
+  return wakeRequest.admissionStatus;
+}
 
 type CollaborationEligibility = {
   success: boolean;
@@ -1646,6 +1669,10 @@ const initialRoutingBatches: RoutingBatch[] = [
         admissionStatus: 'admitted',
         linkedRunId: 'run-202',
         projectedReplyId: 'msg-4',
+        terminalStatus: 'settled',
+        terminalResponsibility: { kind: 'agent', id: 'designer' },
+        terminalReason: 'Agent run settled and its projected reply was persisted.',
+        terminalTimestamp: '24m 30s ago',
       },
     ],
   },
@@ -2323,39 +2350,93 @@ class StateManager {
     batch: RoutingBatch,
     cancellation: PendingReplyCancellation
   ) {
-    batch.status = 'failed-closed';
-    batch.closedAt = 'Just now';
-    batch.failureReason = cancellation.reason;
-    batch.terminalResponsibility = {
+    const responsibility: RoutingBatch['terminalResponsibility'] = {
       kind: cancellation.responsibleKind,
       id: cancellation.responsibleId,
     };
+    batch.status = 'failed-closed';
+    batch.closedAt = 'Just now';
+    batch.failureReason = cancellation.reason;
+    batch.terminalResponsibility = responsibility;
     batch.decisions = batch.decisions.map((decision) =>
       decision.status === 'selected'
         ? { ...decision, status: 'failed', rationale: cancellation.reason }
         : decision
     );
-    batch.resultingWakeRequests = batch.resultingWakeRequests?.map((wakeRequest) =>
-      wakeRequest.admissionStatus !== 'failed'
-        ? {
-            ...wakeRequest,
-            admissionStatus: 'failed',
-            failureReason: cancellation.reason,
-            terminalResponsibility: {
-              kind: cancellation.responsibleKind,
-              id: cancellation.responsibleId,
-            },
-          }
-        : wakeRequest.terminalResponsibility
-          ? wakeRequest
-          : {
-              ...wakeRequest,
-              terminalResponsibility: {
-                kind: cancellation.responsibleKind,
-                id: cancellation.responsibleId,
-              },
-            }
-    );
+    batch.resultingWakeRequests = batch.resultingWakeRequests?.map((wakeRequest) => {
+      if (wakeRequest.terminalStatus === 'settled') return wakeRequest;
+      this.terminalizeWakeRequest(wakeRequest, 'failed-closed', responsibility, cancellation.reason);
+      return wakeRequest;
+    });
+  }
+
+  private terminalizeWakeRequest(
+    wakeRequest: ResultingWakeRequestRecord,
+    status: WakeRequestTerminalStatus,
+    responsibility: NonNullable<RoutingBatch['terminalResponsibility']>,
+    reason: string
+  ) {
+    // A settled WakeRequest is historical evidence of a completed run and
+    // projected reply. Archive/cancellation must never rewrite that fact.
+    if (wakeRequest.terminalStatus === 'settled') return;
+
+    wakeRequest.terminalStatus = status;
+    wakeRequest.terminalResponsibility = responsibility;
+    wakeRequest.terminalReason = reason;
+    wakeRequest.terminalTimestamp = wakeRequest.terminalTimestamp ?? terminalTimestamp();
+    if (status === 'settled') {
+      wakeRequest.admissionStatus = 'admitted';
+      return;
+    }
+
+    // Preserve the pre-existing admission fact (`failed` is used by older
+    // fixtures and projections) while exposing the independent terminal
+    // outcome required by ADR-0007.
+    wakeRequest.admissionStatus = 'failed';
+    wakeRequest.failureReason = reason;
+  }
+
+  private completeLegacyWakeRequestFacts(
+    wakeRequest: ResultingWakeRequestRecord,
+    projectId: string,
+    fallbackResponsibility: NonNullable<RoutingBatch['terminalResponsibility']>
+  ): boolean {
+    if (wakeRequest.terminalStatus) {
+      if (!wakeRequest.terminalResponsibility) {
+        wakeRequest.terminalResponsibility = wakeRequest.terminalStatus === 'settled'
+          ? { kind: 'agent', id: wakeRequest.targetAgentId }
+          : fallbackResponsibility;
+      }
+      if (!wakeRequest.terminalTimestamp) wakeRequest.terminalTimestamp = terminalTimestamp();
+      if (wakeRequest.terminalStatus !== 'settled' && !wakeRequest.failureReason) {
+        wakeRequest.failureReason = wakeRequest.terminalReason ?? 'WakeRequest failed closed without a projected reply.';
+      }
+      return true;
+    }
+
+    if (wakeRequest.linkedRunId && wakeRequest.projectedReplyId) {
+      wakeRequest.terminalStatus = 'settled';
+      wakeRequest.terminalResponsibility = { kind: 'agent', id: wakeRequest.targetAgentId };
+      wakeRequest.terminalReason ??= 'Agent run settled and its projected reply was persisted.';
+      wakeRequest.terminalTimestamp ??= terminalTimestamp();
+      return true;
+    }
+
+    if (
+      wakeRequest.admissionStatus === 'failed' ||
+      wakeRequest.admissionStatus === 'cancelled' ||
+      wakeRequest.admissionStatus === 'failed-closed'
+    ) {
+      this.terminalizeWakeRequest(
+        wakeRequest,
+        wakeRequest.admissionStatus === 'cancelled' ? 'cancelled' : 'failed-closed',
+        fallbackResponsibility,
+        wakeRequest.failureReason ?? `WakeRequest for Agent "${wakeRequest.targetAgentId}" failed closed in Project "${projectId}".`
+      );
+      return true;
+    }
+
+    return false;
   }
 
   private failClosedPersistedProjectRouting(
@@ -2369,9 +2450,32 @@ class StateManager {
     };
     let terminalized = 0;
     for (const batch of this.state.routingBatches) {
-      if (batch.projectId !== projectId || (batch.status !== 'open' && batch.status !== 'evaluating')) continue;
-      this.failClosedRoutingBatch(batch, cancellation);
-      terminalized += 1;
+      if (batch.projectId !== projectId) continue;
+
+      const requests = batch.resultingWakeRequests ?? [];
+      requests.forEach((wakeRequest) =>
+        this.completeLegacyWakeRequestFacts(wakeRequest, projectId, { kind: 'project', id: projectId })
+      );
+      const hasNonTerminalRequest = requests.some((wakeRequest) => !wakeRequest.terminalStatus);
+      if (batch.status === 'open' || batch.status === 'evaluating') {
+        this.failClosedRoutingBatch(batch, cancellation);
+        terminalized += 1;
+      } else if (hasNonTerminalRequest) {
+        // A settled/suppressed parent is historical evidence and must remain
+        // unchanged. Its stale embedded request still needs its own terminal
+        // archive fact, however.
+        requests.forEach((wakeRequest) => {
+          if (!wakeRequest.terminalStatus) {
+            this.terminalizeWakeRequest(
+              wakeRequest,
+              'failed-closed',
+              { kind: 'project', id: projectId },
+              cancellation.reason
+            );
+          }
+        });
+        terminalized += 1;
+      }
     }
     return terminalized;
   }
@@ -2387,20 +2491,41 @@ class StateManager {
     };
     let terminalized = 0;
     for (const batch of this.state.routingBatches) {
-      if (batch.status !== 'open' && batch.status !== 'evaluating') continue;
+      const requests = batch.resultingWakeRequests ?? [];
+      requests
+        .filter((wakeRequest) => wakeRequest.targetAgentId === agentId)
+        .forEach((wakeRequest) =>
+          this.completeLegacyWakeRequestFacts(wakeRequest, batch.projectId, { kind: 'agent', id: agentId })
+        );
       const hasSelectedDecision = batch.decisions.some(
         (decision) => decision.targetAgentId === agentId && decision.status === 'selected'
       );
-      const hasPendingWake = batch.resultingWakeRequests?.some(
-        (wakeRequest) => wakeRequest.targetAgentId === agentId && wakeRequest.admissionStatus !== 'failed'
+      const hasPendingWake = requests.some(
+        (wakeRequest) => wakeRequest.targetAgentId === agentId && !wakeRequest.terminalStatus
       );
       if (!hasSelectedDecision && !hasPendingWake) continue;
-      // A RoutingBatch is one frozen evaluation and therefore settles as one
-      // aggregate. If an admitted recipient becomes invalid before settlement,
-      // fail the whole pending batch closed rather than leaving an aggregate
-      // evaluating around a terminal per-recipient fact.
-      this.failClosedRoutingBatch(batch, cancellation);
-      terminalized += 1;
+      if (batch.status === 'open' || batch.status === 'evaluating') {
+        // A RoutingBatch is one frozen evaluation and therefore settles as one
+        // aggregate. If an admitted recipient becomes invalid before settlement,
+        // fail the whole pending batch closed rather than leaving an aggregate
+        // evaluating around a terminal per-recipient fact.
+        this.failClosedRoutingBatch(batch, cancellation);
+        terminalized += 1;
+      } else if (hasPendingWake) {
+        // Do not rewrite a settled parent merely because a legacy embedded
+        // request was incomplete. Terminalize that request independently.
+        requests
+          .filter((wakeRequest) => wakeRequest.targetAgentId === agentId && !wakeRequest.terminalStatus)
+          .forEach((wakeRequest) =>
+            this.terminalizeWakeRequest(
+              wakeRequest,
+              'failed-closed',
+              { kind: 'agent', id: agentId },
+              cancellation.reason
+            )
+          );
+        terminalized += 1;
+      }
     }
     return terminalized;
   }
@@ -4053,12 +4178,12 @@ class StateManager {
   ): CollaborationEligibility {
     const project = this.state.projects.find((candidate) => candidate.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
-    if (project.status !== 'active') {
-      return {
-        success: false,
-        reason: `Cannot ${operation} Working Group in archived Project "${project.displayName}". History remains read-only.`,
-      };
-    }
+    const projectMutationCheck = this.checkActiveProjectMutation(
+      project,
+      operation === 'restore' ? 'restore a Working Group' : 'send a Working Group message',
+      false
+    );
+    if (!projectMutationCheck.success) return projectMutationCheck;
 
     const group = project.workingGroups.find((candidate) => candidate.id === workingGroupId);
     if (!group) return { success: false, reason: 'Working Group not found' };
@@ -4345,10 +4470,27 @@ class StateManager {
       }
 
       this.scheduleProjectedReply(projectId, wakeTargetId, 1200, (agent) => {
+        const wakeRequest = batch.resultingWakeRequests?.find(
+          (candidate) => candidate.wakeRequestId === `wake-${batchId}`
+        );
+        const runId = `run-proj-${Date.now().toString().slice(-3)}`;
+        const replyMsgId = `msg-proj-${Date.now().toString().slice(-4)}`;
+        const settledAt = terminalTimestamp();
         batch.status = 'settled';
         batch.closedAt = 'Just now';
+        if (wakeRequest) {
+          wakeRequest.linkedRunId = runId;
+          wakeRequest.projectedReplyId = replyMsgId;
+          this.terminalizeWakeRequest(
+            wakeRequest,
+            'settled',
+            { kind: 'agent', id: agent.id },
+            'Agent run settled and its projected reply was persisted.'
+          );
+          wakeRequest.terminalTimestamp = settledAt;
+        }
         const replyMsg: MessageItem = {
-          id: `msg-proj-${Date.now().toString().slice(-4)}`,
+          id: replyMsgId,
           projectId,
           scope,
           authorId: agent.id,
@@ -4360,7 +4502,7 @@ class StateManager {
           agentAttribution: currentAgentExecutionAttribution(agent),
           isProjectedReply: true,
           projectedReplyMeta: {
-            runId: `run-proj-${Date.now().toString().slice(-3)}`,
+            runId,
             agentId: agent.id,
             wakeRequestId: `wake-${batchId}`,
             triggeringMessageIds: [newMsgId],
@@ -4383,10 +4525,13 @@ class StateManager {
 
   public setProjectWakePolicy(projectId: string, policy: 'explicit-only' | 'wake-model-assisted') {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+    const mutationCheck = this.checkActiveProjectMutation(project, 'change the wake policy');
+    if (!mutationCheck.success) return mutationCheck;
 
     project.wakePolicy = policy;
     this.notify(`Updated Project wake policy to ${policy}. Affects future messages only.`);
+    return { success: true };
   }
 
   public createWorkingGroup(
@@ -4397,11 +4542,8 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
-    if (project.status === 'archived') {
-      const reason = `Cannot create a Working Group in archived Project "${project.displayName}". Communication history is read-only.`;
-      this.notify(reason);
-      return { success: false, reason };
-    }
+    const mutationCheck = this.checkActiveProjectMutation(project, 'create a Working Group');
+    if (!mutationCheck.success) return mutationCheck;
 
     for (const memberId of new Set(memberIds)) {
       const member = project.memberships.find((candidate) => candidate.memberId === memberId);
@@ -4438,17 +4580,20 @@ class StateManager {
     return { success: true };
   }
 
-  public disbandWorkingGroup(projectId: string, wgId: string) {
+  public disbandWorkingGroup(projectId: string, wgId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+    const mutationCheck = this.checkActiveProjectMutation(project, 'disband a Working Group');
+    if (!mutationCheck.success) return mutationCheck;
     const wg = project.workingGroups.find((g) => g.id === wgId);
-    if (!wg) return;
+    if (!wg) return { success: false, reason: 'Working Group not found' };
 
     this.ensureWorkingGroupMembershipHistory(wg);
     wg.retainedMemberIds = Array.from(new Set(wg.memberIds));
     wg.memberIds = [];
     wg.status = 'disbanded';
     this.notify(`Disbanded Working group "${wg.displayName}". Channel is now read-only; history preserved.`);
+    return { success: true };
   }
 
   public restoreWorkingGroup(projectId: string, wgId: string): { success: boolean; reason?: string } {
@@ -4622,7 +4767,9 @@ class StateManager {
     completionGuidance?: string
   ) {
     const project = this.state.projects.find((p) => p.id === projectId);
-    if (!project) return;
+    if (!project) return { success: false, reason: 'Project not found' };
+    const mutationCheck = this.checkActiveProjectMutation(project, 'update the Project contract');
+    if (!mutationCheck.success) return mutationCheck;
 
     project.goal = goal;
     project.rules = rules;
@@ -4630,6 +4777,7 @@ class StateManager {
       project.completionGuidance = completionGuidance;
     }
     this.notify(`Updated Project contract for "${project.displayName}". Affects future tasks and runs.`);
+    return { success: true };
   }
 
   public archiveProject(projectId: string) {
@@ -4750,11 +4898,8 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
-    if (project.status === 'archived') {
-      const reason = `Cannot add Agent membership to archived Project "${project.displayName}". Restore the Project first; historical memberships remain unchanged.`;
-      this.notify(reason);
-      return { success: false, reason };
-    }
+    const projectMutationCheck = this.checkActiveProjectMutation(project, 'add Agent membership');
+    if (!projectMutationCheck.success) return projectMutationCheck;
 
     const globalAgent = this.state.agents.find((a) => a.id === agentId);
     if (!globalAgent) return { success: false, reason: 'Agent not found' };
@@ -4800,6 +4945,8 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
+    const projectMutationCheck = this.checkActiveProjectMutation(project, 'edit Project membership');
+    if (!projectMutationCheck.success) return projectMutationCheck;
     const member = project.memberships.find((m) => m.memberId === memberId);
     if (!member) return { success: false, reason: 'Project membership not found' };
     const mutationCheck = this.checkProjectMembershipMutation(project, member, 'edit');
@@ -4814,6 +4961,8 @@ class StateManager {
   public endProjectMembership(projectId: string, memberId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
+    const projectMutationCheck = this.checkActiveProjectMutation(project, 'end Project membership');
+    if (!projectMutationCheck.success) return projectMutationCheck;
     const member = project.memberships.find((m) => m.memberId === memberId);
     if (!member) return { success: false, reason: 'Project membership not found' };
     if (member.memberKind === 'human') return { success: false, reason: 'Cannot end local operator membership' };
@@ -4873,11 +5022,8 @@ class StateManager {
   public restoreProjectMembership(projectId: string, memberId: string): { success: boolean; reason?: string } {
     const project = this.state.projects.find((p) => p.id === projectId);
     if (!project) return { success: false, reason: 'Project not found' };
-    if (project.status === 'archived') {
-      const reason = `Cannot restore membership in archived Project "${project.displayName}". Restore the Project first; historical membership remains ended.`;
-      this.notify(reason);
-      return { success: false, reason };
-    }
+    const projectMutationCheck = this.checkActiveProjectMutation(project, 'restore Project membership');
+    if (!projectMutationCheck.success) return projectMutationCheck;
     const member = project.memberships.find((m) => m.memberId === memberId);
     if (!member) return { success: false, reason: 'Project membership not found' };
     const mutationCheck = this.checkProjectMembershipMutation(project, member, 'restore');
@@ -4893,6 +5039,8 @@ class StateManager {
     member: ProjectMembership,
     action: 'edit' | 'end' | 'restore'
   ): { success: boolean; reason?: string } {
+    const projectMutationCheck = this.checkActiveProjectMutation(project, `${action} Project membership`);
+    if (!projectMutationCheck.success) return projectMutationCheck;
     if (member.memberKind !== 'agent') return { success: true };
 
     const globalAgent = this.state.agents.find((agent) => agent.id === member.memberId);
@@ -4904,6 +5052,19 @@ class StateManager {
     if (globalAgent.status === 'archived') {
       const reason = `Cannot ${action} membership for Agent "${globalAgent.displayName}" in Project "${project.displayName}": Agent is archived. Restore the Agent first; historical membership and attribution remain preserved (ADR-0008).`;
       this.notify(reason);
+      return { success: false, reason };
+    }
+    return { success: true };
+  }
+
+  private checkActiveProjectMutation(
+    project: ProjectItem,
+    operation: string,
+    notifyOnFailure = true
+  ): { success: boolean; reason?: string } {
+    if (project.status !== 'active') {
+      const reason = `Cannot ${operation} in archived Project "${project.displayName}". Restore the Project first; memberships, contract, Working Group, wake policy, and history remain preserved.`;
+      if (notifyOnFailure) this.notify(reason);
       return { success: false, reason };
     }
     return { success: true };

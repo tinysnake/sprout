@@ -1,5 +1,5 @@
 import { renderIcon } from '../icons.js';
-import { stateManager, type PrototypeState } from '../state.js';
+import { getWakeRequestDisplayStatus, stateManager, type PrototypeState } from '../state.js';
 import type { MessageItem, ProjectItem, RoutingBatch, WorkingGroup } from '../types.js';
 
 /**
@@ -956,23 +956,26 @@ export function renderRoutingInspectorModal(
                   </div>
                   <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
                     ${batch.resultingWakeRequests
-                      .map(
-                        (w) => `
+                      .map((w) => {
+                        const status = getWakeRequestDisplayStatus(w);
+                        const statusClass = status === 'settled' ? 'green' : status === 'failed' || status === 'cancelled' || status === 'failed-closed' ? 'red' : 'yellow';
+                        return `
                       <div style="background: var(--bg-surface); padding: 8px 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); font-size: 12px;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                           <strong>WakeRequest: <code>${w.wakeRequestId}</code></strong>
-                          <span class="status-pill ${w.admissionStatus === 'admitted' ? 'green' : w.admissionStatus === 'failed' ? 'red' : 'yellow'}" style="font-size: 9px;">${w.admissionStatus}</span>
+                          <span class="status-pill ${statusClass}" style="font-size: 9px;">${status}</span>
                         </div>
                         <div style="font-size: 11px; color: var(--text-secondary); margin-top: 3px;">
                           Target Agent: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                         </div>
                         <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
-                          ${w.failureReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
+                          ${w.failureReason ?? w.terminalReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
                         </div>
                         ${w.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Responsible ${w.terminalResponsibility.kind}:</strong> <code>${w.terminalResponsibility.id}</code></div>` : ''}
+                        ${w.terminalTimestamp ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Terminal at:</strong> <code>${w.terminalTimestamp}</code></div>` : ''}
                       </div>
-                    `
-                      )
+                    `;
+                      })
                       .join('')}
                   </div>
                 </div>`
@@ -1137,6 +1140,7 @@ export function renderWorkingGroupDetailsModal(
   modal.className = 'proto-modal-backdrop';
 
   const isDisbanded = wg.status === 'disbanded';
+  const isProjectArchived = project.status === 'archived';
   const displayedMemberIds = isDisbanded ? wg.retainedMemberIds ?? wg.memberIds : wg.memberIds;
   const restoreEligibility = isDisbanded
     ? stateManager.evaluateWorkingGroupEligibility(project.id, wg.id, 'restore')
@@ -1195,7 +1199,7 @@ export function renderWorkingGroupDetailsModal(
             ${
               isDisbanded
                 ? `<button class="btn btn-primary btn-sm btn-restore-wg" style="gap: 6px;" ${restoreEligibility.success ? '' : 'disabled'}>${renderIcon('refresh', 14)} Restore Working Group</button>`
-                : `<button class="btn btn-danger btn-sm btn-disband-wg" style="gap: 6px;">${renderIcon('archive', 14)} Disband Working Group (Read-Only)</button>`
+                : `<button class="btn btn-danger btn-sm btn-disband-wg" style="gap: 6px;" ${isProjectArchived ? 'disabled title="Archived Project: restore the Project before changing Working Group history"' : ''}>${renderIcon('archive', 14)} Disband Working Group (Read-Only)</button>`
             }
           </div>
         </div>
@@ -1209,8 +1213,9 @@ export function renderWorkingGroupDetailsModal(
   });
 
   modal.querySelector('.btn-disband-wg')?.addEventListener('click', () => {
-    stateManager.disbandWorkingGroup(project.id, wg.id);
-    modal.remove();
+    const result = stateManager.disbandWorkingGroup(project.id, wg.id);
+    if (!result.success && result.reason) window.alert(result.reason);
+    else modal.remove();
   });
 
   modal.querySelector('.btn-restore-wg')?.addEventListener('click', () => {

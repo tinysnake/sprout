@@ -209,7 +209,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
           <span class="status-pill ${project.status === 'active' ? 'green' : 'neutral'}">
             ${project.status === 'active' ? 'Active' : 'Archived'}
           </span>
-          <button class="btn btn-secondary btn-sm edit-contract-btn" title="Edit Project Contract" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
+          <button class="btn btn-secondary btn-sm edit-contract-btn" title="${project.status === 'archived' ? 'Archived Project: restore before editing the contract' : 'Edit Project Contract'}" aria-label="Edit Project Contract" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;" ${project.status === 'archived' ? 'disabled' : ''}>
             ${renderIcon('edit', 14)}
           </button>
         </div>
@@ -254,7 +254,7 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
             </div>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary btn-sm toggle-policy-btn" ${project.status === 'archived' ? 'disabled' : ''}>
+            <button class="btn btn-secondary btn-sm toggle-policy-btn" title="${project.status === 'archived' ? 'Archived Project: restore before changing wake policy' : 'Change Project wake policy'}" ${project.status === 'archived' ? 'disabled' : ''}>
               Switch to ${project.wakePolicy === 'wake-model-assisted' ? 'Explicit-only' : 'Wake-Model Assisted'}
             </button>
             ${
@@ -417,7 +417,8 @@ function renderProjectOverview(state: PrototypeState, project: ProjectItem): HTM
   overviewEl.querySelector('.toggle-policy-btn')?.addEventListener('click', () => {
     const nextPolicy =
       project.wakePolicy === 'wake-model-assisted' ? 'explicit-only' : 'wake-model-assisted';
-    stateManager.setProjectWakePolicy(project.id, nextPolicy);
+    const result = stateManager.setProjectWakePolicy(project.id, nextPolicy);
+    if (!result.success && result.reason) window.alert(result.reason);
   });
 
   // Archive Project
@@ -755,8 +756,9 @@ function renderEditContractModal(parentEl: HTMLElement, project: ProjectItem) {
       .filter(Boolean);
     const guidance = (modal.querySelector('.edit-guidance-input') as HTMLTextAreaElement).value.trim();
 
-    stateManager.updateProjectContract(project.id, goal, rules, guidance);
-    modal.remove();
+    const result = stateManager.updateProjectContract(project.id, goal, rules, guidance);
+    if (!result.success && result.reason) window.alert(result.reason);
+    else modal.remove();
   });
 
   parentEl.appendChild(modal);
