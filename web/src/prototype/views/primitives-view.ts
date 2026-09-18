@@ -105,7 +105,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
           <div style="font-size: 13px; color: var(--text-primary);">Body Regular (13-14px): Human operator discovery and intervention feed items.</div>
           <div style="font-size: 11px; color: var(--text-secondary);">Caption / Metadata (11-12px): Last heartbeat 4s ago · Protocol v1.2</div>
           <div style="font-family: var(--font-mono); font-size: 12px; background: var(--bg-app); padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
-            <code>Mono Stack: sprout-wk-macstudio-01 (100.64.0.4:5174) · run-817a</code>
+            <code>Mono Stack: identity withheld (private transport) · run-817a</code>
           </div>
         </div>
       </div>
@@ -220,11 +220,11 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
             </div>
 
             <div class="form-group has-error">
-              <label class="form-label" for="demo-input-err">Environment Lease Token <span style="color: var(--red-action)">*</span></label>
-              <input type="text" class="form-input" id="demo-input-err" value="invalid-expired-token" />
+              <label class="form-label" for="demo-input-err">Environment Lease Reference <span style="color: var(--red-action)">*</span></label>
+              <input type="text" class="form-input" id="demo-input-err" value="unavailable-lease-reference" />
               <div class="form-error">
                 ${renderIcon('warning', 14)}
-                <span>Lease token is expired or revoked. Run a live readiness probe.</span>
+                <span>Lease reference is unavailable or revoked. Run a live readiness probe.</span>
               </div>
             </div>
           </div>
@@ -282,7 +282,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
             </div>
             <div class="list-item-body">
               <div class="list-item-title">Task #101: Implement Mobile Touch Zoom Controls</div>
-              <div class="list-item-subtitle">Assigned to Programmer · Leased to Mac Studio (held)</div>
+              <div class="list-item-subtitle">Assigned to Programmer · Leased to Ready Environment (held)</div>
             </div>
             <div class="list-item-trailing">
               <span class="badge badge-purple">Claim Submitted</span>
@@ -295,8 +295,8 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
               <span class="status-dot yellow"></span>
             </div>
             <div class="list-item-body">
-              <div class="list-item-title">Worker: sprout-wk-macair-e018df33</div>
-              <div class="list-item-subtitle">Private Overlay · Pending operator capability enrollment</div>
+              <div class="list-item-title">Worker: enrolled identity</div>
+              <div class="list-item-subtitle">Private transport · Pending operator capability enrollment</div>
             </div>
             <div class="list-item-trailing">
               <span class="badge badge-yellow">Enrollment Required</span>
@@ -309,7 +309,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
               <span class="status-dot red"></span>
             </div>
             <div class="list-item-body">
-              <div class="list-item-title">Environment: Windows Dev Box (win-dev-box)</div>
+              <div class="list-item-title">Environment: Recovery Environment (env-recovery)</div>
               <div class="list-item-subtitle">Heartbeat timed out 8m ago · Retained lease blocked</div>
             </div>
             <div class="list-item-trailing">
@@ -431,7 +431,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
           <div class="card-body" style="display: flex; flex-wrap: wrap; gap: 8px;">
             <span class="provenance-tag operator">
               <span class="prov-icon">${renderIcon('user', 13)}</span>
-              <span>Operator (Lead Tech)</span>
+              <span>Technical Operator</span>
             </span>
             <span class="provenance-tag agent">
               <span class="prov-icon">${renderIcon('bot', 13)}</span>
@@ -439,7 +439,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
             </span>
             <span class="provenance-tag worker">
               <span class="prov-icon">${renderIcon('server', 13)}</span>
-              <span>Mac Studio (Overlay)</span>
+              <span>Ready Environment (Private Transport)</span>
             </span>
             <span class="provenance-tag time" title="2026-09-16T14:40:00Z">
               <span class="prov-icon">${renderIcon('clock', 13)}</span>
@@ -469,7 +469,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
               ${renderIcon('alert', 18)}
               <div style="flex: 1;">
                 <strong>Lease Conflict (409):</strong>
-                <span>Environment mac-1 is retained by Task #104 in recovery state. Generic release refused.</span>
+                <span>Recovery Environment is retained by Task #104. Generic release refused.</span>
               </div>
               <button class="btn btn-danger btn-sm">Resolve Recovery</button>
             </div>
@@ -624,7 +624,7 @@ export function renderPrimitivesView(state: PrototypeState): HTMLElement {
       kind: 'danger-confirm',
       title: 'Emergency Override: Force Release Environment',
       subtitle: 'High-risk action with permanent lease cancellation',
-      bodyText: 'Environment win-dev-box is unresponsive. Force Release will permanently sever the lease and cancel in-flight Task #104. This action cannot be undone.',
+      bodyText: 'Environment env-recovery is unresponsive. Force Release will permanently sever the lease and cancel in-flight Task #104. This action cannot be undone.',
       confirmLabel: 'Force Release Now',
       cancelLabel: 'Cancel',
       isDestructive: true,

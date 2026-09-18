@@ -35,7 +35,7 @@ async function setupPrototypeDom() {
     root: fileURLToPath(new URL('../..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
   });
 
   return {
@@ -211,7 +211,7 @@ test('Task Operating Loop: proposal begin acquires lease and starts first lead r
     initPrototype(appMount);
 
     // Free the fixture lease before exercising this independent, ready begin path.
-    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary');
+    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'env-ready');
     assert.ok(readyEnvironment);
     delete readyEnvironment.activeLeaseHolder;
 

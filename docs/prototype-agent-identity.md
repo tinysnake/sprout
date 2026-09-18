@@ -73,7 +73,7 @@ Per **ADR-0008**, an Agent is created independently of any Project or Environmen
 ### Core Invariants
 1. **No Project or Host Coupling**: An Agent does not belong to a Project; Projects reference Agents via Project Memberships.
 2. **No Environment Lock-in**: An Agent is not bound to a specific host machine; its ordered work options define execution preferences evaluated at run admission across any available Environment.
-3. **Strict Privacy Boundary**: Agent definitions never contain host filesystem paths (`/Users/...`, `C:\Users\...`) or engine credentials (API keys, OAuth tokens).
+3. **Strict Privacy Boundary**: Agent definitions never contain absolute host filesystem paths or engine credentials (API keys, OAuth tokens).
 4. **Minimum One Work Option**: An Agent must have at least one ordered work option. The UI disables deletion when only one option remains.
 
 ---
@@ -85,7 +85,7 @@ ADR-0008 establishes how Sprout evaluates execution preferences at run admission
 ```
   RUN ADMISSION EVALUATION (Outer Boundary)
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │ 1. Evaluate Target Environment Host (e.g. macOS Studio)                 │
+  │ 1. Evaluate Target Environment Host (e.g. Ready Environment)            │
   │    ├── Check Option 1 (Pi · claude-3-5-sonnet · high)                   │
   │    │   └── Is Pi permitted & authenticated? Model available?            │
   │    │       ├── YES ──► ADMIT RUN with Option 1 (Pi)                     │
@@ -165,7 +165,7 @@ The prototype demonstrates realistic data covering all 5 canonical states:
 
 | State | Exemplar Agent | Characteristics & Observable Facts |
 |---|---|---|
-| **Healthy / Ready** | `programmer` (v3), `planner` (v2) | Priority 1 option ready on macOS Studio & Windows Dev; active project memberships; rich private memory; version changelog. |
+| **Healthy / Ready** | `programmer` (v3), `planner` (v2) | Priority 1 option ready on enrolled environments; active project memberships; rich private memory; version changelog. |
 | **Attention / Fallback** | `designer` (v2), `researcher` (v1) | Priority 1 option degraded on some hosts; pre-acceptance fallback to Priority 2 verified in simulation. |
 | **Unavailable** | `sentinel` (ST, v1) | Work option (`opencode` · `deepseek-coder-v2`) is unconfigured (`isConfigured: false`); Agent identity remains intact while clearly explaining why runs cannot currently be admitted. |
 | **Archived** | `legacy-coder` (LC, v1) | Archived status; read-only presentation; preserved attribution of past runs and messages; one-click restore. |

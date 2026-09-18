@@ -28,7 +28,7 @@ The product organizes navigation into three primary destinations ordered by rout
 │    ├── Tab 1: Environments (Enrollment, health, readiness, Force Release)   │
 │    ├── Tab 2: Agents (Global definitions, standing instructions, options)  │
 │    ├── Tab 3: Usage & Costs (Observability across 6 views, API estimates)   │
-│    └── Tab 4: Settings (Operator identity, overlay, diagnostics, recovery)  │
+│    └── Tab 4: Settings (Operator identity, private transport, diagnostics)  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ 4. STYLE BASELINE / PRIMITIVES (Design System Testbed)                      │
 │    └── Interactive token, component, and state language showcase            │
@@ -118,7 +118,7 @@ The interactive testbed (`web/src/prototype/views/primitives-view.ts`) exercises
 3. **Lifecycle Pills:**
    - `Active` (pulsing blue dot), `Idle` (gray), `Paused` (amber), `Blocked` (amber), `Awaiting Validation` (purple), `Completed` (green), `Interrupted` (red), `Failed` (red).
 4. **Provenance & Attribution Tags:**
-   - Human Operator badge (`👤 Lead Tech`), Agent badge (`🤖 Programmer · Pi claude-3-5-sonnet`), Worker host tag (`🖥️ Mac Studio`), and Timestamp with relative time and ISO tooltip.
+   - Human Operator badge (`👤 Technical Operator`), Agent badge (`🤖 Programmer · Pi claude-3-5-sonnet`), Environment tag (`🖥️ Ready Environment`), and Timestamp with relative time and ISO tooltip.
 5. **Edge States:**
    - Loading shimmer skeleton lines (`.skeleton-line`).
    - Empty state box (`.empty-state-box`) with friendly icon, description, and primary call to action.

@@ -89,7 +89,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
-            <span><strong>Strict Privacy Boundary & Neutral Host Facts:</strong> No host credentials, API keys, private keys, or absolute user home paths (/Users/..., C:\\Users\\...) appear in Agent identity; displays neutral relative paths and public engine auth facts.</span>
+            <span><strong>Strict Privacy Boundary & Neutral Host Facts:</strong> No host credentials, API keys, private keys, or absolute user home paths appear in Agent identity; displays neutral relative paths and public engine readiness facts.</span>
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
@@ -130,7 +130,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
-            <span><strong>Strict Privacy & Neutral Host Facts:</strong> No user home paths (<code>/Users/...</code>, <code>C:\\Users\\...</code>), host private keys, or API credentials appear in portable identity or Web UI; displays neutral relative paths, opaque fingerprints, and model readiness.</span>
+            <span><strong>Strict Privacy & Neutral Host Facts:</strong> No user home paths, host private keys, or API credentials appear in portable identity or Web UI; displays neutral relative paths, withheld worker identity, and model readiness.</span>
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
@@ -266,7 +266,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Human-Only Emergency Force Release (ADR-0009):</strong> Emergency escape hatch available only in recovery. Requires explicit risk acknowledgement, operator reason, and typed confirmation (<code>FORCE RELEASE</code>). Permanently cancels Task with forced release disposition and frees Environment without deleting Project workspace.
           </li>
           <li>
-            <strong>Host Credential & Path Isolation:</strong> Engine API keys, private keys, and host filesystem absolute paths remain on the host; Web operates with neutral relative paths and public fingerprints.
+            <strong>Host Credential & Path Isolation:</strong> Engine API keys, private keys, and host filesystem absolute paths remain on the host; Web operates with neutral relative paths and withheld worker identity.
           </li>
           <li>
             <strong>Portable Agent Identity Independent of Project & Environment (ADR-0008):</strong> Agents are global, portable definitions that can be assigned to multiple projects and run on heterogeneous environments without copying or embedding host paths/secrets.

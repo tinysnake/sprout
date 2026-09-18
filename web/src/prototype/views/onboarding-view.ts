@@ -27,15 +27,15 @@ export function renderOnboardingView(_state: PrototypeState): HTMLElement {
         <p style="color: var(--text-secondary); margin-top: 4px;">
           Run on your development host in the user session. Worker generates its private key locally:
         </p>
-        <pre style="background: #090c10; padding: 8px; border-radius: 4px; font-size: 11px; margin-top: 6px; overflow-x: auto; color: #38bdf8;">curl -fsSL https://sprout.local/install-worker.sh | sh
-sprout-worker init --overlay=100.64.0.4:5174</pre>
+        <pre style="background: #090c10; padding: 8px; border-radius: 4px; font-size: 11px; margin-top: 6px; overflow-x: auto; color: #38bdf8;">sprout-worker install --from-host-package
+sprout-worker init --private-transport</pre>
       </div>
 
       <!-- Step 2: Human Approval in Web -->
       <div style="background: var(--bg-surface-elevated); padding: 12px; border-radius: var(--radius-sm); border-left: 3px solid var(--yellow-attention);">
         <div style="font-weight: 700; color: var(--yellow-attention);">Step 2: Approve Worker Identity & Capabilities</div>
         <p style="color: var(--text-secondary); margin-top: 4px;">
-          Pending worker: <code>sprout-wk-mac-7f89a1c2</code> (macOS). Operator approves file & terminal permissions.
+          Pending worker: <code>identity withheld</code>. Operator approves file & terminal permissions.
         </p>
         <button class="btn btn-secondary btn-sm" style="margin-top: 6px;" onclick="alert('Worker identity confirmed and capabilities granted.')">
           Approve Worker Permissions

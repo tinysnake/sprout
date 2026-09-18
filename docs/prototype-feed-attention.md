@@ -4,7 +4,7 @@
 
 This retained artifact documents the design, interaction models, decision evidence, and architectural boundaries for the **Feed & Attention Experience** in the Sprout M2 Local Operator product (Ticket #62, part of Scope #44). It builds upon the shared mobile-first shell baseline settled in Ticket #61 and ADR-0006 through ADR-0010, refined through owner grilling.
 
-The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html` on `0.0.0.0:41000`), with full DOM test coverage in `web/src/prototype/feed.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/feed.dom.test.ts`.
 
 ---
 
@@ -17,7 +17,7 @@ The interactive prototype artifact is executable via `npm run prototype` (servin
 | **Scope & Project Filtering:** Scalable Scope Dropdown (`[ All Projects (4) ▾ ]`) plus dynamic urgent Project quick-chips that only surface projects with active attention. | **Environment Lifecycle Workflows (#65):** Approving worker enrollment, editing permissions, triggering emergency Force Release. |
 | **Prioritization & Multi-Modal Tiers:** 4 streamlined urgency tiers (`All`, ` Action Req.`, `[Yellow] Attention`, `[Blue] Info/Notices`) with dynamic counters. | **Global Agent Definitions (#66):** Configuring work options, editing standing instructions, memory management. |
 | **Contextual Discovery & Transcolation:** Disambiguated lifecycle sentences (`Task · Run · Lease`), actor attribution, why attention is needed, and transcolation of infrastructure issues blocking project tasks. | **Usage & Cost Analysis (#67):** 6-view telemetry filtering, billing rates, token reconciliation. |
-| **Deep-Link Delegation:** Navigating directly to authoritative domain surfaces with sticky `← Back to Feed` return breadcrumbs and filter state preservation. | **Settings & Operator Identity (#68):** Overlay network settings, diagnostics, fourth tab naming. |
+| **Deep-Link Delegation:** Navigating directly to authoritative domain surfaces with sticky `← Back to Feed` return breadcrumbs and filter state preservation. | **Settings & Operator Identity (#68):** Private transport settings, diagnostics, fourth tab naming. |
 | **Live In-Flight Work Snapshot:** Real-time visibility into active tasks and running agent turns across environments. | |
 | **Recent Operational Activity Stream:** Chronological background audit stream strictly scoped to selected project with category filters. | |
 
@@ -64,7 +64,7 @@ During interactive grilling, the filtering architecture was unified into a three
 1. **Top Scope Selector Dropdown (`<select id="feed-scope-select">`):**
    - **Unified Scope Dropdown:** Houses all projects and infrastructure in one clean, scalable control (`[ 📂 All Projects (4 pending) ▾ ]`, `[ 🎮 O7 Minesweeper (3 pending) ]`, `[  Sprout Core (0 pending) ]`, `[  Infrastructure (1 pending) ]`).
    - Completely eliminates duplicate pills/chips beneath the dropdown, ensuring zero redundant filter UI across phone and desktop.
-   - **Infrastructure Event Transcolation Rule:** Infrastructure issues directly blocking or recovering a project's task (e.g. Windows worker offline holding Task #104 lease) transcolate into that project's filtered Attention view, ensuring the operator sees the root cause. Generic host enrollments appear only under `All` and `Infrastructure`.
+   - **Infrastructure Event Transcolation Rule:** Infrastructure issues directly blocking or recovering a project's task (e.g. a recovery environment holding Task #104 lease) transcolate into that project's filtered Attention view, ensuring the operator sees the root cause. Generic environment enrollments appear only under `All` and `Infrastructure`.
    - **Lightweight Project Clear Banner:** Selecting a project with 0 attention items displays a clean green banner (`[Pass] <Project>: All clear, system running autonomously`), without hiding its active in-flight tasks or scoped activity stream.
 2. **Attention Urgency Pills (Dynamic Counter AND Intersection):**
    - Streamlined into 4 distinct pills: `All`, `[Red] Action Req.`, `[Yellow] Attention`, `[Blue] Info/Notices`.

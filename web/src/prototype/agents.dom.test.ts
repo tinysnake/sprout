@@ -35,7 +35,7 @@ async function setupPrototypeDom() {
     root: fileURLToPath(new URL('../..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
   });
 
@@ -310,14 +310,14 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     stateManager.setPrimaryNav('manage', undefined, 'agents');
     stateManager.selectAgent('programmer');
 
-    // Test simulation evaluation on Mac Studio (both Pi and Codex ready)
-    const macResult = stateManager.evaluateAdmissionFallback('programmer', 'mac-studio-primary');
+    // Test simulation evaluation on Ready Environment (both Pi and Codex ready)
+    const macResult = stateManager.evaluateAdmissionFallback('programmer', 'env-ready');
     assert.ok(macResult);
     assert.equal(macResult.selectedOption?.engine, 'pi');
     assert.equal(macResult.evaluationSteps[0]?.status, 'selected');
 
     // Test simulation on Designer where Option 1 (Codex) is login-required on Container CI, triggering fallback to Option 2 (Pi)
-    const containerResult = stateManager.evaluateAdmissionFallback('designer', 'linux-container-ci');
+    const containerResult = stateManager.evaluateAdmissionFallback('designer', 'env-degraded');
     assert.ok(containerResult);
     assert.equal(containerResult.evaluationSteps[0]?.status, 'skipped_unauthenticated');
     assert.equal(containerResult.evaluationSteps[1]?.status, 'selected');
@@ -325,7 +325,7 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     assert.match(containerResult.guaranteeNote, /Pre-Acceptance Fallback Guarantee/);
 
     // Test simulation on Sentinel (opencode with isConfigured: false must be skipped, F-66-01)
-    const sentinelResult = stateManager.evaluateAdmissionFallback('sentinel', 'mac-studio-primary');
+    const sentinelResult = stateManager.evaluateAdmissionFallback('sentinel', 'env-ready');
     assert.ok(sentinelResult);
     assert.equal(sentinelResult.selectedOption, null, 'Unconfigured Sentinel option cannot be admitted');
     assert.equal(sentinelResult.evaluationSteps[0]?.status, 'skipped_unconfigured');
@@ -338,24 +338,24 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
       effort: 'medium',
       isConfigured: true,
     });
-    const sentinelModelResult = stateManager.evaluateAdmissionFallback('sentinel', 'mac-studio-primary');
+    const sentinelModelResult = stateManager.evaluateAdmissionFallback('sentinel', 'env-ready');
     assert.ok(sentinelModelResult);
     assert.equal(sentinelModelResult.selectedOption, null, 'Unavailable model cannot be admitted');
     assert.equal(sentinelModelResult.evaluationSteps[1]?.status, 'skipped_model_missing');
     assert.match(sentinelModelResult.evaluationSteps[1]?.reason ?? '', /not available/);
 
     // Model inventory is an exact token list: gpt-4 must not match gpt-4o.
-    const mac = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary')!;
+    const mac = stateManager.getSnapshot().environments.find((env) => env.id === 'env-ready')!;
     assert.equal(checkEngineModelAvailability('codex', 'gpt-4', mac).isAvailable, false);
     assert.equal(checkEngineModelAvailability('codex', 'gpt-4o', mac).isAvailable, true);
     mac.engineDetails!.codex!.modelAvailability = 'unknown';
-    const unknownInventoryResult = stateManager.evaluateAdmissionFallback('designer', 'mac-studio-primary')!;
+    const unknownInventoryResult = stateManager.evaluateAdmissionFallback('designer', 'env-ready')!;
     assert.equal(unknownInventoryResult.evaluationSteps[0]?.status, 'skipped_model_missing');
     assert.match(unknownInventoryResult.evaluationSteps[0]?.reason ?? '', /unknown or unavailable/i);
     assert.equal(unknownInventoryResult.selectedOption?.engine, 'pi', 'Fallback remains pre-acceptance only');
 
-    // Test environment eligibility gating on offline/recovery host (win-dev-box, F-66-02)
-    const winResult = stateManager.evaluateAdmissionFallback('programmer', 'win-dev-box');
+    // Test environment eligibility gating on offline/recovery host (env-recovery, F-66-02)
+    const winResult = stateManager.evaluateAdmissionFallback('programmer', 'env-recovery');
     assert.ok(winResult);
     assert.equal(winResult.selectedOption, null, 'Offline/recovery environment cannot admit runs');
     assert.ok(winResult.envIneligibilityReason);
@@ -363,15 +363,15 @@ test('Agents: pre-acceptance fallback simulation evaluates environments step-by-
     assert.equal(winResult.evaluationSteps[0]?.status, 'skipped_unsupported');
     assert.match(winResult.evaluationSteps[0]?.reason ?? '', /ineligible/i);
 
-    // Test environment eligibility gating on protocol-incompatible host (mac-mini-mismatch, F-66-02)
-    const miniResult = stateManager.evaluateAdmissionFallback('programmer', 'mac-mini-mismatch');
+    // Test environment eligibility gating on protocol-incompatible host (env-incompatible, F-66-02)
+    const miniResult = stateManager.evaluateAdmissionFallback('programmer', 'env-incompatible');
     assert.ok(miniResult);
     assert.equal(miniResult.selectedOption, null, 'Protocol-incompatible environment cannot admit runs');
     assert.ok(miniResult.envIneligibilityReason);
     assert.match(miniResult.envIneligibilityReason, /protocol incompatible/i);
 
-    // Test environment eligibility gating on pending enrollment host (mac-laptop-pending, F-66-02)
-    const pendingResult = stateManager.evaluateAdmissionFallback('programmer', 'mac-laptop-pending');
+    // Test environment eligibility gating on pending enrollment host (env-pending, F-66-02)
+    const pendingResult = stateManager.evaluateAdmissionFallback('programmer', 'env-pending');
     assert.ok(pendingResult);
     assert.equal(pendingResult.selectedOption, null, 'Pending enrollment host cannot admit runs');
     assert.ok(pendingResult.envIneligibilityReason);
@@ -790,18 +790,18 @@ test('Agents: Environment Compatibility UI displays clear ineligibility reasons 
 
     const text = envFoldable.textContent ?? '';
 
-    // Offline / recovery host (win-dev-box) must NOT show "Admitted via"; must show Ineligible / Offline
-    assert.doesNotMatch(text, /Admitted via.*Windows Dev Host/);
+    // Offline / recovery host (env-recovery) must NOT show "Admitted via"; must show Ineligible / Offline
+    assert.doesNotMatch(text, /Admitted via.*Recovery Environment/);
     assert.match(text, /Ineligible · Offline/);
 
-    // Protocol incompatible host (mac-mini-mismatch) must NOT show "Admitted via"; must show Ineligible
-    assert.doesNotMatch(text, /Admitted via.*Mac mini/);
+    // Protocol incompatible host (env-incompatible) must NOT show "Admitted via"; must show Ineligible
+    assert.doesNotMatch(text, /Admitted via.*Incompatible Environment/);
     assert.match(text, /Ineligible · Protocol Incompatible/);
 
-    // Pending enrollment host (mac-laptop-pending) must show Ineligible · Enrollment
+    // Pending enrollment host (env-pending) must show Ineligible · Enrollment
     assert.match(text, /Ineligible · Enrollment: pending/);
 
-    // Healthy online host (Mac Studio Primary) admits Programmer via PI
+    // Healthy online host (Ready Environment) admits Programmer via PI
     assert.match(text, /Admitted via PI/);
   } finally {
     await cleanup();
@@ -826,26 +826,26 @@ test('Task admission: the shared gate refuses unhealthy hosts and the Begin page
     // and direct approval cannot mutate it into an active Task/run.
     stateManager.setPrimaryNav('project', 'tasks');
     stateManager.selectTask('task-201');
-    const offlineOption = dom.window.document.querySelector('option[value="win-dev-box"]') as HTMLOptionElement;
+    const offlineOption = dom.window.document.querySelector('option[value="env-recovery"]') as HTMLOptionElement;
     assert.ok(offlineOption);
     assert.equal(offlineOption.disabled, true);
     assert.match(offlineOption.textContent ?? '', /Unavailable:.*offline/i);
-    const offlineBegin = stateManager.approveAndBeginProposal('task-201', 'win-dev-box', 'programmer');
+    const offlineBegin = stateManager.approveAndBeginProposal('task-201', 'env-recovery', 'programmer');
     assert.equal(offlineBegin.success, false);
     const offlineTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-201')!;
     assert.equal(offlineTask.lifecycle, 'proposed');
     assert.equal(offlineTask.agentRunLifecycle, 'none');
     assert.equal(offlineTask.runs.length, 0);
-    const incompatibleBegin = stateManager.approveAndBeginProposal('task-201', 'mac-mini-mismatch', 'programmer');
+    const incompatibleBegin = stateManager.approveAndBeginProposal('task-201', 'env-incompatible', 'programmer');
     assert.equal(incompatibleBegin.success, false);
     assert.match(incompatibleBegin.reason ?? '', /protocol incompatible/i);
 
     // F-66-01 actual Begin page path: once a ready fixture is available, the
     // first evaluator-selected option—not a hard-coded engine/model—is stored.
-    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'mac-studio-primary')!;
+    const readyEnvironment = stateManager.getSnapshot().environments.find((env) => env.id === 'env-ready')!;
     delete readyEnvironment.activeLeaseHolder;
     stateManager.selectTask('task-105-prop');
-    const readyOption = dom.window.document.querySelector('option[value="mac-studio-primary"]') as HTMLOptionElement;
+    const readyOption = dom.window.document.querySelector('option[value="env-ready"]') as HTMLOptionElement;
     assert.ok(readyOption);
     assert.equal(readyOption.disabled, false);
     assert.match(readyOption.textContent ?? '', /Ready via CODEX/);
@@ -895,7 +895,7 @@ test('Task and Project admission: archived Agents cannot receive new membership 
     assert.ok(leadSelect);
     assert.equal(Array.from(leadSelect.options).some((option) => option.value === 'legacy-coder'), false);
     const runCount = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-105-prop')!.runs.length;
-    const beginResult = stateManager.approveAndBeginProposal('task-105-prop', 'mac-studio-primary', 'legacy-coder');
+    const beginResult = stateManager.approveAndBeginProposal('task-105-prop', 'env-ready', 'legacy-coder');
     assert.equal(beginResult.success, false);
     assert.match(beginResult.reason ?? '', /archived/i);
     const task = stateManager.getSnapshot().tasks.find((candidate) => candidate.id === 'task-105-prop')!;
@@ -1471,7 +1471,7 @@ test('Project restore: compatibility outcomes are durable and later Task begin s
 
     const projectId = 'proj-docs-portal';
     const project = stateManager.getSnapshot().projects.find((candidate) => candidate.id === projectId)!;
-    const env = stateManager.getSnapshot().environments.find((candidate) => candidate.id === 'mac-studio-primary')!;
+    const env = stateManager.getSnapshot().environments.find((candidate) => candidate.id === 'env-ready')!;
     assert.equal(project.status, 'archived');
 
     env.enrollmentStatus = 'archived';
@@ -1490,8 +1490,8 @@ test('Project restore: compatibility outcomes are durable and later Task begin s
     const archivedBindingCount = project.boundEnvironmentWorkspaces.length;
     const bindToArchivedProject = stateManager.bindEnvironmentToProject(
       projectId,
-      'mac-mini-mismatch',
-      '~/workspace/sprout-projects',
+      'env-incompatible',
+      'workspace-root',
       'must-not-bind'
     );
     assert.equal(bindToArchivedProject.success, false);

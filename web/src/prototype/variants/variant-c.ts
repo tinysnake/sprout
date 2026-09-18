@@ -194,7 +194,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
     });
     recLane.querySelectorAll('.force-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        stateManager.openInspector('force-release', 'win-dev-box');
+        stateManager.openInspector('force-release', 'env-recovery');
       });
     });
 
@@ -233,7 +233,7 @@ export function renderVariantC(state: PrototypeState): HTMLElement {
     propLane.querySelectorAll('.app-begin-btn').forEach((btn) => {
       btn.addEventListener('click', (ev) => {
         const id = (ev.currentTarget as HTMLElement).getAttribute('data-id')!;
-        stateManager.approveAndBeginProposal(id, 'mac-studio-primary', 'designer');
+        stateManager.approveAndBeginProposal(id, 'env-ready', 'designer');
       });
     });
 

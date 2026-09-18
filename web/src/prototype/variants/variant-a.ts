@@ -83,7 +83,7 @@ export function renderVariantA(state: PrototypeState): HTMLElement {
             }
           }
         } else if (item.category === 'task_recovery') {
-          stateManager.openInspector('force-release', 'win-dev-box');
+          stateManager.openInspector('force-release', 'env-recovery');
         } else if (item.category === 'task_blocker') {
           stateManager.resolveBlocker(item.referenceId);
         } else if (item.category === 'env_enrollment') {

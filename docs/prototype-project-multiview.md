@@ -4,7 +4,7 @@
 
 This retained prototype artifact settles the **Multi-View Project Experience** and the complete **Project-Owned Task Operating Loop** for the Sprout M2 Local Operator product (Ticket #63, Scope #44). It builds on the accepted shared shell baseline (Ticket #61) and Feed baseline (Ticket #62) at base commit `6a48b137f886c3cfcbf941868361f74345617ac2`, implementing the product boundaries settled in ADR-0006, ADR-0007, and ADR-0008.
 
-The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype` (bound to `0.0.0.0:41000`), with full DOM verification in `web/src/prototype/project.dom.test.ts`.
+The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype`, with full DOM verification in `web/src/prototype/project.dom.test.ts`.
 
 ---
 
@@ -64,7 +64,7 @@ Rather than forcing all Project concerns into a single monolithic tab or scrollv
 
 ### Bound Workspaces & Host Environments
 - **Environment Access:** References enrolled macOS and Windows host environments.
-- **Workspace Location:** Displays host workspace roots (`/Users/workspace/sprout-projects`, `C:\SproutWorkspaces`) combined with project relative directory paths (`minesweeper-threejs`).
+- **Workspace Location:** Displays a neutral host workspace root and project-relative directory paths (`minesweeper-threejs`), without exposing host filesystem roots.
 - **Preparation & Safety:**
   - `+ Bind Environment`: Binds an enrolled host environment and verifies/prepares the relative workspace directory.
   - `Switch Workspace Path`: Permitted only when no active task run or held lease exists on that environment.
@@ -112,11 +112,11 @@ The prototype implements the complete 7-stage Task operating loop governed by AD
 Every task presents its operational state through a unified sentence and color-coded badge row:
 $$\text{Task State} \cdot \text{Agent Run State} \cdot \text{Task Lease State}$$
 Examples:
-- `Task active · Agent running · Lease held (mac-studio-primary)`
-- `Task pause requested · Active run settling · Lease held (mac-studio-primary)`
-- `Task awaiting validation · No active Agent run · Lease held (mac-studio-primary)`
+- `Task active · Agent running · Lease held (env-ready)`
+- `Task pause requested · Active run settling · Lease held (env-ready)`
+- `Task awaiting validation · No active Agent run · Lease held (env-ready)`
 - `Task proposed · Executes NO run · Holds NO lease`
-- `Task recovery · Interrupted run recorded · Lease recovering (win-dev-box)`
+- `Task recovery · Interrupted run recorded · Lease recovering (env-recovery)`
 
 ### Stage 1: Proposal & Human Begin Authority
 - **Non-Resource Validation:** Proposals perform non-resource validation only. A proposed task holds **NO** Environment lease, executes **NO** agent run, and cannot wake agents.

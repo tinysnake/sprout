@@ -35,7 +35,7 @@ async function setupPrototypeDom() {
     root: fileURLToPath(new URL('../..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
   });
 
   return {
@@ -136,8 +136,8 @@ test('Feed & Attention: scope filtering cascades to Attention, Active Work, and 
 
     // Verify Attention items filtered to infrastructure
     const infraCards = document.querySelectorAll('.attention-card');
-    assert.equal(infraCards.length, 3, '3 infrastructure attention items (MacBook Air, Container CI, Mac mini)');
-    assert.ok(Array.from(infraCards).some((c) => c.textContent?.includes('Pending Worker Enrollment: MacBook Air')));
+    assert.equal(infraCards.length, 3, '3 infrastructure attention items (Pending Environment, Container CI, Incompatible Environment)');
+    assert.ok(Array.from(infraCards).some((c) => c.textContent?.includes('Pending Worker Enrollment: Pending Environment')));
 
     // Verify 0 active tasks under Infrastructure
     assert.equal(document.querySelectorAll('.active-task-card').length, 0, '0 active tasks under infrastructure');
@@ -174,7 +174,7 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
     dangerPill.click();
 
     const redCards = document.querySelectorAll('.attention-card');
-    assert.equal(redCards.length, 3, '3 action required cards (Task #104 recovery, Task #103 blocker, Mac mini protocol mismatch)');
+    assert.equal(redCards.length, 3, '3 action required cards (Task #104 recovery, Task #103 blocker, Incompatible Environment protocol mismatch)');
 
     // Filter by Pending Approval (Validation & Enrollment)
     const warningPill = document.querySelector('.urgency-pill-btn[data-severity="attention"]') as HTMLButtonElement;
@@ -182,7 +182,7 @@ test('Feed & Attention: 4 streamlined urgency pills filter with dynamic counters
     warningPill.click();
 
     const yellowCards = document.querySelectorAll('.attention-card');
-    assert.equal(yellowCards.length, 3, '3 pending approval cards (Task #101 claim, MacAir enrollment, CI container degraded)');
+    assert.equal(yellowCards.length, 3, '3 pending approval cards (Task #101 claim, Pending Environment enrollment, Degraded Environment)');
 
     // Filter by Proposals & Notices (Info)
     const infoPill = document.querySelector('.urgency-pill-btn[data-severity="info"]') as HTMLButtonElement;

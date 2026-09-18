@@ -4,7 +4,7 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Chat Scopes and Wake-Routing Inspection** in the Sprout M2 Local Operator product (Ticket #64, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), and Multi-View Project baseline (#63), preserving the message and wake-routing semantics settled in ADR-0007 and the project/agent management journeys settled in ADR-0008.
 
-The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html` on `0.0.0.0:41000`), with full DOM test coverage in `web/src/prototype/chat.dom.test.ts` and `web/src/prototype/project.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/chat.dom.test.ts` and `web/src/prototype/project.dom.test.ts`.
 
 ---
 

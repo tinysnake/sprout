@@ -35,7 +35,7 @@ async function setupPrototypeDom() {
     root: fileURLToPath(new URL('../..', import.meta.url)),
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
   });
 
   return {
