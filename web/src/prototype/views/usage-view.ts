@@ -294,7 +294,17 @@ function renderRunView(activities: UsageActivity[], state: PrototypeState): stri
   return `
     <div class="usage-list-section">
       <div class="usage-list-heading"><div><h3>Activities</h3><p>Each row is one work-model Agent run or Project-owned Routing attempt.</p></div><span>${activities.length} shown</span></div>
-      ${activities.length > 0 ? `<div class="usage-activity-list">${activities.map((activity) => renderActivityRow(activity, state)).join('')}</div>` : renderEmptyState()}
+      ${activities.length > 0 ? `<div class="usage-activity-list">${activities.map((activity) => renderActivityFoldableRow(activity, state)).join('')}</div>` : renderEmptyState()}
+    </div>
+  `;
+}
+
+function renderActivityFoldableRow(activity: UsageActivity, state: PrototypeState): string {
+  const selected = state.usageFilter.selectedActivityId === activity.id;
+  return `
+    <div class="usage-activity-item ${selected ? 'open' : ''}">
+      ${renderActivityRow(activity, state)}
+      ${selected ? renderActivityDetail(activity, state) : ''}
     </div>
   `;
 }
@@ -496,7 +506,7 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
     <section class="usage-tab-surface" aria-label="${escapeHtml(tabLabels[state.usageFilter.tab])} view">
       ${renderTabContent(activities, state)}
     </section>
-    ${activeDetail ? renderActivityDetail(activeDetail, state) : '<div class="usage-detail-hint">Select an activity or an aggregate constituent to inspect tokens, duration, billing basis, provenance, coverage, and history.</div>'}
+    ${state.usageFilter.tab !== 'run' && activeDetail ? renderActivityDetail(activeDetail, state) : ''}
   `;
 
   container.querySelectorAll<HTMLButtonElement>('[data-usage-tab]').forEach((button) => {
@@ -514,7 +524,9 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
 
   container.querySelectorAll<HTMLButtonElement>('[data-usage-activity]').forEach((button) => {
     button.addEventListener('click', () => {
-      stateManager.setUsageFilter({ selectedActivityId: button.dataset.usageActivity });
+      const currentSelected = state.usageFilter.selectedActivityId;
+      const targetId = button.dataset.usageActivity;
+      stateManager.setUsageFilter({ selectedActivityId: currentSelected === targetId ? undefined : targetId });
     });
   });
 

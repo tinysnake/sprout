@@ -4035,6 +4035,36 @@ code {
   flex-direction: column;
 }
 
+.usage-activity-item {
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.usage-activity-item:last-child {
+  border-bottom: 0;
+}
+
+.usage-activity-item.open {
+  background: var(--bg-surface-elevated);
+}
+
+.usage-activity-item .usage-activity-row {
+  border-bottom: 0;
+}
+
+.usage-activity-item.open .usage-activity-row {
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--accent-bg);
+}
+
+.usage-activity-item .usage-detail-panel {
+  padding: 14px 16px 18px;
+  background: var(--bg-surface-elevated);
+  border: 0;
+  border-radius: 0;
+}
+
 .usage-activity-row {
   display: grid;
   grid-template-columns: minmax(0, 1.8fr) minmax(150px, 0.8fr) minmax(160px, 0.8fr) 18px;
@@ -4117,6 +4147,15 @@ code {
 
 .usage-row-chevron {
   color: var(--text-muted);
+  transition: transform 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.usage-activity-item.open .usage-row-chevron,
+.usage-activity-row.selected .usage-row-chevron {
+  transform: rotate(90deg);
 }
 
 .usage-kind-mark {
