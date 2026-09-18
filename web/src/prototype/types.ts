@@ -184,6 +184,7 @@ export type ResultingWakeRequestRecord = {
   linkedRunId?: string | undefined;
   projectedReplyId?: string | undefined;
   failureReason?: string | undefined;
+  terminalResponsibility?: RoutingTerminalResponsibility | undefined;
 };
 
 export type RoutingTerminalResponsibility = {

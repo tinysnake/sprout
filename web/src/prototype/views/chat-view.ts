@@ -969,6 +969,7 @@ export function renderRoutingInspectorModal(
                         <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
                           ${w.failureReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
                         </div>
+                        ${w.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Responsible ${w.terminalResponsibility.kind}:</strong> <code>${w.terminalResponsibility.id}</code></div>` : ''}
                       </div>
                     `
                       )

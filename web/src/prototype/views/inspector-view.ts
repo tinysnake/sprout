@@ -134,6 +134,7 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
                       Target: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                     </div>
                     ${w.failureReason ? `<div style="font-size: 10px; color: var(--red-action); margin-top: 2px;">${w.failureReason}</div>` : ''}
+                    ${w.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Responsible ${w.terminalResponsibility.kind}:</strong> <code>${w.terminalResponsibility.id}</code></div>` : ''}
                   </div>
                 `
                   )

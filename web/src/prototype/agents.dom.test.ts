@@ -1538,6 +1538,71 @@ test('Project restore: compatibility outcomes are durable and later Task begin s
   }
 });
 
+test('Task lead authority: generic unblock, resume, and recovery cannot restore an invalid lead', async () => {
+  const { vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const projectId = 'proj-minesweeper';
+    const blockedTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-103')!;
+    const recoveryTask = stateManager.getSnapshot().tasks.find((task) => task.id === 'task-104')!;
+    assert.equal(stateManager.endProjectMembership(projectId, 'programmer').success, true);
+    assert.equal(blockedTask.lifecycle, 'blocked');
+    assert.match(blockedTask.activeBlocker?.id ?? '', /^blocker-lead-/);
+
+    stateManager.resolveBlocker(blockedTask.id);
+    assert.equal(blockedTask.lifecycle, 'blocked', 'Generic unblock cannot reactivate an invalid Task lead');
+    assert.match(blockedTask.activeBlocker?.id ?? '', /^blocker-lead-/);
+    assert.equal(blockedTask.leaseLifecycle, 'held', 'Blocked Task retains, but does not recreate, its existing lease');
+
+    blockedTask.lifecycle = 'paused';
+    stateManager.resumeTask(blockedTask.id);
+    assert.equal(blockedTask.lifecycle, 'blocked', 'Generic resume returns an invalid-lead Task to blocked');
+    assert.match(blockedTask.activeBlocker?.requiredNextAction ?? '', /assign.*active Project Agent.*replacement/i);
+
+    blockedTask.lifecycle = 'recovery';
+    blockedTask.leaseLifecycle = 'recovering';
+    stateManager.resumeOrdinaryRecovery(blockedTask.id);
+    assert.equal(blockedTask.lifecycle, 'blocked', 'Recovery reconciliation cannot reactivate an invalid lead');
+    assert.equal(blockedTask.leaseLifecycle, 'held', 'Reconciled lease remains reserved by the blocked Task');
+    assert.match(blockedTask.activeBlocker?.id ?? '', /^blocker-lead-/);
+
+    const recoveryReplacement = stateManager.updateTaskContentVersion(
+      recoveryTask.id,
+      recoveryTask.currentVersion.title,
+      recoveryTask.currentVersion.goal,
+      recoveryTask.currentVersion.constraints,
+      recoveryTask.currentVersion.validationCriteria,
+      'designer'
+    );
+    assert.equal(recoveryReplacement.success, true);
+    assert.equal(recoveryTask.lifecycle, 'recovery', 'Lead replacement does not bypass the Human recovery boundary');
+    assert.equal(recoveryTask.leaseLifecycle, 'recovering');
+    assert.equal(recoveryTask.activeBlocker, undefined);
+    stateManager.resumeOrdinaryRecovery(recoveryTask.id);
+    assert.equal(recoveryTask.lifecycle, 'active');
+    assert.equal(recoveryTask.leaseLifecycle, 'held');
+
+    const replacement = stateManager.updateTaskContentVersion(
+      blockedTask.id,
+      blockedTask.currentVersion.title,
+      blockedTask.currentVersion.goal,
+      blockedTask.currentVersion.constraints,
+      blockedTask.currentVersion.validationCriteria,
+      'designer'
+    );
+    assert.equal(replacement.success, true);
+    assert.equal(blockedTask.taskLeadId, 'designer');
+    assert.equal(blockedTask.activeBlocker, undefined);
+    assert.equal(blockedTask.lifecycle, 'active', 'Human content revision with an eligible replacement restores advancement');
+    assert.equal(blockedTask.leaseLifecycle, 'held');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Routing cancellation: Agent and Project archive write durable terminal outcomes without replies', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {
@@ -1552,6 +1617,40 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     initPrototype(appMount);
 
     const agentProjectId = 'proj-minesweeper';
+    const routingBatches = stateManager.getSnapshot().routingBatches;
+    routingBatches.unshift({
+      id: 'batch-pre-existing-agent-evaluating',
+      projectId: agentProjectId,
+      openedAt: '20s ago',
+      closedAt: 'Just now',
+      inputMessageIds: ['msg-pre-existing-agent'],
+      status: 'evaluating',
+      attemptsCount: 1,
+      wakeModel: 'gpt-4o-mini',
+      frozenContextSummary: {
+        tokenCount: 600,
+        projectRulesIncluded: true,
+        recentMessagesCount: 1,
+        tasksSummariesCount: 1,
+        truncated: false,
+      },
+      decisions: [
+        {
+          messageId: 'msg-pre-existing-agent',
+          targetAgentId: 'reviewer',
+          status: 'selected',
+          rationale: 'Persisted Reviewer selection awaiting settlement.',
+        },
+      ],
+      resultingWakeRequestIds: ['wake-pre-existing-agent'],
+      resultingWakeRequests: [
+        {
+          wakeRequestId: 'wake-pre-existing-agent',
+          targetAgentId: 'reviewer',
+          admissionStatus: 'pending',
+        },
+      ],
+    });
     const agentMessageCount = stateManager.getSnapshot().messages.length;
     assert.equal(
       stateManager.sendMessage(agentProjectId, { kind: 'project-channel' }, '@reviewer terminal cancellation evidence').success,
@@ -1562,6 +1661,16 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     assert.equal(stateManager.archiveAgent('reviewer').success, true);
     assert.equal(addressedMessage.deterministicRoutingOutcomes?.[0]?.status, 'cancelled');
     assert.deepEqual(addressedMessage.deterministicRoutingOutcomes?.[0]?.terminalResponsibility, {
+      kind: 'agent',
+      id: 'reviewer',
+    });
+    const preExistingAgentBatch = routingBatches.find(
+      (candidate) => candidate.id === 'batch-pre-existing-agent-evaluating'
+    )!;
+    assert.equal(preExistingAgentBatch.status, 'failed-closed');
+    assert.deepEqual(preExistingAgentBatch.terminalResponsibility, { kind: 'agent', id: 'reviewer' });
+    assert.equal(preExistingAgentBatch.resultingWakeRequests?.[0]?.admissionStatus, 'failed');
+    assert.deepEqual(preExistingAgentBatch.resultingWakeRequests?.[0]?.terminalResponsibility, {
       kind: 'agent',
       id: 'reviewer',
     });
@@ -1584,6 +1693,59 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     const projectId = 'proj-docs-portal';
     stateManager.restoreProject(projectId);
     stateManager.setProjectWakePolicy(projectId, 'wake-model-assisted');
+    routingBatches.unshift(
+      {
+        id: 'batch-pre-existing-open',
+        projectId,
+        openedAt: '10s ago',
+        closedAt: 'In 20s',
+        inputMessageIds: ['msg-pre-existing-open'],
+        status: 'open',
+        attemptsCount: 0,
+        wakeModel: 'gpt-4o-mini',
+        frozenContextSummary: {
+          tokenCount: 500,
+          projectRulesIncluded: true,
+          recentMessagesCount: 1,
+          tasksSummariesCount: 0,
+          truncated: false,
+        },
+        decisions: [],
+        resultingWakeRequestIds: [],
+        resultingWakeRequests: [],
+      },
+      {
+        id: 'batch-pre-existing-evaluating',
+        projectId,
+        openedAt: '40s ago',
+        closedAt: '10s ago',
+        inputMessageIds: ['msg-pre-existing-evaluating'],
+        status: 'evaluating',
+        attemptsCount: 1,
+        wakeModel: 'gpt-4o-mini',
+        frozenContextSummary: {
+          tokenCount: 700,
+          projectRulesIncluded: true,
+          recentMessagesCount: 2,
+          tasksSummariesCount: 0,
+          truncated: false,
+        },
+        decisions: [
+          {
+            messageId: 'msg-pre-existing-evaluating',
+            targetAgentId: 'designer',
+            status: 'selected',
+            rationale: 'Persisted selection awaiting terminal admission evidence.',
+          },
+        ],
+        resultingWakeRequestIds: ['wake-pre-pending', 'wake-pre-waiting', 'wake-pre-admitted'],
+        resultingWakeRequests: [
+          { wakeRequestId: 'wake-pre-pending', targetAgentId: 'designer', admissionStatus: 'pending' },
+          { wakeRequestId: 'wake-pre-waiting', targetAgentId: 'designer', admissionStatus: 'waiting_capacity' },
+          { wakeRequestId: 'wake-pre-admitted', targetAgentId: 'designer', admissionStatus: 'admitted' },
+        ],
+      }
+    );
     const beforeWake = stateManager.getSnapshot().messages.length;
     assert.equal(
       stateManager.sendMessage(projectId, { kind: 'project-channel' }, 'Evaluate this, then archive the Project').success,
@@ -1596,8 +1758,55 @@ test('Routing cancellation: Agent and Project archive write durable terminal out
     assert.deepEqual(batch.terminalResponsibility, { kind: 'project', id: projectId });
     assert.equal(batch.decisions[0]?.status, 'failed');
     assert.equal(batch.resultingWakeRequests?.[0]?.admissionStatus, 'failed');
+    assert.deepEqual(batch.resultingWakeRequests?.[0]?.terminalResponsibility, {
+      kind: 'project',
+      id: projectId,
+    });
     assert.match(batch.failureReason ?? '', /Project.*archived.*no reply.*will not replay/i);
     assert.match(batch.resultingWakeRequests?.[0]?.failureReason ?? '', /Project.*archived/i);
+    const preExistingOpen = routingBatches.find((candidate) => candidate.id === 'batch-pre-existing-open')!;
+    assert.equal(preExistingOpen.status, 'failed-closed', 'Persisted open batch is terminalized without a timer callback');
+    assert.deepEqual(preExistingOpen.terminalResponsibility, { kind: 'project', id: projectId });
+    assert.match(preExistingOpen.failureReason ?? '', /Project.*archived.*no reply.*will not replay/i);
+    const preExistingEvaluating = routingBatches.find(
+      (candidate) => candidate.id === 'batch-pre-existing-evaluating'
+    )!;
+    assert.equal(preExistingEvaluating.status, 'failed-closed');
+    assert.equal(preExistingEvaluating.decisions[0]?.status, 'failed');
+    for (const wakeRequest of preExistingEvaluating.resultingWakeRequests ?? []) {
+      assert.equal(wakeRequest.admissionStatus, 'failed');
+      assert.deepEqual(wakeRequest.terminalResponsibility, { kind: 'project', id: projectId });
+      assert.match(wakeRequest.failureReason ?? '', /Project.*archived/i);
+    }
+
+    stateManager.openInspector('routing', preExistingEvaluating.id);
+    const sheetEvidence = dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '';
+    assert.match(sheetEvidence, /batch-pre-existing-evaluating/);
+    const sheetStatuses = Array.from(dom.window.document.querySelectorAll('.inspector-sheet .status-pill')).map(
+      (element) => element.textContent?.trim()
+    );
+    assert.equal(
+      sheetStatuses.some((status) => ['admitted', 'evaluating', 'pending', 'waiting_capacity'].includes(status ?? '')),
+      false,
+      'Archived Project inspector exposes terminal statuses only'
+    );
+    assert.match(sheetEvidence, /Responsible project.*proj-docs-portal/i);
+
+    const { renderRoutingInspectorModal } = (await vite.ssrLoadModule(
+      '/src/prototype/views/chat-view.ts'
+    )) as typeof import('./views/chat-view.js');
+    renderRoutingInspectorModal(appMount, stateManager.getSnapshot(), preExistingEvaluating.id);
+    const chatInspectorEvidence = dom.window.document.querySelector('.proto-modal-dialog')?.textContent ?? '';
+    assert.match(chatInspectorEvidence, /batch-pre-existing-evaluating/);
+    const chatInspectorStatuses = Array.from(
+      dom.window.document.querySelectorAll('.proto-modal-dialog .status-pill')
+    ).map((element) => element.textContent?.trim());
+    assert.equal(
+      chatInspectorStatuses.some((status) => ['admitted', 'evaluating', 'pending', 'waiting_capacity'].includes(status ?? '')),
+      false,
+      'Chat routing history exposes terminal statuses only for the archived Project'
+    );
+    assert.match(chatInspectorEvidence, /Responsible project.*proj-docs-portal/i);
     await new Promise((resolve) => setTimeout(resolve, 1300));
     assert.equal(stateManager.getSnapshot().messages.length, beforeWake + 1, 'Cancelled wake batch emits no reply');
     assert.equal(batch.status, 'failed-closed', 'Terminal batch cannot silently replay after its timer window');

@@ -2319,6 +2319,92 @@ class StateManager {
     return cancelled;
   }
 
+  private failClosedRoutingBatch(
+    batch: RoutingBatch,
+    cancellation: PendingReplyCancellation
+  ) {
+    batch.status = 'failed-closed';
+    batch.closedAt = 'Just now';
+    batch.failureReason = cancellation.reason;
+    batch.terminalResponsibility = {
+      kind: cancellation.responsibleKind,
+      id: cancellation.responsibleId,
+    };
+    batch.decisions = batch.decisions.map((decision) =>
+      decision.status === 'selected'
+        ? { ...decision, status: 'failed', rationale: cancellation.reason }
+        : decision
+    );
+    batch.resultingWakeRequests = batch.resultingWakeRequests?.map((wakeRequest) =>
+      wakeRequest.admissionStatus !== 'failed'
+        ? {
+            ...wakeRequest,
+            admissionStatus: 'failed',
+            failureReason: cancellation.reason,
+            terminalResponsibility: {
+              kind: cancellation.responsibleKind,
+              id: cancellation.responsibleId,
+            },
+          }
+        : wakeRequest.terminalResponsibility
+          ? wakeRequest
+          : {
+              ...wakeRequest,
+              terminalResponsibility: {
+                kind: cancellation.responsibleKind,
+                id: cancellation.responsibleId,
+              },
+            }
+    );
+  }
+
+  private failClosedPersistedProjectRouting(
+    projectId: string,
+    projectDisplayName: string
+  ): number {
+    const cancellation: PendingReplyCancellation = {
+      responsibleKind: 'project',
+      responsibleId: projectId,
+      reason: `Cancelled because Project "${projectDisplayName}" was archived before routing settlement. No reply was emitted and the admitted work will not replay.`,
+    };
+    let terminalized = 0;
+    for (const batch of this.state.routingBatches) {
+      if (batch.projectId !== projectId || (batch.status !== 'open' && batch.status !== 'evaluating')) continue;
+      this.failClosedRoutingBatch(batch, cancellation);
+      terminalized += 1;
+    }
+    return terminalized;
+  }
+
+  private failClosedPersistedAgentRouting(
+    agentId: string,
+    agentDisplayName: string
+  ): number {
+    const cancellation: PendingReplyCancellation = {
+      responsibleKind: 'agent',
+      responsibleId: agentId,
+      reason: `Cancelled because Agent "${agentDisplayName}" was archived before routing settlement. No reply was emitted and the admitted work will not replay.`,
+    };
+    let terminalized = 0;
+    for (const batch of this.state.routingBatches) {
+      if (batch.status !== 'open' && batch.status !== 'evaluating') continue;
+      const hasSelectedDecision = batch.decisions.some(
+        (decision) => decision.targetAgentId === agentId && decision.status === 'selected'
+      );
+      const hasPendingWake = batch.resultingWakeRequests?.some(
+        (wakeRequest) => wakeRequest.targetAgentId === agentId && wakeRequest.admissionStatus !== 'failed'
+      );
+      if (!hasSelectedDecision && !hasPendingWake) continue;
+      // A RoutingBatch is one frozen evaluation and therefore settles as one
+      // aggregate. If an admitted recipient becomes invalid before settlement,
+      // fail the whole pending batch closed rather than leaving an aggregate
+      // evaluating around a terminal per-recipient fact.
+      this.failClosedRoutingBatch(batch, cancellation);
+      terminalized += 1;
+    }
+    return terminalized;
+  }
+
   // --- Primary Navigation & Context Tab Actions (ADR-0008, Issue #60) ---
 
   public setPrimaryNav(
@@ -3211,10 +3297,13 @@ class StateManager {
     }
 
     const cancelledReplyCount = this.cancelPendingProjectedReplies(agentId, agent.displayName);
+    const terminalizedBatchCount = this.failClosedPersistedAgentRouting(agentId, agent.displayName);
     agent.status = 'archived';
     this.notify(
       `Archived Agent "${agent.displayName}".${
         cancelledReplyCount > 0 ? ` Cancelled ${cancelledReplyCount} admitted projected repl${cancelledReplyCount === 1 ? 'y' : 'ies'}.` : ''
+      }${
+        terminalizedBatchCount > 0 ? ` Terminalized ${terminalizedBatchCount} persisted routing batch${terminalizedBatchCount === 1 ? '' : 'es'}.` : ''
       } Historical attribution, private memory, and session slots preserved.`
     );
     return { success: true };
@@ -3448,6 +3537,71 @@ class StateManager {
 
   // --- Task Journey Actions (ADR-0006) ---
 
+  private evaluateTaskLeadEligibility(task: TaskItem, leadAgentId = task.taskLeadId): CollaborationEligibility {
+    const project = this.state.projects.find((candidate) => candidate.id === task.projectId);
+    if (!project || project.status !== 'active') {
+      return {
+        success: false,
+        reason: `Task lead cannot advance because Project "${project?.displayName ?? task.projectId}" is unavailable.`,
+      };
+    }
+    const lead = this.state.agents.find((candidate) => candidate.id === leadAgentId);
+    const membership = project.memberships.find(
+      (candidate) =>
+        candidate.memberId === leadAgentId &&
+        candidate.memberKind === 'agent' &&
+        candidate.status === 'active'
+    );
+    if (!lead || lead.status !== 'active' || !membership) {
+      return {
+        success: false,
+        reason: `Task lead "${lead?.displayName ?? leadAgentId}" must be an active global Agent with current active Project membership.`,
+      };
+    }
+    return { success: true };
+  }
+
+  private keepTaskBlockedForLeadSelection(task: TaskItem, reason: string) {
+    task.lifecycle = 'blocked';
+    if (!task.activeBlocker?.id.startsWith('blocker-lead-')) {
+      task.activeBlocker = {
+        id: `blocker-lead-${Date.now()}`,
+        reason,
+        requiredNextAction: 'Operator must assign an active Project Agent as replacement Task Lead through Task content revision.',
+        responsibleActor: 'Operator (Human)',
+        whoAdvancesWhenCleared: 'Replacement Task Lead',
+        createdAt: 'Just now',
+      };
+    }
+  }
+
+  private canReturnTaskToActive(task: TaskItem, action: string): boolean {
+    const leadEligibility = this.evaluateTaskLeadEligibility(task);
+    if (!leadEligibility.success) {
+      this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
+      this.notify(`Cannot ${action} Task #${task.id}: ${leadEligibility.reason} Human lead replacement is required.`);
+      return false;
+    }
+    if (task.activeBlocker?.id.startsWith('blocker-lead-')) {
+      this.keepTaskBlockedForLeadSelection(
+        task,
+        'Task lead responsibility must be confirmed by a Human through Task content revision.'
+      );
+      this.notify(`Cannot ${action} Task #${task.id}: the lead blocker requires Human replacement/content revision and cannot be cleared generically.`);
+      return false;
+    }
+    if (task.activeBlocker) {
+      task.lifecycle = 'blocked';
+      this.notify(`Cannot ${action} Task #${task.id}: its routable blocker is still unresolved.`);
+      return false;
+    }
+    if (task.leaseLifecycle !== 'held') {
+      this.notify(`Cannot ${action} Task #${task.id}: only the normal Task begin or recovery boundary may establish a held lease.`);
+      return false;
+    }
+    return true;
+  }
+
   public approveAndBeginProposal(taskId: string, environmentId: string, leadAgentId: string): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'proposed') return { success: false, reason: 'Task proposal is unavailable.' };
@@ -3541,6 +3695,8 @@ class StateManager {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return;
 
+    if (!this.canReturnTaskToActive(task, 'resume')) return;
+
     task.lifecycle = 'active';
     task.agentRunLifecycle = 'none';
     this.notify(`Resumed Task #${taskId} to active deliberate advancement. Lease held.`);
@@ -3556,20 +3712,8 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return { success: false, reason: 'Task not found.' };
-    const project = this.state.projects.find((candidate) => candidate.id === task.projectId);
-    if (!project || project.status !== 'active') {
-      const reason = 'Cannot revise Task content while its Project is unavailable.';
-      this.notify(reason);
-      return { success: false, reason };
-    }
-    const lead = this.state.agents.find((candidate) => candidate.id === newLeadId);
-    const leadMembership = project.memberships.find(
-      (membership) =>
-        membership.memberId === newLeadId &&
-        membership.memberKind === 'agent' &&
-        membership.status === 'active'
-    );
-    if (!lead || lead.status !== 'active' || !leadMembership) {
+    const leadEligibility = this.evaluateTaskLeadEligibility(task, newLeadId);
+    if (!leadEligibility.success) {
       const reason = `Cannot revise Task responsibility: lead "${newLeadId}" must be an active global Agent with current active Project membership. Existing content and lead remain unchanged.`;
       this.notify(reason);
       return { success: false, reason };
@@ -3593,6 +3737,11 @@ class StateManager {
       delete task.activeBlocker;
       if (task.lifecycle === 'blocked' && task.leaseLifecycle === 'held') {
         task.lifecycle = 'active';
+      } else if (task.lifecycle === 'blocked' && task.leaseLifecycle === 'recovering') {
+        // Lead replacement resolves responsibility, not Environment recovery.
+        // Return to the Human recovery boundary rather than fabricating active
+        // work or a held lease.
+        task.lifecycle = 'recovery';
       }
     }
 
@@ -3605,6 +3754,25 @@ class StateManager {
     if (!task || !task.activeBlocker) return;
     if (task.lifecycle === 'proposed') {
       this.notify(`Cannot clear proposal blocker for Task #${taskId} without selecting an eligible lead. Proposal still holds no lease and admits no run.`);
+      return;
+    }
+
+    const leadEligibility = this.evaluateTaskLeadEligibility(task);
+    if (!leadEligibility.success) {
+      this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
+      this.notify(`Cannot resolve blocker on Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`);
+      return;
+    }
+    if (task.activeBlocker.id.startsWith('blocker-lead-')) {
+      this.keepTaskBlockedForLeadSelection(
+        task,
+        'Task lead responsibility must be confirmed by a Human through Task content revision.'
+      );
+      this.notify(`Cannot clear lead blocker on Task #${taskId} generically. Human replacement/content revision must select an eligible lead.`);
+      return;
+    }
+    if (task.leaseLifecycle !== 'held') {
+      this.notify(`Cannot resolve blocker on Task #${taskId}: no held Task lease exists. Use the normal Task begin or recovery boundary.`);
       return;
     }
 
@@ -3753,7 +3921,6 @@ class StateManager {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task || task.lifecycle !== 'recovery') return;
 
-    task.lifecycle = 'active';
     task.agentRunLifecycle = 'none';
     task.leaseLifecycle = 'held';
     delete task.recoveryReason;
@@ -3770,6 +3937,11 @@ class StateManager {
     }
 
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId);
+    if (!this.canReturnTaskToActive(task, 'resume recovery for')) {
+      this.notify(`Ordinary recovery reconciled Task #${taskId}, but it remains blocked until a Human selects an eligible replacement lead.`);
+      return;
+    }
+    task.lifecycle = 'active';
     this.notify(`Ordinary recovery: Resumed Task #${taskId} on same Environment. Interrupted run recorded as history fact.`);
   }
 
@@ -4149,11 +4321,17 @@ class StateManager {
             targetAgentId: wakeTargetId,
             admissionStatus: wakeTargetEligibility.success ? 'admitted' : 'failed',
             failureReason: wakeTargetEligibility.success ? undefined : wakeTargetEligibility.reason,
+            terminalResponsibility: wakeTargetEligibility.success
+              ? undefined
+              : { kind: 'agent', id: wakeTargetId },
           },
         ],
         failureReason: wakeTargetEligibility.success
           ? undefined
           : `Wake-model selection failed current Agent admission. ${wakeTargetEligibility.reason}`,
+        terminalResponsibility: wakeTargetEligibility.success
+          ? undefined
+          : { kind: 'agent', id: wakeTargetId },
       };
       this.state.routingBatches.unshift(batch);
       newMsg.routingCausalChainId = batchId;
@@ -4193,23 +4371,7 @@ class StateManager {
         this.notify(`Routing batch ${batchId} settled. Projected reply emitted with non-routing disposition.`);
       }, (cancellation) => {
         if (batch.status !== 'evaluating' && batch.status !== 'open') return;
-        batch.status = 'failed-closed';
-        batch.closedAt = 'Just now';
-        batch.failureReason = cancellation.reason;
-        batch.terminalResponsibility = {
-          kind: cancellation.responsibleKind,
-          id: cancellation.responsibleId,
-        };
-        batch.decisions = batch.decisions.map((decision) =>
-          decision.status === 'selected'
-            ? { ...decision, status: 'failed', rationale: cancellation.reason }
-            : decision
-        );
-        batch.resultingWakeRequests = batch.resultingWakeRequests?.map((wakeRequest) =>
-          wakeRequest.admissionStatus === 'admitted'
-            ? { ...wakeRequest, admissionStatus: 'failed', failureReason: cancellation.reason }
-            : wakeRequest
-        );
+        this.failClosedRoutingBatch(batch, cancellation);
       });
 
       this.notify(`Sent unaddressed message. Collected into 30s routing batch ${batchId}.`);
@@ -4495,11 +4657,16 @@ class StateManager {
     }
 
     const cancelledReplyCount = this.cancelProjectPendingProjectedReplies(projectId, project.displayName);
+    const terminalizedBatchCount = this.failClosedPersistedProjectRouting(projectId, project.displayName);
     project.status = 'archived';
     this.notify(
       `Archived Project "${project.displayName}". Channels are now read-only; history and workspaces preserved.${
         cancelledReplyCount > 0
           ? ` Cancelled ${cancelledReplyCount} pending projected repl${cancelledReplyCount === 1 ? 'y' : 'ies'}.`
+          : ''
+      }${
+        terminalizedBatchCount > 0
+          ? ` Terminalized ${terminalizedBatchCount} persisted routing batch${terminalizedBatchCount === 1 ? '' : 'es'} with per-WakeRequest responsibility.`
           : ''
       }`
     );
