@@ -171,6 +171,90 @@ test('Usage: time-range aggregate cards keep work and routing totals separate', 
   }
 });
 
+test('Usage: the visible summary keeps work and routing metrics separate', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  try {
+    const document = dom.window.document;
+    stateManager.setUsageFilter({ tab: 'run', timeRange: 'all' });
+
+    const workSummary = document.querySelector<HTMLElement>('[data-usage-summary-kind="agent_run"]');
+    const routingSummary = document.querySelector<HTMLElement>('[data-usage-summary-kind="routing_attempt"]');
+    assert.ok(workSummary);
+    assert.ok(routingSummary);
+
+    const workText = workSummary.textContent ?? '';
+    const routingText = routingSummary.textContent ?? '';
+    assert.match(workText, /Work-model Agent runs/);
+    assert.match(workText, /181,500 tokens/);
+    assert.match(workText, /\$0\.2900 available estimate/);
+    assert.doesNotMatch(workText, /1,960 tokens/);
+    assert.doesNotMatch(workText, /\$0\.0003 available estimate/);
+    assert.match(routingText, /Project-owned Routing attempts/);
+    assert.match(routingText, /1,960 tokens/);
+    assert.match(routingText, /\$0\.0003 available estimate/);
+    assert.doesNotMatch(routingText, /181,500 tokens/);
+    assert.doesNotMatch(routingText, /\$0\.2900 available estimate/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Usage: ongoing activity is provisional and excluded from finalized aggregate links', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  try {
+    const document = dom.window.document;
+    for (const tab of ['project', 'model', 'time'] as const) {
+      stateManager.setUsageFilter({ tab, timeRange: 'all' });
+      const finalCards = [...document.querySelectorAll<HTMLElement>('[data-usage-provisional="false"]')];
+      const provisionalCards = [...document.querySelectorAll<HTMLElement>('[data-usage-provisional="true"]')];
+      assert.ok(provisionalCards.length > 0, `${tab} renders provisional cards`);
+      assert.ok(
+        provisionalCards.some((card) => /Provisional observed so far/.test(card.textContent ?? '')),
+        `${tab} labels provisional cards`
+      );
+      assert.ok(
+        provisionalCards.some((card) => card.querySelector('[data-usage-activity="act-206"]')),
+        `${tab} keeps ongoing activity in provisional evidence`
+      );
+      assert.ok(
+        finalCards.every((card) => !card.querySelector('[data-usage-activity="act-206"]')),
+        `${tab} excludes ongoing activity from finalized links`
+      );
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Usage: unavailable duration keeps a known subtotal but marks aggregate time incomplete', async () => {
+  const { dom, stateManager, cleanup } = await openUsageSurface();
+  const activities = stateManager.getSnapshot().usageActivities;
+  let added = false;
+  try {
+    const source = activities.find((activity) => activity.id === 'act-207');
+    assert.ok(source);
+    activities.push({
+      ...source,
+      id: 'act-duration-unavailable',
+      wallDurationMs: 154000,
+      durationStatus: 'unavailable',
+    });
+    added = true;
+    stateManager.setUsageFilter({ tab: 'project', timeRange: 'all' });
+
+    const projectCard = document.querySelector<HTMLElement>('[data-usage-project="proj-docs-portal"]');
+    const workCard = projectCard?.querySelector<HTMLElement>('[data-usage-kind="agent_run"][data-usage-provisional="false"]');
+    assert.ok(workCard);
+    const metrics = workCard.querySelector('.usage-aggregate-metrics')?.textContent ?? '';
+    assert.match(metrics, /7m 09s/);
+    assert.match(metrics, /incomplete/);
+    assert.match(workCard.querySelector('.usage-aggregate-coverage')?.textContent ?? '', /1 unavailable/);
+  } finally {
+    if (added) activities.splice(activities.findIndex((activity) => activity.id === 'act-duration-unavailable'), 1);
+    await cleanup();
+  }
+});
+
 test('Usage: model grouping keeps source, provider, and version identity distinct', async () => {
   const { dom, stateManager, cleanup } = await openUsageSurface();
   const activities = stateManager.getSnapshot().usageActivities;

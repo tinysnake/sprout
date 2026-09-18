@@ -41,12 +41,13 @@ function formatUsd(value: number | undefined): string {
 }
 
 function formatDuration(value: number | undefined, status: UsageActivity['durationStatus']): string {
-  if (value === undefined || status === 'unavailable') return 'Unavailable';
+  if (value === undefined) return status === 'partial' ? 'Unavailable observed' : 'Unavailable';
   const seconds = Math.round(value / 1000);
-  if (seconds < 60) return `${seconds}s${status === 'partial' ? ' observed' : ''}`;
+  const suffix = status === 'partial' ? ' observed' : status === 'unavailable' ? ' (incomplete; duration unavailable)' : '';
+  if (seconds < 60) return `${seconds}s${suffix}`;
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
-  return `${minutes}m ${String(remainder).padStart(2, '0')}s${status === 'partial' ? ' observed' : ''}`;
+  return `${minutes}m ${String(remainder).padStart(2, '0')}s${suffix}`;
 }
 
 function formatOutcome(activity: UsageActivity): string {
@@ -282,14 +283,17 @@ function renderActivityDetail(activity: UsageActivity, state: PrototypeState): s
 
 function aggregateMetrics(activities: UsageActivity[]) {
   const duration = sumKnown(activities, (activity) => activity.wallDurationMs);
-  return {
-    duration,
-    durationStatus:
-      duration === undefined
+  const durationStatus =
+    activities.length === 0 || duration === undefined
+      ? ('unavailable' as const)
+      : activities.some((activity) => activity.durationStatus === 'unavailable')
         ? ('unavailable' as const)
         : activities.some((activity) => activity.durationStatus === 'partial')
           ? ('partial' as const)
-          : ('complete' as const),
+          : ('complete' as const);
+  return {
+    duration,
+    durationStatus,
     tokens: sumKnown(activities, (activity) => activity.tokenDimensions.total),
     estimate: sumKnown(activities, (activity) =>
       activity.costValuation.apiEquivalentStatus === 'available' ? activity.costValuation.estimatedUsdMicros : undefined
@@ -359,6 +363,67 @@ function renderAggregateCoverage(activities: UsageActivity[]): string {
   `;
 }
 
+function splitOngoingActivities(activities: UsageActivity[]): { finalized: UsageActivity[]; provisional: UsageActivity[] } {
+  return {
+    finalized: activities.filter((activity) => activity.outcome !== 'ongoing'),
+    provisional: activities.filter((activity) => activity.outcome === 'ongoing'),
+  };
+}
+
+type AggregateCardOptions = {
+  tagName?: 'article' | 'section';
+  className?: string;
+  attributes?: string;
+  afterHeader?: (activities: UsageActivity[], provisional: boolean) => string;
+};
+
+function renderAggregateCard(
+  title: string,
+  subtitle: string,
+  activities: UsageActivity[],
+  provisional: boolean,
+  options: AggregateCardOptions = {}
+): string {
+  const tagName = options.tagName ?? 'article';
+  const className = options.className ?? 'usage-aggregate-row';
+  const attributes = options.attributes ? ` ${options.attributes}` : '';
+  const afterHeader = options.afterHeader?.(activities, provisional) ?? '';
+  return `<${tagName} class="${className}" data-usage-provisional="${provisional}"${attributes}>${renderAggregateHeader(title, subtitle, activities)}${afterHeader}${renderAggregateActivities(activities, provisional)}</${tagName}>`;
+}
+
+function renderAggregateVariants(
+  title: string,
+  subtitle: string,
+  activities: UsageActivity[],
+  options: AggregateCardOptions = {}
+): string {
+  const { finalized, provisional } = splitOngoingActivities(activities);
+  const cards: string[] = [];
+  if (finalized.length > 0) {
+    cards.push(
+      renderAggregateCard(
+        title,
+        `${subtitle} Finalized activities only.`,
+        finalized,
+        false,
+        options
+      )
+    );
+  }
+  if (provisional.length > 0) {
+    cards.push(
+      renderAggregateCard(
+        `${title} — Provisional observed so far`,
+        `${subtitle} Ongoing activity is observed so far and excluded from finalized totals.`,
+        provisional,
+        true,
+        options
+      )
+    );
+  }
+  return cards.join('');
+}
+
 function renderAggregateHeader(title: string, subtitle: string, activities: UsageActivity[]): string {
   const metrics = aggregateMetrics(activities);
   return `
@@ -374,8 +439,8 @@ function renderAggregateHeader(title: string, subtitle: string, activities: Usag
   `;
 }
 
-function renderAggregateActivities(activities: UsageActivity[]): string {
-  return `<div class="usage-aggregate-activities"><span>Constituent activities</span>${activities.map((activity) => renderActivityLink(activity)).join('')}</div>`;
+function renderAggregateActivities(activities: UsageActivity[], provisional = false): string {
+  return `<div class="usage-aggregate-activities"><span>${provisional ? 'Observed activities' : 'Finalized constituent activities'}</span>${activities.map((activity) => renderActivityLink(activity)).join('')}</div>`;
 }
 
 function renderRunView(activities: UsageActivity[], state: PrototypeState): string {
@@ -414,8 +479,12 @@ function renderTaskView(activities: UsageActivity[], state: PrototypeState): str
             ? [...groups.entries()]
                 .map(([taskId, taskActivities]) => {
                   const task = state.tasks.find((candidate) => candidate.id === taskId);
-                  const calendar = Math.max(...taskActivities.map((activity) => activity.taskCalendarElapsedMs ?? 0));
-                  return `<article class="usage-aggregate-row">${renderAggregateHeader(`Task ${taskId}`, task?.currentVersion.title ?? 'Nested Agent work', taskActivities)}<div class="usage-task-calendar"><strong>Task calendar elapsed</strong> ${calendar > 0 ? formatDuration(calendar, 'complete') : 'Unavailable'} / not summed into model time</div>${renderAggregateActivities(taskActivities)}</article>`;
+                  return renderAggregateVariants(`Task ${taskId}`, task?.currentVersion.title ?? 'Nested Agent work', taskActivities, {
+                    afterHeader: (variantActivities, provisional) => {
+                      const calendar = Math.max(...variantActivities.map((activity) => activity.taskCalendarElapsedMs ?? 0));
+                      return `<div class="usage-task-calendar"><strong>Task calendar elapsed${provisional ? ' observed so far' : ''}</strong> ${calendar > 0 ? formatDuration(calendar, 'complete') : 'Unavailable'} / not summed into model time</div>`;
+                    },
+                  });
                 })
                 .join('')
             : renderEmptyState()
@@ -450,7 +519,11 @@ function renderProjectView(activities: UsageActivity[], state: PrototypeState): 
 }
 
 function renderProjectKindCard(title: string, kind: UsageActivityKind, activities: UsageActivity[]): string {
-  return `<section class="usage-subtotal-card" data-usage-aggregate="true" data-usage-kind="${kind}">${renderAggregateHeader(title, `${activityKindLabel(kind)} subtotal`, activities)}${renderAggregateActivities(activities)}</section>`;
+  return renderAggregateVariants(title, `${activityKindLabel(kind)} subtotal`, activities, {
+    tagName: 'section',
+    className: 'usage-subtotal-card',
+    attributes: `data-usage-aggregate="true" data-usage-kind="${kind}"`,
+  });
 }
 
 function renderAgentView(activities: UsageActivity[], state: PrototypeState): string {
@@ -467,7 +540,9 @@ function renderAgentView(activities: UsageActivity[], state: PrototypeState): st
         ${
           groups.size > 0
             ? [...groups.entries()]
-                .map(([agentId, agentActivities]) => `<article class="usage-aggregate-row">${renderAggregateHeader(agentName(state, agentId), 'Grouped by Project, engine, and model', agentActivities)}<div class="usage-subtotal-line">Projects: ${[...new Set(agentActivities.map((activity) => projectName(state, activity.projectId)))].join(', ')}</div>${renderAggregateActivities(agentActivities)}</article>`)
+                .map(([agentId, agentActivities]) => renderAggregateVariants(agentName(state, agentId), 'Grouped by Project, engine, and model', agentActivities, {
+                  afterHeader: (variantActivities) => `<div class="usage-subtotal-line">Projects: ${[...new Set(variantActivities.map((activity) => projectName(state, activity.projectId)))].join(', ')}</div>`,
+                }))
                 .join('')
             : renderEmptyState()
         }
@@ -492,7 +567,9 @@ function renderModelView(activities: UsageActivity[]): string {
             ? [...groups.entries()]
                 .map(([key, modelActivities]) => {
                   const first = modelActivities[0]!;
-                  return `<article class="usage-aggregate-row" data-usage-aggregate="true" data-model-name="${escapeHtml(first.model)}" data-model-key="${escapeHtml(key)}">${renderAggregateHeader(modelLabel(first), `${activityKindLabel(first.kind)} / ${first.engine ?? 'wake model'} / ${escapeHtml(modelIdentityLabel(first))}`, modelActivities)}${renderAggregateActivities(modelActivities)}</article>`;
+                  return renderAggregateVariants(modelLabel(first), `${activityKindLabel(first.kind)} / ${first.engine ?? 'wake model'} / ${escapeHtml(modelIdentityLabel(first))}`, modelActivities, {
+                    attributes: `data-usage-aggregate="true" data-model-name="${escapeHtml(first.model)}" data-model-key="${escapeHtml(key)}"`,
+                  });
                 })
                 .join('')
             : renderEmptyState()
@@ -531,14 +608,47 @@ function renderTimeAggregateCard(
   kind: UsageActivityKind,
   activities: UsageActivity[]
 ): string {
-  const ongoingNote = activities.some((activity) => activity.outcome === 'ongoing')
-    ? 'Ongoing activity shown separately from finalized totals.'
-    : 'Finalized activities only.';
-  return `<article class="usage-aggregate-row" data-usage-aggregate="true" data-usage-range="${range}" data-usage-kind="${kind}">${renderAggregateHeader(`${range === 'today' ? 'Today' : range === '7d' ? 'Previous 7 days' : 'Previous 30 days'} — ${kind === 'agent_run' ? 'Work-model Agent runs' : 'Project-owned Routing attempts'}`, `${activityKindLabel(kind)} / ${ongoingNote}`, activities)}${renderAggregateActivities(activities)}</article>`;
+  return renderAggregateVariants(
+    `${range === 'today' ? 'Today' : range === '7d' ? 'Previous 7 days' : 'Previous 30 days'} — ${kind === 'agent_run' ? 'Work-model Agent runs' : 'Project-owned Routing attempts'}`,
+    activityKindLabel(kind),
+    activities,
+    {
+      attributes: `data-usage-aggregate="true" data-usage-range="${range}" data-usage-kind="${kind}"`,
+    }
+  );
 }
 
 function renderEmptyState(): string {
   return `<div class="usage-empty-state"><span class="usage-empty-icon">${renderIcon('search', 18)}</span><strong>No usage activities match these filters.</strong><span>Clear a scope filter or widen the time range. No missing activity is treated as zero.</span><button class="btn btn-secondary btn-sm usage-clear-filters" type="button">Clear filters</button></div>`;
+}
+
+function renderUsageSummaryMetric(label: string, value: string, evidence: string): string {
+  return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(evidence)}</small></div>`;
+}
+
+function renderUsageSummaryKind(kind: UsageActivityKind, activities: UsageActivity[]): string {
+  const { finalized, provisional } = splitOngoingActivities(activities);
+  const metrics = aggregateMetrics(finalized);
+  const kindLabel = kind === 'agent_run' ? 'Work-model Agent runs' : 'Project-owned Routing attempts';
+  const provisionalMetrics = aggregateMetrics(provisional);
+  return `
+    <section class="usage-summary-kind" data-usage-summary-kind="${kind}">
+      <div class="usage-summary-kind-heading">
+        <strong>${escapeHtml(kindLabel)}</strong>
+        <small>${finalized.length} finalized${provisional.length > 0 ? ` / ${provisional.length} provisional` : ''}</small>
+      </div>
+      <div class="usage-summary-kind-metrics" data-usage-summary-scope="finalized">
+        ${renderUsageSummaryMetric('Finalized model activity time', `${formatDuration(metrics.duration, metrics.durationStatus)} model time`, 'Ongoing activity is not included')}
+        ${renderUsageSummaryMetric('Finalized known total tokens', `${formatNumber(metrics.tokens)} tokens`, coverageText(finalized))}
+        ${renderUsageSummaryMetric('Finalized API-equivalent estimate', `${formatUsd(metrics.estimate)} available estimate`, costCoverageText(finalized))}
+      </div>
+      ${
+        provisional.length > 0
+          ? `<div class="usage-summary-kind-provisional" data-usage-summary-scope="provisional"><strong>Provisional observed so far</strong><span>${formatDuration(provisionalMetrics.duration, provisionalMetrics.durationStatus)} model time / ${formatNumber(provisionalMetrics.tokens)} tokens / ${formatUsd(provisionalMetrics.estimate)} available estimate</span><small>${coverageText(provisional)}; excluded from finalized arithmetic and links</small></div>`
+          : ''
+      }
+    </section>
+  `;
 }
 
 function renderTabContent(activities: UsageActivity[], state: PrototypeState): string {
@@ -563,11 +673,6 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
   container.className = 'view-container usage-view';
   const activities = filterActivities(state);
   const activeDetail = activities.find((activity) => activity.id === state.usageFilter.selectedActivityId);
-  const availableEstimate = sumKnown(activities, (activity) =>
-    activity.costValuation.apiEquivalentStatus === 'available' ? activity.costValuation.estimatedUsdMicros : undefined
-  );
-  const knownTokens = sumKnown(activities, (activity) => activity.tokenDimensions.total);
-  const modelDuration = sumKnown(activities, (activity) => activity.wallDurationMs);
   const projects = state.projects.filter((project) => state.usageActivities.some((activity) => activity.projectId === project.id));
   const models = [...new Set(state.usageActivities.map((activity) => activity.model))];
 
@@ -585,10 +690,8 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
     </section>
 
     <section class="usage-summary-band" aria-label="Usage summary">
-      <div><span>Activities</span><strong>${activities.length}</strong><small>${activities.filter((activity) => activity.kind === 'agent_run').length} Agent runs / ${activities.filter((activity) => activity.kind === 'routing_attempt').length} Routing attempts</small></div>
-      <div><span>Model activity time</span><strong>${escapeHtml(formatDuration(modelDuration, modelDuration === undefined ? 'unavailable' : 'complete'))}</strong><small>Task calendar time is separate</small></div>
-      <div><span>Known total tokens</span><strong>${escapeHtml(formatNumber(knownTokens))}</strong><small>${escapeHtml(coverageText(activities))}</small></div>
-      <div><span>API-equivalent estimate</span><strong>${escapeHtml(formatUsd(availableEstimate))}</strong><small>${escapeHtml(costCoverageText(activities))}</small></div>
+      ${renderUsageSummaryKind('agent_run', activities.filter((activity) => activity.kind === 'agent_run'))}
+      ${renderUsageSummaryKind('routing_attempt', activities.filter((activity) => activity.kind === 'routing_attempt'))}
     </section>
 
     <section class="usage-controls" aria-label="Usage views and filters">
@@ -607,9 +710,9 @@ export function renderUsageView(state: PrototypeState): HTMLElement {
     </section>
 
     <section class="usage-coverage-strip" aria-label="Telemetry coverage">
-      <div><strong>Coverage</strong><span>${escapeHtml(coverageText(activities))}</span></div>
-      <div><strong>Valuation</strong><span>${escapeHtml(costCoverageText(activities))}</span></div>
-      <div><strong>Billed cost</strong><span>Unavailable for ${activities.length} of ${activities.length} activities</span></div>
+      <div><strong>Work-model coverage</strong><span>${escapeHtml(coverageText(activities.filter((activity) => activity.kind === 'agent_run')))} / ${escapeHtml(costCoverageText(activities.filter((activity) => activity.kind === 'agent_run')))}</span></div>
+      <div><strong>Routing-attempt coverage</strong><span>${escapeHtml(coverageText(activities.filter((activity) => activity.kind === 'routing_attempt')))} / ${escapeHtml(costCoverageText(activities.filter((activity) => activity.kind === 'routing_attempt')))}</span></div>
+      <div><strong>Billed cost</strong><span>Unavailable for ${activities.filter((activity) => activity.kind === 'agent_run').length} work-model / ${activities.filter((activity) => activity.kind === 'routing_attempt').length} routing activities</span></div>
     </section>
 
     <section class="usage-tab-surface" aria-label="${escapeHtml(tabLabels[state.usageFilter.tab])} view">

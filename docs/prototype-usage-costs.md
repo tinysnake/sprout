@@ -13,6 +13,12 @@ one pass. The default time range, summary emphasis, and aggregate link density
 remain **unresolved owner preferences**. They are proposed presentation choices,
 not silent product decisions.
 
+The visible summary is split into Work-model Agent runs and Project-owned
+Routing attempts. Each kind has its own duration, known-token, and
+API-equivalent estimate values; no top-level metric combines the two kinds.
+Ongoing activity is called out as provisional observed-so-far evidence rather
+than being included in finalized summary arithmetic.
+
 ## Reused design language
 
 The surface reuses the accepted #61 to #66 conventions:
@@ -71,7 +77,9 @@ details-on-demand coverage block. It names known/partial/unavailable token and d
 coverage, available/pending/unavailable API-equivalent valuations, attributable billed-cost
 availability, each available estimate provenance, and a mixed-provenance label when more than
 one provenance contributes. Pending and unavailable values are counted as gaps and never as
-numeric zeroes.
+numeric zeroes. Ongoing activities render in a separate provisional observed-so-far aggregate
+with observed activity links; finalized aggregates and their constituent links contain only
+settled activities.
 
 Selecting an activity or a constituent link opens details for attribution,
 duration, token dimensions, billed-cost availability, API-equivalent estimate,
@@ -88,7 +96,7 @@ billing basis, measurement coverage, source, and observation history.
 | Interrupted | `act-209` retains partial usage and shows unavailable cost after a worker interruption. |
 | Delayed | `act-207` and `act-210` show pending provider observations rather than invented values. |
 | Corrected | `act-204` retains a superseded local estimate and a later provider estimate in history. |
-| Incomplete | Partial and unavailable dimensions are displayed as unavailable, not zero-filled. |
+| Incomplete | Partial and unavailable dimensions are displayed as unavailable, not zero-filled. A known duration subtotal remains visible with an incomplete/unavailable label when any constituent duration is unavailable. |
 | Mixed provenance | The aggregate may sum available USD API-equivalent values but exposes provenance subtotals and a mixed-provenance label in its coverage evidence. |
 | Routing gap | `act-wake-003` is a failed Routing attempt with unavailable token and cost telemetry, visible as a coverage gap. |
 
