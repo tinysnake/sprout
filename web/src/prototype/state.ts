@@ -2564,6 +2564,7 @@ const initialActivityFeedItems: ActivityFeedItem[] = [
     actor: { name: "Wake Model", avatar: "WM", kind: "system" },
     targetNav: 'project',
     targetProjectTab: 'chat',
+    targetEntityId: 'batch-002',
     metadata: { routingDecision: 'Selected 2 agents; suppressed 1 non-actionable message' },
   },
   {
@@ -3049,6 +3050,7 @@ class StateManager {
       taskId?: string;
       envId?: string;
       agentId?: string;
+      routingBatchId?: string;
     },
     fromLabel: string
   ) {
@@ -3069,6 +3071,19 @@ class StateManager {
       this.state.environmentViewMode = 'detail';
     }
     if (target.agentId) this.state.selectedAgentId = target.agentId;
+    if (target.routingBatchId) {
+      const batch = this.state.routingBatches.find((candidate) => candidate.id === target.routingBatchId);
+      if (batch) {
+        this.state.selectedProjectId = batch.projectId;
+        this.state.selectedScopeKind = 'project-channel';
+        this.state.chatViewMode = 'detail';
+        this.state.inspectorSheet = {
+          isOpen: true,
+          kind: 'routing',
+          entityId: batch.id,
+        };
+      }
+    }
     this.setPrimaryNav(target.nav, target.projectTab, target.manageTab);
     this.notify(`Deep-linked to ${target.nav} with return context from ${fromLabel}`);
   }
@@ -3080,6 +3095,11 @@ class StateManager {
       this.state.returnContext = null;
       if (fromFeedScope) this.state.feedScopeFilter = fromFeedScope;
       if (fromFeedSeverity) this.state.feedAttentionSeverityFilter = fromFeedSeverity as any;
+      this.state.inspectorSheet = {
+        isOpen: false,
+        kind: 'none',
+        entityId: undefined,
+      };
       this.setPrimaryNav(fromNav, fromProjectTab, fromManageTab);
       this.notify(`Returned back to ${fromLabel}`);
     }

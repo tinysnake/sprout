@@ -727,7 +727,7 @@ function renderAttentionCardHtml(item: AttentionItem): string {
          data-cat="${item.category}"
          data-target-nav="${item.targetNav ?? 'project'}"
          data-target-tab="${item.targetProjectTab ?? item.targetManageTab ?? 'tasks'}">
-      
+
       <div class="attention-card-header">
         <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
           <span class="category-icon-pill">${categoryIcon} ${categoryName}</span>
@@ -812,11 +812,12 @@ function attachAttentionCardHandlers(root: HTMLElement, state: PrototypeState) {
           },
           'Feed'
         );
-      } else if (item.category === 'routing_fallback') {
+      } else if (item.referenceType === 'routing_batch') {
         stateManager.navigateWithReturn(
           {
             nav: 'project',
             projectTab: 'chat',
+            routingBatchId: item.referenceId,
           },
           'Feed'
         );
@@ -842,6 +843,7 @@ function attachActivityRowHandlers(root: HTMLElement) {
         manageTab?: any;
         taskId?: string;
         envId?: string;
+        routingBatchId?: string;
       } = { nav };
 
       if (projTab) navTarget.projectTab = projTab;
@@ -851,6 +853,9 @@ function attachActivityRowHandlers(root: HTMLElement) {
       }
       if (nav === 'manage' && manageTab === 'environments' && entityId) {
         navTarget.envId = entityId;
+      }
+      if (nav === 'project' && projTab === 'chat' && entityId) {
+        navTarget.routingBatchId = entityId;
       }
 
       stateManager.navigateWithReturn(navTarget, 'Feed');

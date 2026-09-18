@@ -113,7 +113,7 @@ export function renderProjectChat(
   chatViewEl.innerHTML = `
     <!-- Left Pane: Categorized Chat Cards List -->
     <aside class="chat-list-pane" role="tablist" aria-label="Conversation Scopes">
-      
+
       <!-- 1. Project Channel Section -->
       <div class="chat-section">
         <div class="chat-section-header">
@@ -243,14 +243,14 @@ export function renderProjectChat(
     <!-- Right Pane: Active Conversation Detail -->
     <section class="chat-detail-pane">
       <div class="card" style="display: flex; flex-direction: column; min-height: 520px; height: 100%; position: relative;">
-        
+
         <!-- Conversation Header -->
         <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
           <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
             <span class="card-title" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${currentScopeTitle}</span>
             ${state.agents.find((agent) => agent.id === activeDirectPeer?.memberId)?.status === 'archived' ? `<span class="status-pill neutral" style="font-size: 10px;">Archived</span>` : activeDirectPeer?.status === 'ended' ? `<span class="status-pill neutral" style="font-size: 10px;">Ended</span>` : ''}
           </div>
-          
+
           <div style="display: flex; align-items: center; gap: 6px;">
             <button class="btn btn-secondary btn-sm chat-info-btn" id="chat-scope-info-btn" title="Conversation Details & Routing Policy" aria-label="Conversation Details & Routing Policy" style="width: 32px; height: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center;">
               ${renderIcon('info', 16)}
@@ -305,7 +305,7 @@ export function renderProjectChat(
 
                     return `
                       <div class="chat-msg ${isMe ? 'msg-me' : 'msg-them'} ${isProjected ? 'msg-projected' : ''}" data-msg-id="${msg.id}">
-                        
+
                         <!-- Author & Timestamp Row -->
                         <div class="msg-author-row" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; position: relative;">
                           <div style="display: flex; align-items: center; gap: 6px;">
@@ -824,7 +824,7 @@ export function renderRoutingInspectorModal(
         </div>
 
         <div class="proto-modal-body" style="display: flex; flex-direction: column; gap: 12px; overflow-y: auto; padding-right: 6px;">
-          
+
           <!-- Batch Switcher Dropdown -->
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--bg-surface-elevated); padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
             <label for="inspector-batch-select" style="font-size: 12px; font-weight: 700; color: var(--text-secondary);">Select Batch:</label>

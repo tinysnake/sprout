@@ -408,7 +408,7 @@ export function initPrototype(mountEl: HTMLElement): void {
             <div class="dialog-body">
               ${dialog.subtitle ? `<div style="font-weight: 600; color: var(--red-action); margin-bottom: 6px;">${dialog.subtitle}</div>` : ''}
               <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.4;">${dialog.bodyText ?? ''}</p>
-              
+
               <div style="margin-top: 12px; background: var(--bg-app); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
                 <label class="form-label" for="danger-confirm-input" style="font-size: 12px;">
                   Type <code>${confirmPhrase}</code> to proceed:

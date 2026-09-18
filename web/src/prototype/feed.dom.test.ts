@@ -429,6 +429,7 @@ test('Feed presets keep neutral current references and activate every target', a
 
     const restoreFeed = (preset: typeof presets[number]) => {
       stateManager.clearReturnContext();
+      stateManager.closeInspector();
       stateManager.closeTaskDetail(false);
       stateManager.closeEnvironmentDetail(false);
       stateManager.setPrimaryNav('feed');
@@ -509,6 +510,16 @@ test('Feed presets keep neutral current references and activate every target', a
         } else if (item.referenceType === 'routing_batch') {
           assert.equal(linked.primaryNav, 'project', `${item.id} opens Project Chat`);
           assert.equal(linked.projectTab, 'chat', `${item.id} opens Chat`);
+          assert.equal(linked.chatViewMode, 'detail', `${item.id} opens Chat detail`);
+          assert.equal(linked.inspectorSheet.isOpen, true, `${item.id} opens routing inspector`);
+          assert.equal(linked.inspectorSheet.kind, 'routing', `${item.id} opens routing inspector kind`);
+          assert.equal(linked.inspectorSheet.entityId, item.referenceId, `${item.id} preserves batch id`);
+          assert.ok(dom.window.document.querySelector('.inspector-overlay'), `${item.id} renders routing inspector`);
+          assert.match(
+            dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '',
+            new RegExp(`Batch ID:.*${item.referenceId}`),
+            `${item.id} renders its batch detail`
+          );
         }
       }
 
@@ -523,6 +534,11 @@ test('Feed presets keep neutral current references and activate every target', a
           assert.ok(
             snapshot.tasks.some((task) => task.id === activity.targetEntityId),
             `${preset} activity ${activity.id} references an existing Task`
+          );
+        } else if (activity.kind === 'routing_batch' && activity.targetProjectTab === 'chat') {
+          assert.ok(
+            snapshot.routingBatches.some((batch) => batch.id === activity.targetEntityId),
+            `${preset} activity ${activity.id} references an existing routing batch`
           );
         } else {
           assert.fail(`${preset} activity ${activity.id} has an unsupported target entity`);
@@ -539,13 +555,74 @@ test('Feed presets keep neutral current references and activate every target', a
           assert.equal(linked.environmentViewMode, 'detail', `${activity.id} opens Environment detail`);
           assert.equal(linked.selectedEnvironmentId, activity.targetEntityId);
         } else {
-          assert.equal(linked.primaryNav, 'project', `${activity.id} opens Project`);
-          assert.equal(linked.projectTab, 'tasks', `${activity.id} opens Tasks`);
-          assert.equal(linked.taskViewMode, 'detail', `${activity.id} opens Task detail`);
-          assert.equal(linked.selectedTaskId, activity.targetEntityId);
+          if (activity.kind === 'routing_batch' && activity.targetProjectTab === 'chat') {
+            assert.equal(linked.primaryNav, 'project', `${activity.id} opens Project Chat`);
+            assert.equal(linked.projectTab, 'chat', `${activity.id} opens Chat`);
+            assert.equal(linked.chatViewMode, 'detail', `${activity.id} opens Chat detail`);
+            assert.equal(linked.inspectorSheet.isOpen, true, `${activity.id} opens routing inspector`);
+            assert.equal(linked.inspectorSheet.kind, 'routing', `${activity.id} opens routing inspector kind`);
+            assert.equal(linked.inspectorSheet.entityId, activity.targetEntityId, `${activity.id} preserves batch id`);
+            assert.ok(dom.window.document.querySelector('.inspector-overlay'), `${activity.id} renders routing inspector`);
+            assert.match(
+              dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '',
+              new RegExp(`Batch ID:.*${activity.targetEntityId}`),
+              `${activity.id} renders its batch detail`
+            );
+          } else {
+            assert.equal(linked.primaryNav, 'project', `${activity.id} opens Project`);
+            assert.equal(linked.projectTab, 'tasks', `${activity.id} opens Tasks`);
+            assert.equal(linked.taskViewMode, 'detail', `${activity.id} opens Task detail`);
+            assert.equal(linked.selectedTaskId, activity.targetEntityId);
+          }
         }
       }
     }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed routing targets preserve their batch id and open the authoritative inspector', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { initPrototype } = (await vite.ssrLoadModule(
+      '/src/prototype/prototype.ts'
+    )) as typeof import('./prototype.js');
+    const { stateManager } = (await vite.ssrLoadModule(
+      '/src/prototype/state.ts'
+    )) as typeof import('./state.js');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    initPrototype(appMount);
+
+    stateManager.setPrimaryNav('feed');
+    stateManager.setFeedStatePreset('degraded');
+    const attentionTarget = dom.window.document.querySelector(
+      '[data-attention-id="att-deg-3"]'
+    ) as HTMLButtonElement | null;
+    assert.ok(attentionTarget);
+    attentionTarget.click();
+
+    let snapshot = stateManager.getSnapshot();
+    assert.equal(snapshot.inspectorSheet.entityId, 'batch-004');
+    assert.equal(snapshot.inspectorSheet.isOpen, true);
+    assert.equal(snapshot.inspectorSheet.kind, 'routing');
+    assert.match(dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '', /Batch ID:.*batch-004/);
+
+    stateManager.closeInspector();
+    stateManager.clearReturnContext();
+    stateManager.setPrimaryNav('feed');
+    stateManager.setFeedStatePreset('mixed');
+    const activityTarget = dom.window.document.querySelector('[data-act-id="act-6"]') as HTMLButtonElement | null;
+    assert.ok(activityTarget);
+    activityTarget.click();
+
+    snapshot = stateManager.getSnapshot();
+    assert.equal(snapshot.inspectorSheet.entityId, 'batch-002');
+    assert.equal(snapshot.inspectorSheet.isOpen, true);
+    assert.equal(snapshot.inspectorSheet.kind, 'routing');
+    assert.match(dom.window.document.querySelector('.inspector-sheet')?.textContent ?? '', /Batch ID:.*batch-002/);
   } finally {
     await cleanup();
   }
