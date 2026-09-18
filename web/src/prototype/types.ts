@@ -12,6 +12,83 @@ export type OperatorIdentity = {
   overlayAddress?: string | undefined;
 };
 
+export type BrowserSession = {
+  id: string;
+  deviceLabel: string;
+  browserLabel: string;
+  lastSeen: string;
+  transportLabel: string;
+  state: 'current' | 'active' | 'revoked';
+};
+
+export type SettingsHealthState = 'normal' | 'loading' | 'warning' | 'unavailable' | 'failure' | 'risk';
+
+export type OperatorSettingsModel = {
+  accessBoundary: {
+    authenticationState: 'authenticated' | 'unavailable';
+    identityModel: 'single-operator';
+    networkBoundary: 'loopback-or-private-network';
+    publicExposure: 'unsupported';
+    agentCredentialAccess: 'never';
+  };
+  browserSessions: BrowserSession[];
+  credentials: {
+    state: 'healthy' | 'rotation-complete' | 'recovery-required';
+    lastRotated: string;
+    recoveryOwner: 'host-local';
+    hasDefault: false;
+    rotationConsequence: string;
+  };
+  instance: {
+    sproutVersion: string;
+    protocolVersion: string;
+    schemaVersion: string;
+    supportedSchemaRange: string;
+    compatibility: 'compatible' | 'warning' | 'unavailable';
+    compatibilityReason: string;
+  };
+  migration: {
+    state: 'ready' | 'warning' | 'failed';
+    sourceSchema: string;
+    targetSchema: string;
+    safetyCopyState: 'created' | 'required' | 'failed';
+    safetyCopyLabel: string;
+    failureReason?: string | undefined;
+    startupBlocked: boolean;
+    hostGuidance: string;
+  };
+  durableData: {
+    rootLocation: string;
+    databaseLocation: string;
+    components: string[];
+    backupBoundary: string;
+    copyState: 'idle' | 'copied';
+  };
+  diagnostics: {
+    state: 'ready' | 'unavailable' | 'failed' | 'exported';
+    lastExport: string;
+    includedFacts: string[];
+    excludedFacts: string[];
+    hostFallback: string;
+  };
+  boundaries: {
+    webRoutineOperations: string[];
+    hostLocalAdministration: string[];
+  };
+  stateMatrix: {
+    key: SettingsHealthState;
+    label: string;
+    summary: string;
+  }[];
+  review: {
+    status: 'pending-owner-review';
+    acceptedPatterns: string[];
+    rejectedPatterns: string[];
+    unresolvedDecisions: string[];
+    artifactPath: string;
+  };
+};
+
 export type EngineKind = 'codex' | 'pi' | 'agy' | 'opencode';
 
 export type AgentWorkOption = {

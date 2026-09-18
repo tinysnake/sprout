@@ -116,6 +116,9 @@ export function renderIcon(name: string, size = 18, className = 'proto-icon'): s
     case 'shield':
       return `<svg ${common}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>`;
 
+    case 'key':
+      return `<svg ${common}><circle cx="8" cy="15" r="4" /><path d="m11 12 9-9" /><path d="m17 6 2 2" /><path d="m14 9 2 2" /></svg>`;
+
     case 'terminal':
       return `<svg ${common}><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg>`;
 

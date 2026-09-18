@@ -23,6 +23,7 @@ import type {
   ReturnContext,
   RoutingBatch,
   ResultingWakeRequestRecord,
+  OperatorSettingsModel,
   TaskItem,
   ThemeMode,
   UsageActivity,
@@ -241,6 +242,7 @@ export interface PrototypeState {
   };
   reviewDrawerOpen: boolean;
   operator: OperatorIdentity;
+  settings: OperatorSettingsModel;
   projects: ProjectItem[];
   agents: AgentDefinition[];
   environments: EnvironmentInstance[];
@@ -330,6 +332,91 @@ const initialOperator: OperatorIdentity = {
   connectionState: 'online',
   transport: 'private-overlay',
   overlayAddress: '100.64.0.4:5174',
+};
+
+const initialSettings: OperatorSettingsModel = {
+  accessBoundary: {
+    authenticationState: 'authenticated',
+    identityModel: 'single-operator',
+    networkBoundary: 'loopback-or-private-network',
+    publicExposure: 'unsupported',
+    agentCredentialAccess: 'never',
+  },
+  browserSessions: [
+    {
+      id: 'browser-session-current',
+      deviceLabel: 'Desktop browser',
+      browserLabel: 'Current session',
+      lastSeen: 'Now',
+      transportLabel: 'Private network or loopback',
+      state: 'current',
+    },
+    {
+      id: 'browser-session-phone',
+      deviceLabel: 'Phone browser',
+      browserLabel: 'Safari-like mobile client',
+      lastSeen: '12 minutes ago',
+      transportLabel: 'Private network',
+      state: 'active',
+    },
+  ],
+  credentials: {
+    state: 'healthy',
+    lastRotated: 'Never in this prototype fixture',
+    recoveryOwner: 'host-local',
+    hasDefault: false,
+    rotationConsequence: 'Host-local recovery or rotation invalidates every other browser session. Agents and Workers never receive this credential.',
+  },
+  instance: {
+    sproutVersion: '0.2.0-m2',
+    protocolVersion: 'worker protocol 2.1',
+    schemaVersion: 'schema 12',
+    supportedSchemaRange: 'schema 11 to 12',
+    compatibility: 'compatible',
+    compatibilityReason: 'This instance and its enrolled Workers are within the supported protocol and schema range.',
+  },
+  migration: {
+    state: 'warning',
+    sourceSchema: 'schema 11',
+    targetSchema: 'schema 12',
+    safetyCopyState: 'created',
+    safetyCopyLabel: 'Local pre-migration safety copy is retained until a later migration succeeds or the host operator removes it.',
+    startupBlocked: false,
+    hostGuidance: 'Migration runs on the stopped host. Web does not restore, downgrade, or serve partially migrated state.',
+  },
+  durableData: {
+    rootLocation: '~/.sprout/',
+    databaseLocation: '~/.sprout/sprout.db',
+    components: ['SQLite database', 'WAL and shared-memory files', 'Migration safety copy', 'Host-local troubleshooting logs'],
+    backupBoundary: 'This location is guidance for host-managed backup. It is not a Web backup or restore workflow.',
+    copyState: 'idle',
+  },
+  diagnostics: {
+    state: 'ready',
+    lastExport: 'Not exported in this prototype fixture',
+    includedFacts: ['Sprout, Worker, protocol, and schema versions', 'Migration outcome and timestamps', 'Connection, compatibility, readiness, Task, run, lease, and recovery facts', 'Durable correlation identifiers'],
+    excludedFacts: ['Credentials, tokens, account identity, hostnames, network addresses, absolute paths', 'Message content, prompts, private reasoning, commands, tool output, and raw stderr'],
+    hostFallback: 'If Web is unavailable, run the host-local diagnostic command in the Sprout user session. It checks service registration, durable-data access, Worker state, reachability, and engine readiness.',
+  },
+  boundaries: {
+    webRoutineOperations: ['Inspect health and compatibility', 'Manage Projects, Agents, Tasks, Messages, and leases', 'Approve or revoke Environment enrollment', 'Inspect diagnostics and choose normal recovery outcomes'],
+    hostLocalAdministration: ['Install, update, or remove Sprout and Workers', 'Recover or rotate the operator credential', 'Log Codex or Pi in and out', 'Configure startup, workspace, firewall, private overlay, or Worker identity', 'Run diagnostics while Web is unreachable'],
+  },
+  stateMatrix: [
+    { key: 'normal', label: 'Normal', summary: 'Authenticated operator, compatible instance, current diagnostic export available.' },
+    { key: 'loading', label: 'Loading', summary: 'Web is checking compatibility or preparing a sanitized export; no destructive action is assumed.' },
+    { key: 'warning', label: 'Warning', summary: 'Migration safety copy is present. This is a migration guard, not a backup system.' },
+    { key: 'unavailable', label: 'Unavailable', summary: 'Web cannot reach Sprout. No command is queued offline. Use the host-local fallback.' },
+    { key: 'failure', label: 'Failure', summary: 'Safety copy creation or migration failed. Original data remains protected and startup stays blocked.' },
+    { key: 'risk', label: 'Risk-bearing', summary: 'Credential rotation revokes other browser sessions and requires host-local recovery if access is lost.' },
+  ],
+  review: {
+    status: 'pending-owner-review',
+    acceptedPatterns: ['Inherited Settings tab keeps the Manage hierarchy and uses the #61 shell, tokens, touch floor, and status language.', 'Primary facts stay visible; migration, diagnostics, and host boundary detail stays on demand.', 'Environment recovery and Force Release remain in Manage > Environments.'],
+    rejectedPatterns: ['No Web restart or maintenance control.', 'No backup or restore orchestration, onboarding wizard, multi-Human authorization, or public deployment governance.', 'No candidate dropdown harness controls or flat advanced-settings dashboard.'],
+    unresolvedDecisions: ['Owner preference for the final fourth-tab label remains open between Settings and General.', 'Owner preference for whether the state matrix is shown by default or only in review detail remains open.', 'Owner preference for credential rotation copy and confirmation wording remains open.'],
+    artifactPath: 'docs/prototype-settings-operator.md',
+  },
 };
 
 const initialAgents: AgentDefinition[] = [
@@ -2236,6 +2323,7 @@ class StateManager {
       },
       reviewDrawerOpen: false,
       operator: initialOperator,
+      settings: initialSettings,
       projects: initialProjects,
       agents: initialAgents,
       environments: initialEnvironments,
@@ -2696,6 +2784,69 @@ class StateManager {
   public setViewportMode(mode: ViewportMode) {
     this.state.viewportMode = mode;
     this.notify(`Switched viewport mode to ${mode}`);
+  }
+
+  // --- General / Operator Settings (Ticket #68, ADR-0009) ---
+
+  private syncOperatorSessionCount() {
+    this.state.operator.sessionCount = this.state.settings.browserSessions.filter(
+      (session) => session.state === 'current' || session.state === 'active'
+    ).length;
+  }
+
+  public revokeOtherBrowserSessions() {
+    this.state.settings.browserSessions = this.state.settings.browserSessions.map((session) =>
+      session.state === 'active' ? { ...session, state: 'revoked' as const, lastSeen: 'Revoked just now' } : session
+    );
+    this.syncOperatorSessionCount();
+    this.notify('Revoked all other browser sessions. The current session remains active.');
+  }
+
+  public revokeBrowserSession(sessionId: string): { success: boolean; reason?: string } {
+    const session = this.state.settings.browserSessions.find((candidate) => candidate.id === sessionId);
+    if (!session) return { success: false, reason: 'Browser session not found.' };
+    if (session.state === 'current') {
+      const reason = 'The current browser session cannot revoke itself. Use credential rotation on the host to invalidate all other sessions.';
+      this.notify(reason);
+      return { success: false, reason };
+    }
+    if (session.state === 'revoked') return { success: true };
+    session.state = 'revoked';
+    session.lastSeen = 'Revoked just now';
+    this.syncOperatorSessionCount();
+    this.notify(`Revoked browser session: ${session.deviceLabel}.`);
+    return { success: true };
+  }
+
+  public rotateOperatorCredential(): { success: boolean; reason?: string } {
+    const currentSession = this.state.settings.browserSessions.find((session) => session.state === 'current');
+    if (!currentSession) {
+      const reason = 'Credential rotation cannot continue without a current browser session. Recover access on the Sprout host.';
+      this.notify(reason);
+      return { success: false, reason };
+    }
+
+    this.state.settings.browserSessions = this.state.settings.browserSessions.map((session) =>
+      session.id === currentSession.id
+        ? session
+        : { ...session, state: 'revoked' as const, lastSeen: 'Revoked by credential rotation' }
+    );
+    this.state.settings.credentials.state = 'rotation-complete';
+    this.state.settings.credentials.lastRotated = 'Just now';
+    this.syncOperatorSessionCount();
+    this.notify('Rotated the operator credential. Other browser sessions were revoked; host-local recovery remains the fallback.');
+    return { success: true };
+  }
+
+  public exportSanitizedDiagnostics() {
+    this.state.settings.diagnostics.state = 'exported';
+    this.state.settings.diagnostics.lastExport = 'Prepared just now. Prototype export contains sanitized facts only.';
+    this.notify('Prepared a sanitized diagnostic export. Credentials, content, host identity, and raw logs were excluded.');
+  }
+
+  public markDurableDataLocationCopied() {
+    this.state.settings.durableData.copyState = 'copied';
+    this.notify('Copied the relative durable-data location guidance.');
   }
 
   // --- Feed & Attention Actions (Ticket #62) ---

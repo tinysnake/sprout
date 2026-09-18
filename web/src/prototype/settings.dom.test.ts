@@ -1,0 +1,137 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { JSDOM } from 'jsdom';
+import { createServer } from 'vite';
+
+async function setupPrototypeDom() {
+  const html = await readFile(new URL('../../prototype/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'http://sprout-prototype.test/prototype/', pretendToBeVisual: true });
+  const global = globalThis as Record<string, unknown>;
+  const replacements: Record<string, unknown> = {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+  };
+  const originals = new Map(Object.keys(replacements).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(replacements)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'error', server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true } });
+  return {
+    dom,
+    vite,
+    cleanup: async () => {
+      await vite.close();
+      for (const [key, original] of originals) {
+        if (original === undefined) delete global[key];
+        else Object.defineProperty(globalThis, key, original);
+      }
+      dom.window.close();
+    },
+  };
+}
+
+async function openSettings() {
+  const setup = await setupPrototypeDom();
+  const { initPrototype } = (await setup.vite.ssrLoadModule('/src/prototype/prototype.ts')) as typeof import('./prototype.js');
+  const { stateManager } = (await setup.vite.ssrLoadModule('/src/prototype/state.ts')) as typeof import('./state.js');
+  const appMount = setup.dom.window.document.getElementById('app');
+  assert.ok(appMount);
+  initPrototype(appMount);
+  stateManager.setPrimaryNav('manage', undefined, 'settings');
+  return { ...setup, stateManager, document: setup.dom.window.document };
+}
+
+test('Settings renders the bounded access, compatibility, data, diagnostic, and boundary model', async () => {
+  const { document, cleanup } = await openSettings();
+  try {
+    assert.ok(document.querySelector('.settings-view'));
+    assert.match(document.body.textContent ?? '', /General & Operator Settings/);
+    assert.match(document.body.textContent ?? '', /Operator identity and access boundary/);
+    assert.match(document.body.textContent ?? '', /Browser sessions/);
+    assert.match(document.body.textContent ?? '', /Credential recovery and rotation/);
+    assert.match(document.body.textContent ?? '', /Sprout instance and compatibility/);
+    assert.match(document.body.textContent ?? '', /Migration safety and failure visibility/);
+    assert.match(document.body.textContent ?? '', /Durable data location/);
+    assert.match(document.body.textContent ?? '', /Sanitized diagnostics/);
+    assert.match(document.body.textContent ?? '', /Web routine operation versus host-local administration/);
+    assert.match(document.body.textContent ?? '', /Environment recovery and Force Release remain in Manage \/ Environments/);
+    assert.equal(document.querySelectorAll('[data-settings-state]').length >= 6, true);
+    assert.match(document.body.textContent ?? '', /Loading/);
+    assert.match(document.body.textContent ?? '', /Pending owner review/);
+    assert.match(document.body.textContent ?? '', /docs\/prototype-settings-operator\.md/);
+    assert.doesNotMatch(document.body.textContent ?? '', /\/Users\//);
+    assert.doesNotMatch(document.body.textContent ?? '', /C:\\Users/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Settings revokes browser sessions and makes credential rotation risk-gated', async () => {
+  const { document, stateManager, cleanup } = await openSettings();
+  try {
+    assert.equal(stateManager.getSnapshot().operator.sessionCount, 2);
+    (document.querySelector('#btn-revoke-other-sessions') as HTMLButtonElement).click();
+    assert.equal(stateManager.getSnapshot().operator.sessionCount, 1);
+    assert.equal(stateManager.getSnapshot().settings.browserSessions.filter((session) => session.state === 'revoked').length, 1);
+    assert.equal(document.querySelectorAll('.session-revoke-btn').length, 0);
+
+    (document.querySelector('#btn-show-credential-risk') as HTMLButtonElement).click();
+    const riskPanel = document.querySelector('#credential-risk-panel') as HTMLElement;
+    assert.equal(riskPanel.hidden, false);
+    const rotateButton = document.querySelector('#btn-rotate-credential') as HTMLButtonElement;
+    assert.equal(rotateButton.disabled, true);
+    (document.querySelector('#credential-risk-checkbox') as HTMLInputElement).click();
+    const confirmInput = document.querySelector('#credential-risk-confirm') as HTMLInputElement;
+    confirmInput.value = 'ROTATE CREDENTIAL';
+    confirmInput.dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(rotateButton.disabled, false);
+    rotateButton.click();
+    assert.equal(stateManager.getSnapshot().settings.credentials.state, 'rotation-complete');
+    assert.equal(stateManager.getSnapshot().settings.browserSessions.filter((session) => session.state === 'revoked').length, 1);
+    assert.match(document.body.textContent ?? '', /Rotated just now/);
+    assert.match(document.body.textContent ?? '', /Revoked by credential rotation/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Settings keeps sanitized export and durable-data actions observable without backend behavior', async () => {
+  const { document, stateManager, cleanup } = await openSettings();
+  try {
+    (document.querySelector('#btn-export-diagnostics') as HTMLButtonElement).click();
+    assert.equal(stateManager.getSnapshot().settings.diagnostics.state, 'exported');
+    assert.match(document.body.textContent ?? '', /Prepared just now/);
+    (document.querySelector('#btn-copy-data-location') as HTMLButtonElement).click();
+    assert.equal(stateManager.getSnapshot().settings.durableData.copyState, 'copied');
+    assert.match(document.body.textContent ?? '', /Location copied/);
+
+    const settings = stateManager.getSnapshot().settings;
+    assert.ok(settings.diagnostics.excludedFacts.some((fact) => fact.includes('Credentials')));
+    assert.ok(settings.diagnostics.excludedFacts.some((fact) => fact.includes('Message content')));
+    assert.match(settings.diagnostics.hostFallback, /host-local diagnostic command/);
+    assert.match(settings.durableData.backupBoundary, /not a Web backup or restore workflow/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Settings keeps phone and desktop surfaces equivalent and records unresolved owner preferences', async () => {
+  const { document, stateManager, cleanup } = await openSettings();
+  try {
+    const sectionsBefore = document.querySelectorAll('[data-settings-section]').length;
+    stateManager.setViewportMode('desktop');
+    assert.equal(document.querySelector('.viewport-stage')?.classList.contains('mode-desktop'), true);
+    assert.equal(document.querySelectorAll('[data-settings-section]').length, sectionsBefore);
+    stateManager.setViewportMode('mobile');
+    assert.equal(document.querySelector('.viewport-stage')?.classList.contains('mode-mobile'), true);
+    assert.match(document.body.textContent ?? '', /Unresolved preferences/);
+    assert.match(document.body.textContent ?? '', /final fourth-tab label/i);
+    assert.match(document.body.textContent ?? '', /does not claim owner acceptance/i);
+  } finally {
+    await cleanup();
+  }
+});
