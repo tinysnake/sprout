@@ -4,8 +4,6 @@ import { useRoute, useRouter } from 'vue-router';
 import Icon from '../primitives/Icon.vue';
 import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
-import StatusDot from '../primitives/StatusDot.vue';
-import StatusPill from '../primitives/StatusPill.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -13,6 +11,7 @@ const router = useRouter();
 const selectedProjectId = ref('sprout-m2');
 const activeTab = ref<'overview' | 'tasks' | 'chat'>('overview');
 const activeChatChannel = ref('#general');
+const isMobileChatDetailOpen = ref(false);
 
 function syncTabFromRoute() {
   const tabParam = route.params.tab as string | undefined;
@@ -37,11 +36,6 @@ watch(
     syncTabFromRoute();
   }
 );
-
-function selectTab(tab: 'overview' | 'tasks' | 'chat') {
-  activeTab.value = tab;
-  router.push(`/project/${tab}`);
-}
 
 const projects = [
   { id: 'sprout-m2', name: 'Sprout M2 Operator', desc: 'Local multi-agent collaboration and environment-scheduling platform', status: 'Active' },
@@ -116,13 +110,57 @@ const tasks = [
   },
 ];
 
-const chatScopes = [
-  { id: '#general', label: '#general', kind: 'channel', unread: 0 },
-  { id: 'wg-frontend', label: 'wg-frontend', kind: 'working-group', unread: 1 },
-  { id: 'wg-core', label: 'wg-core', kind: 'working-group', unread: 0 },
-  { id: '@Programmer', label: '@Programmer', kind: 'dm', unread: 0 },
-  { id: '@Architect', label: '@Architect', kind: 'dm', unread: 0 },
-];
+interface ChatScope {
+  id: string;
+  label: string;
+  kind: 'channel' | 'working-group' | 'dm';
+  lastSnippet: string;
+  lastTime: string;
+  unread: number;
+}
+
+const chatScopes = ref<ChatScope[]>([
+  {
+    id: '#general',
+    label: '#general',
+    kind: 'channel',
+    lastSnippet: 'All 8 Reka UI accessible dialog checks pass...',
+    lastTime: '10:11 AM',
+    unread: 0,
+  },
+  {
+    id: 'wg-frontend',
+    label: 'wg-frontend',
+    kind: 'working-group',
+    lastSnippet: 'Vue 3.5 + Tailwind 4 responsive chat layout...',
+    lastTime: '10:05 AM',
+    unread: 1,
+  },
+  {
+    id: 'wg-core',
+    label: 'wg-core',
+    kind: 'working-group',
+    lastSnippet: 'Carrier TLS stream reconnect latency ~14ms...',
+    lastTime: '09:48 AM',
+    unread: 0,
+  },
+  {
+    id: '@Programmer',
+    label: '@Programmer',
+    kind: 'dm',
+    lastSnippet: 'Verified remote-state ports and happy-dom tests.',
+    lastTime: '10:08 AM',
+    unread: 0,
+  },
+  {
+    id: '@Architect',
+    label: '@Architect',
+    kind: 'dm',
+    lastSnippet: 'ADR-0011 architectural foundation baseline confirmed.',
+    lastTime: '10:04 AM',
+    unread: 0,
+  },
+]);
 
 const chatMessages = ref([
   {
@@ -150,6 +188,11 @@ const chatMessages = ref([
 
 const newMessage = ref('');
 
+function selectChannel(channelId: string) {
+  activeChatChannel.value = channelId;
+  isMobileChatDetailOpen.value = true;
+}
+
 function sendMessage() {
   if (!newMessage.value.trim()) return;
   chatMessages.value.push({
@@ -165,7 +208,7 @@ function sendMessage() {
 
 <template>
   <div class="project-view flex flex-col h-full bg-[var(--bg-app)]">
-    <!-- 1. Top Project Header & Selector (Folder icon + Select + Action buttons) -->
+    <!-- 1. Top Project Header & Selector (Without redundant sub-navigation tab strip) -->
     <div class="px-4 py-3 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex items-center justify-between gap-4 flex-wrap">
       <div class="flex items-center gap-3">
         <div class="p-2 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)]">
@@ -201,55 +244,8 @@ function sendMessage() {
       </div>
     </div>
 
-    <!-- 2. Dedicated 3-Button Sub-Navigation Bar across width (Matching prototype sub-nav-tabs tabs-3) -->
-    <div class="px-4 py-2 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)]">
-      <div class="grid grid-cols-3 gap-1.5 p-1 rounded-md bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] w-full" role="tablist" aria-label="Project Sections">
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none min-h-[40px]"
-          :class="activeTab === 'overview' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
-          role="tab"
-          :aria-selected="activeTab === 'overview'"
-          @click="selectTab('overview')"
-        >
-          <Icon name="overview" :size="16" />
-          <span class="truncate">Overview & Contract</span>
-        </button>
-
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none relative min-h-[40px]"
-          :class="activeTab === 'tasks' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
-          role="tab"
-          :aria-selected="activeTab === 'tasks'"
-          @click="selectTab('tasks')"
-        >
-          <Icon name="tasks" :size="16" />
-          <span class="truncate">Tasks & Leases</span>
-          <span
-            class="px-1.5 py-0.2 rounded-full text-[10px] font-bold shrink-0"
-            :class="activeTab === 'tasks' ? 'bg-white/20 text-white' : 'bg-[var(--bg-surface)] text-[var(--accent-primary)] border border-[var(--border-subtle)]'"
-          >
-            {{ tasks.length }}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none min-h-[40px]"
-          :class="activeTab === 'chat' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
-          role="tab"
-          :aria-selected="activeTab === 'chat'"
-          @click="selectTab('chat')"
-        >
-          <Icon name="chat" :size="16" />
-          <span class="truncate">Project Chat</span>
-        </button>
-      </div>
-    </div>
-
-    <!-- 3. Main Content Area (Fluid width, ultra-wide screen adapted) -->
-    <div class="flex-1 overflow-y-auto p-4 sm:p-6 w-full max-w-[1920px] mx-auto">
+    <!-- 2. Main Content Area (Fluid width, ultra-wide screen adapted) -->
+    <div class="flex-1 overflow-y-auto p-4 sm:p-6 w-full max-w-[1920px] mx-auto min-h-0">
       <!-- 1. Overview Tab -->
       <div v-if="activeTab === 'overview'" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <!-- Left 2 Columns on Wide Screens: Contract & Workspaces -->
@@ -367,35 +363,76 @@ function sendMessage() {
         </div>
       </div>
 
-      <!-- 3. Chat Tab (Ultra-wide 2-column layout) -->
+      <!-- 3. Chat Tab (Responsive: Wide screen side-by-side, narrow screen drill-down with back button) -->
       <div v-else-if="activeTab === 'chat'" class="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden flex flex-col md:flex-row h-[750px] shadow-xs">
-        <!-- Chat Channels Navigation (Left sidebar) -->
-        <div class="w-full md:w-64 lg:w-72 bg-[var(--bg-surface-elevated)] border-r border-[var(--border-subtle)] p-3 flex flex-col gap-2 shrink-0">
-          <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] tracking-wider px-2">Channels & DMs</span>
-          <div class="flex flex-col gap-0.5">
+        <!-- Chat Channels Cards / List: Visible on Desktop, or on Mobile when NOT drilled down -->
+        <div
+          class="w-full md:w-72 lg:w-80 bg-[var(--bg-surface-elevated)] md:border-r border-[var(--border-subtle)] p-3 flex flex-col gap-2 shrink-0 overflow-y-auto"
+          :class="isMobileChatDetailOpen ? 'hidden md:flex' : 'flex'"
+        >
+          <div class="flex items-center justify-between px-2 mb-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] tracking-wider">Conversations & Groups</span>
+            <span class="text-[10px] text-[var(--text-muted)]">{{ chatScopes.length }} Active</span>
+          </div>
+
+          <!-- Chat Scope Cards List -->
+          <div class="flex flex-col gap-1.5">
             <button
               v-for="scope in chatScopes"
               :key="scope.id"
               type="button"
-              class="w-full text-left px-3 py-2 rounded text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer"
-              :class="activeChatChannel === scope.id ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]'"
-              @click="activeChatChannel = scope.id"
+              class="w-full text-left p-3 rounded-[var(--radius-sm)] border transition-all cursor-pointer select-none flex flex-col gap-1"
+              :class="activeChatChannel === scope.id ? 'bg-[var(--bg-surface)] border-[var(--accent-primary)] shadow-xs ring-1 ring-[var(--accent-primary)]' : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]'"
+              @click="selectChannel(scope.id)"
             >
-              <div class="flex items-center gap-2 truncate">
-                <Icon :name="scope.kind === 'channel' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'" :size="14" />
-                <span class="truncate">{{ scope.label }}</span>
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 truncate">
+                  <div class="p-1 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
+                    <Icon :name="scope.kind === 'channel' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'" :size="14" />
+                  </div>
+                  <strong class="text-xs font-bold text-[var(--text-primary)] truncate">{{ scope.label }}</strong>
+                </div>
+                <span class="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{{ scope.lastTime }}</span>
               </div>
-              <span v-if="scope.unread > 0" class="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-[var(--accent-primary)] text-[var(--text-inverse)]">
-                {{ scope.unread }}
-              </span>
+
+              <p class="text-[11px] text-[var(--text-secondary)] truncate pl-7">
+                {{ scope.lastSnippet }}
+              </p>
+
+              <div v-if="scope.unread > 0" class="flex justify-end pt-0.5">
+                <span class="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-[var(--accent-primary)] text-[var(--text-inverse)]">
+                  {{ scope.unread }} new
+                </span>
+              </div>
             </button>
           </div>
         </div>
 
-        <!-- Chat Timeline & Composer (Right main area) -->
-        <div class="flex-1 flex flex-col justify-between h-full bg-[var(--bg-surface)] min-w-0">
-          <!-- Channel Header -->
-          <div class="px-4 py-3 border-b border-[var(--border-subtle)] flex items-center justify-between bg-[var(--bg-surface)]">
+        <!-- Chat Timeline & Composer: Visible on Desktop, or on Mobile when drilled down -->
+        <div
+          class="flex-1 flex flex-col justify-between h-full bg-[var(--bg-surface)] min-w-0"
+          :class="!isMobileChatDetailOpen ? 'hidden md:flex' : 'flex'"
+        >
+          <!-- Mobile-only Chat Back Header (Hidden on md+) -->
+          <div class="md:hidden px-3 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between gap-2">
+            <button
+              type="button"
+              class="flex items-center gap-1.5 text-xs font-semibold text-[var(--accent-primary)] hover:underline cursor-pointer py-1 px-2 rounded bg-[var(--accent-bg)] border border-[var(--accent-border)] min-h-[36px]"
+              title="Return to Conversations List"
+              aria-label="Return to Conversations List"
+              @click="isMobileChatDetailOpen = false"
+            >
+              <Icon name="chevron-left" :size="16" />
+              <span>Back to Chats</span>
+            </button>
+            <div class="flex items-center gap-1.5 truncate">
+              <Icon name="chat" :size="14" class="text-[var(--accent-primary)]" />
+              <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeChatChannel }}</strong>
+            </div>
+          </div>
+
+          <!-- Standard Channel Header (Always visible on Desktop) -->
+          <div class="hidden md:flex px-4 py-3 border-b border-[var(--border-subtle)] items-center justify-between bg-[var(--bg-surface)]">
             <div class="flex items-center gap-2">
               <Icon name="chat" :size="16" class="text-[var(--accent-primary)]" />
               <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
@@ -432,7 +469,7 @@ function sendMessage() {
             <input
               v-model="newMessage"
               type="text"
-              placeholder="Send instruction or query to #general (@mention supported)..."
+              :placeholder="`Send message to ${activeChatChannel} (@mention supported)...`"
               class="flex-1 px-3 py-2 text-xs rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)]"
               @keydown.enter="sendMessage"
             />

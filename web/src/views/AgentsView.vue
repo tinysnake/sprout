@@ -1,19 +1,11 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import SubNav, { type SubNavItem } from '../primitives/SubNav.vue';
 import Icon from '../primitives/Icon.vue';
 import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
 import StatusPill from '../primitives/StatusPill.vue';
 import Foldable from '../primitives/Foldable.vue';
-
-const manageSubNavItems: SubNavItem[] = [
-  { to: '/manage/environments', label: 'Environments', icon: 'environments' },
-  { to: '/manage/agents', label: 'Agents', icon: 'agents' },
-  { to: '/manage/usage', label: 'Usage & Costs', icon: 'usage' },
-  { to: '/manage/settings', label: 'Settings', icon: 'settings' },
-];
 
 type AgentFilter = 'all' | 'active' | 'attention' | 'unavailable' | 'archived';
 
@@ -156,9 +148,6 @@ const selectedAgent = computed(() => {
 
 <template>
   <div class="agents-view flex flex-col h-full bg-[var(--bg-app)]">
-    <!-- Sub navigation -->
-    <SubNav :items="manageSubNavItems" />
-
     <!-- Header Card -->
     <div class="p-4 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex flex-col gap-3">
       <div class="flex items-center justify-between gap-2 flex-wrap">

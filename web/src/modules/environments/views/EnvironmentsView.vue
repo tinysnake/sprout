@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router';
 import type { EnvironmentFilter, EnvironmentInstance, ForceReleaseParams } from '../types.js';
 import type { EnvironmentService } from '../ports.js';
 import { FixtureEnvironmentService } from '../adapters/fixture-adapter.js';
-import SubNav, { type SubNavItem } from '../../../primitives/SubNav.vue';
 import FilterPillGroup from '../../../primitives/FilterPillGroup.vue';
 import FilterPill from '../../../primitives/FilterPill.vue';
 import Button from '../../../primitives/Button.vue';
@@ -36,13 +35,6 @@ const isLoading = ref(true);
 const isForceReleaseOpen = ref(false);
 const isGuideOpen = ref(false);
 const isRegisterOpen = ref(false);
-
-const manageSubNavItems: SubNavItem[] = [
-  { to: '/manage/environments', label: 'Environments', icon: 'environments' },
-  { to: '/manage/agents', label: 'Agents', icon: 'agents' },
-  { to: '/manage/usage', label: 'Usage & Costs', icon: 'usage' },
-  { to: '/manage/settings', label: 'Settings', icon: 'settings' },
-];
 
 async function loadData() {
   isLoading.value = true;
@@ -179,9 +171,6 @@ async function handleUnenroll(id: string) {
 
 <template>
   <div class="view-container environments-view flex flex-col h-full bg-[var(--bg-app)]">
-    <!-- Manage Sub-navigation tab strip -->
-    <SubNav :items="manageSubNavItems" />
-
     <!-- Mobile Drill-Down Header (when active on small screens) -->
     <MobileDetailHeader
       v-if="isMobileDetailRoute && selectedEnv"
