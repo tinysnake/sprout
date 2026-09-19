@@ -955,3 +955,55 @@ test('Production Web: agent creation and architecture guide action dialogs', asy
     await cleanup();
   }
 });
+
+test('Production Web: settings view tabs and responsive visibility', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    app.mount(appMount);
+    const doc = dom.window.document;
+
+    await router.push('/manage/settings');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // 1. Initial Access & Security view content visibility
+    assert.match(doc.body.textContent ?? '', /Operator Access Boundary/);
+    assert.match(doc.body.textContent ?? '', /Authorized Browser Sessions/);
+    assert.match(doc.body.textContent ?? '', /Rotate Local Secret Key/);
+
+    // 2. Click Instance & System sub-tab button
+    const systemTabBtn = doc.querySelector('.settings-tab-system') as HTMLButtonElement;
+    assert.ok(systemTabBtn, 'Instance & System tab button found');
+    systemTabBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Platform & Protocol Compatibility/);
+    assert.match(doc.body.textContent ?? '', /Carrier & Transport Security/);
+
+    // 3. Click Status Strip card to switch back to Access & Security
+    const accessCard = doc.querySelector('.settings-status-card') as HTMLButtonElement;
+    assert.ok(accessCard, 'Operator Access status card found');
+    accessCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Operator Access Boundary/);
+
+    // 4. Click Data & Diagnostics tab
+    const dataTabBtn = doc.querySelector('.settings-tab-data') as HTMLButtonElement;
+    assert.ok(dataTabBtn, 'Data & Diagnostics tab button found');
+    dataTabBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Durable Operational Data/);
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
