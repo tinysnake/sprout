@@ -1,11 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
-import type { EngineAdapter } from '../engine/port.ts';
-import { CodexEngineAdapter } from '../engine/codex.ts';
-import { PiEngineAdapter } from '../engine/pi.ts';
-import { AgyEngineAdapter } from '../engine/agy.ts';
-import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
+import { createEnvironmentWorkerEngines, hostEngineFacts } from './engine-selection.ts';
 import { EnvironmentWorker } from './server.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
@@ -37,120 +32,13 @@ const port = Number(process.env.SPROUT_WORKER_PORT ?? 0);
 const transportMode = process.env.SPROUT_WORKER_TRANSPORT ?? 'endpoint';
 const workspaceRoot = process.env.SPROUT_WORKSPACE_ROOT ?? join(process.cwd(), '.sprout-workspaces');
 
-/** Codex must be launched through its real path; a PATH symlink fails sandboxed. */
-function resolveCodexBinary(): string | undefined {
-  if (process.env.SPROUT_CODEX_BIN !== undefined) return process.env.SPROUT_CODEX_BIN;
-  // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
-  // Unlike pi's .cmd shim, the Windows codex distribution ships an .exe, so the
-  // first match is the one that runs.
-  const lookup = process.platform === 'win32'
-    ? { file: 'where.exe', args: ['codex'] }
-    : { file: '/bin/sh', args: ['-lc', 'command -v codex'] };
-  try {
-    const found = execFileSync(lookup.file, lookup.args, { encoding: 'utf8' }).trim();
-    const first = found.split(/\r?\n/).find((line) => line.trim() !== '');
-    return first === undefined ? undefined : first.trim();
-  } catch {
-    return undefined;
-  }
-}
-
-const engines = new Map<string, EngineAdapter>();
-const codexBinary = resolveCodexBinary();
-if (codexBinary !== undefined) {
-  /**
-   * The environment's platform decides the engine's sandbox posture.
-   *
-   * On a shared host, Codex must stay bounded, because other agents and the
-   * owner's own work are on the same machine. Inside a container the container is
-   * the boundary, and Codex's own sandbox is both redundant and non-functional:
-   * an unprivileged container cannot create the user namespace `bwrap` needs, so
-   * every turn fails. This is a fact about the environment, so it is decided here
-   * where the environment is known, not in the core.
-   */
-  const sandbox = process.env.SPROUT_ENV_PLATFORM === 'container' ? 'danger-full-access' : 'read-only';
-  engines.set(
-    'codex',
-    new CodexEngineAdapter({
-      binaryPath: codexBinary,
-      args: ['--strict-config'],
-      sandbox,
-    }),
-  );
-}
-
-/** Pi is resolved the same way, since a worker may host either engine. */
-function resolveBinary(command: string): string | undefined {
-  const override = process.env[`SPROUT_${command.toUpperCase()}_BIN`];
-  if (override !== undefined) return override;
-  try {
-    // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
-    const lookup = process.platform === 'win32'
-      ? { file: 'where.exe', args: [command] }
-      : { file: '/bin/sh', args: ['-lc', `command -v ${command}`] };
-    const found = execFileSync(lookup.file, lookup.args, { encoding: 'utf8' });
-    const candidates = found.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '');
-    if (candidates.length === 0) return undefined;
-    if (process.platform !== 'win32') return candidates[0];
-    // npm puts an extensionless sh script FIRST in `where` output; node on
-    // Windows cannot execute it (found live). An .exe or .cmd actually runs.
-    const executable = candidates.find((c) => /\.(exe|cmd|bat)$/i.test(c));
-    return executable ?? candidates[0];
-  } catch {
-    return undefined;
-  }
-}
-
-const piBinary = resolveBinary('pi');
-if (piBinary !== undefined) {
-  engines.set(
-    'pi',
-    new PiEngineAdapter({
-      binaryPath: piBinary,
-      // Sessions live under Sprout's control rather than the user's default, so
-      // one agent's conversation does not depend on a machine-local store.
-      ...(process.env.SPROUT_PI_SESSION_DIR !== undefined
-        ? { sessionDirectory: process.env.SPROUT_PI_SESSION_DIR }
-        : {}),
-    }),
-  );
-}
-
 /**
- * `agy`'s permission model is binary: auto-deny every tool, or skip all
- * permissions. Headless runs cannot prompt, so denial means the run produces
- * nothing but an empty answer.
- *
- * The owner chose skip-permissions unconditionally: `agy` runs tools with no
- * sandbox tier between denied and unrestricted. That is an accepted trade-off
- * rather than an oversight, and it is recorded in ADR-0003's terms — what a run
- * may touch is the environment's business.
+ * Which engines this environment hosts is an environment fact, so it is selected
+ * by the engine-selection Module rather than here. The Worker's entry point only
+ * turns the selected configuration into adapters and decides what to do when the
+ * host has none.
  */
-const agyBinary = resolveBinary('agy');
-if (agyBinary !== undefined) {
-  // The environment's platform decides which hook command `agy` will run: it
-  // executes hooks through `sh -c` on Unix and `cmd /c` on Windows. A worker on
-  // Windows is a Windows process, so the running platform is the environment's
-  // platform; passing it explicitly keeps the choice a declared fact rather
-  // than a hidden `process.platform` read inside the hook installer.
-  const hookPlatform = process.platform === 'win32' ? 'windows' : 'posix';
-  engines.set(
-    'agy',
-    new AgyEngineAdapter({
-      binaryPath: agyBinary,
-      skipPermissions: true,
-      hookPlatform,
-    }),
-  );
-}
-
-const opencodeBinary = resolveBinary('opencode');
-if (opencodeBinary !== undefined) {
-  engines.set(
-    'opencode',
-    new OpenCodeEngineAdapter({ binaryPath: opencodeBinary }),
-  );
-}
+const engines = createEnvironmentWorkerEngines(hostEngineFacts());
 
 if (engines.size === 0) {
   process.stderr.write('sprout worker: no engine CLI found on this host; nothing to host\n');

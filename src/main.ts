@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import { EnvironmentPool } from './environment/pool.ts';
-import { DockerRuntime, containerEnvironmentDefinition } from './environment/container.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
@@ -15,9 +14,11 @@ import { CollaborationCoordinator } from './collaboration/coordinator.ts';
 import { TaskService } from './task/service.ts';
 import { TaskEnvironmentLifecycle } from './task/environment-lifecycle.ts';
 import { createRunApi } from './web/api.ts';
-import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
-import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
-import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
+import { type WorkerConnection } from './worker/carrier.ts';
+import {
+  createEnvironmentWorkerFactory,
+  selectEnvironmentWorker,
+} from './worker/environment-worker.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
 import { parseRuntimeConfiguration } from './runtime-config.ts';
 
@@ -73,64 +74,44 @@ function containerProxy(): Record<string, string> {
 }
 
 /**
- * Starts a worker for this build's configured environment. Called again after a
- * death.
+ * The host facts carrier and platform selection both depend on.
  *
- * The requested id is checked against the one instance this build serves. A run
- * that resolves anything else is refused instead of executing locally under
- * another instance's name, which would be F1 (#18) at the production edge. A
- * multi-instance build replaces this with a factory keyed by instance id.
+ * Reading them once here is what lets the environment-worker Module choose a
+ * platform and a carrier from one stated description instead of re-reading the
+ * host environment.
  */
+const windowsRunWorkdir = process.env.SPROUT_WINDOWS_WORKDIR ?? 'C:/sprout-work';
+const environmentWorkerConfiguration = {
+  environmentInstanceId: instanceId,
+  environmentKind,
+  containerName,
+  containerMountRoot,
+  containerCodexHome: process.env.SPROUT_CONTAINER_CODEX_HOME ?? '/codexhome',
+  containerProxy: containerProxy(),
+  windowsTarget,
+  windowsReadyFile,
+  windowsTunnelPort: Number(process.env.SPROUT_WINDOWS_TUNNEL_PORT ?? 12741),
+  localWorkingDirectory: workingDirectory,
+  windowsWorkDirectory: windowsRunWorkdir,
+};
+
+/**
+ * Reaches the worker for this build's configured environment. Called again after
+ * a death.
+ *
+ * Which carrier is used — a local endpoint, a container's exec channel, or an
+ * SSH-tunnelled Windows daemon — is selected by the environment-worker Module,
+ * not here. This entry point supplies only the host facts that selection needs.
+ */
+const environmentWorkerFactory = createEnvironmentWorkerFactory(environmentWorkerConfiguration, {
+  workerEntryPath: join(here, 'worker', 'main.ts'),
+  nodeExecutable: process.execPath,
+  hostEnvironment: process.env,
+  logWorkerLine: (source, line) => process.stderr.write(`[${source}-worker] ${line}\n`),
+});
+
 async function startEnvironmentWorker(requestedInstanceId: string): Promise<WorkerConnection> {
-  if (requestedInstanceId !== instanceId) {
-    throw new Error(
-      `this Sprout serves only environment instance ${instanceId}, not ${requestedInstanceId}`,
-    );
-  }
-  if (environmentKind === 'container') {
-    const runtime = new DockerRuntime();
-    const availability = await runtime.available();
-    if (!availability.available) {
-      throw new Error(`container environment unavailable: ${availability.detail}`);
-    }
-    return new ContainerCarrier({
-      runtime,
-      containerName,
-      workerEntryPath: containerWorkerEntry(containerMountRoot),
-      environmentInstanceId: instanceId,
-      workingDirectory: containerMountRoot,
-      environment: {
-        CODEX_HOME: process.env.SPROUT_CONTAINER_CODEX_HOME ?? '/codexhome',
-        ...containerProxy(),
-      },
-      label: `container:${containerName}`,
-      onLog: (line) => process.stderr.write(`[container-worker] ${line}\n`),
-    }).start();
-  }
-
-  if (environmentKind === 'windows') {
-    if (windowsTarget === undefined || windowsTarget === '') {
-      throw new Error('SPROUT_WINDOWS_TARGET is required for SPROUT_ENV_KIND=windows (e.g. user@host)');
-    }
-    // Read the daemon's address from the provisioning channel.
-    const ready = await readWindowsReadyFile({ target: windowsTarget, remotePath: windowsReadyFile });
-    return new SshTunnelCarrier({
-      target: windowsTarget,
-      daemonPort: ready.port,
-      // Collisions across concurrent cores on this machine are an operator
-      // concern at M1 size; the port is stable so reconnects are predictable.
-      localPort: Number(process.env.SPROUT_WINDOWS_TUNNEL_PORT ?? 12741),
-      label: `windows:${windowsTarget}`,
-      onLog: (line) => process.stderr.write(`[windows-worker] ${line}\n`),
-    }).start();
-  }
-
-  return EndpointCarrier.start({
-    command: process.execPath,
-    args: [join(here, 'worker', 'main.ts')],
-    env: { ...process.env, SPROUT_ENV_INSTANCE: instanceId },
-    label: 'sprout-worker',
-  });
+  return environmentWorkerFactory.connect(requestedInstanceId);
 }
 
 /**
@@ -156,32 +137,14 @@ if (!initialEngines.has(engineId)) {
 }
 
 /**
- * The environment definition.
+ * The environment definition and instance.
  *
- * Only the platform and the capabilities' names differ. Both kinds declare
- * `requiresLease` the same way, which is why the lease registry needs no
- * platform-specific rule and exclusivity works identically for a container.
+ * Only the platform, the definition id, and the working directory differ; every
+ * kind declares `requiresLease` the same way, which is why the lease registry
+ * needs no platform-specific rule and exclusivity works identically for a
+ * container. Selecting them is the environment-worker Module's job.
  */
-const definition: EnvironmentDefinition =
-  environmentKind === 'container'
-    ? containerEnvironmentDefinition({ id: 'container-linux', image: containerName })
-    : environmentKind === 'windows'
-      ? {
-          id: 'windows-workstation',
-          platform: 'windows',
-          capabilities: [
-            { name: 'agent-run', requiresLease: true },
-            { name: 'read-only-investigation', requiresLease: false },
-          ],
-        }
-      : {
-          id: 'macos-workstation',
-          platform: 'macos',
-          capabilities: [
-            { name: 'agent-run', requiresLease: true },
-            { name: 'read-only-investigation', requiresLease: false },
-          ],
-        };
+const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
 
 const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
 
@@ -191,17 +154,7 @@ const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
  * It therefore lives on the instance, so the same agent works unchanged on a host
  * and inside a container whose path differs (F1 suggestion, #18).
  */
-const windowsRunWorkdir = process.env.SPROUT_WINDOWS_WORKDIR ?? 'C:/sprout-work';
-const environmentInstances: readonly EnvironmentInstance[] = [
-  {
-    id: instanceId,
-    definitionId: definition.id,
-    workingDirectory:
-      environmentKind === 'container' ? containerMountRoot
-      : environmentKind === 'windows' ? windowsRunWorkdir
-      : workingDirectory,
-  },
-];
+const environmentInstances: readonly EnvironmentInstance[] = [instance];
 
 const defaultAgents: readonly AgentDefinition[] = [
   {
