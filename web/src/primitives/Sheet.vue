@@ -67,6 +67,8 @@ const contentClasses = computed(() => {
           <DialogClose
             class="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-elevated)] cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
             aria-label="Close sheet"
+            @keydown.enter="emit('update:open', false)"
+            @keydown.space.prevent="emit('update:open', false)"
           >
             <Icon name="close" :size="16" />
           </DialogClose>

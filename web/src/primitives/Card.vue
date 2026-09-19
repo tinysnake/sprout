@@ -16,6 +16,14 @@ const props = withDefaults(defineProps<CardProps>(), {
   as: 'div',
 });
 
+function handleKeyDown(event: KeyboardEvent) {
+  if (!props.interactive) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    (event.currentTarget as HTMLElement | null)?.click();
+  }
+}
+
 const classes = computed(() => {
   return cn(
     'rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xs transition-colors',
@@ -29,7 +37,11 @@ const classes = computed(() => {
 </script>
 
 <template>
-  <component :is="as" :class="classes">
+  <component
+    :is="as"
+    :class="classes"
+    @keydown="handleKeyDown"
+  >
     <slot />
   </component>
 </template>
