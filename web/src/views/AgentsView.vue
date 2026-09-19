@@ -37,6 +37,90 @@ const selectedAgentId = ref('agent-prog');
 const isMobileAgentDetailOpen = ref(false);
 const isCreateAgentOpen = ref(false);
 const isAgentGuideOpen = ref(false);
+const isAddOptionOpen = ref(false);
+
+const draggedOptionIndex = ref<number | null>(null);
+const dragOverOptionIndex = ref<number | null>(null);
+
+const newOptionEngine = ref('Pi');
+const newOptionModel = ref('claude-3-7-sonnet');
+const newOptionEffort = ref('medium');
+
+function handleDragStart(index: number, e: DragEvent) {
+  draggedOptionIndex.value = index;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(index));
+  }
+}
+
+function handleDragOver(index: number, e: DragEvent) {
+  e.preventDefault();
+  dragOverOptionIndex.value = index;
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleDragLeave(index: number) {
+  if (dragOverOptionIndex.value === index) {
+    dragOverOptionIndex.value = null;
+  }
+}
+
+function handleDrop(targetIndex: number, e: DragEvent) {
+  e.preventDefault();
+  if (draggedOptionIndex.value !== null && draggedOptionIndex.value !== targetIndex) {
+    moveOption(draggedOptionIndex.value, targetIndex);
+  }
+  draggedOptionIndex.value = null;
+  dragOverOptionIndex.value = null;
+}
+
+function handleDragEnd() {
+  draggedOptionIndex.value = null;
+  dragOverOptionIndex.value = null;
+}
+
+function moveOption(fromIndex: number, toIndex: number) {
+  if (!selectedAgent.value) return;
+  const options = selectedAgent.value.workOptions;
+  if (fromIndex < 0 || fromIndex >= options.length || toIndex < 0 || toIndex >= options.length) return;
+  const [moved] = options.splice(fromIndex, 1);
+  options.splice(toIndex, 0, moved);
+  options.forEach((opt, idx) => {
+    opt.priority = idx + 1;
+  });
+  if (options.length > 0) {
+    selectedAgent.value.trafficLightReason = `Ready: Priority 1 option (${options[0].engine.toUpperCase()} · ${options[0].model} · ${options[0].effort}) ready on online host(s) · ${options.length - 1} fallback(s) configured`;
+  }
+}
+
+function deleteOption(index: number) {
+  if (!selectedAgent.value || selectedAgent.value.workOptions.length <= 1) return;
+  selectedAgent.value.workOptions.splice(index, 1);
+  selectedAgent.value.workOptions.forEach((opt, idx) => {
+    opt.priority = idx + 1;
+  });
+  if (selectedAgent.value.workOptions.length > 0) {
+    const p1 = selectedAgent.value.workOptions[0];
+    selectedAgent.value.trafficLightReason = `Ready: Priority 1 option (${p1.engine.toUpperCase()} · ${p1.model} · ${p1.effort}) ready on online host(s) · ${selectedAgent.value.workOptions.length - 1} fallback(s) configured`;
+  }
+}
+
+function handleAddOption() {
+  if (!selectedAgent.value) return;
+  const newPriority = selectedAgent.value.workOptions.length + 1;
+  selectedAgent.value.workOptions.push({
+    priority: newPriority,
+    engine: newOptionEngine.value,
+    model: newOptionModel.value.trim() || 'default-model',
+    effort: newOptionEffort.value,
+    isConfigured: true,
+  });
+  isAddOptionOpen.value = false;
+  newOptionModel.value = 'claude-3-7-sonnet';
+}
 
 const newAgentName = ref('');
 const newAgentRole = ref('');
@@ -410,41 +494,144 @@ const selectedAgent = computed(() => {
               <p class="text-[var(--text-primary)] leading-relaxed">{{ selectedAgent.standingInstructions }}</p>
             </div>
 
-            <!-- Ordered Work Options (Grid on wide screens) -->
+            <!-- Ordered Work Options (Execution Preferences) with Drag-and-Drop Reorder -->
             <div class="flex flex-col gap-2.5">
-              <div class="flex items-center justify-between">
-                <strong class="text-xs uppercase tracking-wider text-[var(--text-muted)] font-bold">
-                  Ordered Work Options (Priority & Fallbacks)
-                </strong>
-                <span class="text-[10px] text-[var(--text-muted)]">Minimum 1 option guard</span>
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <strong class="text-xs uppercase tracking-wider text-[var(--text-muted)] font-bold block">
+                    Ordered Execution Preferences (Work Options)
+                  </strong>
+                  <p class="text-[11px] text-[var(--text-muted)] mt-0.5">
+                    Drag to reorder priority. Evaluated at run admission in top-to-bottom order.
+                  </p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-[10px] text-[var(--text-muted)]">Minimum 1 option guard</span>
+                  <Button
+                    v-if="selectedAgent.status === 'active'"
+                    variant="secondary"
+                    size="xs"
+                    class="add-option-btn"
+                    @click="isAddOptionOpen = true"
+                  >
+                    <Icon name="plus" :size="12" />
+                    <span>Add Option</span>
+                  </Button>
+                </div>
               </div>
 
-              <div class="grid grid-cols-1 xl:grid-cols-3 gap-2.5">
+              <!-- Draggable Options List -->
+              <div class="agent-options-drag-list flex flex-col gap-2">
                 <div
-                  v-for="opt in selectedAgent.workOptions"
-                  :key="opt.priority"
-                  class="p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex flex-col justify-between gap-2"
+                  v-for="(opt, idx) in selectedAgent.workOptions"
+                  :key="opt.engine + opt.model + idx"
+                  class="agent-option-row p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between gap-3 transition-all select-none"
+                  :class="[
+                    draggedOptionIndex === idx ? 'opacity-40 border-dashed border-[var(--accent-primary)] bg-[var(--bg-surface)]' : '',
+                    dragOverOptionIndex === idx ? 'border-t-2 border-t-[var(--accent-primary)] bg-[var(--accent-bg)]' : '',
+                    selectedAgent.status === 'active' ? 'cursor-grab active:cursor-grabbing' : ''
+                  ]"
+                  :draggable="selectedAgent.status === 'active'"
+                  :data-index="idx"
+                  @dragstart="handleDragStart(idx, $event)"
+                  @dragover="handleDragOver(idx, $event)"
+                  @dragleave="handleDragLeave(idx)"
+                  @drop="handleDrop(idx, $event)"
+                  @dragend="handleDragEnd"
+                  @keydown.up.prevent="moveOption(idx, idx - 1)"
+                  @keydown.down.prevent="moveOption(idx, idx + 1)"
                 >
-                  <div class="flex items-center justify-between">
-                    <span class="w-5 h-5 rounded-full bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold text-[10px] flex items-center justify-center">
-                      {{ opt.priority }}
+                  <!-- Left: Drag handle + option info -->
+                  <div class="agent-option-info flex items-center gap-2.5 min-w-0 flex-wrap flex-1">
+                    <div
+                      v-if="selectedAgent.status === 'active'"
+                      class="drag-handle-wrap cursor-grab active:cursor-grabbing p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+                      tabindex="0"
+                      role="button"
+                      :title="`Drag or press Up/Down arrows to reorder priority for ${opt.engine}`"
+                      :aria-label="`Reorder priority for ${opt.engine} option`"
+                      @keydown.up.prevent="moveOption(idx, idx - 1)"
+                      @keydown.down.prevent="moveOption(idx, idx + 1)"
+                    >
+                      <Icon name="grip-vertical" :size="14" />
+                    </div>
+
+                    <Badge :variant="idx === 0 ? 'info' : 'secondary'" class="text-[10px] font-bold shrink-0">
+                      Priority {{ idx + 1 }}{{ idx === 0 ? ' (Primary)' : ' (Fallback)' }}
+                    </Badge>
+
+                    <strong class="text-xs font-bold text-[var(--text-primary)]">{{ opt.engine.toUpperCase() }}</strong>
+
+                    <span class="text-xs text-[var(--text-secondary)] font-mono truncate">
+                      Model: <code class="text-[var(--accent-primary)]">{{ opt.model }}</code>
                     </span>
-                    <Badge :variant="opt.isConfigured ? 'success' : 'danger'">
-                      {{ opt.isConfigured ? 'Configured' : 'Missing' }}
+
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[var(--purple-agent-bg)] text-[var(--purple-agent)] border border-[var(--purple-agent-border)] shrink-0">
+                      Effort: {{ opt.effort }}
+                    </span>
+
+                    <Badge :variant="opt.isConfigured ? 'success' : 'danger'" class="text-[10px] shrink-0">
+                      {{ opt.isConfigured ? 'Configured & Ready' : 'Missing' }}
                     </Badge>
                   </div>
-                  <div>
-                    <strong class="text-xs font-bold text-[var(--text-primary)] block">{{ opt.engine.toUpperCase() }}</strong>
-                    <span class="text-xs text-[var(--text-secondary)] font-mono">{{ opt.model }}</span>
-                  </div>
-                  <div class="text-[10px] text-[var(--text-muted)] pt-1 border-t border-[var(--border-subtle)]">
-                    Effort: {{ opt.effort }}
+
+                  <!-- Right: Action buttons (Up/Down for touch & accessibility + Delete) -->
+                  <div v-if="selectedAgent.status === 'active'" class="agent-option-actions flex items-center gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      class="move-opt-up-btn h-7 w-7 p-0 flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      :disabled="idx === 0"
+                      title="Move priority up"
+                      :aria-label="`Move ${opt.engine} priority up`"
+                      @click.stop="moveOption(idx, idx - 1)"
+                    >
+                      <Icon name="arrow-up" :size="12" />
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      class="move-opt-down-btn h-7 w-7 p-0 flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      :disabled="idx === selectedAgent.workOptions.length - 1"
+                      title="Move priority down"
+                      :aria-label="`Move ${opt.engine} priority down`"
+                      @click.stop="moveOption(idx, idx + 1)"
+                    >
+                      <Icon name="arrow-down" :size="12" />
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      class="delete-opt-btn h-7 w-7 p-0 flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red-action)]"
+                      :disabled="selectedAgent.workOptions.length <= 1"
+                      :title="selectedAgent.workOptions.length <= 1 ? 'An Agent must have at least one work option' : 'Remove Option'"
+                      aria-label="Remove Option"
+                      @click.stop="deleteOption(idx)"
+                    >
+                      <Icon name="trash" :size="12" />
+                    </Button>
                   </div>
                 </div>
 
-                <div v-if="selectedAgent.workOptions.length === 0" class="text-xs text-[var(--text-muted)] italic py-1 col-span-3">
-                  No work options configured for this archived persona.
+                <div v-if="selectedAgent.workOptions.length === 0" class="text-xs text-[var(--text-muted)] italic py-2 text-center">
+                  No work options configured for this persona.
                 </div>
+              </div>
+
+              <!-- Pre-Acceptance Fallback & No-Replay Guarantee Card -->
+              <div class="agent-fallback-box p-3 rounded-[var(--radius-sm)] border border-[var(--accent-border)] bg-[var(--bg-surface-elevated)] flex flex-col gap-1 text-xs text-[var(--text-secondary)]">
+                <div class="flex items-center gap-1.5 text-[var(--accent-primary)] font-bold">
+                  <Icon name="shield" :size="14" />
+                  <span>Pre-Acceptance Fallback & No-Silent-Replay Guarantee</span>
+                </div>
+                <p class="leading-relaxed">
+                  1. <strong>Pre-Acceptance Fallback</strong>: At run admission, Sprout takes the first configured option permitted and authenticated on the target host.
+                </p>
+                <p class="leading-relaxed">
+                  2. <strong>No Silent Replay</strong>: Once an engine accepts the run, any later failure reports directly. Sprout <em>never</em> silently replays work through lower-priority options because tools may have caused irreversible side effects.
+                </p>
               </div>
             </div>
 
@@ -572,6 +759,64 @@ const selectedAgent = computed(() => {
       <template #footer>
         <Button variant="primary" size="sm" class="close-agent-guide-btn" @click="isAgentGuideOpen = false">
           Close Guide
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- Add Work Option Modal -->
+    <Dialog
+      :open="isAddOptionOpen"
+      :title="`Add Work Option (Priority ${selectedAgent ? selectedAgent.workOptions.length + 1 : 1})`"
+      description="Configure an execution fallback option. Sprout evaluates options in priority order at run admission."
+      @update:open="isAddOptionOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="flex flex-col gap-1">
+          <label for="add-opt-engine" class="font-bold text-[var(--text-primary)]">Engine *</label>
+          <select
+            id="add-opt-engine"
+            v-model="newOptionEngine"
+            class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+          >
+            <option value="Pi">Pi</option>
+            <option value="Codex">Codex</option>
+            <option value="agy">agy</option>
+            <option value="opencode">opencode</option>
+          </select>
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="add-opt-model" class="font-bold text-[var(--text-primary)]">Work Model *</label>
+          <input
+            id="add-opt-model"
+            v-model="newOptionModel"
+            type="text"
+            placeholder="e.g. claude-3-7-sonnet"
+            class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="add-opt-effort" class="font-bold text-[var(--text-primary)]">Reasoning Effort</label>
+          <select
+            id="add-opt-effort"
+            v-model="newOptionEffort"
+            class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+          >
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+            <option value="default">default</option>
+          </select>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" class="cancel-add-option-btn" @click="isAddOptionOpen = false">
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" class="confirm-add-option-btn" :disabled="!newOptionModel.trim()" @click="handleAddOption">
+          Add Option
         </Button>
       </template>
     </Dialog>

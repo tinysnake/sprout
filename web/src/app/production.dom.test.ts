@@ -950,6 +950,31 @@ test('Production Web: agent creation and architecture guide action dialogs', asy
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
 
+    // Test Ordered Work Options reordering (drag handle, move down, move up, add option)
+    const dragRows = doc.querySelectorAll('.agent-option-row');
+    assert.ok(dragRows.length >= 2, 'Work option rows rendered for reordering');
+    assert.ok(doc.querySelector('.drag-handle-wrap'), 'Drag handles present');
+
+    // Move first option down
+    const moveDownBtn = doc.querySelector('.move-opt-down-btn') as HTMLButtonElement;
+    assert.ok(moveDownBtn, 'Move down button found');
+    moveDownBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify first option is now CODEX (Priority 1)
+    const firstRowText = doc.querySelectorAll('.agent-option-row')[0]?.textContent ?? '';
+    assert.match(firstRowText, /CODEX/);
+
+    // Move second option back up
+    const secondRow = doc.querySelectorAll('.agent-option-row')[1];
+    const moveUpBtn = secondRow?.querySelector('.move-opt-up-btn') as HTMLButtonElement;
+    assert.ok(moveUpBtn, 'Move up button on second row found');
+    moveUpBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const restoredFirstText = doc.querySelectorAll('.agent-option-row')[0]?.textContent ?? '';
+    assert.match(restoredFirstText, /PI/);
+
     app.unmount();
   } finally {
     await cleanup();
