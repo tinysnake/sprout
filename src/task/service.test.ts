@@ -505,7 +505,7 @@ test('Tasks, their status, and their run summaries survive a process restart', a
   const path = join(directory, 'sprout.db');
   try {
     const store = new SqliteStore({ filename: path });
-    const taskStore = new SqliteTaskStore({ db: store.db });
+    const taskStore = new SqliteTaskStore({ db: store.db, leases: store.leases });
     const first = build({ taskStore });
     const task = await first.service.create({
       projectId: 'project-sprout',
@@ -537,7 +537,7 @@ test('an orphaned Task run is reconciled to blocked after a restart', async () =
   try {
     // First process: create a Task run but leave it recorded mid-flight.
     const first = new SqliteStore({ filename: path });
-    const taskStore = new SqliteTaskStore({ db: first.db });
+    const taskStore = new SqliteTaskStore({ db: first.db, leases: first.leases });
     await taskStore.create({
       id: 'task-1',
       projectId: 'project-sprout',

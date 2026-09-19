@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { EnvironmentLease, LeaseState, LeaseStore } from './pool.ts';
+import type { EnvironmentLease, LeaseState, LeaseStore, TaskLeaseBinding } from './pool.ts';
 
 /**
  * SQLite-backed storage for environment leases (ADR-0002).
@@ -11,8 +11,15 @@ import type { EnvironmentLease, LeaseState, LeaseStore } from './pool.ts';
  * durable state the run and Task domains use (which is what lets a Task's begin
  * and terminal transitions bind a Task lease in one transaction).
  *
- * The SQL, table, columns, and migration behaviour are unchanged from the M1
- * adapter; this file only relocates the class from `run/` to `environment/`.
+ * Besides the plain `LeaseStore` surface it implements the `TaskLeaseBinding`
+ * port, so the Task lifecycle's atomic begin/end boundaries run this domain's
+ * lease statements rather than duplicating them; those methods issue no
+ * `BEGIN`/`COMMIT` of their own and rely on the shared `TransactionCoordinator`
+ * to hold the boundary.
+ *
+ * The plain `LeaseStore` SQL, table, columns, and migration behaviour are
+ * unchanged from the M1 adapter; this file only relocates the class from `run/`
+ * to `environment/` and adds the boundary methods whose SQL also came from M1.
  */
 
 interface LeaseRow {
@@ -28,7 +35,7 @@ interface LeaseRow {
   readonly state: string;
 }
 
-export class SqliteLeaseStore implements LeaseStore {
+export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
   readonly #db: DatabaseSync;
   readonly #ownsDb: boolean;
 
@@ -99,6 +106,48 @@ export class SqliteLeaseStore implements LeaseStore {
       .prepare('SELECT * FROM environment_leases WHERE id = ?')
       .get(leaseId) as unknown | undefined;
     return row ? toLease(row as LeaseRow) : undefined;
+  }
+
+  /**
+   * The Task-held lease statements a Task's atomic begin boundary needs.
+   *
+   * These issue no `BEGIN`/`COMMIT`: the Task store opens one shared
+   * transaction through the `TransactionCoordinator` and calls them inside it,
+   * so a Task row and its Task-held lease commit or roll back as one state.
+   * The statements and the conflict semantics are exactly the ones M1 ran from
+   * inside the Task adapter; only their owner moved here.
+   */
+  insertTaskHeldLease(lease: EnvironmentLease): void {
+    const conflict = this.#db.prepare(
+      `SELECT id FROM environment_leases
+        WHERE instance_id = ? AND state IN ('active', 'recovering') LIMIT 1`,
+    ).get(lease.instanceId);
+    if (conflict) throw new Error(`environment ${lease.instanceId} is unavailable`);
+    this.#db
+      .prepare(
+        `INSERT INTO environment_leases
+       (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(lease.id, lease.instanceId, lease.capability, lease.holderId, 'task', lease.runId ?? null,
+        lease.taskId ?? null, lease.acquiredAt, lease.expiresAt, lease.state);
+  }
+
+  /**
+   * The Task-held lease statements a Task's atomic end boundary needs.
+   *
+   * An already-released or foreign lease is refused rather than silently
+   * treated as cleanup. Called inside the shared transaction so the release and
+   * the terminal Task row commit together.
+   */
+  markTaskLeaseReleased(leaseId: string, taskId: string): void {
+    const lease = this.#db.prepare(
+      `SELECT holder_kind, task_id FROM environment_leases WHERE id = ?`,
+    ).get(leaseId) as { holder_kind: string | null; task_id: string | null } | undefined;
+    if (!lease || lease.holder_kind !== 'task' || lease.task_id !== taskId) {
+      throw new Error(`task ${taskId} lease could not be released after cleanup`);
+    }
+    this.#db.prepare(`UPDATE environment_leases SET state = 'released' WHERE id = ?`).run(leaseId);
   }
 
   list(): readonly EnvironmentLease[] {

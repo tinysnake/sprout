@@ -33,6 +33,9 @@ import { SqliteStore } from '../store/db.ts';
 import { SqliteRunStore } from '../run/sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
+import { SqliteTaskStore } from '../task/sqlite-store.ts';
+import type { TaskLeaseBinding } from '../environment/pool.ts';
+import type { Task } from '../task/model.ts';
 
 interface ColumnShape {
   readonly name: string;
@@ -159,6 +162,20 @@ function withStore(run: (store: SqliteStore) => Promise<void> | void): Promise<v
       store.close();
       rmSync(directory, { recursive: true, force: true });
     });
+}
+
+function sampleTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: 'task-1',
+    projectId: 'project-sprout',
+    title: 'Owned lease boundary',
+    goal: 'Commit the Task and its lease together.',
+    constraints: [],
+    status: 'todo',
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
 }
 
 test('the composed handle declares the same nine tables with the same columns', async () => {
@@ -374,6 +391,178 @@ test('a database written with the pre-rehome schema still opens and reads back',
     const leases = new SqliteLeaseStore({ filename: path });
     assert.equal(leases.get('legacy-lease')?.taskId, 'task-1');
     leases.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * F1 regression evidence (#81 rework).
+ *
+ * The reviewer found that `SqliteTaskStore` still issued `environment_leases`
+ * SQL directly while `SqliteLeaseStore` separately owned that table. These tests
+ * pin the two properties the fix must hold:
+ *
+ * 1. **One owner for lease SQL.** The Task adapter has no lease SQL of its own;
+ *    the begin/end boundary runs the environment domain's statements through a
+ *    bound `TaskLeaseBinding`, and the shared handle owns the transaction.
+ * 2. **The atomic boundary is unchanged.** A Task begin writes the Task row and
+ *    its Task lease in one `BEGIN IMMEDIATE` … `COMMIT`, and a failing begin
+ *    rolls back both, exactly as M1 did.
+ */
+
+test('a Task begin/end boundary calls the bound environment lease adapter, not lease SQL of its own', async () => {
+  const calls: string[] = [];
+  const binding: TaskLeaseBinding = {
+    insertTaskHeldLease: (lease) => { calls.push(`insert:${lease.id}`); },
+    markTaskLeaseReleased: (leaseId) => { calls.push(`release:${leaseId}`); },
+  };
+  const store = new SqliteTaskStore({ filename: ':memory:', leases: binding });
+  await store.create(sampleTask());
+  const lease = {
+    id: 'lease-1', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+    holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
+  };
+  await store.saveBeginningWithLease(sampleTask({ environmentLeaseId: 'lease-1' }), lease);
+  await store.saveTerminalWithLease(sampleTask({ environmentLeaseId: 'lease-1' }), 'lease-1');
+  assert.deepEqual(calls, ['insert:lease-1', 'release:lease-1'], 'lease SQL is delegated to the environment port');
+
+  // A store constructed without the environment port refuses a lease boundary
+  // rather than issuing lease SQL itself or committing half of it.
+  const bare = new SqliteTaskStore({ filename: ':memory:' });
+  await bare.create(sampleTask());
+  await assert.rejects(bare.saveBeginningWithLease(sampleTask(), lease), /no Environment lease adapter/);
+  store.close();
+  bare.close();
+});
+
+test('the composed handle binds the Task adapter to the environment lease port and one coordinator', async () => {
+  await withStore((store) => {
+    assert.equal(typeof store.transactions.immediate, 'function');
+    // The Task store answers a begin boundary by writing the lease row through
+    // the environment adapter, proving the mount is wired, not merely typed.
+    const lease = {
+      id: 'lease-bound', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+      holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
+    };
+    return (async () => {
+      await store.tasks.create(sampleTask());
+      await store.tasks.saveBeginningWithLease(sampleTask({ environmentLeaseId: 'lease-bound', assignedAgentId: 'pi' }), lease);
+      assert.deepEqual(store.leases.get('lease-bound'), lease);
+    })();
+  });
+});
+
+test('a failing Task begin rolls back both the Task row and the lease in the one shared transaction', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-f1-atomic-'));
+  const path = join(directory, 'sprout.db');
+  try {
+    const store = new SqliteStore({ filename: path });
+    await store.tasks.create(sampleTask());
+
+    // A conflicting live lease makes the boundary throw after the conflict read;
+    // neither the Task write nor any lease row may survive.
+    store.leases.insertTaskHeldLease({
+      id: 'lease-live', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'run-1',
+      holderKind: 'run', runId: 'run-1', acquiredAt: 1, expiresAt: 9_999_999_999, state: 'active',
+    });
+    await assert.rejects(
+      store.tasks.saveBeginningWithLease(
+        sampleTask({ environmentLeaseId: 'lease-new', environmentLifecycleState: 'beginning', assignedAgentId: 'pi' }),
+        { id: 'lease-new', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+          holderKind: 'task', taskId: 'task-1', acquiredAt: 2, expiresAt: 3, state: 'active' },
+      ),
+      /unavailable/,
+    );
+    assert.equal(store.leases.get('lease-new'), undefined, 'no partial lease row survives a failed begin');
+    assert.equal((await store.tasks.get('task-1'))?.environmentLifecycleState, undefined, 'no partial Task write survives');
+    assert.equal(store.leases.list().length, 1, 'only the pre-existing lease remains');
+    store.close();
+
+    // Reopening the file after the rolled-back boundary shows the same durable
+    // state: the boundary is atomic across a restart, not only in memory.
+    const reopened = new SqliteStore({ filename: path });
+    assert.equal(reopened.leases.get('lease-new'), undefined);
+    assert.equal(reopened.leases.list().length, 1);
+    reopened.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a Task begin then end commits and releases its Task-held lease in one boundary each', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-f1-commit-'));
+  const path = join(directory, 'sprout.db');
+  try {
+    const store = new SqliteStore({ filename: path });
+    await store.tasks.create(sampleTask());
+    const lease = {
+      id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+      holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
+    };
+    await store.tasks.saveBeginningWithLease(
+      sampleTask({ environmentLeaseId: 'lease-task', environmentLifecycleState: 'beginning', assignedAgentId: 'pi' }),
+      lease,
+    );
+    assert.equal(store.leases.get('lease-task')?.state, 'active');
+
+    await store.tasks.saveTerminalWithLease(
+      sampleTask({ status: 'done', environmentLeaseId: 'lease-task', environmentLifecycleState: 'ended', completedAt: 5 }),
+      'lease-task',
+    );
+    assert.equal(store.leases.get('lease-task')?.state, 'released');
+    assert.equal((await store.tasks.get('task-1'))?.environmentLifecycleState, 'ended');
+    store.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * S1 evidence (#81 review suggestion): a write/reopen round-trip across every
+ * composed adapter, including the Task-held atomic lease path, so the move's
+ * compatibility claim is asserted by a durable test rather than only by an
+ * external byte probe.
+ */
+test('every composed adapter writes, reopens from the file, and reads back', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-f1-reopen-'));
+  const path = join(directory, 'sprout.db');
+  try {
+    const first = new SqliteStore({ filename: path });
+    await first.tasks.create(sampleTask());
+    await first.tasks.saveBeginningWithLease(
+      sampleTask({ environmentLeaseId: 'lease-task', environmentLifecycleState: 'beginning', assignedAgentId: 'pi' }),
+      { id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+        holderKind: 'task', taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' },
+    );
+    await first.tasks.linkRun({ taskId: 'task-1', runId: 'run-1', agentId: 'agent-scout', now: 3 });
+    await first.runs.save({
+      id: 'run-1', agentId: 'agent-scout', prompt: 'go', environmentInstanceId: 'mac-mini-1',
+      projectId: 'project-sprout', taskId: 'task-1', status: 'completed', events: [],
+      tokenUsage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 }, createdAt: 4, completedAt: 5,
+    });
+    await first.sessionKeys.save({
+      agentId: 'agent-scout', engine: 'scripted', environmentInstanceId: 'mac-mini-1',
+      workingDirectory: '/work', key: 'sk-1', updatedAt: 6,
+    });
+    await first.collaboration.postMessage({
+      message: { id: 'msg-1', projectId: 'project-sprout', channel: 'project',
+        author: { id: 'agent-scout', kind: 'agent' }, body: 'hi', recipients: [], deliveryKey: 'd-1', createdAt: 7 },
+      plan: { messageId: 'msg-1', decisions: [{ agentId: 'agent-scout', reason: 'direct-recipient' }], observations: [] },
+      now: 7,
+    });
+    first.close();
+
+    const reopened = new SqliteStore({ filename: path });
+    assert.equal((await reopened.tasks.get('task-1'))?.environmentLifecycleState, 'beginning');
+    assert.equal(reopened.leases.get('lease-task')?.state, 'active');
+    assert.equal((await reopened.tasks.listRuns('task-1')).length, 1);
+    assert.equal((await reopened.runs.get('run-1'))?.tokenUsage?.totalTokens, 3);
+    assert.equal((await reopened.sessionKeys.get({
+      agentId: 'agent-scout', engine: 'scripted', environmentInstanceId: 'mac-mini-1', workingDirectory: '/work',
+    }))?.key, 'sk-1');
+    assert.equal((await reopened.collaboration.listWakeRequests()).length, 1);
+    reopened.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

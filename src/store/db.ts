@@ -5,6 +5,7 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
+import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 
 /**
  * The shared SQLite persistence handle for Sprout (ADR-0002).
@@ -23,9 +24,12 @@ import { SqliteTaskStore } from '../task/sqlite-store.ts';
  *   (`collaboration/sqlite-store.ts`)
  *
  * Mounting every adapter on one handle is what lets a domain's multi-table
- * transaction commit against the same durable state a restart reconciles: a
- * Task's begin and terminal transitions bind a Task lease in one transaction,
- * and a Message commits together with every wake request it implies.
+ * transaction commit against the same durable state a restart reconciles. The
+ * Task lifecycle commits its Task row together with its Task-held lease in one
+ * boundary: the environment adapter owns the lease statements, the Task adapter
+ * owns the Task statements, and this handle binds them through one shared
+ * `TransactionCoordinator` over the one connection. No adapter begins or ends a
+ * transaction over another domain's table.
  *
  * The class name and its `runs`/`leases`/`projects`/`sessionKeys`/
  * `collaboration`/`tasks` surface are unchanged from M1; this file only moves the
@@ -40,6 +44,7 @@ export interface SqliteStoreOptions {
 
 export class SqliteStore {
   readonly db: DatabaseSync;
+  readonly transactions: TransactionCoordinator;
   readonly runs: SqliteRunStore;
   readonly leases: SqliteLeaseStore;
   readonly projects: SqliteProjectStore;
@@ -49,12 +54,19 @@ export class SqliteStore {
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    // The one connection's transaction lifecycle: a cross-domain boundary (the
+    // Task begin/end lease binding) runs through this, so neither the Task nor
+    // the environment adapter owns `BEGIN`/`COMMIT` on the other's table.
+    this.transactions = createTransactionCoordinator(this.db);
     this.runs = new SqliteRunStore({ db: this.db });
     this.leases = new SqliteLeaseStore({ db: this.db });
     this.projects = new SqliteProjectStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
-    this.tasks = new SqliteTaskStore({ db: this.db });
+    // The Task adapter is given the environment domain's lease-binding port, so
+    // its begin/end boundaries call lease SQL the environment owns rather than
+    // issuing `environment_leases` statements itself.
+    this.tasks = new SqliteTaskStore({ db: this.db, leases: this.leases, transactions: this.transactions });
   }
 
   close(): void {
