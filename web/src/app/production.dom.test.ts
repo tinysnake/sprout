@@ -445,12 +445,10 @@ test('Production Web: deep-link return context banner preserves navigation histo
     await new Promise((resolve) => setTimeout(resolve, 80));
     const doc = dom.window.document;
 
-    // On Feed view, click the deep-link button
-    const inspectBtn = Array.from(doc.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Inspect in Manage / Environments')
-    );
-    assert.ok(inspectBtn, 'Deep-link inspect button found on Feed view');
-    inspectBtn.click();
+    // On Feed view, click the attention card directly (clean clickable card with no redundant inspect button)
+    const attentionCard = doc.querySelector('.feed-attention-card') as HTMLButtonElement;
+    assert.ok(attentionCard, 'Attention card found on Feed view');
+    attentionCard.click();
 
     await new Promise((resolve) => setTimeout(resolve, 80));
 

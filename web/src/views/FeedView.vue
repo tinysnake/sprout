@@ -350,7 +350,7 @@ function handleNavigate(path: string) {
               v-for="item in filteredAttentionItems"
               :key="item.id"
               type="button"
-              class="text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
+              class="feed-attention-card text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
               :class="item.severity === 'action_required' ? 'border-l-4 border-l-[var(--red-action)] border-[var(--border-subtle)]' : item.severity === 'attention' ? 'border-l-4 border-l-[var(--yellow-attention)] border-[var(--border-subtle)]' : 'border-l-4 border-l-[var(--purple-agent)] border-[var(--border-subtle)]'"
               @click="handleNavigate(item.targetPath)"
             >
@@ -383,9 +383,6 @@ function handleNavigate(path: string) {
                   <span>•</span>
                   <span>{{ item.timestamp }}</span>
                 </div>
-                <span class="text-xs font-semibold text-[var(--accent-primary)] hover:underline flex items-center gap-1">
-                  Inspect in Manage / Environments →
-                </span>
               </div>
             </button>
           </div>
@@ -407,7 +404,7 @@ function handleNavigate(path: string) {
               v-for="task in activeTasks"
               :key="task.id"
               type="button"
-              class="text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
+              class="feed-task-card text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
               @click="openTaskDetail(task)"
             >
               <div>
@@ -435,10 +432,6 @@ function handleNavigate(path: string) {
                     Goal: {{ task.goal }}
                   </div>
                 </div>
-              </div>
-
-              <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-end text-xs font-semibold text-[var(--accent-primary)]">
-                <span>Inspect Task Details →</span>
               </div>
             </button>
           </div>
