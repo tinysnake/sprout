@@ -115,7 +115,7 @@ export class SqliteStore {
     this.projects = new SqliteProjectStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
-    this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db });
+    this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than
     // issuing `environment_leases` statements itself.

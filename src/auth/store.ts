@@ -31,6 +31,12 @@ export interface BrowserSessionRecord {
 export interface OperatorSessionStore {
   getOperator(): Promise<OperatorCredentialRecord | undefined>;
   saveOperator(record: OperatorCredentialRecord): Promise<void>;
+  /**
+   * Commit a replacement credential and revoke every active browser session as
+   * one durable rotation boundary. `false` means another writer changed the
+   * single operator version before this rotation acquired that boundary.
+   */
+  rotateOperator(record: OperatorCredentialRecord, expectedVersion: number, at: number): Promise<boolean>;
   getSessionByTokenHash(tokenHash: string): Promise<BrowserSessionRecord | undefined>;
   createSession(record: BrowserSessionRecord): Promise<void>;
   listSessions(): Promise<readonly BrowserSessionRecord[]>;
@@ -39,7 +45,6 @@ export interface OperatorSessionStore {
   revokeExpiredSessions(at: number): Promise<number>;
   revokeSession(id: string, at: number): Promise<boolean>;
   revokeSessionsExcept(id: string, at: number): Promise<number>;
-  revokeAllSessions(at: number): Promise<number>;
 }
 
 /** In-memory implementation for composition and HTTP-contract tests. */
@@ -53,6 +58,15 @@ export class InMemoryOperatorSessionStore implements OperatorSessionStore {
 
   async saveOperator(record: OperatorCredentialRecord): Promise<void> {
     this.#operator = record;
+  }
+
+  async rotateOperator(record: OperatorCredentialRecord, expectedVersion: number, at: number): Promise<boolean> {
+    if (this.#operator?.version !== expectedVersion) return false;
+    this.#operator = record;
+    for (const session of this.#sessions.values()) {
+      if (session.revokedAt === undefined) this.#sessions.set(session.id, { ...session, revokedAt: at });
+    }
+    return true;
   }
 
   async getSessionByTokenHash(tokenHash: string): Promise<BrowserSessionRecord | undefined> {
@@ -103,14 +117,4 @@ export class InMemoryOperatorSessionStore implements OperatorSessionStore {
     return revoked;
   }
 
-  async revokeAllSessions(at: number): Promise<number> {
-    let revoked = 0;
-    for (const session of this.#sessions.values()) {
-      if (session.revokedAt === undefined) {
-        this.#sessions.set(session.id, { ...session, revokedAt: at });
-        revoked += 1;
-      }
-    }
-    return revoked;
-  }
 }

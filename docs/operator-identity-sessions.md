@@ -11,8 +11,11 @@ separate sessions of that identity.
 read through `HostConfiguration`, never runtime JSON. On a new durable store it
 initializes the operator identity. Supplying the same value after a normal
 restart keeps existing sessions. Supplying a different host-local value is
-recovery/rotation: it replaces the stored verifier and invalidates every browser
-session. No Web API can initialize, recover, rotate, or export this input.
+recovery/rotation: one SQLite transaction replaces the stored verifier and
+invalidates every browser session. A failed or interrupted transaction leaves
+the prior identity and its sessions together; it never persists a replacement
+verifier beside active sessions from an earlier credential version. No Web API
+can initialize, recover, rotate, or export this input.
 
 The durable store retains an scrypt verifier and salt, not the host input. It
 retains SHA-256 digests for browser bearer and request-forgery values, not their

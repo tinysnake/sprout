@@ -54,15 +54,23 @@ export class OperatorSessionService {
    */
   async initializeOrRecover(hostCredential: string | undefined): Promise<void> {
     if (!hostCredential) return;
-    const existing = await this.#store.getOperator();
-    const now = this.#clock();
-    if (!existing) {
-      await this.#store.saveOperator(this.#newCredential(hostCredential, 1, now, now));
-      return;
+    for (;;) {
+      const existing = await this.#store.getOperator();
+      const now = this.#clock();
+      if (!existing) {
+        await this.#store.saveOperator(this.#newCredential(hostCredential, 1, now, now));
+        return;
+      }
+      if (verifyCredential(hostCredential, existing)) return;
+      const rotated = await this.#store.rotateOperator(
+        this.#newCredential(hostCredential, existing.version + 1, existing.createdAt, now),
+        existing.version,
+        now,
+      );
+      if (rotated) return;
+      // A concurrent host recovery won the version check. Re-read before
+      // deciding whether this host input is now current or needs a new rotation.
     }
-    if (verifyCredential(hostCredential, existing)) return;
-    await this.#store.saveOperator(this.#newCredential(hostCredential, existing.version + 1, existing.createdAt, now));
-    await this.#store.revokeAllSessions(now);
   }
 
   async isConfigured(): Promise<boolean> {

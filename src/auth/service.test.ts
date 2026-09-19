@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import test from 'node:test';
 import { OperatorSessionService } from './service.ts';
 import { InMemoryOperatorSessionStore } from './store.ts';
 import { SqliteOperatorSessionStore } from './sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from './session-policy.ts';
 
 /** Inputs are generated at test time, never committed as credentials or tokens. */
@@ -74,6 +76,66 @@ test('session revocation, revoke-others, and host recovery remain durable across
   assert.equal((await restarted.authenticate(current.bearerToken)).authenticated, false);
   assert.equal((await restarted.listSessions(currentAuth.session.id)).length, 0);
   restartedStore.close();
+});
+
+test('M77-AUTH-003: an interrupted credential rotation cannot persist a replacement beside active sessions', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-auth-rotation-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'sprout.db');
+  const priorCredential = privateInput();
+  const replacementCredential = privateInput();
+
+  const firstStore = new SqliteStore({ filename });
+  const first = new OperatorSessionService({ store: firstStore.operatorSessions });
+  await first.initializeOrRecover(priorCredential);
+  const firstSession = await first.signIn(priorCredential);
+  const secondSession = await first.signIn(priorCredential);
+  assert.ok(firstSession);
+  assert.ok(secondSession);
+  firstStore.close();
+
+  // Inject a failure in the second write of rotation, after the replacement
+  // verifier UPDATE would have run. SQLite must roll that first write back too.
+  const injector = new DatabaseSync(filename);
+  injector.exec(`
+    CREATE TRIGGER fail_rotation_session_revoke
+    BEFORE UPDATE OF revoked_at ON browser_sessions
+    WHEN NEW.revoked_at IS NOT NULL
+    BEGIN SELECT RAISE(ABORT, 'injected rotation interruption'); END;
+  `);
+  injector.close();
+
+  const interruptedStore = new SqliteStore({ filename });
+  const interrupted = new OperatorSessionService({ store: interruptedStore.operatorSessions });
+  await assert.rejects(() => interrupted.initializeOrRecover(replacementCredential), /injected rotation interruption/);
+  interruptedStore.close();
+
+  // A fresh process sees the old complete identity, not a replacement version
+  // with sessions left active/listed. The uncommitted replacement cannot sign in.
+  const restartedStore = new SqliteStore({ filename });
+  const restarted = new OperatorSessionService({ store: restartedStore.operatorSessions });
+  assert.equal(await restarted.signIn(replacementCredential), undefined);
+  assert.equal((await restarted.authenticate(firstSession.bearerToken)).authenticated, true);
+  const firstAuth = await restarted.authenticate(firstSession.bearerToken);
+  assert.equal(firstAuth.authenticated, true);
+  if (!firstAuth.authenticated) return;
+  assert.equal((await restarted.listSessions(firstAuth.session.id)).length, 2);
+  restartedStore.close();
+
+  const cleanup = new DatabaseSync(filename);
+  cleanup.exec('DROP TRIGGER fail_rotation_session_revoke');
+  cleanup.close();
+
+  // Retrying the host recovery commits both halves. No old bearer authenticates
+  // and no prior-version session remains in the active listing after restart.
+  const recoveredStore = new SqliteStore({ filename });
+  const recovered = new OperatorSessionService({ store: recoveredStore.operatorSessions });
+  await recovered.initializeOrRecover(replacementCredential);
+  assert.equal((await recovered.authenticate(firstSession.bearerToken)).authenticated, false);
+  assert.equal((await recovered.authenticate(secondSession.bearerToken)).authenticated, false);
+  assert.equal((await recovered.listSessions('none')).length, 0);
+  assert.ok(await recovered.signIn(replacementCredential));
+  recoveredStore.close();
 });
 
 test('a persisted finite session lifetime rejects expired authentication, CSRF, and session listing after restart', async (t) => {

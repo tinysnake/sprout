@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { BrowserSessionRecord, OperatorCredentialRecord, OperatorSessionStore } from './store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
+import { createTransactionCoordinator, type TransactionCoordinator } from '../store/transaction.ts';
 
 interface OperatorRow {
   readonly credential_hash: string;
@@ -27,11 +28,13 @@ interface SessionRow {
 export class SqliteOperatorSessionStore implements OperatorSessionStore {
   readonly #db: DatabaseSync;
   readonly #ownsDb: boolean;
+  readonly #transactions: TransactionCoordinator;
 
-  constructor(options: { filename: string } | { db: DatabaseSync }) {
+  constructor(options: { filename: string } | { db: DatabaseSync; transactions?: TransactionCoordinator }) {
     if ('db' in options) {
       this.#db = options.db;
       this.#ownsDb = false;
+      this.#transactions = options.transactions ?? createTransactionCoordinator(this.#db);
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
@@ -41,6 +44,7 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
         this.#db.close();
         throw error;
       }
+      this.#transactions = createTransactionCoordinator(this.#db);
     }
     this.#init();
   }
@@ -86,6 +90,22 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
         version = excluded.version,
         updated_at = excluded.updated_at
     `).run(record.credentialHash, record.credentialSalt, record.version, record.createdAt, record.updatedAt);
+  }
+
+  async rotateOperator(record: OperatorCredentialRecord, expectedVersion: number, at: number): Promise<boolean> {
+    // Credential replacement and session invalidation are one crash boundary.
+    // This uses the same connection as the composed SqliteStore, so no second
+    // writer can observe a replacement version with still-active old rows.
+    return this.#transactions.immediate(() => {
+      const replacement = this.#db.prepare(`
+        UPDATE operator_identity
+        SET credential_hash = ?, credential_salt = ?, version = ?, updated_at = ?
+        WHERE singleton = 1 AND version = ?
+      `).run(record.credentialHash, record.credentialSalt, record.version, record.updatedAt, expectedVersion);
+      if (replacement.changes !== 1) return false;
+      this.#db.prepare('UPDATE browser_sessions SET revoked_at = ? WHERE revoked_at IS NULL').run(at);
+      return true;
+    });
   }
 
   async getSessionByTokenHash(tokenHash: string): Promise<BrowserSessionRecord | undefined> {
@@ -138,10 +158,6 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
   async revokeSessionsExcept(id: string, at: number): Promise<number> {
     return Number(this.#db.prepare('UPDATE browser_sessions SET revoked_at = ? WHERE id != ? AND revoked_at IS NULL').run(at, id)
       .changes);
-  }
-
-  async revokeAllSessions(at: number): Promise<number> {
-    return Number(this.#db.prepare('UPDATE browser_sessions SET revoked_at = ? WHERE revoked_at IS NULL').run(at).changes);
   }
 
   close(): void {
