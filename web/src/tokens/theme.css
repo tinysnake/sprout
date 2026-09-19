@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "../prototype/prototype.css";
 
 @theme {
   --color-bg-app: var(--bg-app);
