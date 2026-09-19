@@ -39,6 +39,8 @@ function handleBack() {
       title="Back to Environments"
       aria-label="Back to environments list"
       @click="handleBack"
+      @keydown.enter="handleBack"
+      @keydown.space.prevent="handleBack"
     >
       <Icon name="chevron-left" :size="14" />
       <span class="back-btn-text">Back</span>

@@ -22,6 +22,14 @@ const emit = defineEmits<{
   (e: 'click', event: MouseEvent): void;
 }>();
 
+function handleKeyDown(event: KeyboardEvent) {
+  if (props.disabled) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    (event.currentTarget as HTMLElement | null)?.click();
+  }
+}
+
 const classes = computed(() => {
   const base =
     'inline-flex items-center justify-center font-medium rounded transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--border-focus)] disabled:opacity-50 disabled:pointer-events-none select-none cursor-pointer shrink-0';
@@ -59,6 +67,7 @@ const classes = computed(() => {
     :disabled="disabled"
     :class="classes"
     @click="(ev) => emit('click', ev)"
+    @keydown="handleKeyDown"
   >
     <slot />
   </button>

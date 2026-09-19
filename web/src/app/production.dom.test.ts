@@ -648,73 +648,138 @@ test('Production Web: accessible overlay interactions — keyboard activation, E
     await new Promise((resolve) => setTimeout(resolve, 80));
     const doc = dom.window.document;
 
-    // 1. Keyboard activation & Sheet consumption: Host Bootstrap Guide (#btn-host-guide)
+    // 1. Sheet Keyboard Activation (Enter/Space), Initial Focus, Action Target, and Focus Restoration (Ordinary Close & Escape)
     const guideBtn = doc.querySelector('#btn-host-guide') as HTMLButtonElement;
     assert.ok(guideBtn, 'Host Bootstrap Guide button found');
     guideBtn.focus();
-    assert.equal(doc.activeElement, guideBtn, 'Guide button receives keyboard focus');
+    assert.equal(doc.activeElement, guideBtn, 'Guide button receives initial keyboard focus');
 
-    // Activate with keyboard (click / Enter keydown)
-    guideBtn.click();
+    // 1a. Exercise actual keyboard activation using Enter key (no mouse .click())
+    guideBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    // Verify Sheet opened
+    // Verify Sheet overlay opened
     assert.match(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
     assert.match(doc.body.textContent ?? '', /macOS & Windows Service Setup and Security Guidelines/);
 
-    // Verify close button within Sheet works
+    // Verify initial focus moved inside the overlay to the expected accessible control (Sheet close button)
+    const sheetCloseHeaderBtn = doc.querySelector('[aria-label="Close sheet"]') as HTMLButtonElement;
+    assert.ok(sheetCloseHeaderBtn, 'Sheet header close button found');
+    assert.equal(doc.activeElement, sheetCloseHeaderBtn, 'Initial focus moved inside Sheet overlay to accessible close control');
+
+    // Reach action target inside Sheet: footer Close button activated via Space key
     const closeGuideBtn = doc.querySelector('.close-guide-btn') as HTMLButtonElement;
     assert.ok(closeGuideBtn, 'Close button in Sheet footer found');
-    closeGuideBtn.click();
+    closeGuideBtn.focus();
+    assert.equal(doc.activeElement, closeGuideBtn, 'Action target inside Sheet receives focus');
+    closeGuideBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    // Verify Sheet closed via close button
+    // Verify Sheet closed via keyboard activation of action target
     assert.doesNotMatch(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
+    // Verify focus restoration to opener button
+    assert.equal(doc.activeElement, guideBtn, 'Focus restored to opener button after ordinary close');
 
-    // Reopen Sheet to test Escape key dismissal
-    guideBtn.click();
+    // 1b. Reopen Sheet with Space key to test Escape key dismissal & focus restoration
+    guideBtn.focus();
+    guideBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.match(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
+    assert.equal(doc.activeElement, doc.querySelector('[aria-label="Close sheet"]'), 'Initial focus inside Sheet after Space key opening');
 
-    // Dispatch Escape keydown on document
-    const escEvent = new dom.window.KeyboardEvent('keydown', {
+    // Dispatch Escape keydown from focused element inside overlay
+    doc.activeElement?.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
       key: 'Escape',
       code: 'Escape',
       bubbles: true,
       cancelable: true,
-    });
-    doc.dispatchEvent(escEvent);
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.doesNotMatch(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/, 'Sheet closed via Escape');
+    // Verify focus restoration to opener button
+    assert.equal(doc.activeElement, guideBtn, 'Focus restored to opener button after Escape key dismissal');
 
-    // 2. AlertDialog: Emergency Force Release keyboard activation and Escape / Cancel
+    // 2. AlertDialog: Emergency Force Release Keyboard Activation (Enter/Space), Initial Focus, and Focus Restoration (Cancel & Escape)
+    // First select env-recovery card using Enter key activation on interactive Card
     const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
-    assert.ok(recoveryCard);
-    recoveryCard.click();
+    assert.ok(recoveryCard, 'Recovery environment card found');
+    recoveryCard.focus();
+    assert.equal(doc.activeElement, recoveryCard, 'Recovery card receives keyboard focus');
+    recoveryCard.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     const forceReleaseBtn = doc.querySelector('.force-release-btn') as HTMLButtonElement;
-    assert.ok(forceReleaseBtn);
+    assert.ok(forceReleaseBtn, 'Emergency Force Release button found');
     forceReleaseBtn.focus();
-    forceReleaseBtn.click();
+    assert.equal(doc.activeElement, forceReleaseBtn, 'Force Release button receives keyboard focus');
+
+    // 2a. Activate Force Release button using Space key (no mouse .click())
+    forceReleaseBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     // Verify AlertDialog is open
     assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
 
-    // Verify Cancel button in AlertDialog footer closes the dialog
-    const cancelBtn = doc.querySelector('.close-sheet-btn') as HTMLButtonElement;
-    assert.ok(cancelBtn);
-    cancelBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.doesNotMatch(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+    // Verify initial focus moved inside AlertDialog to the accessible close control
+    const alertCloseHeaderBtn = doc.querySelector('[aria-label="Close dialog"]') as HTMLButtonElement;
+    assert.ok(alertCloseHeaderBtn, 'AlertDialog close button found');
+    assert.equal(doc.activeElement, alertCloseHeaderBtn, 'Initial focus moved inside AlertDialog to accessible close control');
 
-    // Reopen AlertDialog and verify Escape dismisses
-    forceReleaseBtn.click();
+    // Reach action target inside AlertDialog: Cancel button (.close-sheet-btn) activated via Enter key
+    const cancelBtn = doc.querySelector('.close-sheet-btn') as HTMLButtonElement;
+    assert.ok(cancelBtn, 'Cancel button in AlertDialog footer found');
+    cancelBtn.focus();
+    assert.equal(doc.activeElement, cancelBtn, 'Cancel button receives focus');
+    cancelBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify AlertDialog closed and focus restored to opener
+    assert.doesNotMatch(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+    assert.equal(doc.activeElement, forceReleaseBtn, 'Focus restored to Force Release button after Cancel');
+
+    // 2b. Reopen AlertDialog using Enter key to verify Escape dismissal & focus restoration
+    forceReleaseBtn.focus();
+    forceReleaseBtn.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+    assert.equal(doc.activeElement, doc.querySelector('[aria-label="Close dialog"]'), 'Initial focus inside AlertDialog after Enter opening');
 
-    doc.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+    doc.activeElement?.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
       key: 'Escape',
       code: 'Escape',
       bubbles: true,
@@ -722,18 +787,64 @@ test('Production Web: accessible overlay interactions — keyboard activation, E
     }));
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.doesNotMatch(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/, 'AlertDialog closed via Escape');
+    assert.equal(doc.activeElement, forceReleaseBtn, 'Focus restored to Force Release button after Escape dismissal');
 
-    // 3. Mobile touch/pointer parity: pointerdown/pointerup and touchstart/touchend activate master selection
-    const readyCard = doc.querySelector('button[data-env="env-ready"]') as HTMLButtonElement;
-    assert.ok(readyCard);
-    readyCard.dispatchEvent(new dom.window.PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-    readyCard.dispatchEvent(new dom.window.PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-    readyCard.dispatchEvent(new dom.window.TouchEvent('touchstart', { bubbles: true, cancelable: true }));
-    readyCard.dispatchEvent(new dom.window.TouchEvent('touchend', { bubbles: true, cancelable: true }));
-    readyCard.click();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // 3. Mobile touch/pointer parity & Route Drill-down
+    // Navigate back to un-drilled base route to establish clear pre-action state facts
+    await router.push('/manage/environments');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /Mac Studio M2 Max/);
+    // 3a. Assert Pre-Action state facts
+    assert.equal(router.currentRoute.value.path, '/manage/environments', 'Pre-action: base environments route active');
+    assert.equal(doc.querySelector('.mobile-detail-nav-header'), null, 'Pre-action: mobile detail header not rendered');
+    assert.equal(doc.querySelector('.envs-mobile-detail-wrapper'), null, 'Pre-action: mobile drilldown wrapper not rendered');
+    assert.ok(doc.querySelector('.envs-master-list.mobile-full'), 'Pre-action: mobile master list visible');
+
+    const preRecoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
+    const prePendingCard = doc.querySelector('button[data-env="env-pending"]') as HTMLButtonElement;
+    assert.ok(preRecoveryCard, 'Pre-action: recovery card exists');
+    assert.ok(prePendingCard, 'Pre-action: pending card exists');
+    assert.equal(preRecoveryCard.getAttribute('aria-current'), 'page', 'Pre-action: env-recovery is current');
+    assert.equal(prePendingCard.getAttribute('aria-current'), null, 'Pre-action: env-pending is NOT current');
+
+    // 3b. Dispatch the real production touch/pointer interaction path
+    // Per W3C Pointer Events and Touch Events standards, a touchscreen tap gesture dispatches:
+    // pointerdown -> touchstart -> pointerup -> touchend -> UA compatibility click (detail: 1, pointerType: touch).
+    // In JSDOM (lacking a hardware gesture interpreter), dispatch the coordinated tap transaction.
+    const tapTarget = prePendingCard;
+    tapTarget.dispatchEvent(new dom.window.PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
+    tapTarget.dispatchEvent(new dom.window.TouchEvent('touchstart', { bubbles: true, cancelable: true }));
+    tapTarget.dispatchEvent(new dom.window.PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
+    tapTarget.dispatchEvent(new dom.window.TouchEvent('touchend', { bubbles: true, cancelable: true }));
+    tapTarget.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // 3c. Assert Changed Post-Action state facts (caused by the touch gesture, not pre-existing facts)
+    assert.equal(router.currentRoute.value.path, '/manage/environments/env-pending', 'Post-action: route changed to tapped environment');
+    assert.equal(preRecoveryCard.getAttribute('aria-current'), null, 'Post-action: env-recovery is no longer current');
+    assert.equal(prePendingCard.getAttribute('aria-current'), 'page', 'Post-action: env-pending is now marked aria-current="page"');
+    assert.ok(doc.querySelector('.envs-mobile-detail-wrapper'), 'Post-action: mobile drill-down wrapper rendered');
+    assert.equal(doc.querySelector('.envs-master-list.mobile-full'), null, 'Post-action: master list hidden during mobile drilldown');
+
+    const mobileHeader = doc.querySelector('.mobile-detail-nav-header');
+    assert.ok(mobileHeader, 'Post-action: mobile detail navigation header rendered');
+    const headerTitle = doc.querySelector('.mobile-detail-title-text')?.textContent?.trim();
+    assert.equal(headerTitle, 'MacBook Pro Operator Local', 'Post-action: mobile header displays tapped environment title');
+
+    // 3d. Complete bidirectional touch cycle: touch tap back button to return to master list
+    const backBtn = doc.querySelector('#btn-back-to-envs') as HTMLButtonElement;
+    assert.ok(backBtn, 'Mobile detail back button reachable');
+    backBtn.dispatchEvent(new dom.window.PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
+    backBtn.dispatchEvent(new dom.window.TouchEvent('touchstart', { bubbles: true, cancelable: true }));
+    backBtn.dispatchEvent(new dom.window.PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true }));
+    backBtn.dispatchEvent(new dom.window.TouchEvent('touchend', { bubbles: true, cancelable: true }));
+    backBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(router.currentRoute.value.path, '/manage/environments', 'Touch tap on back button restored base route');
+    assert.equal(doc.querySelector('.mobile-detail-nav-header'), null, 'Mobile detail header dismissed');
+    assert.ok(doc.querySelector('.envs-master-list.mobile-full'), 'Mobile master list restored');
 
     app.unmount();
   } finally {
