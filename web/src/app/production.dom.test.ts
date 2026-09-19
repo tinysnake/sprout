@@ -23,6 +23,7 @@ const replacements: Record<string, unknown> = {
   HTMLTextAreaElement: initialDom.window.HTMLTextAreaElement,
   SVGElement: initialDom.window.SVGElement,
   Element: initialDom.window.Element,
+  Document: initialDom.window.Document,
   DocumentFragment: initialDom.window.DocumentFragment,
   location: initialDom.window.location,
   history: initialDom.window.history,
@@ -850,6 +851,106 @@ test('Production Web: task card and agent card interactive details inspection', 
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: project header and chat info buttons respond with accessible dialogs', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    app.mount(appMount);
+    const doc = dom.window.document;
+
+    // 1. In ProjectView: test Project Info button (.project-info-btn)
+    await router.push('/project/overview');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const projectInfoBtn = doc.querySelector('.project-info-btn') as HTMLButtonElement;
+    assert.ok(projectInfoBtn, 'Project Info button found');
+    projectInfoBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Information & Metadata/);
+    const closeBtn1 = doc.querySelector('.close-project-info-btn') as HTMLButtonElement;
+    closeBtn1?.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // 2. In ProjectView: test Create Project button (.new-project-btn)
+    const newProjBtn = doc.querySelector('.new-project-btn') as HTMLButtonElement;
+    assert.ok(newProjBtn, 'Create Project button found');
+    newProjBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Create New Project Workspace/);
+    const cancelBtn = doc.querySelector('.cancel-new-project-btn') as HTMLButtonElement;
+    cancelBtn?.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // 3. In Project Chat: test Chat Info button (.chat-info-btn)
+    await router.push('/project/chat');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const chatInfoBtn = doc.querySelector('.chat-info-btn') as HTMLButtonElement;
+    assert.ok(chatInfoBtn, 'Chat Info button found');
+    chatInfoBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Conversation Details/);
+    const closeBtn2 = doc.querySelector('.close-chat-info-btn') as HTMLButtonElement;
+    closeBtn2?.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: agent creation and architecture guide action dialogs', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    app.mount(appMount);
+    const doc = dom.window.document;
+
+    await router.push('/manage/agents');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Test Create Agent modal
+    const createAgentBtn = doc.querySelector('.create-agent-btn') as HTMLButtonElement;
+    assert.ok(createAgentBtn, 'Create Agent button found');
+    createAgentBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Create Global Agent Definition/);
+
+    // Close dialog before unmounting to ensure clean Teleport teardown
+    doc.dispatchEvent(
+      new dom.window.KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     app.unmount();
   } finally {

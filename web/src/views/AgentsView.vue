@@ -6,6 +6,7 @@ import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
 import StatusPill from '../primitives/StatusPill.vue';
 import Foldable from '../primitives/Foldable.vue';
+import Dialog from '../primitives/Dialog.vue';
 
 type AgentFilter = 'all' | 'active' | 'attention' | 'unavailable' | 'archived';
 
@@ -34,6 +35,40 @@ interface AgentItem {
 const activeFilter = ref<AgentFilter>('all');
 const selectedAgentId = ref('agent-prog');
 const isMobileAgentDetailOpen = ref(false);
+const isCreateAgentOpen = ref(false);
+const isAgentGuideOpen = ref(false);
+
+const newAgentName = ref('');
+const newAgentRole = ref('');
+const newAgentEngine = ref('Pi');
+const newAgentModel = ref('gemini-2.5-pro');
+
+function handleCreateAgent() {
+  if (!newAgentName.value.trim()) return;
+  const newId = `agent-${newAgentName.value.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  agents.value.push({
+    id: newId,
+    displayName: newAgentName.value.trim(),
+    role: newAgentRole.value.trim() || 'Specialist Engineer',
+    status: 'active',
+    trafficLight: 'green',
+    trafficLightReason: `Ready: Priority 1 option (${newAgentEngine.value.toUpperCase()} · ${newAgentModel.value}) ready on host(s)`,
+    description: `Agent persona configured for ${newAgentRole.value.trim() || 'task execution'}.`,
+    standingInstructions: 'Verify work thoroughly and preserve zero uncommitted host state.',
+    privateMemoryCount: 0,
+    workOptions: [
+      { priority: 1, engine: newAgentEngine.value, model: newAgentModel.value, effort: 'high', isConfigured: true },
+    ],
+    compatibility: [
+      { host: 'Mac Studio M2 Max', eligible: true, reason: 'Engine authenticated · Protocol v2.1' },
+      { host: 'Windows Workstation 01', eligible: true, reason: 'Engine ready' },
+    ],
+  });
+  selectedAgentId.value = newId;
+  newAgentName.value = '';
+  newAgentRole.value = '';
+  isCreateAgentOpen.value = false;
+}
 
 function selectAgent(id: string) {
   selectedAgentId.value = id;
@@ -162,10 +197,24 @@ const selectedAgent = computed(() => {
           <span>Agents & Worker Personas</span>
         </h2>
         <div class="flex items-center gap-2">
-          <Button variant="primary" size="icon" title="Create New Agent">
+          <Button
+            variant="primary"
+            size="icon"
+            title="Create New Agent"
+            aria-label="Create New Agent"
+            class="create-agent-btn"
+            @click="isCreateAgentOpen = true"
+          >
             <Icon name="plus" :size="14" />
           </Button>
-          <Button variant="secondary" size="icon" title="Agent Architecture Guide">
+          <Button
+            variant="secondary"
+            size="icon"
+            title="Agent Architecture Guide"
+            aria-label="Agent Architecture Guide"
+            class="agent-guide-btn"
+            @click="isAgentGuideOpen = true"
+          >
             <Icon name="guide" :size="14" />
           </Button>
         </div>
@@ -428,5 +477,103 @@ const selectedAgent = computed(() => {
         </div>
       </div>
     </div>
+    <!-- Create Agent Modal -->
+    <Dialog
+      :open="isCreateAgentOpen"
+      title="Create Global Agent Definition"
+      description="Agent identity is portable across Projects and Environments with ordered work options."
+      @update:open="isCreateAgentOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="flex flex-col gap-1">
+          <label for="new-agent-name" class="font-bold text-[var(--text-primary)]">Display Name *</label>
+          <input
+            id="new-agent-name"
+            v-model="newAgentName"
+            type="text"
+            placeholder="e.g. Quality Engineer, Security Analyst"
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="new-agent-role" class="font-bold text-[var(--text-primary)]">Role & Responsibilities</label>
+          <input
+            id="new-agent-role"
+            v-model="newAgentRole"
+            type="text"
+            placeholder="e.g. End-to-end integration testing and regression analysis"
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 pt-2 border-t border-[var(--border-subtle)]">
+          <div class="flex flex-col gap-1">
+            <label for="new-agent-engine" class="font-bold text-[var(--text-primary)]">Engine</label>
+            <select
+              id="new-agent-engine"
+              v-model="newAgentEngine"
+              class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+            >
+              <option value="Pi">Pi</option>
+              <option value="Codex">Codex</option>
+              <option value="agy">agy</option>
+              <option value="opencode">opencode</option>
+            </select>
+          </div>
+          <div class="flex flex-col gap-1">
+            <label for="new-agent-model" class="font-bold text-[var(--text-primary)]">Work Model</label>
+            <input
+              id="new-agent-model"
+              v-model="newAgentModel"
+              type="text"
+              class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+            />
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" class="cancel-create-agent-btn" @click="isCreateAgentOpen = false">
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" class="confirm-create-agent-btn" :disabled="!newAgentName.trim()" @click="handleCreateAgent">
+          Create Agent
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- Agent Guide Modal -->
+    <Dialog
+      :open="isAgentGuideOpen"
+      title="Agent Identity & Work Options Architecture"
+      description="Portable Multi-Agent Personas and Pre-Acceptance Execution Policies"
+      @update:open="isAgentGuideOpen = $event"
+    >
+      <div class="space-y-3 text-xs text-[var(--text-secondary)] leading-relaxed max-h-[60vh] overflow-y-auto pr-1">
+        <div>
+          <strong class="text-[var(--text-primary)] block mb-0.5">1. Portable Identity Independent of Project & Environment</strong>
+          <p>An Agent is created independently of any Project or Environment. It requires a stable ID, display name, and ordered work options. Private memory persists across project assignments.</p>
+        </div>
+        <div>
+          <strong class="text-[var(--text-primary)] block mb-0.5">2. Ordered Execution Preferences (Work Options)</strong>
+          <p>Each option specifies an execution engine (Codex, Pi, agy, opencode) and work model with effort parameter.</p>
+        </div>
+        <div>
+          <strong class="text-[var(--text-primary)] block mb-0.5">3. Pre-Acceptance Fallback vs No-Silent-Replay</strong>
+          <p>At run admission, Sprout evaluates available engines on the target host. Fallback occurs strictly before an engine accepts work. Once accepted, later failures report directly without silent replay.</p>
+        </div>
+        <div>
+          <strong class="text-[var(--text-primary)] block mb-0.5">4. Historical Attribution & Archiving</strong>
+          <p>Archiving an Agent safely stops new run admission while permanently preserving historical task attributions and collaboration records.</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="primary" size="sm" class="close-agent-guide-btn" @click="isAgentGuideOpen = false">
+          Close Guide
+        </Button>
+      </template>
+    </Dialog>
   </div>
 </template>

@@ -20,6 +20,59 @@ const activeTaskFilter = ref('all');
 const taskViewMode = ref<'list' | 'detail'>('list');
 const isLifecycleFoldExpanded = ref(true);
 
+const isProjectInfoOpen = ref(false);
+const isNewProjectOpen = ref(false);
+const isProposeTaskOpen = ref(false);
+const isChatInfoOpen = ref(false);
+
+const newProjName = ref('');
+const newProjDesc = ref('');
+const newProjPolicy = ref('explicit-only');
+
+function handleCreateProject() {
+  if (!newProjName.value.trim()) return;
+  const newId = `proj-${newProjName.value.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  projects.push({
+    id: newId,
+    name: newProjName.value.trim(),
+    desc: newProjDesc.value.trim() || 'Multi-agent project collaboration workspace',
+    status: 'Active',
+  });
+  selectedProjectId.value = newId;
+  newProjName.value = '';
+  newProjDesc.value = '';
+  isNewProjectOpen.value = false;
+}
+
+const newProposalTitle = ref('');
+const newProposalGoal = ref('');
+const newProposalLead = ref('Programmer');
+const newProposalHost = ref('Mac Studio M2 Max');
+
+function handleProposeTask() {
+  if (!newProposalTitle.value.trim()) return;
+  const newId = String(tasks.length + 101);
+  tasks.unshift({
+    id: newId,
+    title: newProposalTitle.value.trim(),
+    stage: 'Proposed',
+    stageVariant: 'secondary' as const,
+    lead: newProposalLead.value,
+    host: newProposalHost.value,
+    version: 'v1',
+    lifecycleSentence: 'Task proposed · Executes NO run · Holds NO lease',
+    agentRunLifecycle: 'none',
+    leaseLifecycle: 'clear',
+    goal: newProposalGoal.value.trim() || 'Execute proposed project task goals with verification.',
+    constraints: ['Proposals execute zero runs until explicit Human Begin authority.'],
+    validationCriteria: ['Verification suite passes with zero uncommitted artifacts.'],
+    runs: [],
+  });
+  newProposalTitle.value = '';
+  newProposalGoal.value = '';
+  isProposeTaskOpen.value = false;
+}
+
 function openTaskDetail(task: any) {
   selectedTask.value = task;
   taskViewMode.value = 'detail';
@@ -340,7 +393,6 @@ function sendMessage() {
                 {{ p.name }}
               </option>
             </select>
-            <Badge variant="success" class="shrink-0">Active</Badge>
           </div>
           <span class="text-[10px] sm:text-[11px] text-[var(--text-muted)] block truncate">
             {{ currentProject.desc }}
@@ -350,10 +402,24 @@ function sendMessage() {
 
       <!-- Action Buttons (Info & New Project) - strictly right-aligned, shrink-0, no wrapping on narrow screens -->
       <div class="flex items-center gap-1.5 shrink-0 ml-auto">
-        <Button variant="secondary" size="icon" title="Project Information & Metadata" aria-label="Project Information & Metadata" class="h-8 w-8">
+        <Button
+          variant="secondary"
+          size="icon"
+          title="Project Information & Metadata"
+          aria-label="Project Information & Metadata"
+          class="project-info-btn h-8 w-8"
+          @click="isProjectInfoOpen = true"
+        >
           <Icon name="info" :size="15" />
         </Button>
-        <Button variant="secondary" size="icon" title="Create New Project" aria-label="Create New Project" class="h-8 w-8">
+        <Button
+          variant="secondary"
+          size="icon"
+          title="Create New Project"
+          aria-label="Create New Project"
+          class="new-project-btn h-8 w-8"
+          @click="isNewProjectOpen = true"
+        >
           <Icon name="plus" :size="15" />
         </Button>
       </div>
@@ -433,7 +499,6 @@ function sendMessage() {
               </div>
               <div class="flex items-center gap-2">
                 <Badge variant="secondary" class="font-mono text-[9px]">{{ m.engine }}</Badge>
-                <span class="text-[10px] text-[var(--accent-primary)] font-semibold">View →</span>
               </div>
             </button>
           </div>
@@ -630,7 +695,7 @@ function sendMessage() {
                 <option value="Completed">Completed</option>
               </select>
 
-              <Button variant="primary" size="sm">
+              <Button variant="primary" size="sm" class="propose-task-btn" @click="isProposeTaskOpen = true">
                 <Icon name="plus" :size="14" />
                 <span>Propose Task</span>
               </Button>
@@ -662,8 +727,8 @@ function sendMessage() {
               </div>
 
               <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-xs text-[var(--text-muted)]">
-                <span>Lead: @{{ task.lead }} · Host: {{ task.host }}</span>
-                <span class="text-[var(--accent-primary)] font-semibold hover:underline">Inspect Task Details →</span>
+                <span>Lead: @{{ task.lead }}</span>
+                <span>Host: {{ task.host }}</span>
               </div>
             </button>
           </div>
@@ -732,9 +797,21 @@ function sendMessage() {
               <Icon name="chevron-left" :size="16" />
               <span>Back to Chats</span>
             </button>
-            <div class="flex items-center gap-1.5 truncate">
-              <Icon name="chat" :size="14" class="text-[var(--accent-primary)]" />
-              <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeChatChannel }}</strong>
+            <div class="flex items-center gap-2 truncate">
+              <div class="flex items-center gap-1.5 truncate">
+                <Icon name="chat" :size="14" class="text-[var(--accent-primary)]" />
+                <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeChatChannel }}</strong>
+              </div>
+              <Button
+                variant="secondary"
+                size="icon"
+                title="Conversation Information"
+                aria-label="Conversation Information"
+                class="chat-info-btn h-7 w-7 shrink-0"
+                @click="isChatInfoOpen = true"
+              >
+                <Icon name="info" :size="13" />
+              </Button>
             </div>
           </div>
 
@@ -745,7 +822,19 @@ function sendMessage() {
               <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
               <span class="text-[10px] text-[var(--text-muted)]">Active multi-agent message timeline</span>
             </div>
-            <Badge variant="secondary">3 Members Online</Badge>
+            <div class="flex items-center gap-2">
+              <Badge variant="secondary">3 Members Online</Badge>
+              <Button
+                variant="secondary"
+                size="icon"
+                title="Conversation Information & Routing Policy"
+                aria-label="Conversation Information & Routing Policy"
+                class="chat-info-btn h-7 w-7"
+                @click="isChatInfoOpen = true"
+              >
+                <Icon name="info" :size="14" />
+              </Button>
+            </div>
           </div>
 
           <!-- Messages Scroll Area -->
@@ -788,7 +877,209 @@ function sendMessage() {
       </div>
     </div>
 
-    <!-- Task Detail Modal -->
+    <!-- 1. Project Information & Metadata Modal -->
+    <Dialog
+      :open="isProjectInfoOpen"
+      :title="`${currentProject.name} — Information & Metadata`"
+      description="Project Identity, Workspace Bindings, and Agreement Policy"
+      @update:open="isProjectInfoOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <div class="flex items-center justify-between">
+            <strong class="text-sm font-bold text-[var(--text-primary)]">{{ currentProject.name }}</strong>
+            <Badge variant="success">{{ currentProject.status }}</Badge>
+          </div>
+          <span class="font-mono text-[11px] text-[var(--text-muted)]">ID: <code>{{ currentProject.id }}</code></span>
+          <p class="text-xs text-[var(--text-primary)] mt-1">{{ currentProject.desc }}</p>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-2">
+          <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Bound Host Workspaces ({{ boundWorkspaces.length }})</strong>
+          <div class="flex flex-col gap-1.5">
+            <div
+              v-for="ws in boundWorkspaces"
+              :key="ws.root"
+              class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px]"
+            >
+              <span class="font-mono font-bold text-[var(--text-primary)]">{{ ws.root }}</span>
+              <span class="text-[var(--text-muted)]">{{ ws.host }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Wake Routing Policy</strong>
+          <p class="text-[var(--text-primary)]">Strict multi-agent boundaries: all worker turns must record verifiable evidence before advancing task lifecycle.</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="primary" size="sm" class="close-project-info-btn" @click="isProjectInfoOpen = false">
+          Close
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 2. Create New Project Modal -->
+    <Dialog
+      :open="isNewProjectOpen"
+      title="Create New Project Workspace"
+      description="Define a new multi-agent project workspace with agreement rules and bound environments."
+      @update:open="isNewProjectOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="flex flex-col gap-1">
+          <label for="new-proj-name" class="font-bold text-[var(--text-primary)]">Project Name *</label>
+          <input
+            id="new-proj-name"
+            v-model="newProjName"
+            type="text"
+            placeholder="e.g. Distributed Analytics Service"
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="new-proj-desc" class="font-bold text-[var(--text-primary)]">Purpose & Scope</label>
+          <input
+            id="new-proj-desc"
+            v-model="newProjDesc"
+            type="text"
+            placeholder="e.g. Real-time telemetry ingestion and multi-node coordination pipeline"
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="new-proj-policy" class="font-bold text-[var(--text-primary)]">Wake Policy</label>
+          <select
+            id="new-proj-policy"
+            v-model="newProjPolicy"
+            class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+          >
+            <option value="explicit-only">Explicit Mentions Only</option>
+            <option value="wake-model-assisted">Wake-Model Assisted (30s window)</option>
+          </select>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" class="cancel-new-project-btn" @click="isNewProjectOpen = false">
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" :disabled="!newProjName.trim()" @click="handleCreateProject">
+          Create Project
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 3. Propose Task Modal -->
+    <Dialog
+      :open="isProposeTaskOpen"
+      title="Propose Project Task"
+      description="Propose a new task to be assigned and approved by Human authority before execution."
+      @update:open="isProposeTaskOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="flex flex-col gap-1">
+          <label for="new-task-title" class="font-bold text-[var(--text-primary)]">Task Title *</label>
+          <input
+            id="new-task-title"
+            v-model="newProposalTitle"
+            type="text"
+            placeholder="e.g. Setup Carrier Heartbeat Health Probe"
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="new-task-goal" class="font-bold text-[var(--text-primary)]">Task Goal & Specification</label>
+          <textarea
+            id="new-task-goal"
+            v-model="newProposalGoal"
+            rows="3"
+            placeholder="Detailed description of objective, constraints, and success criteria..."
+            class="px-3 py-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--border-focus)]"
+          ></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="flex flex-col gap-1">
+            <label for="new-task-lead" class="font-bold text-[var(--text-primary)]">Lead Agent</label>
+            <select
+              id="new-task-lead"
+              v-model="newProposalLead"
+              class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+            >
+              <option v-for="m in projectMembers" :key="m.id" :value="m.name">@{{ m.name }}</option>
+            </select>
+          </div>
+          <div class="flex flex-col gap-1">
+            <label for="new-task-host" class="font-bold text-[var(--text-primary)]">Target Host</label>
+            <select
+              id="new-task-host"
+              v-model="newProposalHost"
+              class="px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+            >
+              <option value="Mac Studio M2 Max">Mac Studio M2 Max</option>
+              <option value="Windows Workstation 01">Windows Workstation 01</option>
+              <option value="Local Worker">Local Worker</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" @click="isProposeTaskOpen = false">
+          Cancel
+        </Button>
+        <Button variant="primary" size="sm" :disabled="!newProposalTitle.trim()" @click="handleProposeTask">
+          Submit Proposal
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 4. Conversation Information Modal -->
+    <Dialog
+      :open="isChatInfoOpen"
+      :title="`Conversation Details — ${activeChatChannel}`"
+      description="Channel Membership, Routing Policy, and Delivery Guarantees"
+      @update:open="isChatInfoOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <div class="flex items-center justify-between">
+            <strong class="text-sm font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
+            <Badge variant="info">{{ activeChatChannel.startsWith('@') ? 'Direct Message' : activeChatChannel.startsWith('wg-') ? 'Working Group' : 'Project Channel' }}</Badge>
+          </div>
+          <span class="text-[11px] text-[var(--text-muted)]">Project: <code>{{ currentProject.name }}</code></span>
+          <p class="text-xs text-[var(--text-primary)] mt-0.5">
+            {{ activeChatChannel === '#general' ? 'Main broadcast channel for all project agents and human operators.' : activeChatChannel.startsWith('wg-') ? 'Focused working group collaboration stream.' : 'Direct 1-on-1 agent conversation.' }}
+          </p>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-2">
+          <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Active Participants</strong>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span v-for="m in projectMembers" :key="m.id" class="px-2 py-1 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] font-semibold text-[var(--text-primary)]">
+              @{{ m.name }}
+            </span>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Routing & Delivery Semantics</strong>
+          <p class="text-[var(--text-secondary)]">Mentions strictly wake declared recipients. Unaddressed messages follow project wake policy. All messages are durably recorded in SQLite.</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="primary" size="sm" class="close-chat-info-btn" @click="isChatInfoOpen = false">
+          Close
+        </Button>
+      </template>
+    </Dialog>
     <Dialog
       v-if="selectedTask"
       :open="isTaskDetailOpen"
