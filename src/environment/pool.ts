@@ -71,6 +71,22 @@ export interface LeaseStore {
   list(): Promise<readonly EnvironmentLease[]> | readonly EnvironmentLease[];
 }
 
+/**
+ * The Task-held lease statements a Task's atomic begin/end boundary needs.
+ *
+ * A Task lifecycle commits its Task row and its Task-held lease in one shared
+ * transaction. The environment domain owns the lease SQL, so the Task store
+ * opens the boundary through the shared `TransactionCoordinator` and runs only
+ * the lease-specific statements through this port; neither statement begins or
+ * ends a transaction of its own, so the shared boundary stays exact.
+ */
+export interface TaskLeaseBinding {
+  /** Refuse a live lease on the instance, then insert the Task-held lease. */
+  insertTaskHeldLease(lease: EnvironmentLease): void;
+  /** Refuse a lease that is not this Task's, then mark it released. */
+  markTaskLeaseReleased(leaseId: string, taskId: string): void;
+}
+
 export class InMemoryLeaseStore implements LeaseStore {
   readonly #leases = new Map<string, EnvironmentLease>();
 

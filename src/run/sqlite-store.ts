@@ -9,18 +9,21 @@ import {
   type SessionKeyIdentity,
   type StoredSessionKey,
 } from './session-key-store.ts';
-import type { EnvironmentLease, LeaseState, LeaseStore } from '../environment/pool.ts';
-import type { Project } from '../project/model.ts';
-import type { ProjectStore } from '../project/store.ts';
-import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
-import { SqliteTaskStore } from '../task/sqlite-store.ts';
 
 /**
- * SQLite-backed storage for runs and leases (ADR-0002).
+ * SQLite-backed storage for the run domain (ADR-0002).
  *
- * This is the only module that knows SQL. The orchestrator and environment pool
- * depend on the `RunStore` and `LeaseStore` interfaces, so swapping this for
- * an in-memory store or server database does not touch domain orchestration.
+ * This module owns the run domain's SQL and nothing else: `SqliteRunStore`
+ * persists agent runs and `SqliteSessionKeyStore` persists engine session keys,
+ * both beside the store interfaces they implement. The classes are mounted on a
+ * shared persistence handle (`src/store/db.ts`) so their rows commit against the
+ * same durable state the environment, project, Task, and collaboration domains
+ * use; the handle owns only connection lifecycle and the composition of those
+ * adapters.
+ *
+ * The orchestrator depends on the `RunStore` and `SessionKeyStore` interfaces, so
+ * swapping this for an in-memory store or server database does not touch domain
+ * orchestration.
  *
  * Events are stored as one JSON document per run rather than a child table: the
  * run's progress record is always read as a whole, and a run is small enough
@@ -159,172 +162,6 @@ export class SqliteRunStore implements RunStore {
   }
 }
 
-interface LeaseRow {
-  readonly id: string;
-  readonly instance_id: string;
-  readonly capability: string;
-  readonly holder_id: string;
-  readonly holder_kind: 'run' | 'task' | null;
-  readonly run_id: string | null;
-  readonly task_id: string | null;
-  readonly acquired_at: number;
-  readonly expires_at: number;
-  readonly state: string;
-}
-
-export class SqliteLeaseStore implements LeaseStore {
-  readonly #db: DatabaseSync;
-  readonly #ownsDb: boolean;
-
-  constructor(options: { filename: string } | { db: DatabaseSync }) {
-    if ('db' in options) {
-      this.#db = options.db;
-      this.#ownsDb = false;
-    } else {
-      this.#db = new DatabaseSync(options.filename);
-      this.#ownsDb = true;
-    }
-    this.#init();
-  }
-
-  #init(): void {
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS environment_leases (
-        id TEXT PRIMARY KEY,
-        instance_id TEXT NOT NULL,
-        capability TEXT NOT NULL,
-        holder_id TEXT NOT NULL,
-        holder_kind TEXT,
-        run_id TEXT,
-        task_id TEXT,
-        acquired_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        state TEXT NOT NULL
-      );
-    `);
-    this.#addColumnIfMissing('environment_leases', 'holder_kind', 'TEXT');
-    this.#addColumnIfMissing('environment_leases', 'task_id', 'TEXT');
-  }
-
-  #addColumnIfMissing(table: string, column: string, type: string): void {
-    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
-    if (!columns.some((existing) => existing.name === column)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-  }
-
-  save(lease: EnvironmentLease): void {
-    this.#db
-      .prepare(
-        `INSERT INTO environment_leases
-           (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           expires_at = excluded.expires_at,
-           state = excluded.state,
-           run_id = excluded.run_id,
-           task_id = excluded.task_id,
-           holder_kind = excluded.holder_kind`,
-      )
-      .run(
-        lease.id,
-        lease.instanceId,
-        lease.capability,
-        lease.holderId,
-        lease.holderKind ?? null,
-        lease.runId ?? null,
-        lease.taskId ?? null,
-        lease.acquiredAt,
-        lease.expiresAt,
-        lease.state,
-      );
-  }
-
-  get(leaseId: string): EnvironmentLease | undefined {
-    const row = this.#db
-      .prepare('SELECT * FROM environment_leases WHERE id = ?')
-      .get(leaseId) as unknown | undefined;
-    return row ? toLease(row as LeaseRow) : undefined;
-  }
-
-  list(): readonly EnvironmentLease[] {
-    const rows = this.#db
-      .prepare('SELECT * FROM environment_leases ORDER BY acquired_at DESC')
-      .all() as unknown as LeaseRow[];
-    return rows.map(toLease);
-  }
-
-  close(): void {
-    if (this.#ownsDb) {
-      this.#db.close();
-    }
-  }
-}
-
-export interface SqliteStoreOptions {
-  /** A file path, or `:memory:` for tests. */
-  readonly filename: string;
-}
-
-/**
- * SQLite-backed storage for projects (ADR-0002).
- *
- * A project is read and written as a whole — its rules, environment set, and
- * memberships belong together — so it is stored as one JSON document keyed by
- * id rather than normalized into child tables.
- */
-export class SqliteProjectStore implements ProjectStore {
-  readonly #db: DatabaseSync;
-  readonly #ownsDb: boolean;
-
-  constructor(options: { filename: string } | { db: DatabaseSync }) {
-    if ('db' in options) {
-      this.#db = options.db;
-      this.#ownsDb = false;
-    } else {
-      this.#db = new DatabaseSync(options.filename);
-      this.#ownsDb = true;
-    }
-    this.#init();
-  }
-
-  #init(): void {
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS projects (
-        id TEXT PRIMARY KEY,
-        document TEXT NOT NULL
-      );
-    `);
-  }
-
-  async save(project: Project): Promise<void> {
-    this.#db
-      .prepare(
-        `INSERT INTO projects (id, document) VALUES (?, ?)
-         ON CONFLICT(id) DO UPDATE SET document = excluded.document`,
-      )
-      .run(project.id, JSON.stringify(project));
-  }
-
-  async get(projectId: string): Promise<Project | undefined> {
-    const row = this.#db.prepare('SELECT document FROM projects WHERE id = ?').get(projectId) as
-      | { readonly document: string }
-      | undefined;
-    return row ? (JSON.parse(row.document) as Project) : undefined;
-  }
-
-  async list(): Promise<readonly Project[]> {
-    const rows = this.#db
-      .prepare('SELECT document FROM projects ORDER BY id')
-      .all() as unknown as readonly { readonly document: string }[];
-    return rows.map((row) => JSON.parse(row.document) as Project);
-  }
-
-  close(): void {
-    if (this.#ownsDb) {
-      this.#db.close();
-    }
-  }
-}
-
 /**
  * SQLite-backed storage for engine session keys (ADR-0002).
  *
@@ -405,54 +242,6 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
       this.#db.close();
     }
   }
-}
-
-/**
- * Unified SQLite storage for Sprout, managing runs, leases, projects, session
- * keys, collaboration Messages/wake requests, and durable Tasks through a single
- * database handle (ADR-0002).
- *
- * Collaboration and Task rows live in the primary database rather than a separate
- * file, so a Message, its wake requests, the run they admitted, and the Task that
- * run advances all commit against the same durable state a restart reconciles.
- */
-export class SqliteStore {
-  readonly db: DatabaseSync;
-  readonly runs: SqliteRunStore;
-  readonly leases: SqliteLeaseStore;
-  readonly projects: SqliteProjectStore;
-  readonly sessionKeys: SqliteSessionKeyStore;
-  readonly collaboration: SqliteCollaborationStore;
-  readonly tasks: SqliteTaskStore;
-
-  constructor(options: SqliteStoreOptions) {
-    this.db = new DatabaseSync(options.filename);
-    this.runs = new SqliteRunStore({ db: this.db });
-    this.leases = new SqliteLeaseStore({ db: this.db });
-    this.projects = new SqliteProjectStore({ db: this.db });
-    this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
-    this.collaboration = new SqliteCollaborationStore({ db: this.db });
-    this.tasks = new SqliteTaskStore({ db: this.db });
-  }
-
-  close(): void {
-    this.db.close();
-  }
-}
-
-function toLease(row: LeaseRow): EnvironmentLease {
-  return {
-    id: row.id,
-    instanceId: row.instance_id,
-    capability: row.capability,
-    holderId: row.holder_id,
-    ...(row.holder_kind !== null ? { holderKind: row.holder_kind } : {}),
-    ...(row.run_id !== null ? { runId: row.run_id } : {}),
-    ...(row.task_id !== null ? { taskId: row.task_id } : {}),
-    acquiredAt: row.acquired_at,
-    expiresAt: row.expires_at,
-    state: row.state as LeaseState,
-  };
 }
 
 function toRun(row: RunRow): AgentRun {

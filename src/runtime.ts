@@ -18,7 +18,7 @@ import type { ProjectStore } from './project/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
-import { SqliteStore } from './run/sqlite-store.ts';
+import { SqliteStore } from './store/db.ts';
 import type { RunStore } from './run/store.ts';
 import {
   TaskEnvironmentLifecycle,
