@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import Icon from '../primitives/Icon.vue';
 import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
+import Dialog from '../primitives/Dialog.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -12,6 +13,32 @@ const selectedProjectId = ref('sprout-m2');
 const activeTab = ref<'overview' | 'tasks' | 'chat'>('overview');
 const activeChatChannel = ref('#general');
 const isMobileChatDetailOpen = ref(false);
+
+const selectedTask = ref<any>(null);
+const isTaskDetailOpen = ref(false);
+
+function openTaskDetail(task: any) {
+  selectedTask.value = task;
+  isTaskDetailOpen.value = true;
+}
+
+const selectedMember = ref<any>(null);
+const isMemberDetailOpen = ref(false);
+
+function openMemberDetail(member: any) {
+  selectedMember.value = member;
+  isMemberDetailOpen.value = true;
+}
+
+function navigateToTaskEnv() {
+  isTaskDetailOpen.value = false;
+  router.push('/manage/environments/env-ready');
+}
+
+function navigateToAgentsView() {
+  isMemberDetailOpen.value = false;
+  router.push('/manage/agents');
+}
 
 function syncTabFromRoute() {
   const tabParam = route.params.tab as string | undefined;
@@ -63,7 +90,7 @@ const boundWorkspaces = [
 const tasks = [
   {
     id: '101',
-    title: 'Refactor Environment State Manager into Decoupled Seams',
+    title: 'Continuous Integration & Host Verification Pipeline',
     stage: 'Active',
     stageVariant: 'success' as const,
     lead: 'Programmer',
@@ -73,7 +100,7 @@ const tasks = [
   },
   {
     id: '104',
-    title: 'Multi-Agent Simulation Validation & Host Porting',
+    title: 'Distributed Agent Orchestration & Safety Validation',
     stage: 'Recovery',
     stageVariant: 'danger' as const,
     lead: 'Architect',
@@ -83,7 +110,7 @@ const tasks = [
   },
   {
     id: '107',
-    title: 'Validate Reka UI Headless Accessible Overlays & Focus Trap',
+    title: 'Accessibility Verification & Operator Surface Diagnostics',
     stage: 'Validation',
     stageVariant: 'warning' as const,
     lead: 'Foreman',
@@ -93,7 +120,7 @@ const tasks = [
   },
   {
     id: '110',
-    title: 'CSS-first Theme Variable Ladder for Comfortable & Compact Density',
+    title: 'Multi-Platform Host Configuration & Capability Profiling',
     stage: 'Proposed',
     stageVariant: 'secondary' as const,
     lead: 'Researcher',
@@ -103,7 +130,7 @@ const tasks = [
   },
   {
     id: '98',
-    title: 'Audit M1 Baseline Seams & SQLite Transactional Safety',
+    title: 'Durable Transactional Persistence & Event Store Verification',
     stage: 'Completed',
     stageVariant: 'info' as const,
     lead: 'Architect',
@@ -306,10 +333,12 @@ function sendMessage() {
             <Badge variant="info">{{ projectMembers.length }} Agents</Badge>
           </div>
           <div class="flex flex-col gap-2">
-            <div
+            <button
               v-for="m in projectMembers"
               :key="m.id"
-              class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex items-center justify-between gap-2"
+              type="button"
+              class="w-full text-left p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] transition-all cursor-pointer flex items-center justify-between gap-2"
+              @click="openMemberDetail(m)"
             >
               <div class="flex items-center gap-2.5">
                 <div class="w-8 h-8 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-xs">
@@ -320,8 +349,11 @@ function sendMessage() {
                   <span class="text-[10px] text-[var(--text-muted)] block">{{ m.role }}</span>
                 </div>
               </div>
-              <Badge variant="secondary" class="font-mono text-[9px]">{{ m.engine }}</Badge>
-            </div>
+              <div class="flex items-center gap-2">
+                <Badge variant="secondary" class="font-mono text-[9px]">{{ m.engine }}</Badge>
+                <span class="text-[10px] text-[var(--accent-primary)] font-semibold">View →</span>
+              </div>
+            </button>
           </div>
         </div>
       </div>
@@ -340,10 +372,12 @@ function sendMessage() {
         </div>
 
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
-          <div
+          <button
             v-for="task in tasks"
             :key="task.id"
-            class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] transition-all flex flex-col justify-between gap-3 shadow-xs"
+            type="button"
+            class="text-left w-full p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-elevated)] transition-all flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none"
+            @click="openTaskDetail(task)"
           >
             <div>
               <div class="flex items-center justify-between gap-2 mb-1.5">
@@ -363,9 +397,9 @@ function sendMessage() {
 
             <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-xs text-[var(--text-muted)]">
               <span>Lead: @{{ task.lead }} · Host: {{ task.host }}</span>
-              <span class="text-[var(--accent-primary)] font-semibold cursor-pointer hover:underline">Inspect Task →</span>
+              <span class="text-[var(--accent-primary)] font-semibold hover:underline">Inspect Task Details →</span>
             </div>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -486,5 +520,93 @@ function sendMessage() {
         </div>
       </div>
     </div>
+
+    <!-- Task Detail Modal -->
+    <Dialog
+      v-if="selectedTask"
+      :open="isTaskDetailOpen"
+      :title="`Task #${selectedTask.id}: ${selectedTask.title}`"
+      :description="`Lifecycle stage: ${selectedTask.stage} · Lead: @${selectedTask.lead}`"
+      @update:open="isTaskDetailOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-2">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-[var(--text-primary)]">Execution Lifecycle</span>
+            <Badge :variant="selectedTask.stageVariant ?? 'info'">{{ selectedTask.stage.toUpperCase() }}</Badge>
+          </div>
+          <p class="text-[var(--text-primary)] font-mono text-[11px]">{{ selectedTask.lifecycleSentence }}</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Lead Agent</span>
+            <strong class="text-[var(--text-primary)]">@{{ selectedTask.lead }}</strong>
+          </div>
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Assigned Host</span>
+            <strong class="text-[var(--text-primary)]">{{ selectedTask.host }}</strong>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] flex flex-col gap-1">
+          <strong class="text-xs font-bold flex items-center gap-1.5">
+            <Icon name="shield" :size="14" />
+            <span>Task-Held Exclusive Lease Active</span>
+          </strong>
+          <p class="text-[11px] text-[var(--text-secondary)]">
+            Lease is held continuously across runs, human validation, and pauses. No automatic timeout.
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" @click="isTaskDetailOpen = false">
+          Close
+        </Button>
+        <Button variant="primary" size="sm" @click="navigateToTaskEnv">
+          <Icon name="environments" :size="13" />
+          <span>Inspect Host Environment</span>
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- Agent Member Detail Modal -->
+    <Dialog
+      v-if="selectedMember"
+      :open="isMemberDetailOpen"
+      :title="`@${selectedMember.name} — ${selectedMember.role}`"
+      description="Active Project Member & Worker Persona"
+      @update:open="isMemberDetailOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="flex items-center gap-3 p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+          <div class="w-10 h-10 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-sm">
+            {{ selectedMember.name[0] }}
+          </div>
+          <div>
+            <strong class="text-sm text-[var(--text-primary)] block">@{{ selectedMember.name }}</strong>
+            <span class="text-xs text-[var(--text-muted)]">{{ selectedMember.role }} · <span class="font-mono">{{ selectedMember.engine }}</span></span>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Membership Responsibilities</span>
+          <p class="text-[var(--text-primary)]">
+            Assigned to collaborate in project channels, accept task assignments, and execute runs on authorized host environments.
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" @click="isMemberDetailOpen = false">
+          Close
+        </Button>
+        <Button variant="primary" size="sm" @click="navigateToAgentsView">
+          <Icon name="agents" :size="13" />
+          <span>Manage Agent Personas</span>
+        </Button>
+      </template>
+    </Dialog>
   </div>
 </template>

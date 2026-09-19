@@ -33,6 +33,12 @@ interface AgentItem {
 
 const activeFilter = ref<AgentFilter>('all');
 const selectedAgentId = ref('agent-prog');
+const isMobileAgentDetailOpen = ref(false);
+
+function selectAgent(id: string) {
+  selectedAgentId.value = id;
+  isMobileAgentDetailOpen.value = true;
+}
 
 const agents = ref<AgentItem[]>([
   {
@@ -228,14 +234,18 @@ const selectedAgent = computed(() => {
     <!-- Master / Detail Body (Ultra-wide screen adapted) -->
     <div class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 w-full max-w-[1920px] mx-auto">
       <div class="flex flex-col md:flex-row gap-4 h-full">
-        <!-- Master Card List (Fixed width 320px-384px) -->
-        <div class="w-full md:w-80 lg:w-96 shrink-0 flex flex-col gap-2.5 overflow-y-auto pr-1">
-          <div
+        <!-- Master Card List (Fixed width 320px-384px; hidden on mobile when drilled down) -->
+        <div
+          class="w-full md:w-80 lg:w-96 shrink-0 flex flex-col gap-2.5 overflow-y-auto pr-1"
+          :class="isMobileAgentDetailOpen ? 'hidden md:flex' : 'flex'"
+        >
+          <button
             v-for="agent in filteredAgents"
             :key="agent.id"
-            class="p-3 rounded-[var(--radius-md)] border transition-all cursor-pointer select-none flex flex-col gap-2"
+            type="button"
+            class="text-left w-full p-3 rounded-[var(--radius-md)] border transition-all cursor-pointer select-none flex flex-col gap-2"
             :class="agent.id === selectedAgentId ? 'bg-[var(--bg-surface-elevated)] border-[var(--accent-primary)] ring-1 ring-[var(--accent-primary)] shadow-xs' : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]'"
-            @click="selectedAgentId = agent.id"
+            @click="selectAgent(agent.id)"
           >
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-2.5">
@@ -260,11 +270,32 @@ const selectedAgent = computed(() => {
               </Badge>
               <Badge v-if="agent.status === 'archived'" variant="neutral">ARCHIVED</Badge>
             </div>
-          </div>
+          </button>
         </div>
 
-        <!-- Detail Column (Fluid flex-1) -->
-        <div v-if="selectedAgent" class="flex-1 overflow-y-auto pl-1">
+        <!-- Detail Column (Fluid flex-1; hidden on mobile when viewing list) -->
+        <div
+          v-if="selectedAgent"
+          class="flex-1 overflow-y-auto pl-1"
+          :class="!isMobileAgentDetailOpen ? 'hidden md:block' : 'block'"
+        >
+          <!-- Mobile-only Back to Agents Header (Hidden on md+) -->
+          <div class="md:hidden px-3 py-2.5 mb-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between gap-2">
+            <button
+              type="button"
+              class="flex items-center gap-1.5 text-xs font-semibold text-[var(--accent-primary)] hover:underline cursor-pointer py-1 px-2.5 rounded bg-[var(--accent-bg)] border border-[var(--accent-border)] min-h-[36px]"
+              title="Return to Agent List"
+              aria-label="Return to Agent List"
+              @click="isMobileAgentDetailOpen = false"
+            >
+              <Icon name="chevron-left" :size="16" />
+              <span>Back to Agents</span>
+            </button>
+            <div class="flex items-center gap-1.5 truncate">
+              <StatusDot :status="selectedAgent.trafficLight" size="sm" />
+              <strong class="text-xs text-[var(--text-primary)] truncate">@{{ selectedAgent.displayName }}</strong>
+            </div>
+          </div>
           <div class="p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-5 shadow-xs">
             <!-- Identity Banner -->
             <div class="flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">

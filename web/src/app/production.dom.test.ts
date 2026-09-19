@@ -790,3 +790,66 @@ test('Production Web: strict non-product copy boundary across all reachable rout
     await cleanup();
   }
 });
+
+test('Production Web: task card and agent card interactive details inspection', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    app.mount(appMount);
+    const doc = dom.window.document;
+
+    // 1. In Project Tasks: click task card to open Task Detail Dialog
+    await router.push('/project/tasks');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const taskBtn = doc.querySelector('button h4')?.closest('button') as HTMLButtonElement;
+    assert.ok(taskBtn, 'Task card button found in Project Tasks');
+    taskBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Execution Lifecycle/);
+    assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
+
+    // Close task dialog
+    const closeBtn = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Close');
+    assert.ok(closeBtn);
+    closeBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // 2. In AgentsView: click agent card to view details
+    await router.push('/manage/agents');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const agentCard = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.includes('@Architect'));
+    assert.ok(agentCard, 'Architect agent card found');
+    agentCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /@Architect/);
+    assert.match(doc.body.textContent ?? '', /System & Seams Architect/);
+
+    // 3. In FeedView: click task card to view Task Detail Dialog
+    await router.push('/feed');
+    await router.isReady();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const allButtons = Array.from(doc.querySelectorAll('button'));
+    const feedTaskCard = allButtons.find((b) => b.textContent?.includes('#101:'));
+    assert.ok(feedTaskCard, 'Feed task card found');
+    feedTaskCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});

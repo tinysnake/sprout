@@ -7,6 +7,8 @@ import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
 import FilterPillGroup from '../primitives/FilterPillGroup.vue';
 import FilterPill from '../primitives/FilterPill.vue';
+import Dialog from '../primitives/Dialog.vue';
+import Button from '../primitives/Button.vue';
 
 const router = useRouter();
 const appStore = useAppStore();
@@ -102,6 +104,22 @@ const attentionItems = ref<AttentionItem[]>([
     targetPath: '/manage/environments/env-ready',
   },
 ]);
+
+const selectedTask = ref<any>(null);
+const isTaskDetailOpen = ref(false);
+
+function openTaskDetail(task: any) {
+  selectedTask.value = task;
+  isTaskDetailOpen.value = true;
+}
+
+function navigateToTaskEnv() {
+  if (selectedTask.value?.targetPath) {
+    const target = selectedTask.value.targetPath;
+    isTaskDetailOpen.value = false;
+    handleNavigate(target);
+  }
+}
 
 const activeTasks = ref([
   {
@@ -390,7 +408,7 @@ function handleNavigate(path: string) {
               :key="task.id"
               type="button"
               class="text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
-              @click="handleNavigate(task.targetPath)"
+              @click="openTaskDetail(task)"
             >
               <div>
                 <div class="flex items-start justify-between gap-2 mb-2">
@@ -420,7 +438,7 @@ function handleNavigate(path: string) {
               </div>
 
               <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-end text-xs font-semibold text-[var(--accent-primary)]">
-                <span>View Environment Lease →</span>
+                <span>Inspect Task Details →</span>
               </div>
             </button>
           </div>
@@ -516,5 +534,55 @@ function handleNavigate(path: string) {
         </section>
       </div>
     </div>
+    <!-- Task Detail Modal -->
+    <Dialog
+      v-if="selectedTask"
+      :open="isTaskDetailOpen"
+      :title="`Task #${selectedTask.id}: ${selectedTask.title}`"
+      :description="`Project: ${selectedTask.projectName} · Lead: @${selectedTask.lead}`"
+      @update:open="isTaskDetailOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <Badge variant="info">{{ selectedTask.projectName }}</Badge>
+            <span class="font-mono text-[11px] text-[var(--text-muted)]">{{ selectedTask.engine }}</span>
+          </div>
+          <strong class="text-sm text-[var(--text-primary)]">#{{ selectedTask.id }}: {{ selectedTask.title }}</strong>
+          <p class="text-xs text-[var(--text-secondary)]">Goal: {{ selectedTask.goal }}</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Lead Agent</span>
+            <strong class="text-[var(--text-primary)]">@{{ selectedTask.lead }}</strong>
+          </div>
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Environment</span>
+            <strong class="text-[var(--text-primary)]">{{ selectedTask.environment }}</strong>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] flex flex-col gap-1">
+          <strong class="text-xs font-bold flex items-center gap-1.5">
+            <Icon name="shield" :size="14" />
+            <span>Task-Held Exclusive Lease</span>
+          </strong>
+          <p class="text-[11px] text-[var(--text-secondary)]">
+            Exclusive lease is held continuously on host {{ selectedTask.environment }} across turns and validation steps.
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" @click="isTaskDetailOpen = false">
+          Close
+        </Button>
+        <Button variant="primary" size="sm" @click="navigateToTaskEnv">
+          <Icon name="environments" :size="13" />
+          <span>Inspect Host Environment</span>
+        </Button>
+      </template>
+    </Dialog>
   </div>
 </template>
