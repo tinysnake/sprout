@@ -37,7 +37,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { InMemoryRunStore } from '../run/store.ts';
-import { SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { CollaborationCoordinator } from './coordinator.ts';
 import type { WakeModel } from './model.ts';
 

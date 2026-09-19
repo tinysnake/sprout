@@ -9,7 +9,7 @@ import { EnvironmentPool } from './environment/pool.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
-import { SqliteStore } from './run/sqlite-store.ts';
+import { SqliteStore } from './store/db.ts';
 import { CollaborationCoordinator } from './collaboration/coordinator.ts';
 import { TaskService } from './task/service.ts';
 import { TaskEnvironmentLifecycle } from './task/environment-lifecycle.ts';

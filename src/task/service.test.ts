@@ -19,7 +19,7 @@ import { AgentRegistry } from '../agent/registry.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
-import { SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { InMemoryTaskStore } from './store.ts';
 import { SqliteTaskStore } from './sqlite-store.ts';
 import { TaskService } from './service.ts';

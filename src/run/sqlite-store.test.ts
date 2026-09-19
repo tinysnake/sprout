@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from './model.ts';
-import { SqliteRunStore, SqliteLeaseStore, SqliteStore } from './sqlite-store.ts';
+import { SqliteRunStore } from './sqlite-store.ts';
+import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {

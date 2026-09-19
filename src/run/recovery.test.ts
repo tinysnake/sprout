@@ -12,7 +12,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
   try {
     // Process 1: acquires a lease in SQLite and stays alive until killed.
     const proc1Code = `
-      import { SqliteStore } from './src/run/sqlite-store.ts';
+      import { SqliteStore } from './src/store/db.ts';
       import { EnvironmentPool } from './src/environment/pool.ts';
 
       const store = new SqliteStore({ filename: ${JSON.stringify(dbPath)} });
@@ -71,7 +71,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
     // Process 2: restarts against the same SQLite file.
     // It must observe the restored lease and enforce exclusion based on persisted state.
     const proc2Code = `
-      import { SqliteStore } from './src/run/sqlite-store.ts';
+      import { SqliteStore } from './src/store/db.ts';
       import { EnvironmentPool } from './src/environment/pool.ts';
 
       const store = new SqliteStore({ filename: ${JSON.stringify(dbPath)} });
@@ -175,7 +175,7 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
   try {
     // Process 1: starts a run that emits events and hangs mid-flight, then gets killed.
     const proc1Code = `
-      import { SqliteStore } from './src/run/sqlite-store.ts';
+      import { SqliteStore } from './src/store/db.ts';
       import { EnvironmentPool } from './src/environment/pool.ts';
       import { RunOrchestrator } from './src/run/orchestrator.ts';
       import { AgentRegistry } from './src/agent/registry.ts';
@@ -280,7 +280,7 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
 
     // Process 2: the restart. Reconciles orphaned runs and verifies explicit end state & lease recovery.
     const proc2Code = `
-      import { SqliteStore } from './src/run/sqlite-store.ts';
+      import { SqliteStore } from './src/store/db.ts';
       import { EnvironmentPool } from './src/environment/pool.ts';
       import { RunOrchestrator } from './src/run/orchestrator.ts';
       import { AgentRegistry } from './src/agent/registry.ts';

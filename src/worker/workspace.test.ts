@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { AgentRegistry } from '../agent/registry.ts';
 import { EnvironmentPool } from '../environment/pool.ts';
 import { ProjectRegistry } from '../project/registry.ts';
-import { SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 import { EndpointCarrier } from './carrier.ts';
 
