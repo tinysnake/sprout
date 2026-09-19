@@ -9,6 +9,7 @@ import {
   type SessionKeyIdentity,
   type StoredSessionKey,
 } from './session-key-store.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed storage for the run domain (ADR-0002).
@@ -64,6 +65,12 @@ export class SqliteRunStore implements RunStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
   }
@@ -180,6 +187,12 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
   }

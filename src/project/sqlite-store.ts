@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { Project } from './model.ts';
 import type { ProjectStore } from './store.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed storage for projects (ADR-0002).
@@ -30,6 +31,12 @@ export class SqliteProjectStore implements ProjectStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
   }

@@ -16,6 +16,7 @@ import {
   type PostMessageResult,
   wakeFromDecision,
 } from './store.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed collaboration storage (ticket #26, ADR-0002).
@@ -48,6 +49,12 @@ export class SqliteCollaborationStore implements CollaborationStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
   }

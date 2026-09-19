@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseHostConfiguration } from './host-config.ts';
 import { createSproutRuntime, MissingEnvironmentEngineError } from './runtime.ts';
+import { SchemaError } from './store/schema.ts';
 
 /**
  * The M1 runtime entry point.
@@ -37,6 +38,10 @@ try {
   if (error instanceof MissingEnvironmentEngineError) {
     process.stderr.write(`${error.message}\n`);
     process.exit(2);
+  }
+  if (error instanceof SchemaError) {
+    process.stderr.write(`Sprout database schema error:\n${error.message}\n\n${error.guidance}\n`);
+    process.exit(1);
   }
   throw error;
 }
