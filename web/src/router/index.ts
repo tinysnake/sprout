@@ -2,9 +2,9 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import EnvironmentsView from '../modules/environments/views/EnvironmentsView.vue';
 import FeedView from '../views/FeedView.vue';
 import ProjectView from '../views/ProjectView.vue';
-import AgentsPlaceholder from '../views/AgentsPlaceholder.vue';
-import UsagePlaceholder from '../views/UsagePlaceholder.vue';
-import SettingsPlaceholder from '../views/SettingsPlaceholder.vue';
+import AgentsView from '../views/AgentsView.vue';
+import UsageView from '../views/UsageView.vue';
+import SettingsView from '../views/SettingsView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -38,17 +38,17 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/manage/agents',
     name: 'agents',
-    component: AgentsPlaceholder,
+    component: AgentsView,
   },
   {
     path: '/manage/usage',
     name: 'usage',
-    component: UsagePlaceholder,
+    component: UsageView,
   },
   {
     path: '/manage/settings',
     name: 'settings',
-    component: SettingsPlaceholder,
+    component: SettingsView,
   },
 ];
 
