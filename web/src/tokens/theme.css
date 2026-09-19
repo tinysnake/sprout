@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-app: var(--bg-app);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-surface-elevated: var(--bg-surface-elevated);
+  --color-bg-surface-glass: var(--bg-surface-glass);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-strong: var(--border-strong);
+  --color-border-focus: var(--border-focus);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-text-inverse: var(--text-inverse);
+
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-primary-hover: var(--accent-primary-hover);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-border: var(--accent-border);
+
+  --color-green-ready: var(--green-ready);
+  --color-green-ready-bg: var(--green-ready-bg);
+  --color-green-ready-border: var(--green-ready-border);
+
+  --color-yellow-attention: var(--yellow-attention);
+  --color-yellow-attention-bg: var(--yellow-attention-bg);
+  --color-yellow-attention-border: var(--yellow-attention-border);
+
+  --color-red-action: var(--red-action);
+  --color-red-action-bg: var(--red-action-bg);
+  --color-red-action-border: var(--red-action-border);
+
+  --color-purple-agent: var(--purple-agent);
+  --color-purple-agent-bg: var(--purple-agent-bg);
+  --color-purple-agent-border: var(--purple-agent-border);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --radius-xs: 3px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+}
+
+/* 1. Root & Dark Theme (Default) */
+:root,
+[data-theme="dark"] {
+  --bg-app: #0a0e17;
+  --bg-surface: #131b26;
+  --bg-surface-elevated: #1a2534;
+  --bg-surface-glass: rgba(19, 27, 38, 0.88);
+  --border-subtle: #243245;
+  --border-strong: #384c66;
+  --border-focus: #38bdf8;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-inverse: #0f172a;
+
+  --accent-primary: #38bdf8;
+  --accent-primary-hover: #0ea5e9;
+  --accent-bg: rgba(56, 189, 248, 0.12);
+  --accent-border: rgba(56, 189, 248, 0.35);
+
+  --green-ready: #10b981;
+  --green-ready-bg: rgba(16, 185, 129, 0.15);
+  --green-ready-border: rgba(16, 185, 129, 0.35);
+
+  --yellow-attention: #f59e0b;
+  --yellow-attention-bg: rgba(245, 158, 11, 0.15);
+  --yellow-attention-border: rgba(245, 158, 11, 0.35);
+
+  --red-action: #ef4444;
+  --red-action-bg: rgba(239, 68, 68, 0.15);
+  --red-action-border: rgba(239, 68, 68, 0.35);
+
+  --purple-agent: #a855f7;
+  --purple-agent-bg: rgba(168, 85, 247, 0.15);
+  --purple-agent-border: rgba(168, 85, 247, 0.35);
+
+  --touch-target: 44px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.65);
+}
+
+/* 2. Light Theme Override */
+[data-theme="light"] {
+  --bg-app: #f1f5f9;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f8fafc;
+  --bg-surface-glass: rgba(255, 255, 255, 0.95);
+  --border-subtle: #e2e8f0;
+  --border-strong: #94a3b8;
+  --border-focus: #0284c7;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-inverse: #ffffff;
+
+  --accent-primary: #0284c7;
+  --accent-primary-hover: #0369a1;
+  --accent-bg: rgba(2, 132, 199, 0.12);
+  --accent-border: rgba(2, 132, 199, 0.4);
+
+  --green-ready: #059669;
+  --green-ready-bg: rgba(5, 150, 105, 0.12);
+  --green-ready-border: rgba(5, 150, 105, 0.4);
+
+  --yellow-attention: #b45309;
+  --yellow-attention-bg: rgba(217, 119, 6, 0.14);
+  --yellow-attention-border: rgba(217, 119, 6, 0.4);
+
+  --red-action: #dc2626;
+  --red-action-bg: rgba(220, 38, 38, 0.12);
+  --red-action-border: rgba(220, 38, 38, 0.4);
+
+  --purple-agent: #7c3aed;
+  --purple-agent-bg: rgba(124, 58, 237, 0.12);
+  --purple-agent-border: rgba(124, 58, 237, 0.4);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.12);
+}
+
+/* 3. Base Resets & Global Behavior */
+body {
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
