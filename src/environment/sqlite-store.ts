@@ -1,6 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type { EnvironmentLease, LeaseState, LeaseStore, TaskLeaseBinding } from './pool.ts';
+import {
+  assertSchemaCompatibility,
+  CURRENT_SCHEMA_VERSION,
+  getSchemaVersion,
+  setSchemaVersion,
+} from '../store/schema.ts';
 
 /**
  * SQLite-backed storage for environment leases (ADR-0002).
@@ -46,8 +52,12 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      assertSchemaCompatibility(this.#db, undefined, options.filename);
     }
     this.#init();
+    if (this.#ownsDb && getSchemaVersion(this.#db) === 0) {
+      setSchemaVersion(this.#db, CURRENT_SCHEMA_VERSION);
+    }
   }
 
   #init(): void {

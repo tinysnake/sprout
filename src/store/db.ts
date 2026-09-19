@@ -6,15 +6,47 @@ import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
+import {
+  getSchemaVersion,
+  migrateOrInitializeDatabase,
+  type MigrationStep,
+  type SchemaVersionRange,
+} from './schema.ts';
+
+export {
+  CURRENT_SCHEMA_VERSION,
+  MIN_SUPPORTED_SCHEMA_VERSION,
+  MAX_SUPPORTED_SCHEMA_VERSION,
+  SUPPORTED_SCHEMA_RANGE,
+  type SchemaVersionRange,
+  type MigrationStep,
+  SchemaError,
+  UnsupportedSchemaVersionError,
+  SchemaTooNewError,
+  SchemaTooOldError,
+  MigrationSafetyCopyError,
+  SchemaMigrationError,
+  getSchemaVersion,
+  setSchemaVersion,
+  isDatabaseEmpty,
+  sanitizePath,
+} from './schema.ts';
 
 /**
- * The shared SQLite persistence handle for Sprout (ADR-0002).
+ * The shared SQLite persistence handle for Sprout (ADR-0002, ADR-0009).
  *
- * This module owns exactly two things: the one `DatabaseSync` connection's
- * lifecycle and the composition of the domain adapters mounted on it. It knows
- * no table, column, or SQL of its own — every domain store owns the SQL for the
- * tables it persists, beside its own store interface:
+ * This module owns connection lifecycle, schema version validation/migration,
+ * and the composition of domain adapters mounted on the one database handle.
  *
+ * - Every database declares a schema version (`PRAGMA user_version`) and normal
+ *   startup accepts only the documented supported range.
+ * - Non-empty stores receive a consistent pre-migration safety copy before any
+ *   forward migration runs; copy failure blocks migration.
+ * - Supported forward migrations are transactional (`BEGIN IMMEDIATE` … `COMMIT`).
+ * - Failed, newer, and too-old schemas refuse normal serving with sanitized
+ *   host-local guidance.
+ *
+ * Domain stores own the SQL for their respective tables:
  * - run domain: `agent_runs`, `agent_session_keys` (`run/sqlite-store.ts`)
  * - environment domain: `environment_leases` (`environment/sqlite-store.ts`)
  * - project domain: `projects` (`project/sqlite-store.ts`)
@@ -22,24 +54,23 @@ import { createTransactionCoordinator, type TransactionCoordinator } from './tra
  * - collaboration domain: `collaboration_messages`,
  *   `collaboration_wake_requests`, `collaboration_observations`
  *   (`collaboration/sqlite-store.ts`)
- *
- * Mounting every adapter on one handle is what lets a domain's multi-table
- * transaction commit against the same durable state a restart reconciles. The
- * Task lifecycle commits its Task row together with its Task-held lease in one
- * boundary: the environment adapter owns the lease statements, the Task adapter
- * owns the Task statements, and this handle binds them through one shared
- * `TransactionCoordinator` over the one connection. No adapter begins or ends a
- * transaction over another domain's table.
- *
- * The class name and its `runs`/`leases`/`projects`/`sessionKeys`/
- * `collaboration`/`tasks` surface are unchanged from M1; this file only moves the
- * composition out of the run domain so `run/` no longer looks like the
- * persistence owner.
  */
 
 export interface SqliteStoreOptions {
   /** A file path, or `:memory:` for tests. */
   readonly filename: string;
+  /** Optional custom safety copy path. */
+  readonly safetyCopyPath?: string | undefined;
+  /** Optional target schema version (defaults to CURRENT_SCHEMA_VERSION). */
+  readonly targetSchemaVersion?: number | undefined;
+  /** Optional supported schema range (defaults to SUPPORTED_SCHEMA_RANGE). */
+  readonly supportedSchemaRange?: SchemaVersionRange | undefined;
+  /** Optional custom safety copy creator (for tests). */
+  readonly createSafetyCopy?:
+    | ((sourceDb: DatabaseSync, sourceFilename: string, safetyCopyPath: string) => void)
+    | undefined;
+  /** Optional forward migration definitions (for tests). */
+  readonly migrations?: readonly MigrationStep[] | undefined;
 }
 
 export class SqliteStore {
@@ -51,9 +82,24 @@ export class SqliteStore {
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
+  readonly schemaVersion: number;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    try {
+      migrateOrInitializeDatabase(this.db, {
+        filename: options.filename,
+        safetyCopyPath: options.safetyCopyPath,
+        targetVersion: options.targetSchemaVersion,
+        supportedRange: options.supportedSchemaRange,
+        createSafetyCopy: options.createSafetyCopy,
+        migrations: options.migrations,
+      });
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    this.schemaVersion = getSchemaVersion(this.db);
     // The one connection's transaction lifecycle: a cross-domain boundary (the
     // Task begin/end lease binding) runs through this, so neither the Task nor
     // the environment adapter owns `BEGIN`/`COMMIT` on the other's table.

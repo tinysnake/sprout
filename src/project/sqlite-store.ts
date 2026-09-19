@@ -2,6 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { Project } from './model.ts';
 import type { ProjectStore } from './store.ts';
+import {
+  assertSchemaCompatibility,
+  CURRENT_SCHEMA_VERSION,
+  getSchemaVersion,
+  setSchemaVersion,
+} from '../store/schema.ts';
 
 /**
  * SQLite-backed storage for projects (ADR-0002).
@@ -30,8 +36,12 @@ export class SqliteProjectStore implements ProjectStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      assertSchemaCompatibility(this.#db, undefined, options.filename);
     }
     this.#init();
+    if (this.#ownsDb && getSchemaVersion(this.#db) === 0) {
+      setSchemaVersion(this.#db, CURRENT_SCHEMA_VERSION);
+    }
   }
 
   #init(): void {
