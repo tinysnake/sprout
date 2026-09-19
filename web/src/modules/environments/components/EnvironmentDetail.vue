@@ -6,6 +6,7 @@ import Icon from '../../../primitives/Icon.vue';
 import StatusDot from '../../../primitives/StatusDot.vue';
 import StatusPill from '../../../primitives/StatusPill.vue';
 import Badge from '../../../primitives/Badge.vue';
+import Card from '../../../primitives/Card.vue';
 import HealthDimensionsGrid from './HealthDimensionsGrid.vue';
 import CapabilityPermissionsGrid from './CapabilityPermissionsGrid.vue';
 import EngineReadinessGrid from './EngineReadinessGrid.vue';
@@ -34,7 +35,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="card env-detail-card p-3.5 sm:p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] flex flex-col gap-4 shadow-sm">
+  <Card class="env-detail-card p-3.5 sm:p-4 flex flex-col gap-4 shadow-sm">
     <!-- 1. Prominent Traffic Light Summary Banner -->
     <StateBanner
       :traffic-light="env.trafficLight"
@@ -50,7 +51,6 @@ const emit = defineEmits<{
         <h3 class="text-sm font-bold text-[var(--text-primary)]">
           6 Independent Health Dimensions (Never collapsed into one boolean)
         </h3>
-        <span class="text-[11px] text-[var(--text-muted)]">ADR-0008 & ADR-0009</span>
       </div>
 
       <!-- 1–4. Core Operational Status & Safety Dimensions -->
@@ -114,7 +114,7 @@ const emit = defineEmits<{
       @reconcile="emit('reconcile', $event)"
     />
     <RecoveryAlertBox
-      v-else-if="env.workSafety === 'recovery' || env.leaseRecovery"
+      v-else-if="env.workSafety === 'recovery'"
       :env="env"
       @resume="emit('resume', $event)"
       @discard="emit('discard', $event)"
@@ -216,5 +216,5 @@ const emit = defineEmits<{
         </div>
       </div>
     </div>
-  </div>
+  </Card>
 </template>

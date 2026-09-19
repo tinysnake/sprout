@@ -118,8 +118,8 @@ const browserSessions = ref([
               <strong class="text-[var(--text-primary)] font-mono">SQLite (WAL Mode)</strong>
             </div>
             <div class="flex justify-between py-1.5">
-              <span class="text-[var(--text-muted)]">Production Web Foundation:</span>
-              <strong class="text-[var(--accent-primary)] font-mono">Vue 3.5 + Tailwind 4 + Reka UI</strong>
+              <span class="text-[var(--text-muted)]">Operator Console:</span>
+              <strong class="text-[var(--accent-primary)] font-mono">Sprout Modern Web UI</strong>
             </div>
           </div>
         </div>

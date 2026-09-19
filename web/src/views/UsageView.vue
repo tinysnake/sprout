@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import Icon from '../primitives/Icon.vue';
 import Badge from '../primitives/Badge.vue';
+import Card from '../primitives/Card.vue';
 
 const activeTab = ref<'run' | 'task' | 'project' | 'agent' | 'model' | 'time'>('project');
 
@@ -37,7 +38,7 @@ const usageItems = ref([
     tokens: '28,400',
     duration: '1m 15s',
     costEstimate: '$0.03',
-    provenance: 'harness_calculated',
+    provenance: 'locally_estimated',
   },
   {
     id: 'u-4',
@@ -48,7 +49,7 @@ const usageItems = ref([
     tokens: '14,200',
     duration: '42s',
     costEstimate: '$0.02',
-    provenance: 'harness_calculated',
+    provenance: 'locally_estimated',
   },
 ]);
 </script>
@@ -62,7 +63,7 @@ const usageItems = ref([
         <div>
           <h2 class="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
             <Icon name="usage" :size="18" />
-            <span>Usage & Cost Telemetry (ADR-0010)</span>
+            <span>Usage & Cost Telemetry</span>
           </h2>
           <p class="text-xs text-[var(--text-secondary)] mt-0.5">
             Token telemetry, API equivalent estimations, and truthful duration observability.
@@ -71,7 +72,7 @@ const usageItems = ref([
         <Badge variant="warning">Billed cost: Unavailable (Self-hosted)</Badge>
       </div>
 
-      <!-- 6-View Tab Strip (ADR-0010) -->
+      <!-- 6-View Tab Strip -->
       <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] overflow-x-auto w-fit" role="tablist">
         <button
           type="button"
@@ -150,18 +151,18 @@ const usageItems = ref([
         </div>
       </div>
 
-      <!-- ADR-0010 Separation Invariant: 2-Column Split on Wide Screens -->
+      <!-- Separation Invariant: 2-Column Split on Wide Screens -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <!-- Left 2 Columns: Activity Items Breakdown -->
         <div class="lg:col-span-2 flex flex-col gap-3">
           <div class="flex items-center justify-between">
             <strong class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">
-              Activity Items Breakdown (Work Runs & Routing Separate — ADR-0010)
+              Activity Items Breakdown (Work Runs & Routing Separate)
             </strong>
             <span class="text-[10px] text-[var(--text-muted)]">Never merged into one total</span>
           </div>
 
-          <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+          <Card class="p-4 flex flex-col gap-3">
             <div
               v-for="item in usageItems"
               :key="item.id"
@@ -188,14 +189,14 @@ const usageItems = ref([
                 </div>
               </div>
             </div>
-          </div>
+          </Card>
         </div>
 
         <!-- Right 1 Column: Telemetry Invariant & Audit Info -->
-        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs h-fit">
+        <Card class="p-4 flex flex-col gap-4 h-fit">
           <div class="flex items-center gap-2">
             <Icon name="shield" :size="16" class="text-[var(--accent-primary)]" />
-            <strong class="text-xs font-bold text-[var(--text-primary)]">Telemetry Invariants (ADR-0010)</strong>
+            <strong class="text-xs font-bold text-[var(--text-primary)]">Telemetry Invariants</strong>
           </div>
           <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
             In Sprout M2, Work-model runs represent purposeful agent output (token charges with task attribution).
@@ -206,7 +207,7 @@ const usageItems = ref([
             <div>Routing Overhead: 42,600 tokens (3.7%)</div>
             <div>Unbilled local execution: $0.00 actual</div>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   </div>

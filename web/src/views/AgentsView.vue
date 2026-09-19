@@ -118,7 +118,7 @@ const agents = ref<AgentItem[]>([
     role: 'Historical M1 Migration Helper',
     status: 'archived',
     trafficLight: 'neutral',
-    trafficLightReason: 'Archived Agent · Preserved attribution, private memory, and session slots (ADR-0008)',
+    trafficLightReason: 'Archived Agent · Preserved attribution, private memory, and session slots',
     description: 'M1 to M2 transition utility agent, now cleanly retired without deleting historic activity.',
     standingInstructions: 'Archived persona; does not accept new task work.',
     privateMemoryCount: 19,
@@ -153,7 +153,7 @@ const selectedAgent = computed(() => {
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <h2 class="text-sm sm:text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
           <Icon name="agents" :size="18" />
-          <span>Agents & Worker Personas (ADR-0008)</span>
+          <span>Agents & Worker Personas</span>
         </h2>
         <div class="flex items-center gap-2">
           <Button variant="primary" size="icon" title="Create New Agent">
@@ -285,7 +285,7 @@ const selectedAgent = computed(() => {
 
             <!-- Standing Instructions -->
             <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs flex flex-col gap-1">
-              <strong class="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-bold">Standing Instructions (ADR-0008)</strong>
+              <strong class="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-bold">Standing Instructions</strong>
               <p class="text-[var(--text-primary)] leading-relaxed">{{ selectedAgent.standingInstructions }}</p>
             </div>
 
@@ -347,7 +347,7 @@ const selectedAgent = computed(() => {
             </div>
 
             <!-- Historical Attribution Foldable -->
-            <Foldable title="Attribution & Historical Contribution Trace" subtext="ADR-0008 Non-destructive provenance">
+            <Foldable title="Attribution & Historical Contribution Trace" subtext="Non-destructive historical attribution">
               <p class="text-[11px] text-[var(--text-secondary)] py-1">
                 Completed 42 runs across Project Sprout M2. Historical runs retain persistent attribution even if this persona is subsequently archived.
               </p>

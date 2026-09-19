@@ -13,7 +13,7 @@ defineProps<{
     <div class="flex items-center justify-between">
       <strong class="text-xs font-bold text-[var(--text-primary)] flex items-center gap-1.5">
         <Icon name="shield" :size="15" />
-        <span>Task-Held Lease Active (ADR-0005)</span>
+        <span>Task-Held Lease Active</span>
       </strong>
       <StatusPill status="purple" class="text-[10px]">
         EXCLUSIVE LEASE
@@ -29,7 +29,7 @@ defineProps<{
     </div>
 
     <div class="text-[10px] text-[var(--text-muted)] pt-1.5 border-t border-[var(--purple-agent-border)]">
-      ADR-0005 Safety Guarantee: Lease is held continuously from Task begin to end across runs, idle gaps, and human validation. No automatic timeout.
+      Safety Guarantee: Lease is held continuously from Task begin to end across runs, idle gaps, and human validation. No automatic timeout.
     </div>
   </div>
 </template>

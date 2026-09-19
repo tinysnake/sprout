@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import Dialog from '../../../primitives/Dialog.vue';
+import Sheet from '../../../primitives/Sheet.vue';
 import Button from '../../../primitives/Button.vue';
 
 defineProps<{
@@ -12,10 +12,11 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <Dialog
+  <Sheet
     :open="open"
+    side="bottom"
     title="Host Bootstrap & Enrollment Guide"
-    description="macOS & Windows Service Setup under ADR-0008 & ADR-0009"
+    description="macOS & Windows Service Setup and Security Guidelines"
     @update:open="(val) => emit('update:open', val)"
   >
     <div class="space-y-3 text-xs text-[var(--text-secondary)] leading-relaxed">
@@ -44,9 +45,9 @@ const emit = defineEmits<{
     </div>
 
     <template #footer>
-      <Button variant="primary" size="sm" @click="emit('update:open', false)">
+      <Button variant="primary" size="sm" class="close-guide-btn" @click="emit('update:open', false)">
         Close Guide
       </Button>
     </template>
-  </Dialog>
+  </Sheet>
 </template>

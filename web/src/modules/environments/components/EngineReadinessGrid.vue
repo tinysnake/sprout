@@ -107,7 +107,7 @@ function getStatusPill(status: EngineStatus): 'green' | 'yellow' | 'red' | 'neut
     </div>
 
     <div class="text-[10px] text-[var(--text-muted)] mt-1">
-      Strict ADR-0008 & ADR-0009 Invariant: Host paths, API keys, and credentials remain strictly on the host; Web inspects only neutral readiness facts.
+      Safety Guarantee: Host paths, API keys, and credentials remain strictly on the host; Web inspects only neutral readiness facts.
     </div>
   </div>
 </template>

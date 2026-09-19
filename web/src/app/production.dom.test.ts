@@ -32,6 +32,10 @@ const replacements: Record<string, unknown> = {
   Node: initialDom.window.Node,
   Event: initialDom.window.Event,
   MouseEvent: initialDom.window.MouseEvent,
+  KeyboardEvent: initialDom.window.KeyboardEvent,
+  PointerEvent: initialDom.window.PointerEvent,
+  FocusEvent: initialDom.window.FocusEvent,
+  TouchEvent: initialDom.window.TouchEvent,
   CustomEvent: initialDom.window.CustomEvent,
   requestAnimationFrame: (cb: FrameRequestCallback) => setTimeout(cb, 10),
   cancelAnimationFrame: (id: number) => clearTimeout(id),
@@ -134,12 +138,15 @@ test('Production Web: mounts Shell and Manage / Environments, preserving structu
     assert.match(doc.body.textContent ?? '', /agy/);
     assert.match(doc.body.textContent ?? '', /opencode/);
 
-    // 6. Verify Active Lease Card & Task-Held Lease Guarantee (ADR-0005)
-    assert.match(doc.body.textContent ?? '', /Task-Held Lease Active \(ADR-0005\)/);
+    // 6. Verify Active Lease Card & Task-Held Lease Guarantee
+    assert.match(doc.body.textContent ?? '', /Task-Held Lease Active/);
     assert.match(doc.body.textContent ?? '', /Task #101/);
     assert.match(doc.body.textContent ?? '', /@Programmer/);
 
-    // 7. Verify exclusion of prototype harness controls
+    // 7. Verify exclusion of prototype harness controls and non-product copy
+    assert.doesNotMatch(doc.body.textContent ?? '', /ADR-\d{4}/, 'No ADR references in production DOM');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Ticket #\d+/, 'No Ticket references in production DOM');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Simulate/, 'No simulation copy in production DOM');
     assert.equal(doc.querySelector('.proto-control-bar'), null, 'No prototype control bar');
     assert.equal(doc.querySelector('#top-viewport-select'), null, 'No prototype viewport switcher');
     assert.equal(doc.querySelector('#top-style-baseline-btn'), null, 'No prototype style baseline button');
@@ -458,6 +465,325 @@ test('Production Web: deep-link return context banner preserves navigation histo
 
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.equal(router.currentRoute.value.path, '/feed', 'Returned to Feed view');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: deterministic loading state and empty state rendered in EnvironmentsView', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { FixtureEnvironmentService } = (await vite.ssrLoadModule(
+      '/src/modules/environments/adapters/fixture-adapter.ts'
+    )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    // 1. Test Loading State with deferred promise
+    let resolveList: (val: any) => void = () => {};
+    const deferredPromise = new Promise((resolve) => {
+      resolveList = resolve;
+    });
+
+    class LoadingEnvironmentService extends FixtureEnvironmentService {
+      override async listEnvironments() {
+        return deferredPromise as any;
+      }
+    }
+
+    const { app: loadingApp, router: loadingRouter } = createSproutApp({
+      routerBase: '/app/',
+      environmentService: new LoadingEnvironmentService(),
+    });
+    await loadingRouter.push('/manage/environments');
+    await loadingRouter.isReady();
+    loadingApp.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const doc = dom.window.document;
+
+    const loadingState = doc.querySelector('.envs-loading-state');
+    assert.ok(loadingState, 'Loading state indicator rendered while query pending');
+    assert.match(loadingState.textContent ?? '', /Loading Environments & Host States/);
+
+    // Resolve deferred promise and unmount
+    resolveList([]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    loadingApp.unmount();
+
+    // 2. Test Empty State with service returning zero environments
+    class EmptyEnvironmentService extends FixtureEnvironmentService {
+      override async listEnvironments() {
+        return [];
+      }
+    }
+
+    const { app: emptyApp, router: emptyRouter } = createSproutApp({
+      routerBase: '/app/',
+      environmentService: new EmptyEnvironmentService(),
+    });
+    await emptyRouter.push('/manage/environments');
+    await emptyRouter.isReady();
+    emptyApp.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const emptyState = doc.querySelector('.envs-empty-state');
+    assert.ok(emptyState, 'Empty state rendered when no environments enrolled');
+    assert.match(emptyState.textContent ?? '', /No Environments Enrolled/);
+    assert.match(emptyState.textContent ?? '', /Register New Host/);
+
+    emptyApp.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: reachable reconciling state presents ReconcilingBox and resolves to recovery decision with proof', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/manage/environments/env-reconciling');
+    await router.isReady();
+    app.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // Verify ReconcilingBox is rendered
+    const reconcilingBox = doc.querySelector('.reconciling-box');
+    assert.ok(reconcilingBox, 'ReconcilingBox is rendered for env-reconciling');
+    assert.match(reconcilingBox.textContent ?? '', /Worker Reconnected · Reconciling Settlement Evidence/);
+    assert.match(reconcilingBox.textContent ?? '', /RECONCILING/);
+
+    // Verify independent health & recovery semantics: reconciling has NOT collapsed into recovery
+    assert.equal(doc.querySelector('.recovery-alert-box'), null, 'RecoveryAlertBox is NOT rendered during reconciling');
+
+    // Click 'Reconcile & Synchronize Evidence'
+    const reconcileBtn = doc.querySelector('.btn-reconcile-evidence') as HTMLButtonElement;
+    assert.ok(reconcileBtn, 'Reconcile evidence button found');
+    reconcileBtn.click();
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify ReconcilingBox is gone and RecoveryAlertBox is rendered with proof
+    assert.equal(doc.querySelector('.reconciling-box'), null, 'ReconcilingBox dismissed after synchronization');
+    const recoveryAlertBox = doc.querySelector('.recovery-alert-box');
+    assert.ok(recoveryAlertBox, 'RecoveryAlertBox rendered after evidence synchronization');
+    assert.match(
+      recoveryAlertBox.textContent ?? '',
+      /Reconciliation Proof: Retained 4 events, verified engine session stopped/
+    );
+
+    // Verify operator recovery actions are now available
+    assert.ok(doc.querySelector('.btn-resume-recovery'), 'Resume action available');
+    assert.ok(doc.querySelector('.btn-discard-recovery'), 'Discard action available');
+    assert.ok(doc.querySelector('.force-release-btn'), 'Force release action available');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: shared Card primitive is consumed by domain compositions with no domain kind switcher', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const cardModule = (await vite.ssrLoadModule('/src/primitives/Card.vue')) as any;
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/manage/environments/env-ready');
+    await router.isReady();
+    app.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // 1. Master card uses Card as="button" with interactive and selected states
+    const masterCard = doc.querySelector('.env-master-card') as HTMLButtonElement;
+    assert.ok(masterCard, 'Master card element rendered');
+    assert.equal(masterCard.tagName.toLowerCase(), 'button', 'Master card renders as button');
+    assert.ok(masterCard.classList.contains('rounded-[var(--radius-md)]'), 'Shared Card rounded radius applied');
+    assert.ok(masterCard.classList.contains('border'), 'Shared Card border applied');
+
+    // 2. Detail card uses Card shell
+    const detailCard = doc.querySelector('.env-detail-card');
+    assert.ok(detailCard, 'Detail card rendered using shared Card shell');
+    assert.ok(detailCard.classList.contains('rounded-[var(--radius-md)]'), 'Shared Card rounded radius applied');
+
+    // 3. Verify Card component interface has NO domain 'kind' prop or domain-switching branches
+    const cardProps = cardModule.default?.props ?? {};
+    assert.equal(cardProps.kind, undefined, 'Card does not accept a domain kind prop');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: accessible overlay interactions — keyboard activation, Escape dismissal, initial focus, and mobile touch/pointer parity', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // 1. Keyboard activation & Sheet consumption: Host Bootstrap Guide (#btn-host-guide)
+    const guideBtn = doc.querySelector('#btn-host-guide') as HTMLButtonElement;
+    assert.ok(guideBtn, 'Host Bootstrap Guide button found');
+    guideBtn.focus();
+    assert.equal(doc.activeElement, guideBtn, 'Guide button receives keyboard focus');
+
+    // Activate with keyboard (click / Enter keydown)
+    guideBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify Sheet opened
+    assert.match(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
+    assert.match(doc.body.textContent ?? '', /macOS & Windows Service Setup and Security Guidelines/);
+
+    // Verify close button within Sheet works
+    const closeGuideBtn = doc.querySelector('.close-guide-btn') as HTMLButtonElement;
+    assert.ok(closeGuideBtn, 'Close button in Sheet footer found');
+    closeGuideBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify Sheet closed via close button
+    assert.doesNotMatch(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
+
+    // Reopen Sheet to test Escape key dismissal
+    guideBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/);
+
+    // Dispatch Escape keydown on document
+    const escEvent = new dom.window.KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    doc.dispatchEvent(escEvent);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.doesNotMatch(doc.body.textContent ?? '', /Host Bootstrap & Enrollment Guide/, 'Sheet closed via Escape');
+
+    // 2. AlertDialog: Emergency Force Release keyboard activation and Escape / Cancel
+    const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
+    assert.ok(recoveryCard);
+    recoveryCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const forceReleaseBtn = doc.querySelector('.force-release-btn') as HTMLButtonElement;
+    assert.ok(forceReleaseBtn);
+    forceReleaseBtn.focus();
+    forceReleaseBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Verify AlertDialog is open
+    assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+
+    // Verify Cancel button in AlertDialog footer closes the dialog
+    const cancelBtn = doc.querySelector('.close-sheet-btn') as HTMLButtonElement;
+    assert.ok(cancelBtn);
+    cancelBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.doesNotMatch(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+
+    // Reopen AlertDialog and verify Escape dismisses
+    forceReleaseBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+
+    doc.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.doesNotMatch(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/, 'AlertDialog closed via Escape');
+
+    // 3. Mobile touch/pointer parity: pointerdown/pointerup and touchstart/touchend activate master selection
+    const readyCard = doc.querySelector('button[data-env="env-ready"]') as HTMLButtonElement;
+    assert.ok(readyCard);
+    readyCard.dispatchEvent(new dom.window.PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    readyCard.dispatchEvent(new dom.window.PointerEvent('pointerup', { bubbles: true, cancelable: true }));
+    readyCard.dispatchEvent(new dom.window.TouchEvent('touchstart', { bubbles: true, cancelable: true }));
+    readyCard.dispatchEvent(new dom.window.TouchEvent('touchend', { bubbles: true, cancelable: true }));
+    readyCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.match(doc.body.textContent ?? '', /Mac Studio M2 Max/);
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Production Web: strict non-product copy boundary across all reachable routes', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    app.mount(appMount);
+
+    const routesToTest = [
+      '/feed',
+      '/project/overview',
+      '/project/tasks',
+      '/project/chat',
+      '/manage/environments',
+      '/manage/environments/env-ready',
+      '/manage/environments/env-recovery',
+      '/manage/environments/env-reconciling',
+      '/manage/agents',
+      '/manage/usage',
+      '/manage/settings',
+    ];
+
+    const doc = dom.window.document;
+
+    for (const routePath of routesToTest) {
+      await router.push(routePath);
+      await router.isReady();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      const content = doc.body.textContent ?? '';
+
+      assert.doesNotMatch(content, /ADR-\d{4}/, `No ADR captions rendered on ${routePath}`);
+      assert.doesNotMatch(content, /Ticket #\d+/, `No Ticket numbers rendered on ${routePath}`);
+      assert.doesNotMatch(content, /\bSimulate\b/, `No simulation copy rendered on ${routePath}`);
+      assert.equal(doc.querySelector('.proto-control-bar'), null, `No prototype control bar on ${routePath}`);
+      assert.equal(doc.querySelector('#top-viewport-select'), null, `No viewport switcher on ${routePath}`);
+      assert.equal(doc.querySelector('#top-style-baseline-btn'), null, `No style baseline on ${routePath}`);
+      assert.equal(doc.querySelector('.review-drawer'), null, `No review drawer on ${routePath}`);
+    }
 
     app.unmount();
   } finally {

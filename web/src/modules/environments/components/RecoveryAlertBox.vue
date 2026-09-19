@@ -34,7 +34,7 @@ const unresolvedFacts = computed(() => {
     <div class="flex items-center justify-between">
       <strong class="text-sm font-bold text-[var(--red-action)] flex items-center gap-1.5">
         <Icon name="alert" :size="16" />
-        <span>Lease Recovery Required (ADR-0006 & ADR-0009)</span>
+        <span>Lease Recovery Required</span>
       </strong>
       <StatusPill status="red" class="text-[10px]">
         RECOVERY LOCKED

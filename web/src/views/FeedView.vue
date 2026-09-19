@@ -96,7 +96,7 @@ const attentionItems = ref<AttentionItem[]>([
     title: 'Active Task-Held Lease on Mac Studio M2 Max',
     projectName: 'Sprout M2 Operator',
     summary: 'Task #101 holds exclusive lease across multi-run execution. Running lead @Programmer.',
-    lifecycleSentence: 'Task #101 active · Run running · Lease held continuously (ADR-0005)',
+    lifecycleSentence: 'Task #101 active · Run running · Lease held continuously',
     attribution: '@Programmer',
     timestamp: '10s ago',
     targetPath: '/manage/environments/env-ready',
@@ -107,31 +107,31 @@ const activeTasks = ref([
   {
     id: '101',
     projectName: 'Sprout M2 Operator',
-    title: 'Refactor Environment State Manager into Decoupled Seams',
+    title: 'Continuous Integration & Host Verification Pipeline',
     lead: 'Programmer',
     environment: 'Mac Studio M2 Max',
     engine: 'Pi (gemini-2.5-pro)',
-    goal: 'Establish typed remote-state ports and replace mutable StateManager with clean Vue modules.',
+    goal: 'Establish persistent host worker pipelines and verify carrier streaming.',
     targetPath: '/manage/environments/env-ready',
   },
   {
     id: '104',
     projectName: 'Sprout M2 Operator',
-    title: 'Multi-Agent Simulation Validation & Host Porting',
+    title: 'Distributed Agent Orchestration & Safety Validation',
     lead: 'Architect',
     environment: 'Windows Workstation 01',
     engine: 'Codex (gpt-5-codex)',
-    goal: 'Validate host-local carrier disconnect, reconnect and 3-gate emergency Force Release.',
+    goal: 'Validate carrier disconnect recovery and operator force release procedures.',
     targetPath: '/manage/environments/env-recovery',
   },
   {
     id: '107',
     projectName: 'o7 Minesweeper',
-    title: 'Validate Reka UI Headless Accessible Overlays & Focus Trap',
+    title: 'Accessibility Verification & Operator Surface Diagnostics',
     lead: 'Foreman',
     environment: 'Local Worker',
     engine: 'Pi (claude-3-7-sonnet)',
-    goal: 'Prove keyboard focus trap, initial focus, and escape dismissal in dialogs.',
+    goal: 'Verify operator control accessibility, focus trapping, and screen-reader semantics.',
     targetPath: '/manage/environments',
   },
 ]);
@@ -176,7 +176,7 @@ const activities = ref([
     badgeKind: 'purple' as const,
     title: 'Task #101 acquired exclusive lease',
     projectName: 'Sprout M2 Operator',
-    subtitle: 'Acquired exclusive lease on Mac Studio M2 Max under ADR-0005 guarantee.',
+    subtitle: 'Acquired exclusive lease on Mac Studio M2 Max with guaranteed exclusivity.',
     relativeTime: '18m ago',
     timestamp: '09:56:00',
     targetPath: '/manage/environments/env-ready',
@@ -381,7 +381,7 @@ function handleNavigate(path: string) {
               <h3 class="text-sm font-bold text-[var(--text-primary)]">Live In-Flight Work</h3>
               <Badge variant="info">{{ activeTasks.length }} Active</Badge>
             </div>
-            <span class="text-[11px] text-[var(--text-muted)]">Active Task leases held under ADR-0005</span>
+            <span class="text-[11px] text-[var(--text-muted)]">Active task leases held continuously</span>
           </div>
 
           <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">

@@ -18,7 +18,6 @@ const emit = defineEmits<{
       <strong class="text-xs uppercase tracking-wider text-[var(--text-muted)] font-bold">
         1–4. Core Operational Status & Safety Dimensions
       </strong>
-      <span class="text-[10px] text-[var(--text-muted)]">ADR-0008 & ADR-0009</span>
     </div>
 
     <div class="dimensions-2x2-grid grid grid-cols-1 sm:grid-cols-2 gap-2">

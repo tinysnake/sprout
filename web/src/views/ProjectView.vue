@@ -151,7 +151,7 @@ const chatScopes = ref<ChatScope[]>([
     id: '@Programmer',
     label: '@Programmer',
     kind: 'dm',
-    lastSnippet: 'Verified remote-state ports and happy-dom tests.',
+    lastSnippet: 'Verified worker ports and host daemon checks.',
     lastTime: '10:08 AM',
     unread: 0,
   },
@@ -159,7 +159,7 @@ const chatScopes = ref<ChatScope[]>([
     id: '@Architect',
     label: '@Architect',
     kind: 'dm',
-    lastSnippet: 'ADR-0011 architectural foundation baseline confirmed.',
+    lastSnippet: 'Production workspace baseline confirmed.',
     lastTime: '10:04 AM',
     unread: 0,
   },
@@ -171,21 +171,21 @@ const chatMessages = ref([
     author: 'Architect',
     role: 'System Architect',
     time: '10:04 AM',
-    content: 'Reviewing Ticket #74 Vue foundation slice. Ensure ADR-0011 boundary holds: Shell + Environments are authoritative; Pinia owns only UI state.',
+    content: 'Inspecting operator services and environment readiness. Remote state stays behind EnvironmentService port.',
   },
   {
     id: 'msg-2',
     author: 'Programmer',
     role: 'Lead Implementer',
     time: '10:08 AM',
-    content: 'Verified. Remote state stays behind EnvironmentService port. No global mutable StateManager. 541 automated tests passing cleanly.',
+    content: 'Verified. Carrier connection stable and host daemons responsive.',
   },
   {
     id: 'msg-3',
     author: 'Foreman',
     role: 'Coordinator',
     time: '10:11 AM',
-    content: 'All 8 Reka UI accessible dialog checks pass. Focus trap, Escape dismissal, and 3-gate Force Release safety verification green.',
+    content: 'All host security policies active. Host-local keys verified and carrier stream encrypted.',
   },
 ]);
 
@@ -268,7 +268,7 @@ function sendMessage() {
             </p>
             <div class="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] pt-2 border-t border-[var(--border-subtle)]">
               <Icon name="shield" :size="14" class="text-[var(--green-ready)]" />
-              <span>Host permissions verified · Task-held leases guaranteed exclusive (ADR-0005)</span>
+              <span>Host permissions verified · Task-held leases guaranteed exclusive</span>
             </div>
           </div>
 

@@ -25,6 +25,13 @@ test('EnvironmentService: listEnvironments returns structured health facts and s
   assert.ok(recovery.leaseRecovery, 'Lease recovery info present');
   assert.ok(recovery.leaseRecovery.unresolvedFacts.length > 0);
 
+  const reconciling = envs.find((e) => e.id === 'env-reconciling');
+  assert.ok(reconciling, 'Reconciling environment exists');
+  assert.equal(reconciling.workSafety, 'reconciling');
+  assert.equal(reconciling.trafficLight, 'yellow');
+  assert.equal(reconciling.connectionState, 'online');
+  assert.ok(reconciling.leaseRecovery, 'Lease recovery info present for reconciling');
+
   const pending = envs.find((e) => e.id === 'env-pending');
   assert.ok(pending, 'Pending environment exists');
   assert.equal(pending.enrollmentStatus, 'pending');
@@ -94,10 +101,16 @@ test('EnvironmentService: unbindWorkspace removes bound workspace safely', async
 
 test('EnvironmentService: reconcileEvidence synchronizes evidence and updates recovery state', async () => {
   const service = new FixtureEnvironmentService();
-  await service.reconcileEvidence('env-recovery');
+  const before = await service.getEnvironment('env-reconciling');
+  assert.ok(before);
+  assert.equal(before.workSafety, 'reconciling');
+  assert.equal(before.leaseRecovery?.reconciledEvidence, undefined);
 
-  const env = await service.getEnvironment('env-recovery');
+  await service.reconcileEvidence('env-reconciling');
+
+  const env = await service.getEnvironment('env-reconciling');
   assert.ok(env?.leaseRecovery?.reconciledEvidence);
+  assert.equal(env.workSafety, 'recovery');
   assert.equal(env.leaseRecovery.reconciledEvidence.retainedEventsCount, 4);
   assert.equal(env.leaseRecovery.reconciledEvidence.engineStoppedProof, true);
 });
