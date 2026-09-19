@@ -15,7 +15,7 @@ const emit = defineEmits<{
   <Dialog
     :open="open"
     title="Register New Host Environment"
-    description="Simulate pending worker bootstrap connection over private transport"
+    description="Connect worker bootstrap over private transport"
     @update:open="(val) => emit('update:open', val)"
   >
     <div class="space-y-3 text-xs text-[var(--text-secondary)] leading-relaxed">

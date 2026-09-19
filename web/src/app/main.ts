@@ -2,15 +2,20 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import App from './App.vue';
 import { createAppRouter } from '../router/index.js';
+import type { EnvironmentService } from '../modules/environments/ports.js';
 import '../tokens/theme.css';
 
-export function createSproutApp(options: { routerBase?: string } = {}) {
+export function createSproutApp(options: { routerBase?: string; environmentService?: EnvironmentService } = {}) {
   const app = createApp(App);
   const pinia = createPinia();
   const router = createAppRouter(options.routerBase);
 
   app.use(pinia);
   app.use(router);
+
+  if (options.environmentService) {
+    app.provide('environmentService', options.environmentService);
+  }
 
   return { app, pinia, router };
 }

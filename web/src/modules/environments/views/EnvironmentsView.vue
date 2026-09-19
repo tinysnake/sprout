@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch, inject } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { EnvironmentFilter, EnvironmentInstance, ForceReleaseParams } from '../types.js';
 import type { EnvironmentService } from '../ports.js';
@@ -8,6 +8,7 @@ import FilterPillGroup from '../../../primitives/FilterPillGroup.vue';
 import FilterPill from '../../../primitives/FilterPill.vue';
 import Button from '../../../primitives/Button.vue';
 import Icon from '../../../primitives/Icon.vue';
+import EmptyState from '../../../primitives/EmptyState.vue';
 import EnvironmentMasterList from '../components/EnvironmentMasterList.vue';
 import EnvironmentDetail from '../components/EnvironmentDetail.vue';
 import ForceReleaseDialog from '../components/ForceReleaseDialog.vue';
@@ -15,14 +16,12 @@ import BootstrapGuideDialog from '../components/BootstrapGuideDialog.vue';
 import RegisterHostDialog from '../components/RegisterHostDialog.vue';
 import MobileDetailHeader from '../../../shell/MobileDetailHeader.vue';
 
-const props = withDefaults(
-  defineProps<{
-    service?: EnvironmentService;
-  }>(),
-  {
-    service: () => new FixtureEnvironmentService(),
-  }
-);
+const props = defineProps<{
+  service?: EnvironmentService;
+}>();
+
+const injectedService = inject<EnvironmentService | undefined>('environmentService', undefined);
+const activeService = computed(() => props.service ?? injectedService ?? new FixtureEnvironmentService());
 
 const route = useRoute();
 const router = useRouter();
@@ -38,7 +37,7 @@ const isRegisterOpen = ref(false);
 
 async function loadData() {
   isLoading.value = true;
-  environments.value = await props.service.listEnvironments();
+  environments.value = await activeService.value.listEnvironments();
   if (route.params.id && typeof route.params.id === 'string') {
     selectedId.value = route.params.id;
   } else if (!selectedId.value || !environments.value.some((e) => e.id === selectedId.value)) {
@@ -105,39 +104,39 @@ function handleSelectEnvironment(id: string) {
 }
 
 async function handleApprove(id: string) {
-  await props.service.approveEnrollment(id);
+  await activeService.value.approveEnrollment(id);
   await loadData();
 }
 
 async function handleProbe(id: string) {
-  await props.service.triggerProbe(id);
+  await activeService.value.triggerProbe(id);
   await loadData();
 }
 
 async function handleTogglePermission(cap: any) {
   if (selectedEnv.value) {
-    await props.service.togglePermission(selectedEnv.value.id, cap);
+    await activeService.value.togglePermission(selectedEnv.value.id, cap);
     await loadData();
   }
 }
 
 async function handleUnbindWorkspace(payload: { projectId: string; envId: string }) {
-  await props.service.unbindWorkspace(payload.projectId, payload.envId);
+  await activeService.value.unbindWorkspace(payload.projectId, payload.envId);
   await loadData();
 }
 
 async function handleReconcile(id: string) {
-  await props.service.reconcileEvidence(id);
+  await activeService.value.reconcileEvidence(id);
   await loadData();
 }
 
 async function handleResume(taskId: string) {
-  await props.service.resumeRecovery(taskId);
+  await activeService.value.resumeRecovery(taskId);
   await loadData();
 }
 
 async function handleDiscard(taskId: string) {
-  await props.service.discardRecovery(taskId);
+  await activeService.value.discardRecovery(taskId);
   await loadData();
 }
 
@@ -146,24 +145,24 @@ function handleOpenForceRelease(_id: string) {
 }
 
 async function handleConfirmForceRelease(params: ForceReleaseParams) {
-  await props.service.forceRelease(params);
+  await activeService.value.forceRelease(params);
   isForceReleaseOpen.value = false;
   await loadData();
 }
 
 async function handleArchive(id: string) {
-  await props.service.archiveEnvironment(id);
+  await activeService.value.archiveEnvironment(id);
   await loadData();
 }
 
 async function handleRestore(id: string) {
-  await props.service.restoreEnvironment(id);
+  await activeService.value.restoreEnvironment(id);
   await loadData();
 }
 
 async function handleUnenroll(id: string) {
   if (confirm(`Revoke identity key for ${selectedEnv.value?.displayName}? Worker will be barred from reconnecting.`)) {
-    await props.service.unenrollEnvironment(id);
+    await activeService.value.unenrollEnvironment(id);
     await loadData();
   }
 }
@@ -264,71 +263,94 @@ async function handleUnenroll(id: string) {
 
     <!-- Layout: Desktop 2-Column Split vs Mobile Drill-down -->
     <div class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
-      <!-- Desktop 2-Column Split Layout (md+) -->
-      <div class="envs-split-layout hidden md:flex gap-4 h-full">
-        <!-- Left Master Column (fixed width ~340px) -->
-        <div class="envs-master-column w-80 lg:w-96 overflow-y-auto shrink-0 pr-1">
-          <EnvironmentMasterList
-            :environments="filteredEnvironments"
-            :selected-id="selectedId"
-            @select="handleSelectEnvironment"
-            @probe="handleProbe"
-          />
-        </div>
+      <!-- Loading State -->
+      <div v-if="isLoading" class="envs-loading-state flex flex-col items-center justify-center p-12 text-center h-64 gap-3">
+        <Icon name="refresh" class="animate-spin text-[var(--accent-primary)]" :size="28" />
+        <span class="text-sm font-semibold text-[var(--text-primary)]">Loading Environments & Host States</span>
+        <span class="text-xs text-[var(--text-muted)]">Querying local daemons and carrier overlay status...</span>
+      </div>
 
-        <!-- Right Detail Column (flex 1) -->
-        <div class="envs-detail-column flex-1 overflow-y-auto pl-1">
-          <EnvironmentDetail
-            v-if="selectedEnv"
-            :env="selectedEnv"
-            @approve="handleApprove"
-            @probe="handleProbe"
-            @toggle-permission="handleTogglePermission"
-            @unbind-workspace="handleUnbindWorkspace"
-            @reconcile="handleReconcile"
-            @resume="handleResume"
-            @discard="handleDiscard"
-            @force-release="handleOpenForceRelease"
-            @archive="handleArchive"
-            @restore="handleRestore"
-            @unenroll="handleUnenroll"
-          />
-          <div v-else class="p-8 text-center text-xs text-[var(--text-muted)]">
-            No environment matches the active filter.
+      <!-- Empty State: No environments enrolled at all -->
+      <div v-else-if="environments.length === 0" class="envs-empty-state flex items-center justify-center p-8 h-full">
+        <EmptyState
+          icon="environments"
+          title="No Environments Enrolled"
+          description="No host environments are currently enrolled. Connect a worker or register a new host to begin dispatching agent tasks."
+        >
+          <Button variant="primary" size="sm" class="mt-3" @click="isRegisterOpen = true">
+            <Icon name="plus" :size="13" />
+            <span>Register New Host</span>
+          </Button>
+        </EmptyState>
+      </div>
+
+      <template v-else>
+        <!-- Desktop 2-Column Split Layout (md+) -->
+        <div class="envs-split-layout hidden md:flex gap-4 h-full">
+          <!-- Left Master Column (fixed width ~340px) -->
+          <div class="envs-master-column w-80 lg:w-96 overflow-y-auto shrink-0 pr-1">
+            <EnvironmentMasterList
+              :environments="filteredEnvironments"
+              :selected-id="selectedId"
+              @select="handleSelectEnvironment"
+              @probe="handleProbe"
+            />
+          </div>
+
+          <!-- Right Detail Column (flex 1) -->
+          <div class="envs-detail-column flex-1 overflow-y-auto pl-1">
+            <EnvironmentDetail
+              v-if="selectedEnv"
+              :env="selectedEnv"
+              @approve="handleApprove"
+              @probe="handleProbe"
+              @toggle-permission="handleTogglePermission"
+              @unbind-workspace="handleUnbindWorkspace"
+              @reconcile="handleReconcile"
+              @resume="handleResume"
+              @discard="handleDiscard"
+              @force-release="handleOpenForceRelease"
+              @archive="handleArchive"
+              @restore="handleRestore"
+              @unenroll="handleUnenroll"
+            />
+            <div v-else class="p-8 text-center text-xs text-[var(--text-muted)]">
+              No environment matches the active filter.
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Mobile View (below md): either Master List or Detail View -->
-      <div class="md:hidden">
-        <!-- Mobile Drill-down Detail View -->
-        <div v-if="isMobileDetailRoute && selectedEnv" class="envs-mobile-detail-wrapper">
-          <EnvironmentDetail
-            :env="selectedEnv"
-            @approve="handleApprove"
-            @probe="handleProbe"
-            @toggle-permission="handleTogglePermission"
-            @unbind-workspace="handleUnbindWorkspace"
-            @reconcile="handleReconcile"
-            @resume="handleResume"
-            @discard="handleDiscard"
-            @force-release="handleOpenForceRelease"
-            @archive="handleArchive"
-            @restore="handleRestore"
-            @unenroll="handleUnenroll"
-          />
-        </div>
+        <!-- Mobile View (below md): either Master List or Detail View -->
+        <div class="md:hidden">
+          <!-- Mobile Drill-down Detail View -->
+          <div v-if="isMobileDetailRoute && selectedEnv" class="envs-mobile-detail-wrapper">
+            <EnvironmentDetail
+              :env="selectedEnv"
+              @approve="handleApprove"
+              @probe="handleProbe"
+              @toggle-permission="handleTogglePermission"
+              @unbind-workspace="handleUnbindWorkspace"
+              @reconcile="handleReconcile"
+              @resume="handleResume"
+              @discard="handleDiscard"
+              @force-release="handleOpenForceRelease"
+              @archive="handleArchive"
+              @restore="handleRestore"
+              @unenroll="handleUnenroll"
+            />
+          </div>
 
-        <!-- Mobile Master List View -->
-        <div v-else class="envs-master-list mobile-full">
-          <EnvironmentMasterList
-            :environments="filteredEnvironments"
-            :selected-id="selectedId"
-            @select="handleSelectEnvironment"
-            @probe="handleProbe"
-          />
+          <!-- Mobile Master List View -->
+          <div v-else class="envs-master-list mobile-full">
+            <EnvironmentMasterList
+              :environments="filteredEnvironments"
+              :selected-id="selectedId"
+              @select="handleSelectEnvironment"
+              @probe="handleProbe"
+            />
+          </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <!-- Modals -->

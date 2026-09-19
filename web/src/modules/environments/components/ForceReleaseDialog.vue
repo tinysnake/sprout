@@ -65,7 +65,7 @@ function handleConfirm() {
   <AlertDialog
     :open="open"
     title="Emergency Force Release"
-    description="Human-only override for otherwise unrecoverable state (ADR-0009)"
+    description="Human-only override for otherwise unrecoverable state"
     @update:open="(val) => emit('update:open', val)"
   >
     <div class="flex flex-col gap-3">

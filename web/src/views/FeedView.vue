@@ -7,6 +7,8 @@ import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
 import FilterPillGroup from '../primitives/FilterPillGroup.vue';
 import FilterPill from '../primitives/FilterPill.vue';
+import Dialog from '../primitives/Dialog.vue';
+import Button from '../primitives/Button.vue';
 
 const router = useRouter();
 const appStore = useAppStore();
@@ -96,42 +98,58 @@ const attentionItems = ref<AttentionItem[]>([
     title: 'Active Task-Held Lease on Mac Studio M2 Max',
     projectName: 'Sprout M2 Operator',
     summary: 'Task #101 holds exclusive lease across multi-run execution. Running lead @Programmer.',
-    lifecycleSentence: 'Task #101 active · Run running · Lease held continuously (ADR-0005)',
+    lifecycleSentence: 'Task #101 active · Run running · Lease held continuously',
     attribution: '@Programmer',
     timestamp: '10s ago',
     targetPath: '/manage/environments/env-ready',
   },
 ]);
 
+const selectedTask = ref<any>(null);
+const isTaskDetailOpen = ref(false);
+
+function openTaskDetail(task: any) {
+  selectedTask.value = task;
+  isTaskDetailOpen.value = true;
+}
+
+function navigateToTaskEnv() {
+  if (selectedTask.value?.targetPath) {
+    const target = selectedTask.value.targetPath;
+    isTaskDetailOpen.value = false;
+    handleNavigate(target);
+  }
+}
+
 const activeTasks = ref([
   {
     id: '101',
     projectName: 'Sprout M2 Operator',
-    title: 'Refactor Environment State Manager into Decoupled Seams',
+    title: 'Continuous Integration & Host Verification Pipeline',
     lead: 'Programmer',
     environment: 'Mac Studio M2 Max',
     engine: 'Pi (gemini-2.5-pro)',
-    goal: 'Establish typed remote-state ports and replace mutable StateManager with clean Vue modules.',
+    goal: 'Establish persistent host worker pipelines and verify carrier streaming.',
     targetPath: '/manage/environments/env-ready',
   },
   {
     id: '104',
     projectName: 'Sprout M2 Operator',
-    title: 'Multi-Agent Simulation Validation & Host Porting',
+    title: 'Distributed Agent Orchestration & Safety Validation',
     lead: 'Architect',
     environment: 'Windows Workstation 01',
     engine: 'Codex (gpt-5-codex)',
-    goal: 'Validate host-local carrier disconnect, reconnect and 3-gate emergency Force Release.',
+    goal: 'Validate carrier disconnect recovery and operator force release procedures.',
     targetPath: '/manage/environments/env-recovery',
   },
   {
     id: '107',
     projectName: 'o7 Minesweeper',
-    title: 'Validate Reka UI Headless Accessible Overlays & Focus Trap',
+    title: 'Accessibility Verification & Operator Surface Diagnostics',
     lead: 'Foreman',
     environment: 'Local Worker',
     engine: 'Pi (claude-3-7-sonnet)',
-    goal: 'Prove keyboard focus trap, initial focus, and escape dismissal in dialogs.',
+    goal: 'Verify operator control accessibility, focus trapping, and screen-reader semantics.',
     targetPath: '/manage/environments',
   },
 ]);
@@ -176,7 +194,7 @@ const activities = ref([
     badgeKind: 'purple' as const,
     title: 'Task #101 acquired exclusive lease',
     projectName: 'Sprout M2 Operator',
-    subtitle: 'Acquired exclusive lease on Mac Studio M2 Max under ADR-0005 guarantee.',
+    subtitle: 'Acquired exclusive lease on Mac Studio M2 Max with guaranteed exclusivity.',
     relativeTime: '18m ago',
     timestamp: '09:56:00',
     targetPath: '/manage/environments/env-ready',
@@ -332,7 +350,7 @@ function handleNavigate(path: string) {
               v-for="item in filteredAttentionItems"
               :key="item.id"
               type="button"
-              class="text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
+              class="feed-attention-card text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
               :class="item.severity === 'action_required' ? 'border-l-4 border-l-[var(--red-action)] border-[var(--border-subtle)]' : item.severity === 'attention' ? 'border-l-4 border-l-[var(--yellow-attention)] border-[var(--border-subtle)]' : 'border-l-4 border-l-[var(--purple-agent)] border-[var(--border-subtle)]'"
               @click="handleNavigate(item.targetPath)"
             >
@@ -365,9 +383,6 @@ function handleNavigate(path: string) {
                   <span>•</span>
                   <span>{{ item.timestamp }}</span>
                 </div>
-                <span class="text-xs font-semibold text-[var(--accent-primary)] hover:underline flex items-center gap-1">
-                  Inspect in Manage / Environments →
-                </span>
               </div>
             </button>
           </div>
@@ -381,7 +396,7 @@ function handleNavigate(path: string) {
               <h3 class="text-sm font-bold text-[var(--text-primary)]">Live In-Flight Work</h3>
               <Badge variant="info">{{ activeTasks.length }} Active</Badge>
             </div>
-            <span class="text-[11px] text-[var(--text-muted)]">Active Task leases held under ADR-0005</span>
+            <span class="text-[11px] text-[var(--text-muted)]">Active task leases held continuously</span>
           </div>
 
           <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
@@ -389,8 +404,8 @@ function handleNavigate(path: string) {
               v-for="task in activeTasks"
               :key="task.id"
               type="button"
-              class="text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
-              @click="handleNavigate(task.targetPath)"
+              class="feed-task-card text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
+              @click="openTaskDetail(task)"
             >
               <div>
                 <div class="flex items-start justify-between gap-2 mb-2">
@@ -417,10 +432,6 @@ function handleNavigate(path: string) {
                     Goal: {{ task.goal }}
                   </div>
                 </div>
-              </div>
-
-              <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-end text-xs font-semibold text-[var(--accent-primary)]">
-                <span>View Environment Lease →</span>
               </div>
             </button>
           </div>
@@ -516,5 +527,55 @@ function handleNavigate(path: string) {
         </section>
       </div>
     </div>
+    <!-- Task Detail Modal -->
+    <Dialog
+      v-if="selectedTask"
+      :open="isTaskDetailOpen"
+      :title="`Task #${selectedTask.id}: ${selectedTask.title}`"
+      :description="`Project: ${selectedTask.projectName} · Lead: @${selectedTask.lead}`"
+      @update:open="isTaskDetailOpen = $event"
+    >
+      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
+        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <Badge variant="info">{{ selectedTask.projectName }}</Badge>
+            <span class="font-mono text-[11px] text-[var(--text-muted)]">{{ selectedTask.engine }}</span>
+          </div>
+          <strong class="text-sm text-[var(--text-primary)]">#{{ selectedTask.id }}: {{ selectedTask.title }}</strong>
+          <p class="text-xs text-[var(--text-secondary)]">Goal: {{ selectedTask.goal }}</p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Lead Agent</span>
+            <strong class="text-[var(--text-primary)]">@{{ selectedTask.lead }}</strong>
+          </div>
+          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Environment</span>
+            <strong class="text-[var(--text-primary)]">{{ selectedTask.environment }}</strong>
+          </div>
+        </div>
+
+        <div class="p-3 rounded bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] flex flex-col gap-1">
+          <strong class="text-xs font-bold flex items-center gap-1.5">
+            <Icon name="shield" :size="14" />
+            <span>Task-Held Exclusive Lease</span>
+          </strong>
+          <p class="text-[11px] text-[var(--text-secondary)]">
+            Exclusive lease is held continuously on host {{ selectedTask.environment }} across turns and validation steps.
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="secondary" size="sm" @click="isTaskDetailOpen = false">
+          Close
+        </Button>
+        <Button variant="primary" size="sm" @click="navigateToTaskEnv">
+          <Icon name="environments" :size="13" />
+          <span>Inspect Host Environment</span>
+        </Button>
+      </template>
+    </Dialog>
   </div>
 </template>

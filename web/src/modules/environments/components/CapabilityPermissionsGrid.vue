@@ -17,7 +17,6 @@ const emit = defineEmits<{
       <strong class="text-xs uppercase tracking-wider text-[var(--text-muted)] font-bold">
         5. Capability Permissions (Host-Enforced, Web-Configured)
       </strong>
-      <span class="text-[10px] text-[var(--text-muted)]">ADR-0008</span>
     </div>
 
     <div class="permissions-2x2-grid grid grid-cols-2 sm:grid-cols-4 gap-2">

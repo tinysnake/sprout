@@ -5,6 +5,7 @@ import StatusDot from '../../../primitives/StatusDot.vue';
 import Badge from '../../../primitives/Badge.vue';
 import Button from '../../../primitives/Button.vue';
 import Icon from '../../../primitives/Icon.vue';
+import Card from '../../../primitives/Card.vue';
 import { cn } from '../../../lib/utils.js';
 
 const props = defineProps<{
@@ -63,15 +64,11 @@ const connectionAgeLabel = computed(() => {
 
 <template>
   <div class="env-master-card-shell relative group flex flex-col gap-1 w-full">
-    <button
-      type="button"
-      :class="cn(
-        'env-master-card w-full text-left p-3.5 rounded-[var(--radius-md)] border transition-all cursor-pointer select-none relative',
-        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--border-focus)]',
-        selected
-          ? 'active bg-[var(--bg-surface-elevated)] border-[var(--accent-primary)] ring-1 ring-[var(--accent-primary)] shadow-sm'
-          : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-elevated)]'
-      )"
+    <Card
+      as="button"
+      :interactive="true"
+      :selected="selected"
+      class="env-master-card w-full text-left p-3.5 select-none relative"
       :data-env="env.id"
       :aria-label="`Open Environment ${env.displayName}`"
       :aria-describedby="contextId"
@@ -138,7 +135,7 @@ const connectionAgeLabel = computed(() => {
       <span :id="contextId" class="sr-only">
         Health: {{ trafficLightLabel }} ({{ env.trafficLight }}). Decisive reason: {{ env.trafficLightReason }}. Connection {{ env.connectionState }}; Protocol {{ env.protocolVersion }} {{ env.protocolCompatibility }}. {{ recoveryContext }}; {{ leaseContext }}; {{ holderContext }}.
       </span>
-    </button>
+    </Card>
 
     <!-- Quick Probe Action Button -->
     <Button

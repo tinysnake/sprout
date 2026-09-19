@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import Icon from '../primitives/Icon.vue';
 import Badge from '../primitives/Badge.vue';
+import Card from '../primitives/Card.vue';
 
 const activeTab = ref<'run' | 'task' | 'project' | 'agent' | 'model' | 'time'>('project');
 
@@ -37,7 +38,7 @@ const usageItems = ref([
     tokens: '28,400',
     duration: '1m 15s',
     costEstimate: '$0.03',
-    provenance: 'harness_calculated',
+    provenance: 'locally_estimated',
   },
   {
     id: 'u-4',
@@ -48,7 +49,7 @@ const usageItems = ref([
     tokens: '14,200',
     duration: '42s',
     costEstimate: '$0.02',
-    provenance: 'harness_calculated',
+    provenance: 'locally_estimated',
   },
 ]);
 </script>
@@ -56,13 +57,13 @@ const usageItems = ref([
 <template>
   <div class="usage-view flex flex-col h-full bg-[var(--bg-app)]">
     <!-- Main Container (Fluid width, ultra-wide screen adapted) -->
-    <div class="p-4 sm:p-6 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
+    <div class="p-4 sm:p-6 w-full max-w-[1920px] mx-auto flex flex-col gap-6 min-w-0">
       <!-- Header -->
       <div class="border-b border-[var(--border-subtle)] pb-4 flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h2 class="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
             <Icon name="usage" :size="18" />
-            <span>Usage & Cost Telemetry (ADR-0010)</span>
+            <span>Usage & Cost Telemetry</span>
           </h2>
           <p class="text-xs text-[var(--text-secondary)] mt-0.5">
             Token telemetry, API equivalent estimations, and truthful duration observability.
@@ -71,55 +72,64 @@ const usageItems = ref([
         <Badge variant="warning">Billed cost: Unavailable (Self-hosted)</Badge>
       </div>
 
-      <!-- 6-View Tab Strip (ADR-0010) -->
-      <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] overflow-x-auto w-fit" role="tablist">
+      <!-- Prototype Semantics Reading Note -->
+      <div class="usage-reading-note p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center gap-3 text-xs text-[var(--text-secondary)]">
+        <Icon name="chart" :size="18" class="text-[var(--accent-primary)] shrink-0" />
+        <div>
+          <strong class="text-[var(--text-primary)] block">Known values stay useful without pretending to be complete.</strong>
+          <span>Attributable billed cost is unavailable for these local interfaces. API-equivalent estimates name their provenance. Pending observations remain visible.</span>
+        </div>
+      </div>
+
+      <!-- 6-View Tab Strip (Prototype: 3-col on mobile, 6-col on desktop) -->
+      <div class="usage-view-tabs grid grid-cols-3 sm:grid-cols-6 gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] w-full" role="tablist" aria-label="Usage view tabs">
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'project' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'project' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'project'"
         >
-          Project View
+          Project
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'task' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'task' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'task'"
         >
-          Task View
+          Task
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'run' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'run' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'run'"
         >
-          Agent Run View
+          Agent run
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'agent' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'agent' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'agent'"
         >
-          Agent View
+          Agent
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'model' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'model' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'model'"
         >
-          Model View
+          Model
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'time' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'time' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'time'"
         >
-          Time Range (7d)
+          Time range
         </button>
       </div>
 
@@ -150,18 +160,18 @@ const usageItems = ref([
         </div>
       </div>
 
-      <!-- ADR-0010 Separation Invariant: 2-Column Split on Wide Screens -->
+      <!-- Separation Invariant: 2-Column Split on Wide Screens -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <!-- Left 2 Columns: Activity Items Breakdown -->
         <div class="lg:col-span-2 flex flex-col gap-3">
           <div class="flex items-center justify-between">
             <strong class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">
-              Activity Items Breakdown (Work Runs & Routing Separate — ADR-0010)
+              Activity Items Breakdown (Work Runs & Routing Separate)
             </strong>
             <span class="text-[10px] text-[var(--text-muted)]">Never merged into one total</span>
           </div>
 
-          <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+          <Card class="p-4 flex flex-col gap-3">
             <div
               v-for="item in usageItems"
               :key="item.id"
@@ -188,14 +198,14 @@ const usageItems = ref([
                 </div>
               </div>
             </div>
-          </div>
+          </Card>
         </div>
 
         <!-- Right 1 Column: Telemetry Invariant & Audit Info -->
-        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs h-fit">
+        <Card class="p-4 flex flex-col gap-4 h-fit">
           <div class="flex items-center gap-2">
             <Icon name="shield" :size="16" class="text-[var(--accent-primary)]" />
-            <strong class="text-xs font-bold text-[var(--text-primary)]">Telemetry Invariants (ADR-0010)</strong>
+            <strong class="text-xs font-bold text-[var(--text-primary)]">Telemetry Invariants</strong>
           </div>
           <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
             In Sprout M2, Work-model runs represent purposeful agent output (token charges with task attribution).
@@ -206,7 +216,7 @@ const usageItems = ref([
             <div>Routing Overhead: 42,600 tokens (3.7%)</div>
             <div>Unbilled local execution: $0.00 actual</div>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   </div>
