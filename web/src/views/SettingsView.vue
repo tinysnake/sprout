@@ -16,43 +16,74 @@ const browserSessions = ref([
 <template>
   <div class="settings-view flex flex-col h-full bg-[var(--bg-app)]">
     <div class="p-4 sm:p-6 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
-      <!-- Status Strip -->
-      <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between gap-3 flex-wrap shadow-xs">
-        <div class="flex items-center gap-3">
-          <StatusDot status="green" size="md" />
-          <div>
-            <strong class="text-xs font-bold text-[var(--text-primary)] block">Local Operator Service Running</strong>
-            <span class="text-[11px] text-[var(--text-muted)] font-mono">Carrier TLS/WSS · Protocol v2.1 · Schema v1</span>
-          </div>
+      <!-- 1. Header & Boundary Note (Prototype .settings-page-header) -->
+      <div class="border-b border-[var(--border-subtle)] pb-4 flex flex-col gap-2.5">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <h2 class="text-base sm:text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
+            <Icon name="settings" :size="19" />
+            <span>General & Operator Settings</span>
+          </h2>
+          <Badge variant="info">Manage / Settings</Badge>
         </div>
-        <Badge variant="success">Online & Authenticated</Badge>
+        <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <Icon name="shield" :size="15" class="text-[var(--green-ready)] shrink-0" />
+          <span><strong>Routine operation stays in Web.</strong> Host-owned credentials, installation, startup, network policy, and offline diagnostics stay on the Sprout host.</span>
+        </div>
       </div>
 
-      <!-- Settings Sub-Tabs -->
+      <!-- 2. Status Summary Strip (Prototype .settings-status-strip) -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div class="p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center gap-2.5 shadow-xs">
+          <Icon name="check" :size="16" class="text-[var(--green-ready)] shrink-0" />
+          <div>
+            <strong class="text-xs text-[var(--text-primary)] block">Operator Access</strong>
+            <span class="text-[11px] text-[var(--text-muted)]">Authenticated</span>
+          </div>
+        </div>
+        <div class="p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center gap-2.5 shadow-xs">
+          <Icon name="server" :size="16" class="text-[var(--green-ready)] shrink-0" />
+          <div>
+            <strong class="text-xs text-[var(--text-primary)] block">Instance & Protocol</strong>
+            <span class="text-[11px] text-[var(--text-muted)]">Compatible (v2.1)</span>
+          </div>
+        </div>
+        <div class="p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center gap-2.5 shadow-xs">
+          <Icon name="warning" :size="16" class="text-[var(--yellow-attention)] shrink-0" />
+          <div>
+            <strong class="text-xs text-[var(--text-primary)] block">Migration Guard</strong>
+            <span class="text-[11px] text-[var(--text-muted)]">Safety copy retained</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Settings Sub-Tabs -->
       <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] w-fit" role="tablist">
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold cursor-pointer transition-colors"
-          :class="activeSubTab === 'access' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold cursor-pointer transition-colors"
+          :class="activeSubTab === 'access' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
           @click="activeSubTab = 'access'"
         >
-          Access & Security
+          <Icon name="shield" :size="14" />
+          <span>Access & Security</span>
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold cursor-pointer transition-colors"
-          :class="activeSubTab === 'system' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
-          @click="activeSubTab = 'system'"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold cursor-pointer transition-colors"
+          :class="activeSubTab === 'system' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          @click="activeSubTab === 'system'"
         >
-          Instance & System
+          <Icon name="server" :size="14" />
+          <span>Instance & System</span>
         </button>
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold cursor-pointer transition-colors"
-          :class="activeSubTab === 'data' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold cursor-pointer transition-colors"
+          :class="activeSubTab === 'data' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
           @click="activeSubTab = 'data'"
         >
-          Data & Diagnostics
+          <Icon name="folder" :size="14" />
+          <span>Data & Diagnostics</span>
         </button>
       </div>
 
