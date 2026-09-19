@@ -16,17 +16,22 @@ session. No Web API can initialize, recover, rotate, or export this input.
 
 The durable store retains an scrypt verifier and salt, not the host input. It
 retains SHA-256 digests for browser bearer and request-forgery values, not their
-raw values. Session list records expose only non-authorizing session references
-and timestamps so a browser can select one to revoke.
+raw values. Each session persists a finite 30-day absolute deadline and a
+rolling 12-hour idle deadline. Activity may refresh only the idle deadline and
+never beyond the absolute deadline. Expired sessions are rejected, removed from
+active listings, and revocable cleanup records their expiry. Session list records
+expose only non-authorizing session references and timestamps so a browser can
+select one to revoke.
 
 ## Browser boundary
 
 `POST /api/auth/session` accepts the credential in a request body, never a URL.
 On success it writes a `HttpOnly`, `SameSite=Strict`, path-scoped session cookie
-and returns a separate request-forgery value for the browser to send as
-`X-Sprout-Csrf` on every state-changing API request. TLS sockets also receive
-the `Secure` cookie flag; host-local HTTP omits it because browsers reject
-`Secure` cookies over that supported local transport.
+with `Max-Age` and `Expires` limited to the current finite deadline, and returns
+a separate request-forgery value for the browser to send as `X-Sprout-Csrf` on
+every state-changing API request. TLS sockets also receive the `Secure` cookie
+flag; host-local HTTP omits it because browsers reject `Secure` cookies over
+that supported local transport.
 
 All `/api` reads and commands require a valid browser session in the composed
 runtime, except this credential exchange. All state-changing commands also

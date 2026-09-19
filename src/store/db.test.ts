@@ -61,6 +61,8 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'credential_version', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'last_seen_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'absolute_expires_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'idle_expires_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'revoked_at', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
   agent_runs: [

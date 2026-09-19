@@ -21,6 +21,10 @@ export interface BrowserSessionRecord {
   readonly credentialVersion: number;
   readonly createdAt: number;
   readonly lastSeenAt: number;
+  /** Fixed per-session upper bound; it is never extended by activity. */
+  readonly absoluteExpiresAt: number;
+  /** Persisted rolling idle deadline, always no later than the absolute bound. */
+  readonly idleExpiresAt: number;
   readonly revokedAt: number | undefined;
 }
 
@@ -30,7 +34,9 @@ export interface OperatorSessionStore {
   getSessionByTokenHash(tokenHash: string): Promise<BrowserSessionRecord | undefined>;
   createSession(record: BrowserSessionRecord): Promise<void>;
   listSessions(): Promise<readonly BrowserSessionRecord[]>;
-  touchSession(id: string, at: number): Promise<void>;
+  touchSession(id: string, at: number, idleExpiresAt: number): Promise<boolean>;
+  /** Revoke active sessions whose persisted deadline has passed. */
+  revokeExpiredSessions(at: number): Promise<number>;
   revokeSession(id: string, at: number): Promise<boolean>;
   revokeSessionsExcept(id: string, at: number): Promise<number>;
   revokeAllSessions(at: number): Promise<number>;
@@ -61,9 +67,22 @@ export class InMemoryOperatorSessionStore implements OperatorSessionStore {
     return [...this.#sessions.values()].sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  async touchSession(id: string, at: number): Promise<void> {
+  async touchSession(id: string, at: number, idleExpiresAt: number): Promise<boolean> {
     const session = this.#sessions.get(id);
-    if (session) this.#sessions.set(id, { ...session, lastSeenAt: at });
+    if (!session || session.revokedAt !== undefined) return false;
+    this.#sessions.set(id, { ...session, lastSeenAt: at, idleExpiresAt });
+    return true;
+  }
+
+  async revokeExpiredSessions(at: number): Promise<number> {
+    let revoked = 0;
+    for (const session of this.#sessions.values()) {
+      if (session.revokedAt === undefined && (session.absoluteExpiresAt <= at || session.idleExpiresAt <= at)) {
+        this.#sessions.set(session.id, { ...session, revokedAt: at });
+        revoked += 1;
+      }
+    }
+    return revoked;
   }
 
   async revokeSession(id: string, at: number): Promise<boolean> {

@@ -25,6 +25,7 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
+import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from '../auth/session-policy.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-schema-test-'));
@@ -36,13 +37,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 }
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 2);
+  assert.equal(CURRENT_SCHEMA_VERSION, 3);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 2);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 3);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 2,
-    current: 2,
+    max: 3,
+    current: 3,
   });
 });
 
@@ -104,10 +105,10 @@ test('non-empty store receives pre-migration safety copy before forward migratio
 
     assert.equal(existsSync(safetyPath), false);
 
-    // Open through SqliteStore, triggering the supported v0 -> v2 migration chain.
+    // Open through SqliteStore, triggering the supported v0 -> v3 migration chain.
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 2);
-    assert.equal(getSchemaVersion(store.db), 2);
+    assert.equal(store.schemaVersion, 3);
+    assert.equal(getSchemaVersion(store.db), 3);
 
     // Pre-migration safety copy must exist
     assert.equal(existsSync(safetyPath), true, 'safety copy must be created for non-empty migration');
@@ -122,6 +123,37 @@ test('non-empty store receives pre-migration safety copy before forward migratio
     // The migrated store has the data and full schema
     const project = await store.projects.get('proj-1');
     assert.equal(project?.goal, 'Legacy');
+    store.close();
+  });
+});
+
+test('v2 browser sessions receive persisted finite absolute and idle deadlines during migration', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, 'sprout.db');
+    const createdAt = 10_000;
+    const lastSeenAt = 20_000;
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA user_version = 2;
+      CREATE TABLE browser_sessions (
+        id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL,
+        credential_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL, revoked_at INTEGER
+      );
+    `);
+    legacy.prepare(`INSERT INTO browser_sessions
+      (id, token_hash, csrf_hash, credential_version, created_at, last_seen_at, revoked_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL)`).run('legacy-session', 'digest-a', 'digest-b', 1, createdAt, lastSeenAt);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: dbPath });
+    const row = store.db.prepare(`SELECT absolute_expires_at, idle_expires_at FROM browser_sessions WHERE id = 'legacy-session'`)
+      .get() as { absolute_expires_at: number; idle_expires_at: number };
+    assert.equal(row.absolute_expires_at, createdAt + BROWSER_SESSION_ABSOLUTE_LIFETIME_MS);
+    assert.equal(row.idle_expires_at, Math.min(
+      lastSeenAt + BROWSER_SESSION_IDLE_LIFETIME_MS,
+      createdAt + BROWSER_SESSION_ABSOLUTE_LIFETIME_MS,
+    ));
     store.close();
   });
 });
@@ -155,7 +187,7 @@ test('safety copy creation failure blocks forward migration and leaves database 
     assert.ok(thrownError instanceof MigrationSafetyCopyError, 'must throw MigrationSafetyCopyError');
     assert.equal(thrownError.name, 'MigrationSafetyCopyError');
     assert.equal(thrownError.fromVersion, 0);
-    assert.equal(thrownError.toVersion, 2);
+    assert.equal(thrownError.toVersion, 3);
     assert.ok(thrownError.guidance.includes('refused to migrate'));
     assert.ok(thrownError.guidance.includes('disk space'));
 
@@ -295,10 +327,10 @@ test('newer schema version is refused with sanitized host-local guidance', async
   await withTempDir(async (dir) => {
     const dbPath = join(dir, 'sprout.db');
 
-    // Create database with schema version 3 (newer than current max supported 2)
+    // Create database with schema version 4 (newer than current max supported 3)
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 3;
+      PRAGMA user_version = 4;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);
@@ -313,7 +345,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
 
     assert.ok(thrownError instanceof SchemaTooNewError, 'must throw SchemaTooNewError');
     assert.equal(thrownError.name, 'SchemaTooNewError');
-    assert.equal(thrownError.version, 3);
+    assert.equal(thrownError.version, 4);
     assert.deepEqual(thrownError.supportedRange, SUPPORTED_SCHEMA_RANGE);
     assert.ok(thrownError.message.includes('newer than supported range'));
     assert.ok(thrownError.guidance.includes('upgrade Sprout'));
@@ -321,11 +353,11 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Standalone domain stores also refuse the newer version
     assert.throws(
       () => new SqliteRunStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 3,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 4,
     );
     assert.throws(
       () => new SqliteTaskStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 3,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 4,
     );
   });
 });
@@ -412,9 +444,9 @@ test('existing safety copy is replaced by the newest pre-migration safety copy',
     `);
     seedDb.close();
 
-    // Migrate from v0 to v2
+    // Migrate from v0 to v3
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 2);
+    assert.equal(store.schemaVersion, 3);
     store.close();
 
     // Safety copy was replaced with a valid SQLite database
@@ -581,7 +613,7 @@ test('path sanitization sanitizes arbitrary Unix, Windows, and UNC absolute path
 
 test('directly constructed domain adapters enforce schema coordination and safety copy (M77-SCHEMA-003)', async () => {
   await withTempDir(async (dir) => {
-    // 1. Direct SqliteProjectStore on legacy v0 creates safety copy before migrating to v2
+    // 1. Direct SqliteProjectStore on legacy v0 creates safety copy before migrating to v3
     const projDbPath = join(dir, 'proj.db');
     const projSafetyPath = defaultSafetyCopyPath(projDbPath);
     const seedProj = new DatabaseSync(projDbPath);
@@ -598,10 +630,10 @@ test('directly constructed domain adapters enforce schema coordination and safet
     projCopyDb.close();
     projStore.close();
 
-    // 2. Direct SqliteLeaseStore on future v3 throws SchemaTooNewError
+    // 2. Direct SqliteLeaseStore on future v4 throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 3; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 4; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

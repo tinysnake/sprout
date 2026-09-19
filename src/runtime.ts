@@ -31,6 +31,7 @@ import type { TaskStore } from './task/store.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import {
   createEnvironmentWorkerFactory,
+  localWorkerEnvironment,
   selectEnvironmentWorker,
   type EnvironmentWorkerConfiguration,
   type WorkerLogSource,
@@ -269,7 +270,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     createEnvironmentWorkerPort(environmentWorkerConfiguration, {
       workerEntryPath: options.workerEntryPath ?? join(projectRoot, 'src', 'worker', 'main.ts'),
       nodeExecutable: options.nodeExecutable ?? process.execPath,
-      hostEnvironment: options.hostEnvironment ?? process.env,
+      // Never hand the core environment to a Worker: it can contain the
+      // operator credential, browser/session secrets, or unrelated authority.
+      hostEnvironment: localWorkerEnvironment(options.hostEnvironment ?? process.env),
       logWorkerLine:
         options.logWorkerLine ??
         ((source, line) => process.stderr.write(`[${source}-worker] ${line}\n`)),

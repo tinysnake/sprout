@@ -1,17 +1,22 @@
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 
 import type { OperatorCredentialRecord, OperatorSessionStore } from './store.ts';
+import { absoluteSessionExpiry, idleSessionExpiry, sessionHasExpired } from './session-policy.ts';
 
 const CREDENTIAL_KEY_LENGTH = 32;
 
 export interface AuthenticatedBrowserSession {
   readonly id: string;
+  /** The earlier persisted deadline, used to refresh the browser cookie. */
+  readonly expiresAt: number;
 }
 
 export interface BrowserSessionView {
   readonly id: string;
   readonly createdAt: number;
   readonly lastSeenAt: number;
+  readonly absoluteExpiresAt: number;
+  readonly idleExpiresAt: number;
   readonly current: boolean;
 }
 
@@ -65,12 +70,18 @@ export class OperatorSessionService {
   }
 
   /** Create one browser session after credential verification, never returning its bearer token. */
-  async signIn(credential: string): Promise<{ readonly bearerToken: string; readonly csrfToken: string } | undefined> {
+  async signIn(credential: string): Promise<{
+    readonly bearerToken: string;
+    readonly csrfToken: string;
+    readonly expiresAt: number;
+  } | undefined> {
     const operator = await this.#store.getOperator();
     if (!operator || !verifyCredential(credential, operator)) return undefined;
     const bearerToken = this.#token();
     const csrfToken = this.#token();
     const now = this.#clock();
+    const absoluteExpiresAt = absoluteSessionExpiry(now);
+    const idleExpiresAt = idleSessionExpiry(now, absoluteExpiresAt);
     await this.#store.createSession({
       id: this.#token(),
       tokenHash: digest(bearerToken),
@@ -78,9 +89,11 @@ export class OperatorSessionService {
       credentialVersion: operator.version,
       createdAt: now,
       lastSeenAt: now,
+      absoluteExpiresAt,
+      idleExpiresAt,
       revokedAt: undefined,
     });
-    return { bearerToken, csrfToken };
+    return { bearerToken, csrfToken, expiresAt: idleExpiresAt };
   }
 
   async authenticate(bearerToken: string | undefined): Promise<SessionAuthentication> {
@@ -89,26 +102,37 @@ export class OperatorSessionService {
       this.#store.getOperator(),
       this.#store.getSessionByTokenHash(digest(bearerToken)),
     ]);
+    const now = this.#clock();
     if (!operator || !session || session.revokedAt !== undefined || session.credentialVersion !== operator.version) {
       return { authenticated: false };
     }
-    await this.#store.touchSession(session.id, this.#clock());
-    return { authenticated: true, session: { id: session.id } };
+    if (sessionHasExpired(session, now)) {
+      await this.#store.revokeSession(session.id, now);
+      return { authenticated: false };
+    }
+    const idleExpiresAt = idleSessionExpiry(now, session.absoluteExpiresAt);
+    if (!(await this.#store.touchSession(session.id, now, idleExpiresAt))) return { authenticated: false };
+    return { authenticated: true, session: { id: session.id, expiresAt: idleExpiresAt } };
   }
 
   async verifyRequestForgery(sessionId: string, csrfToken: string | undefined): Promise<boolean> {
     if (!csrfToken) return false;
+    const now = this.#clock();
+    await this.#store.revokeExpiredSessions(now);
     const session = (await this.#store.listSessions()).find((candidate) => candidate.id === sessionId);
-    return session !== undefined && session.revokedAt === undefined && equalDigest(digest(csrfToken), session.csrfHash);
+    return session !== undefined && session.revokedAt === undefined && !sessionHasExpired(session, now) && equalDigest(digest(csrfToken), session.csrfHash);
   }
 
   async listSessions(currentSessionId: string): Promise<readonly BrowserSessionView[]> {
+    await this.#store.revokeExpiredSessions(this.#clock());
     return (await this.#store.listSessions())
       .filter((session) => session.revokedAt === undefined)
       .map((session) => ({
         id: session.id,
         createdAt: session.createdAt,
         lastSeenAt: session.lastSeenAt,
+        absoluteExpiresAt: session.absoluteExpiresAt,
+        idleExpiresAt: session.idleExpiresAt,
         current: session.id === currentSessionId,
       }));
   }

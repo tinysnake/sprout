@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import type { ContainerRuntime } from '../environment/container.ts';
 import type { WorkerConnection } from './carrier.ts';
@@ -8,6 +9,7 @@ import type { SshTunnelCarrierOptions } from './windows-carrier.ts';
 import {
   createEnvironmentWorkerFactory,
   environmentWorkerProfile,
+  localWorkerEnvironment,
   selectEnvironmentWorker,
   type EndpointWorkerStart,
   type EnvironmentWorkerConfiguration,
@@ -111,7 +113,13 @@ test('a local environment reaches its worker as a separate network endpoint', as
   const factory = createEnvironmentWorkerFactory(baseConfiguration(), {
     workerEntryPath: '/repo/src/worker/main.ts',
     nodeExecutable: '/usr/bin/node',
-    hostEnvironment: { PATH: '/usr/bin', SPROUT_UNRELATED: 'kept' },
+    hostEnvironment: {
+      PATH: '/usr/bin', HOME: '/synthetic/home', SPROUT_PI_SESSION_DIR: '/synthetic/pi-sessions',
+      SPROUT_OPERATOR_CREDENTIAL: 'operator-credential-probe',
+      SPROUT_SESSION_SECRET: 'session-secret-probe',
+      AWS_SESSION_TOKEN: 'authority-material-probe', SSH_AUTH_SOCK: '/synthetic/agent.sock',
+      SPROUT_RUNTIME_CONFIG: 'unrelated-core-configuration', UNRELATED_HOST_FACT: 'not-for-worker',
+    },
     carriers: carriers.carriers,
   });
 
@@ -124,8 +132,38 @@ test('a local environment reaches its worker as a separate network endpoint', as
   assert.equal(carriers.options.endpoint?.command, '/usr/bin/node');
   assert.deepEqual(carriers.options.endpoint?.args, ['/repo/src/worker/main.ts']);
   assert.equal(carriers.options.endpoint?.env?.['SPROUT_ENV_INSTANCE'], 'local-macos');
-  assert.equal(carriers.options.endpoint?.env?.['SPROUT_UNRELATED'], 'kept');
+  assert.equal(carriers.options.endpoint?.env?.['PATH'], '/usr/bin');
+  assert.equal(carriers.options.endpoint?.env?.['HOME'], '/synthetic/home');
+  assert.equal(carriers.options.endpoint?.env?.['SPROUT_PI_SESSION_DIR'], '/synthetic/pi-sessions');
+  // Injected-environment negative probe: a local Worker and the engines it
+  // spawns see only allowlisted host-local facts, never core authority material.
+  for (const name of [
+    'SPROUT_OPERATOR_CREDENTIAL', 'SPROUT_SESSION_SECRET', 'AWS_SESSION_TOKEN',
+    'SSH_AUTH_SOCK', 'SPROUT_RUNTIME_CONFIG', 'UNRELATED_HOST_FACT',
+  ]) {
+    assert.equal(carriers.options.endpoint?.env?.[name], undefined, `${name} must not reach the Worker/engine`);
+  }
   assert.equal(carriers.options.endpoint?.env?.['SPROUT_WORKER_TRANSPORT'], undefined);
+});
+
+test('the allowlist probe keeps injected core authority out of a Worker and its engine child', () => {
+  const workerEnvironment = localWorkerEnvironment({
+    PATH: process.env.PATH,
+    SPROUT_PI_SESSION_DIR: '/synthetic/pi-sessions',
+    SPROUT_OPERATOR_CREDENTIAL: 'operator-credential-probe',
+    SPROUT_SESSION_SECRET: 'session-secret-probe',
+    AWS_SESSION_TOKEN: 'authority-material-probe',
+  });
+  const probe = spawnSync(process.execPath, [
+    '-e',
+    "process.stdout.write(JSON.stringify(['SPROUT_OPERATOR_CREDENTIAL','SPROUT_SESSION_SECRET','AWS_SESSION_TOKEN','SPROUT_PI_SESSION_DIR'].map((key) => [key, process.env[key] ?? null])))",
+  ], { env: workerEnvironment, encoding: 'utf8' });
+  assert.equal(probe.status, 0, probe.stderr);
+  const seen = new Map(JSON.parse(probe.stdout) as [string, string | null][]);
+  assert.equal(seen.get('SPROUT_OPERATOR_CREDENTIAL'), null);
+  assert.equal(seen.get('SPROUT_SESSION_SECRET'), null);
+  assert.equal(seen.get('AWS_SESSION_TOKEN'), null);
+  assert.equal(seen.get('SPROUT_PI_SESSION_DIR'), '/synthetic/pi-sessions');
 });
 
 test('a container environment is reached through the runtime exec channel with no published port', async () => {

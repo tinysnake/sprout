@@ -18,6 +18,8 @@ interface SessionRow {
   readonly credential_version: number;
   readonly created_at: number;
   readonly last_seen_at: number;
+  readonly absolute_expires_at: number;
+  readonly idle_expires_at: number;
   readonly revoked_at: number | null;
 }
 
@@ -60,6 +62,8 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
         credential_version INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         last_seen_at INTEGER NOT NULL,
+        absolute_expires_at INTEGER NOT NULL,
+        idle_expires_at INTEGER NOT NULL,
         revoked_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS browser_sessions_active_idx
@@ -92,8 +96,8 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
   async createSession(record: BrowserSessionRecord): Promise<void> {
     this.#db.prepare(`
       INSERT INTO browser_sessions
-        (id, token_hash, csrf_hash, credential_version, created_at, last_seen_at, revoked_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (id, token_hash, csrf_hash, credential_version, created_at, last_seen_at, absolute_expires_at, idle_expires_at, revoked_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id,
       record.tokenHash,
@@ -101,6 +105,8 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
       record.credentialVersion,
       record.createdAt,
       record.lastSeenAt,
+      record.absoluteExpiresAt,
+      record.idleExpiresAt,
       record.revokedAt ?? null,
     );
   }
@@ -110,8 +116,18 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
       .map(toSession);
   }
 
-  async touchSession(id: string, at: number): Promise<void> {
-    this.#db.prepare('UPDATE browser_sessions SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL').run(at, id);
+  async touchSession(id: string, at: number, idleExpiresAt: number): Promise<boolean> {
+    return Number(this.#db.prepare(`
+      UPDATE browser_sessions SET last_seen_at = ?, idle_expires_at = ?
+      WHERE id = ? AND revoked_at IS NULL AND absolute_expires_at > ? AND idle_expires_at > ?
+    `).run(at, idleExpiresAt, id, at, at).changes) > 0;
+  }
+
+  async revokeExpiredSessions(at: number): Promise<number> {
+    return Number(this.#db.prepare(`
+      UPDATE browser_sessions SET revoked_at = ?
+      WHERE revoked_at IS NULL AND (absolute_expires_at <= ? OR idle_expires_at <= ?)
+    `).run(at, at, at).changes);
   }
 
   async revokeSession(id: string, at: number): Promise<boolean> {
@@ -151,6 +167,8 @@ function toSession(row: SessionRow): BrowserSessionRecord {
     credentialVersion: row.credential_version,
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
+    absoluteExpiresAt: row.absolute_expires_at,
+    idleExpiresAt: row.idle_expires_at,
     revokedAt: row.revoked_at ?? undefined,
   };
 }

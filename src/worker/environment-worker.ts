@@ -178,7 +178,7 @@ export interface EnvironmentWorkerDependencies {
   readonly workerEntryPath: string;
   /** The Node executable the Worker runs under. */
   readonly nodeExecutable: string;
-  /** The host environment a local Worker inherits. */
+  /** Host facts to be reduced to the explicit local Worker allowlist. */
   readonly hostEnvironment: NodeJS.ProcessEnv;
   /** Carrier overrides; tests supply recording carriers. */
   readonly carriers?: Partial<EnvironmentWorkerCarriers>;
@@ -191,6 +191,37 @@ export interface EnvironmentWorkerDependencies {
   }) => Promise<WorkerReady>;
   /** Attributed carrier log lines, so diagnostics keep their source prefix. */
   readonly logWorkerLine?: (source: WorkerLogSource, line: string) => void;
+}
+
+/**
+ * The only host environment facts a local Worker and the engines it starts may
+ * inherit. Worker configuration stays explicit; process-wide authority, browser
+ * session state, operator recovery input, and unrelated host facts never cross
+ * the core-to-Worker process boundary.
+ *
+ * HOME/XDG locations are intentionally retained because environment-owned engine
+ * login and CLI configuration live with the signed-in Worker host, not the core.
+ * Credentials and authority material must be reached through those native host
+ * facilities, never injected as environment values by Sprout.
+ */
+const LOCAL_WORKER_ENVIRONMENT_KEYS = new Set([
+  'PATH', 'Path', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'ComSpec', 'PATHEXT',
+  'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'SHELL',
+  // Typed Worker configuration and known engine binary settings only.
+  'SPROUT_WORKER_HOST', 'SPROUT_WORKER_PORT', 'SPROUT_WORKSPACE_ROOT',
+  'SPROUT_PI_SESSION_DIR', 'SPROUT_READY_FILE', 'SPROUT_ENV_PLATFORM',
+  'SPROUT_CODEX_BIN', 'SPROUT_PI_BIN', 'SPROUT_AGY_BIN', 'SPROUT_OPENCODE_BIN',
+]);
+
+export function localWorkerEnvironment(hostEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const allowed: NodeJS.ProcessEnv = {};
+  for (const key of LOCAL_WORKER_ENVIRONMENT_KEYS) {
+    const value = hostEnvironment[key];
+    if (value !== undefined) allowed[key] = value;
+  }
+  return allowed;
 }
 
 /** The caller-facing surface: reach the Worker serving one environment instance. */
@@ -272,7 +303,7 @@ export function createEnvironmentWorkerFactory(
         // A local Worker is a separate process with its own address; it is told
         // which instance it serves through its environment, exactly as before.
         env: {
-          ...dependencies.hostEnvironment,
+          ...localWorkerEnvironment(dependencies.hostEnvironment),
           ...workerEnvironment(configuration.environmentInstanceId),
         },
         label: 'sprout-worker',

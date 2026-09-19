@@ -8,6 +8,7 @@ import test from 'node:test';
 import { OperatorSessionService } from './service.ts';
 import { InMemoryOperatorSessionStore } from './store.ts';
 import { SqliteOperatorSessionStore } from './sqlite-store.ts';
+import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from './session-policy.ts';
 
 /** Inputs are generated at test time, never committed as credentials or tokens. */
 function privateInput(): string {
@@ -72,5 +73,40 @@ test('session revocation, revoke-others, and host recovery remain durable across
   await restarted.initializeOrRecover(privateInput());
   assert.equal((await restarted.authenticate(current.bearerToken)).authenticated, false);
   assert.equal((await restarted.listSessions(currentAuth.session.id)).length, 0);
+  restartedStore.close();
+});
+
+test('a persisted finite session lifetime rejects expired authentication, CSRF, and session listing after restart', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-auth-expiry-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'sprout.db');
+  let now = 1_000;
+  const credential = privateInput();
+  const firstStore = new SqliteOperatorSessionStore({ filename });
+  const first = new OperatorSessionService({ store: firstStore, clock: () => now });
+  await first.initializeOrRecover(credential);
+  const idle = await first.signIn(credential);
+  const active = await first.signIn(credential);
+  assert.ok(idle);
+  assert.ok(active);
+
+  // The active session refreshes its idle deadline, but no activity can extend
+  // the durable absolute deadline. The idle session remains untouched.
+  now += BROWSER_SESSION_IDLE_LIFETIME_MS - 1;
+  assert.equal((await first.authenticate(active.bearerToken)).authenticated, true);
+  firstStore.close();
+
+  now += 1;
+  const restartedStore = new SqliteOperatorSessionStore({ filename });
+  const restarted = new OperatorSessionService({ store: restartedStore, clock: () => now });
+  assert.equal((await restarted.authenticate(idle.bearerToken)).authenticated, false, 'idle expiry rejects the bearer');
+  const idleRecord = (await restartedStore.listSessions()).find((session) => session.lastSeenAt === 1_000);
+  assert.ok(idleRecord);
+  assert.equal(await restarted.verifyRequestForgery(idleRecord.id, idle.csrfToken), false, 'expired CSRF proof fails closed');
+  assert.equal((await restarted.listSessions('none')).length, 1, 'expired records are cleaned from active listings');
+
+  now = 1_000 + BROWSER_SESSION_ABSOLUTE_LIFETIME_MS;
+  assert.equal((await restarted.authenticate(active.bearerToken)).authenticated, false, 'absolute expiry wins despite activity');
+  assert.equal((await restarted.listSessions('none')).length, 0);
   restartedStore.close();
 });

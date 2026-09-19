@@ -133,6 +133,8 @@ async function signIn(base: string, credential: string): Promise<{ readonly cook
   const setCookie = response.headers.get('set-cookie') ?? '';
   assert.match(setCookie, /HttpOnly/);
   assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Max-Age=\d+/);
+  assert.match(setCookie, /Expires=/);
   assert.equal(setCookie.includes(credential), false);
   const { csrfToken } = (await response.json()) as { csrfToken: string };
   return { cookie: setCookie.split(';', 1)[0]!, csrf: csrfToken };

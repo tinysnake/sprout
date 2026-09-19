@@ -116,7 +116,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 401, { error: 'authentication failed' });
         return;
       }
-      response.setHeader('set-cookie', sessionCookie(signedIn.bearerToken, isTransportSecure(request)));
+      response.setHeader('set-cookie', sessionCookie(signedIn.bearerToken, signedIn.expiresAt, isTransportSecure(request)));
       sendJson(response, 201, { csrfToken: signedIn.csrfToken });
       return;
     }
@@ -128,6 +128,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
         return;
       }
       browserSession = authentication.session;
+      // A successful request renews the rolling idle cookie only up to the
+      // persisted absolute lifetime. The server independently enforces both.
+      response.setHeader('set-cookie', sessionCookie(readCookie(request, 'sprout_session')!, browserSession.expiresAt, isTransportSecure(request)));
       if (!isSafeMethod(request.method) && !(await auth.verifyRequestForgery(browserSession.id, headerValue(request, 'x-sprout-csrf')))) {
         sendJson(response, 403, { error: 'request-forgery protection failed' });
         return;
@@ -772,12 +775,13 @@ function responseError(error: unknown, protectedApi: boolean): string {
  * browsers otherwise refuse the cookie entirely, while HttpOnly + SameSite
  * Strict still protect the supported host-local HTTP mode.
  */
-function sessionCookie(token: string, secure: boolean): string {
-  return `sprout_session=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
+function sessionCookie(token: string, expiresAt: number, secure: boolean): string {
+  const maxAge = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1_000));
+  return `sprout_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}; Expires=${new Date(expiresAt).toUTCString()}${secure ? '; Secure' : ''}`;
 }
 
 function expiredSessionCookie(secure: boolean): string {
-  return `sprout_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`;
+  return `sprout_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? '; Secure' : ''}`;
 }
 
 function isTransportSecure(request: IncomingMessage): boolean {

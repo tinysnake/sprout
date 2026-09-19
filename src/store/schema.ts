@@ -1,6 +1,10 @@
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import {
+  BROWSER_SESSION_ABSOLUTE_LIFETIME_MS,
+  BROWSER_SESSION_IDLE_LIFETIME_MS,
+} from '../auth/session-policy.ts';
 
 /**
  * Sprout database schema versioning, safety copy, and forward migration (#83, ADR-0009).
@@ -19,13 +23,13 @@ import type { DatabaseSync } from 'node:sqlite';
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 2;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 3;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -346,6 +350,22 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         );
         CREATE INDEX IF NOT EXISTS browser_sessions_active_idx
           ON browser_sessions (revoked_at, credential_version);
+      `);
+    },
+  },
+  {
+    fromVersion: 2,
+    toVersion: 3,
+    name: 'bounded_browser_session_lifetime',
+    migrate: (db) => {
+      // Version 2 sessions were unbounded. Preserve their original timestamps
+      // but assign finite deadlines before this transaction exposes version 3.
+      db.exec(`
+        ALTER TABLE browser_sessions ADD COLUMN absolute_expires_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE browser_sessions ADD COLUMN idle_expires_at INTEGER NOT NULL DEFAULT 0;
+        UPDATE browser_sessions
+        SET absolute_expires_at = created_at + ${BROWSER_SESSION_ABSOLUTE_LIFETIME_MS},
+            idle_expires_at = MIN(last_seen_at + ${BROWSER_SESSION_IDLE_LIFETIME_MS}, created_at + ${BROWSER_SESSION_ABSOLUTE_LIFETIME_MS});
       `);
     },
   },
