@@ -44,6 +44,7 @@ import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
 import { InMemoryTaskStore } from './task/store.ts';
+import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
@@ -60,7 +61,7 @@ const PROJECT_ID = 'composition-project';
 
 /** A complete typed host configuration for one synthetic local environment. */
 function hostConfiguration(overrides: Partial<HostConfiguration> = {}): HostConfiguration {
-  return {
+  const configuration: HostConfiguration = {
     databasePath: ':memory:',
     workingDirectory: '/synthetic/work',
     port: 0,
@@ -81,8 +82,9 @@ function hostConfiguration(overrides: Partial<HostConfiguration> = {}): HostConf
     windowsWorkDirectory: 'C:/synthetic/work',
     projectId: PROJECT_ID,
     leaseTtlMs: 900_000,
-    ...overrides,
+    operatorCredential: undefined,
   };
+  return { ...configuration, ...overrides, operatorCredential: overrides.operatorCredential ?? configuration.operatorCredential };
 }
 
 function agent(id: string): AgentDefinition {
@@ -118,6 +120,7 @@ function inMemoryStores(): MemoryStores {
     sessionKeys: new InMemorySessionKeyStore(),
     collaboration: new InMemoryCollaborationStore(),
     tasks: new InMemoryTaskStore(),
+    operatorSessions: new InMemoryOperatorSessionStore(),
     runsStore: runs,
     close: () => {
       closes += 1;
@@ -540,6 +543,7 @@ test('runtime construction failure closes environment and worker resources witho
     sessionKeys: new InMemorySessionKeyStore(),
     collaboration: new InMemoryCollaborationStore(),
     tasks: new InMemoryTaskStore(),
+          operatorSessions: new InMemoryOperatorSessionStore(),
     close() {
       storesClosed++;
     },
@@ -564,7 +568,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 2; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 3; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;

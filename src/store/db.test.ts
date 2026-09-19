@@ -44,8 +44,25 @@ interface ColumnShape {
   readonly pk: number;
 }
 
-/** The exact table/column/index shape the pre-rehome schema produced. */
+/** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  operator_identity: [
+    { name: 'singleton', type: 'INTEGER', notnull: 0, pk: 1 },
+    { name: 'credential_hash', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'credential_salt', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'version', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  browser_sessions: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'token_hash', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'csrf_hash', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'credential_version', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'last_seen_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'revoked_at', type: 'INTEGER', notnull: 0, pk: 0 },
+  ],
   agent_runs: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'agent_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -178,7 +195,7 @@ function sampleTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
-test('the composed handle declares the same nine tables with the same columns', async () => {
+test('the composed handle declares every domain table with its contract columns', async () => {
   await withStore((store) => {
     const tables = store.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -199,15 +216,23 @@ test('the composed handle declares the same nine tables with the same columns', 
   });
 });
 
-test('the one explicit index keeps its name, table, and column order', async () => {
+test('explicit indexes keep their names, tables, and column order', async () => {
   await withStore((store) => {
     const indexes = store.db
       .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL")
       .all() as unknown as readonly { readonly name: string; readonly tbl_name: string }[];
     assert.deepEqual(
       indexes.map((index) => ({ name: index.name, tbl: index.tbl_name })),
-      [{ name: 'task_run_links_by_task', tbl: 'task_run_links' }],
+      [
+        { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
+        { name: 'task_run_links_by_task', tbl: 'task_run_links' },
+      ],
     );
+
+    const sessionColumns = store.db.prepare('PRAGMA index_info(browser_sessions_active_idx)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(sessionColumns.map((column) => column.name), ['revoked_at', 'credential_version']);
 
     const columns = store.db.prepare('PRAGMA index_info(task_run_links_by_task)').all() as unknown as readonly {
       readonly name: string;
@@ -229,6 +254,8 @@ test('uniqueness identities are still enforced by the database, not the caller',
       [
         'agent_runs',
         'agent_session_keys',
+        'browser_sessions',
+        'browser_sessions',
         'collaboration_messages',
         'collaboration_messages',
         'collaboration_wake_requests',

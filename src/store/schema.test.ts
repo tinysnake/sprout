@@ -36,13 +36,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 }
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 1);
+  assert.equal(CURRENT_SCHEMA_VERSION, 2);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 1);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 2);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 1,
-    current: 1,
+    max: 2,
+    current: 2,
   });
 });
 
@@ -104,10 +104,10 @@ test('non-empty store receives pre-migration safety copy before forward migratio
 
     assert.equal(existsSync(safetyPath), false);
 
-    // Open through SqliteStore, triggering forward migration v0 -> v1
+    // Open through SqliteStore, triggering the supported v0 -> v2 migration chain.
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 1);
-    assert.equal(getSchemaVersion(store.db), 1);
+    assert.equal(store.schemaVersion, 2);
+    assert.equal(getSchemaVersion(store.db), 2);
 
     // Pre-migration safety copy must exist
     assert.equal(existsSync(safetyPath), true, 'safety copy must be created for non-empty migration');
@@ -155,7 +155,7 @@ test('safety copy creation failure blocks forward migration and leaves database 
     assert.ok(thrownError instanceof MigrationSafetyCopyError, 'must throw MigrationSafetyCopyError');
     assert.equal(thrownError.name, 'MigrationSafetyCopyError');
     assert.equal(thrownError.fromVersion, 0);
-    assert.equal(thrownError.toVersion, 1);
+    assert.equal(thrownError.toVersion, 2);
     assert.ok(thrownError.guidance.includes('refused to migrate'));
     assert.ok(thrownError.guidance.includes('disk space'));
 
@@ -295,10 +295,10 @@ test('newer schema version is refused with sanitized host-local guidance', async
   await withTempDir(async (dir) => {
     const dbPath = join(dir, 'sprout.db');
 
-    // Create database with schema version 2 (newer than current max supported 1)
+    // Create database with schema version 3 (newer than current max supported 2)
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 2;
+      PRAGMA user_version = 3;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);
@@ -313,7 +313,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
 
     assert.ok(thrownError instanceof SchemaTooNewError, 'must throw SchemaTooNewError');
     assert.equal(thrownError.name, 'SchemaTooNewError');
-    assert.equal(thrownError.version, 2);
+    assert.equal(thrownError.version, 3);
     assert.deepEqual(thrownError.supportedRange, SUPPORTED_SCHEMA_RANGE);
     assert.ok(thrownError.message.includes('newer than supported range'));
     assert.ok(thrownError.guidance.includes('upgrade Sprout'));
@@ -321,11 +321,11 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Standalone domain stores also refuse the newer version
     assert.throws(
       () => new SqliteRunStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 2,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 3,
     );
     assert.throws(
       () => new SqliteTaskStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 2,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 3,
     );
   });
 });
@@ -412,9 +412,9 @@ test('existing safety copy is replaced by the newest pre-migration safety copy',
     `);
     seedDb.close();
 
-    // Migrate from v0 to v1
+    // Migrate from v0 to v2
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 1);
+    assert.equal(store.schemaVersion, 2);
     store.close();
 
     // Safety copy was replaced with a valid SQLite database
@@ -581,7 +581,7 @@ test('path sanitization sanitizes arbitrary Unix, Windows, and UNC absolute path
 
 test('directly constructed domain adapters enforce schema coordination and safety copy (M77-SCHEMA-003)', async () => {
   await withTempDir(async (dir) => {
-    // 1. Direct SqliteProjectStore on legacy v0 creates safety copy before migrating to v1
+    // 1. Direct SqliteProjectStore on legacy v0 creates safety copy before migrating to v2
     const projDbPath = join(dir, 'proj.db');
     const projSafetyPath = defaultSafetyCopyPath(projDbPath);
     const seedProj = new DatabaseSync(projDbPath);
@@ -598,10 +598,10 @@ test('directly constructed domain adapters enforce schema coordination and safet
     projCopyDb.close();
     projStore.close();
 
-    // 2. Direct SqliteLeaseStore on future v2 throws SchemaTooNewError
+    // 2. Direct SqliteLeaseStore on future v3 throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 2; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 3; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

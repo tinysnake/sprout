@@ -19,6 +19,8 @@ import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
 import { SqliteStore } from './store/db.ts';
+import type { OperatorSessionStore } from './auth/store.ts';
+import { OperatorSessionService } from './auth/service.ts';
 import type { RunStore } from './run/store.ts';
 import {
   TaskEnvironmentLifecycle,
@@ -83,6 +85,8 @@ export interface RuntimeStores {
   readonly sessionKeys: SessionKeyStore;
   readonly collaboration: CollaborationStore;
   readonly tasks: TaskStore;
+  /** The durable one-Operator identity and browser-session boundary. */
+  readonly operatorSessions: OperatorSessionStore;
   close(): void;
 }
 
@@ -288,6 +292,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
+    const operatorSessions = new OperatorSessionService({ store: stores.operatorSessions });
+    // Host-local initialization and recovery happen before the HTTP surface is
+    // constructed. A missing credential leaves the surface fail-closed rather
+    // than creating a default Human authority.
+    await operatorSessions.initializeOrRecover(configuration.operatorCredential);
 
     const agents = new AgentRegistry(runtimeConfiguration.agents ?? defaultAgents(engineId));
     const pool = new EnvironmentPool({
@@ -388,6 +397,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       projects,
       // Durable multi-run Tasks (#28): create, list, inspect, and advance.
       tasks,
+      auth: operatorSessions,
       staticRoot,
       readFile: options.readFile ?? defaultReadFile,
     });

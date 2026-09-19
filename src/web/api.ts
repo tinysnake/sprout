@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { TLSSocket } from 'node:tls';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
@@ -7,6 +8,7 @@ import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
+import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import {
   summarizeRunHistory,
   toMessageView,
@@ -63,6 +65,12 @@ export interface RunApiOptions {
    * service so the Task lifecycle has exactly one implementation.
    */
   readonly tasks?: TaskService;
+  /**
+   * M2's one-Operator browser boundary. Omitted only for the preserved M1
+   * transport seam and its direct contract tests; runtime composition supplies
+   * it and then every API read/write is session-authenticated.
+   */
+  readonly auth?: OperatorSessionService;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
@@ -77,13 +85,13 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents, collaboration, projects, tasks } = options;
+  const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
       sendJson(response, 500, {
-        error: error instanceof Error ? error.message : String(error),
+        error: responseError(error, auth !== undefined),
       });
     });
   });
@@ -91,6 +99,77 @@ export function createRunApi(options: RunApiOptions): RunApi {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
+    let browserSession: AuthenticatedBrowserSession | undefined;
+
+    // Credential exchange is the only anonymous API operation. The credential
+    // is sent in a POST body (never a URL) and succeeds by setting an HTTP-only
+    // browser cookie; the response exposes only the separate CSRF value.
+    if (auth && request.method === 'POST' && url.pathname === '/api/auth/session') {
+      if (!(await auth.isConfigured())) {
+        sendJson(response, 503, { error: 'operator access is unavailable; initialize it on the host' });
+        return;
+      }
+      const body = await readJson(request);
+      const credential = typeof body.credential === 'string' ? body.credential : '';
+      const signedIn = await auth.signIn(credential);
+      if (!signedIn) {
+        sendJson(response, 401, { error: 'authentication failed' });
+        return;
+      }
+      response.setHeader('set-cookie', sessionCookie(signedIn.bearerToken, isTransportSecure(request)));
+      sendJson(response, 201, { csrfToken: signedIn.csrfToken });
+      return;
+    }
+
+    if (auth && url.pathname.startsWith('/api/')) {
+      const authentication = await auth.authenticate(readCookie(request, 'sprout_session'));
+      if (!authentication.authenticated) {
+        sendJson(response, 401, { error: 'authentication required' });
+        return;
+      }
+      browserSession = authentication.session;
+      if (!isSafeMethod(request.method) && !(await auth.verifyRequestForgery(browserSession.id, headerValue(request, 'x-sprout-csrf')))) {
+        sendJson(response, 403, { error: 'request-forgery protection failed' });
+        return;
+      }
+    }
+
+    if (auth && request.method === 'GET' && url.pathname === '/api/auth/sessions') {
+      sendJson(response, 200, { sessions: await auth.listSessions(browserSession!.id) });
+      return;
+    }
+
+    if (auth && request.method === 'DELETE' && url.pathname === '/api/auth/session') {
+      await auth.revokeCurrentSession(browserSession!.id);
+      response.setHeader('set-cookie', expiredSessionCookie(isTransportSecure(request)));
+      sendJson(response, 200, { signedOut: true });
+      return;
+    }
+
+    if (auth && request.method === 'POST' && url.pathname === '/api/auth/sessions/revoke-others') {
+      sendJson(response, 200, { revoked: await auth.revokeOtherSessions(browserSession!.id) });
+      return;
+    }
+
+    if (
+      auth &&
+      request.method === 'POST' &&
+      segments.length === 5 &&
+      segments[0] === 'api' &&
+      segments[1] === 'auth' &&
+      segments[2] === 'sessions' &&
+      segments[4] === 'revoke'
+    ) {
+      const id = segments[3] ?? '';
+      const revoked = await auth.revokeSession(id);
+      if (!revoked) {
+        sendJson(response, 404, { error: 'session is unavailable' });
+        return;
+      }
+      if (id === browserSession!.id) response.setHeader('set-cookie', expiredSessionCookie(isTransportSecure(request)));
+      sendJson(response, 200, { revoked: true });
+      return;
+    }
 
     // POST /api/messages — deliver one Message to a project channel and wake
     // whoever the M1 wake contract addresses.
@@ -98,8 +177,8 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const body = await readJson(request);
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const channel = body.channel;
-      const authorId = typeof body.authorId === 'string' ? body.authorId : '';
-      const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
+      const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
+      const authorKind = auth ? 'human' : body.authorKind === 'agent' ? 'agent' : 'human';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
@@ -113,6 +192,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 400, {
           error: 'projectId, channel, authorId, body, and deliveryKey are required',
         });
+        return;
+      }
+      // An authenticated browser is the only source of Human authority. In the
+      // protected runtime an Agent/Worker cannot select an authority kind or a
+      // different Human id through request JSON.
+      if (auth && (body.authorKind === 'agent' || body.authorKind === 'worker')) {
+        sendJson(response, 403, { error: 'browser commands are Human-only' });
         return;
       }
       if (
@@ -273,7 +359,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         // The Task exists, so a refusal here is a lifecycle conflict (terminal or
         // unassigned), not a missing resource.
         sendJson(response, 409, {
-          error: error instanceof Error ? error.message : String(error),
+          error: responseError(error, auth !== undefined),
         });
       }
       return;
@@ -291,7 +377,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
           ...(typeof body.agentId === 'string' ? { agentId: body.agentId } : {}),
           ...(selection !== undefined ? { selection } : {}),
         })) });
-      } catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      } catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -300,7 +386,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.end(taskId)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -311,7 +397,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const body = await readJson(request);
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -320,7 +406,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.awaitHumanValidation(taskId)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -397,7 +483,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       });
       sendJson(response, 200, { task: toTaskView(updated) });
       } catch (error) {
-        sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(response, 409, { error: responseError(error, auth !== undefined) });
       }
       return;
     }
@@ -651,6 +737,51 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
     'content-length': Buffer.byteLength(payload),
   });
   response.end(payload);
+}
+
+/** API reads have no state-changing effect; every other method needs CSRF proof. */
+function isSafeMethod(method: string | undefined): boolean {
+  return method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+}
+
+function readCookie(request: IncomingMessage, name: string): string | undefined {
+  const header = request.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) continue;
+    const key = part.slice(0, separator).trim();
+    if (key === name) return part.slice(separator + 1).trim();
+  }
+  return undefined;
+}
+
+function headerValue(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Protected-browser responses never serialize a domain/host exception. */
+function responseError(error: unknown, protectedApi: boolean): string {
+  if (protectedApi) return 'request could not be completed';
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * `Secure` is mandatory on a TLS socket. Loopback HTTP deliberately omits it:
+ * browsers otherwise refuse the cookie entirely, while HttpOnly + SameSite
+ * Strict still protect the supported host-local HTTP mode.
+ */
+function sessionCookie(token: string, secure: boolean): string {
+  return `sprout_session=${token}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
+}
+
+function expiredSessionCookie(secure: boolean): string {
+  return `sprout_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`;
+}
+
+function isTransportSecure(request: IncomingMessage): boolean {
+  return (request.socket as TLSSocket).encrypted === true;
 }
 
 const CONTENT_TYPES: Record<string, string> = {

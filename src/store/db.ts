@@ -5,6 +5,7 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
+import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
@@ -56,6 +57,8 @@ export {
  * - collaboration domain: `collaboration_messages`,
  *   `collaboration_wake_requests`, `collaboration_observations`
  *   (`collaboration/sqlite-store.ts`)
+ * - authority domain: `operator_identity`, `browser_sessions`
+ *   (`auth/sqlite-store.ts`)
  */
 
 export interface SqliteStoreOptions {
@@ -84,6 +87,7 @@ export class SqliteStore {
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
+  readonly operatorSessions: SqliteOperatorSessionStore;
   readonly schemaVersion: number;
 
   constructor(options: SqliteStoreOptions) {
@@ -111,6 +115,7 @@ export class SqliteStore {
     this.projects = new SqliteProjectStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
+    this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db });
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than
     // issuing `environment_leases` statements itself.
