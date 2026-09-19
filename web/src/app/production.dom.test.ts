@@ -813,14 +813,17 @@ test('Production Web: task card and agent card interactive details inspection', 
     taskBtn.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /Execution Lifecycle/);
+    // Verify Dedicated Task Detail Page (prototype-aligned)
+    assert.match(doc.body.textContent ?? '', /Task Operating Stage & Specification/);
+    assert.match(doc.body.textContent ?? '', /Nested Agent Runs Timeline/);
     assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
 
-    // Close task dialog
-    const closeBtn = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Close');
-    assert.ok(closeBtn);
-    closeBtn.click();
+    // Click 'Back to Tasks List' to return to list mode
+    const backBtn = doc.querySelector('.back-to-tasks-btn') as HTMLButtonElement;
+    assert.ok(backBtn, 'Back to tasks list button found');
+    backBtn.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/);
 
     // 2. In AgentsView: click agent card to view details
     await router.push('/manage/agents');

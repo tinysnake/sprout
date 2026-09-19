@@ -72,55 +72,64 @@ const usageItems = ref([
         <Badge variant="warning">Billed cost: Unavailable (Self-hosted)</Badge>
       </div>
 
-      <!-- 6-View Tab Strip (Responsive: 2-col on narrow mobile, 3-col on tablet, flex strip on desktop) -->
-      <div class="grid grid-cols-2 sm:grid-cols-3 md:flex md:items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] w-full md:w-fit" role="tablist">
+      <!-- Prototype Semantics Reading Note -->
+      <div class="usage-reading-note p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center gap-3 text-xs text-[var(--text-secondary)]">
+        <Icon name="chart" :size="18" class="text-[var(--accent-primary)] shrink-0" />
+        <div>
+          <strong class="text-[var(--text-primary)] block">Known values stay useful without pretending to be complete.</strong>
+          <span>Attributable billed cost is unavailable for these local interfaces. API-equivalent estimates name their provenance. Pending observations remain visible.</span>
+        </div>
+      </div>
+
+      <!-- 6-View Tab Strip (Prototype: 3-col on mobile, 6-col on desktop) -->
+      <div class="usage-view-tabs grid grid-cols-3 sm:grid-cols-6 gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] w-full" role="tablist" aria-label="Usage view tabs">
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'project' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'project' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'project'"
         >
-          Project View
+          Project
         </button>
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'task' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'task' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'task'"
         >
-          Task View
+          Task
         </button>
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'run' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'run' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'run'"
         >
-          Agent Run View
+          Agent run
         </button>
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'agent' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'agent' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'agent'"
         >
-          Agent View
+          Agent
         </button>
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'model' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'model' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'model'"
         >
-          Model View
+          Model
         </button>
         <button
           type="button"
-          class="px-2.5 py-1.5 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors"
-          :class="activeTab === 'time' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="usage-view-tab py-2 px-2 rounded text-xs font-semibold text-center whitespace-nowrap cursor-pointer transition-colors min-h-[36px] flex items-center justify-center"
+          :class="activeTab === 'time' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] font-bold shadow-xs' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           @click="activeTab = 'time'"
         >
-          Time Range (7d)
+          Time range
         </button>
       </div>
 

@@ -296,7 +296,28 @@ const selectedAgent = computed(() => {
               <strong class="text-xs text-[var(--text-primary)] truncate">@{{ selectedAgent.displayName }}</strong>
             </div>
           </div>
-          <div class="p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-5 shadow-xs">
+          <div class="p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs">
+            <!-- Prototype Traffic Light Summary Banner -->
+            <div
+              class="env-traffic-light-banner p-3.5 rounded-[var(--radius-sm)] border flex flex-col gap-2"
+              :class="selectedAgent.trafficLight === 'green' ? 'bg-[var(--green-ready-bg)] border-[var(--green-ready)]' : selectedAgent.trafficLight === 'yellow' ? 'bg-[var(--yellow-attention-bg)] border-[var(--yellow-attention)]' : selectedAgent.trafficLight === 'red' ? 'bg-[var(--red-action-bg)] border-[var(--red-action)]' : 'bg-[var(--bg-surface-elevated)] border-[var(--border-subtle)]'"
+            >
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <StatusDot :status="selectedAgent.trafficLight" size="sm" />
+                  <strong class="text-xs uppercase tracking-wider font-bold text-[var(--text-primary)]">
+                    {{ selectedAgent.trafficLight === 'green' ? 'Ready' : selectedAgent.trafficLight === 'yellow' ? 'Attention / Degraded' : selectedAgent.trafficLight === 'red' ? 'Action Required' : 'Archived' }}
+                  </strong>
+                </div>
+                <span class="text-[11px] text-[var(--text-secondary)] font-mono">
+                  {{ selectedAgent.status === 'active' ? 'v1 · Active' : 'Archived' }}
+                </span>
+              </div>
+              <p class="text-xs text-[var(--text-primary)] leading-relaxed">
+                {{ selectedAgent.trafficLightReason }}
+              </p>
+            </div>
+
             <!-- Identity Banner -->
             <div class="flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
               <div class="flex items-center gap-3">
@@ -306,11 +327,31 @@ const selectedAgent = computed(() => {
                 <div>
                   <div class="flex items-center gap-2">
                     <h3 class="text-base font-bold text-[var(--text-primary)]">@{{ selectedAgent.displayName }}</h3>
+                    <code class="text-[10px] text-[var(--text-muted)] bg-[var(--bg-surface-elevated)] px-1.5 py-0.5 rounded font-mono">{{ selectedAgent.id }}</code>
                     <StatusPill :status="selectedAgent.trafficLight">{{ selectedAgent.status.toUpperCase() }}</StatusPill>
                   </div>
                   <span class="text-xs text-[var(--text-secondary)] font-medium block mt-0.5">{{ selectedAgent.role }}</span>
-                  <span class="text-[10px] text-[var(--text-muted)] font-mono">Private memory: {{ selectedAgent.privateMemoryCount }} entries retained</span>
+                  <p class="text-xs text-[var(--text-muted)] mt-1">{{ selectedAgent.description }}</p>
                 </div>
+              </div>
+            </div>
+
+            <!-- Core Dimensions Grid (Prototype dimensions-2x2-grid) -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div class="p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between">
+                <div>
+                  <span class="text-xs font-semibold text-[var(--text-primary)] block">Stable Identity</span>
+                  <span class="text-[10px] text-[var(--text-muted)] font-mono"><code>{{ selectedAgent.id }}</code></span>
+                </div>
+                <Badge variant="secondary">@{{ selectedAgent.displayName }}</Badge>
+              </div>
+
+              <div class="p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between">
+                <div>
+                  <span class="text-xs font-semibold text-[var(--text-primary)] block">Private Memory</span>
+                  <span class="text-[10px] text-[var(--text-muted)]">Preserved across projects</span>
+                </div>
+                <Badge variant="info">{{ selectedAgent.privateMemoryCount }} entries</Badge>
               </div>
             </div>
 

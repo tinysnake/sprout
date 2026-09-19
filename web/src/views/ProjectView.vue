@@ -16,10 +16,17 @@ const isMobileChatDetailOpen = ref(false);
 
 const selectedTask = ref<any>(null);
 const isTaskDetailOpen = ref(false);
+const activeTaskFilter = ref('all');
+const taskViewMode = ref<'list' | 'detail'>('list');
+const isLifecycleFoldExpanded = ref(true);
 
 function openTaskDetail(task: any) {
   selectedTask.value = task;
-  isTaskDetailOpen.value = true;
+  taskViewMode.value = 'detail';
+}
+
+function closeTaskDetail() {
+  taskViewMode.value = 'list';
 }
 
 const selectedMember = ref<any>(null);
@@ -91,12 +98,33 @@ const tasks = [
   {
     id: '101',
     title: 'Continuous Integration & Host Verification Pipeline',
-    stage: 'Active',
-    stageVariant: 'success' as const,
+    stage: 'Validation',
+    stageVariant: 'warning' as const,
     lead: 'Programmer',
     host: 'Mac Studio M2 Max',
     version: 'v2',
-    lifecycleSentence: 'Task active · Run #2 running · Lease held exclusively',
+    lifecycleSentence: 'Task awaiting validation · No active Agent run · Lease held (Mac Studio M2 Max)',
+    agentRunLifecycle: 'completed',
+    leaseLifecycle: 'held',
+    goal: 'Construct host validation pipelines and verify carrier streaming with local engine readiness.',
+    constraints: [
+      'Preserve host paths and private credentials strictly local to the worker host.',
+      'Guarantee continuous exclusive Task lease holding from task begin to human validation.',
+    ],
+    validationCriteria: [
+      'Automated runner passes verification checks with zero uncommitted artifacts.',
+      'Carrier stream reports protocol compatibility and active heartbeat.',
+    ],
+    completionClaim: {
+      outcomeSummary: 'CI and host verification pipelines constructed and operational across all enrolled worker hosts.',
+      validationEvidence: '14 verification checks passing with 100% success.',
+      durableChanges: ['repos/sprout/worker.go', 'repos/sprout/carrier.ts'],
+      recommendedDisposition: 'completed',
+    },
+    runs: [
+      { id: 'run-204', agent: 'Programmer', engine: 'Pi', model: 'gemini-2.5-pro', duration: '14m 20s', tokens: '412,000', status: 'Completed' },
+      { id: 'run-203', agent: 'Programmer', engine: 'Pi', model: 'gemini-2.5-pro', duration: '8m 10s', tokens: '277,120', status: 'Completed' },
+    ],
   },
   {
     id: '104',
@@ -106,17 +134,44 @@ const tasks = [
     lead: 'Architect',
     host: 'Windows Workstation 01',
     version: 'v1',
-    lifecycleSentence: 'Task recovery · Interrupted run #206 · Unresolved facts pending',
+    lifecycleSentence: 'Task recovery · Interrupted run #206 · Lease recovering (Windows Workstation 01)',
+    agentRunLifecycle: 'interrupted',
+    leaseLifecycle: 'recovering',
+    goal: 'Validate carrier disconnect recovery and operator force release procedures across partitioned workers.',
+    constraints: [
+      'No silent replay of uncommitted work.',
+      'Operator force release must require explicit typed confirmation and reason.',
+    ],
+    validationCriteria: [
+      'Worker carrier reconnect produces reconciled settlement evidence.',
+      'Force release audit record is durably preserved.',
+    ],
+    runs: [
+      { id: 'run-206', agent: 'Architect', engine: 'Codex', model: 'gpt-5-codex', duration: '5m 12s', tokens: '145,000', status: 'Interrupted' },
+    ],
   },
   {
     id: '107',
     title: 'Accessibility Verification & Operator Surface Diagnostics',
-    stage: 'Validation',
-    stageVariant: 'warning' as const,
+    stage: 'Active',
+    stageVariant: 'success' as const,
     lead: 'Foreman',
     host: 'Local Worker',
     version: 'v3',
-    lifecycleSentence: 'Task awaiting validation · 8 tests passing · Human decision required',
+    lifecycleSentence: 'Task active · Agent running · Lease held (Local Worker)',
+    agentRunLifecycle: 'running',
+    leaseLifecycle: 'held',
+    goal: 'Verify operator control accessibility, focus trapping, Escape dismissal, and screen-reader semantics.',
+    constraints: [
+      'Follow Reka UI accessibility primitives for overlay focus trapping.',
+      'Ensure keyboard and mobile touch event parity.',
+    ],
+    validationCriteria: [
+      'All 14 production DOM tests pass including keyboard and touch assertion suites.',
+    ],
+    runs: [
+      { id: 'run-208', agent: 'Foreman', engine: 'Pi', model: 'claude-3-7-sonnet', duration: '3m 45s', tokens: '89,400', status: 'Running' },
+    ],
   },
   {
     id: '110',
@@ -126,7 +181,17 @@ const tasks = [
     lead: 'Researcher',
     host: 'Unassigned',
     version: 'v1',
-    lifecycleSentence: 'Task proposed · Holds no lease · Awaiting Begin',
+    lifecycleSentence: 'Task proposed · Executes NO run · Holds NO lease',
+    agentRunLifecycle: 'none',
+    leaseLifecycle: 'clear',
+    goal: 'Profile host engine readiness and granular capability permissions across macOS, Windows, and container platforms.',
+    constraints: [
+      'Proposals execute zero runs and hold no host leases until explicit Human Begin authority.',
+    ],
+    validationCriteria: [
+      'Capability matrix matches host security profiles.',
+    ],
+    runs: [],
   },
   {
     id: '98',
@@ -137,8 +202,25 @@ const tasks = [
     host: 'Mac Studio M2 Max',
     version: 'v4',
     lifecycleSentence: 'Task completed · All verification runs green · Released lease',
+    agentRunLifecycle: 'completed',
+    leaseLifecycle: 'clear',
+    goal: 'Verify SQLite ACID transactional consistency across multi-agent turns and worker lease transitions.',
+    constraints: [
+      'Atomic transactions for lease acquisition and release.',
+    ],
+    validationCriteria: [
+      'WAL mode enabled and verification suite passes cleanly.',
+    ],
+    runs: [
+      { id: 'run-198', agent: 'Architect', engine: 'Codex', model: 'gpt-5-codex', duration: '22m 10s', tokens: '580,200', status: 'Completed' },
+    ],
   },
 ];
+
+const filteredTasks = computed(() => {
+  if (activeTaskFilter.value === 'all') return tasks;
+  return tasks.filter((t) => t.stage === activeTaskFilter.value);
+});
 
 interface ChatScope {
   id: string;
@@ -358,48 +440,233 @@ function sendMessage() {
         </div>
       </div>
 
-      <!-- 2. Tasks Tab (Ultra-wide grid) -->
+      <!-- 2. Tasks Tab (Prototype Operating Loop: List vs Dedicated Detail Drill-down) -->
       <div v-else-if="activeTab === 'tasks'" class="flex flex-col gap-4">
-        <div class="flex items-center justify-between gap-2 flex-wrap">
-          <div class="flex items-center gap-2">
-            <h3 class="text-sm font-bold text-[var(--text-primary)]">Project Tasks & Run States</h3>
-            <Badge variant="info">{{ tasks.length }} Tasks</Badge>
+        <!-- 2.1 Dedicated Task Detail View (Matching prototype renderTaskDetailPage) -->
+        <div v-if="taskViewMode === 'detail' && selectedTask" class="flex flex-col gap-4">
+          <!-- Back Navigation Bar -->
+          <div class="flex items-center justify-between gap-3 p-3 rounded-[var(--radius-sm)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex-wrap shadow-xs">
+            <button
+              type="button"
+              class="back-to-tasks-btn flex items-center gap-1.5 px-3 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs font-semibold text-[var(--accent-primary)] hover:underline cursor-pointer min-h-[36px]"
+              @click="closeTaskDetail"
+            >
+              <Icon name="chevron-left" :size="16" />
+              <span>Back to Tasks List</span>
+            </button>
+            <div class="flex items-center gap-2">
+              <Badge :variant="selectedTask.stageVariant">{{ selectedTask.stage.toUpperCase() }}</Badge>
+              <span class="text-xs font-mono font-bold text-[var(--text-primary)]">#{{ selectedTask.id }}: {{ selectedTask.title }}</span>
+            </div>
           </div>
-          <Button variant="primary" size="sm">
-            <Icon name="plus" :size="14" />
-            <span>New Task</span>
-          </Button>
+
+          <!-- 3-Lifecycle Disambiguation Box (Matching prototype .lifecycle-disambiguation-box) -->
+          <div class="lifecycle-disambiguation-box rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden shadow-xs">
+            <div
+              class="lifecycle-fold-header flex items-center justify-between p-3 bg-[var(--bg-surface-elevated)] border-l-4 border-l-[var(--accent-primary)] cursor-pointer select-none"
+              role="button"
+              tabindex="0"
+              @click="isLifecycleFoldExpanded = !isLifecycleFoldExpanded"
+              @keydown.enter="isLifecycleFoldExpanded = !isLifecycleFoldExpanded"
+              @keydown.space.prevent="isLifecycleFoldExpanded = !isLifecycleFoldExpanded"
+            >
+              <div class="flex items-center gap-2 font-mono text-xs font-semibold text-[var(--text-primary)]">
+                <Icon name="settings" :size="14" />
+                <span>{{ selectedTask.lifecycleSentence }}</span>
+              </div>
+              <Icon
+                name="chevron-right"
+                :size="14"
+                class="transition-transform duration-150 text-[var(--text-muted)]"
+                :class="{ 'rotate-90': isLifecycleFoldExpanded }"
+              />
+            </div>
+
+            <div v-if="isLifecycleFoldExpanded" class="p-3 border-t border-[var(--border-subtle)] bg-[var(--bg-surface)] grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Task Lifecycle:</span>
+                <Badge :variant="selectedTask.stageVariant">{{ selectedTask.stage }}</Badge>
+              </div>
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Agent Run Lifecycle:</span>
+                <Badge variant="purple">{{ selectedTask.agentRunLifecycle }}</Badge>
+              </div>
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Task Lease State:</span>
+                <Badge variant="success">{{ selectedTask.leaseLifecycle }} ({{ selectedTask.host }})</Badge>
+              </div>
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Content Version:</span>
+                <span class="font-mono font-bold">{{ selectedTask.version }}</span>
+              </div>
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Task Lead Agent:</span>
+                <span class="font-bold text-[var(--accent-primary)]">@{{ selectedTask.lead }}</span>
+              </div>
+              <div class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[var(--text-muted)] font-semibold">Assigned Host:</span>
+                <span class="font-semibold">{{ selectedTask.host }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Operating Stage Card (Matching prototype .operating-stage-card) -->
+          <div class="operating-stage-card p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+            <div class="flex items-center justify-between border-b border-[var(--border-subtle)] pb-2.5">
+              <div class="flex items-center gap-2">
+                <Icon name="tasks" :size="16" class="text-[var(--accent-primary)]" />
+                <h4 class="text-sm font-bold text-[var(--text-primary)]">Task Operating Stage & Specification</h4>
+              </div>
+              <span class="text-xs font-mono text-[var(--text-muted)]">{{ selectedTask.version }}</span>
+            </div>
+
+            <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5 text-xs text-[var(--text-secondary)]">
+              <strong class="text-xs text-[var(--text-primary)] font-semibold">Task Goal:</strong>
+              <p class="leading-relaxed">{{ selectedTask.goal }}</p>
+            </div>
+
+            <!-- Constraints & Validation Criteria -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+                <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Operational Constraints</strong>
+                <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+                  <li v-for="c in selectedTask.constraints" :key="c">{{ c }}</li>
+                </ul>
+              </div>
+              <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
+                <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Validation Criteria</strong>
+                <ul class="list-disc list-inside space-y-1 text-[var(--text-secondary)]">
+                  <li v-for="v in selectedTask.validationCriteria" :key="v">{{ v }}</li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Pending Completion Claim (If present) -->
+            <div v-if="selectedTask.completionClaim" class="p-3 rounded bg-[var(--green-ready-bg)] border border-[var(--green-ready)] flex flex-col gap-2 text-xs">
+              <div class="flex items-center justify-between">
+                <strong class="text-xs font-bold text-[var(--green-ready)] flex items-center gap-1.5">
+                  <Icon name="check" :size="14" />
+                  <span>Completion Claim Submitted for Human Validation</span>
+                </strong>
+                <Badge variant="success">{{ selectedTask.completionClaim.recommendedDisposition.toUpperCase() }}</Badge>
+              </div>
+              <p class="text-[var(--text-primary)] leading-relaxed">{{ selectedTask.completionClaim.outcomeSummary }}</p>
+              <div class="p-2 rounded bg-[var(--bg-surface)] font-mono text-[11px] text-[var(--text-secondary)]">
+                Evidence: {{ selectedTask.completionClaim.validationEvidence }}
+              </div>
+              <div class="flex items-center justify-end gap-2 pt-2 border-t border-[var(--green-ready)]/30">
+                <Button variant="secondary" size="xs">Require Correction</Button>
+                <Button variant="primary" size="xs">Accept & Authorize Safe Task End</Button>
+              </div>
+            </div>
+
+            <!-- Stage Actions -->
+            <div class="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)] flex-wrap">
+              <Button variant="secondary" size="sm" @click="navigateToTaskEnv">
+                <Icon name="environments" :size="13" />
+                <span>Inspect Host Environment</span>
+              </Button>
+            </div>
+          </div>
+
+          <!-- Nested Agent Runs Timeline (Matching prototype .runs-card) -->
+          <div class="runs-card p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+            <div class="flex items-center justify-between border-b border-[var(--border-subtle)] pb-2.5">
+              <div class="flex items-center gap-2">
+                <Icon name="lightning" :size="16" class="text-[var(--accent-primary)]" />
+                <h4 class="text-sm font-bold text-[var(--text-primary)]">Nested Agent Runs Timeline</h4>
+              </div>
+              <span class="text-xs text-[var(--text-muted)]">{{ selectedTask.runs.length }} Sequential Run(s) coordinated under Task-held Lease</span>
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <div
+                v-for="run in selectedTask.runs"
+                :key="run.id"
+                class="p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex flex-col gap-2 text-xs"
+              >
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono font-bold text-[var(--accent-primary)]">{{ run.id }}</span>
+                    <strong class="text-[var(--text-primary)]">@{{ run.agent }}</strong>
+                    <Badge :variant="run.status === 'Completed' ? 'success' : 'purple'">{{ run.status }}</Badge>
+                  </div>
+                  <span class="text-[11px] text-[var(--text-muted)] font-mono">{{ run.duration }} · {{ run.tokens }} toks</span>
+                </div>
+                <div class="text-[11px] text-[var(--text-secondary)] font-mono flex items-center gap-2">
+                  <span>Engine: {{ run.engine }}</span>
+                  <span>·</span>
+                  <span>Model: {{ run.model }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
-          <button
-            v-for="task in tasks"
-            :key="task.id"
-            type="button"
-            class="text-left w-full p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-elevated)] transition-all flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none"
-            @click="openTaskDetail(task)"
-          >
+        <!-- 2.2 Standard Task List Grid (When no task is drilled into) -->
+        <div v-else class="flex flex-col gap-4">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
             <div>
-              <div class="flex items-center justify-between gap-2 mb-1.5">
-                <div class="flex items-center gap-2">
-                  <Badge :variant="task.stageVariant">{{ task.stage.toUpperCase() }}</Badge>
-                  <span class="text-xs font-mono font-bold text-[var(--text-muted)]">#{{ task.id }}</span>
-                </div>
-                <span class="text-[11px] font-mono text-[var(--text-muted)]">{{ task.version }}</span>
-              </div>
-              <h4 class="text-sm font-bold text-[var(--text-primary)] mb-1">
-                {{ task.title }}
-              </h4>
-              <p class="text-xs text-[var(--text-secondary)] font-mono">
-                {{ task.lifecycleSentence }}
+              <h3 class="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2">
+                <Icon name="tasks" :size="18" />
+                <span>Project Tasks & Operating Loop</span>
+              </h3>
+              <p class="text-xs text-[var(--text-secondary)] mt-0.5">
+                Click any task card to drill down into its full operating controls and run execution timeline.
               </p>
             </div>
 
-            <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-xs text-[var(--text-muted)]">
-              <span>Lead: @{{ task.lead }} · Host: {{ task.host }}</span>
-              <span class="text-[var(--accent-primary)] font-semibold hover:underline">Inspect Task Details →</span>
+            <div class="flex items-center gap-2">
+              <select
+                v-model="activeTaskFilter"
+                class="px-2.5 py-1.5 rounded text-xs bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] cursor-pointer"
+                aria-label="Filter tasks by status"
+              >
+                <option value="all">All Tasks ({{ tasks.length }})</option>
+                <option value="Active">Active / Running</option>
+                <option value="Validation">Validation Claims</option>
+                <option value="Recovery">Recovery</option>
+                <option value="Proposed">Proposed</option>
+                <option value="Completed">Completed</option>
+              </select>
+
+              <Button variant="primary" size="sm">
+                <Icon name="plus" :size="14" />
+                <span>Propose Task</span>
+              </Button>
             </div>
-          </button>
+          </div>
+
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            <button
+              v-for="task in filteredTasks"
+              :key="task.id"
+              type="button"
+              class="text-left w-full p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-surface-elevated)] transition-all flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none"
+              @click="openTaskDetail(task)"
+            >
+              <div>
+                <div class="flex items-center justify-between gap-2 mb-1.5">
+                  <div class="flex items-center gap-2">
+                    <Badge :variant="task.stageVariant">{{ task.stage.toUpperCase() }}</Badge>
+                    <span class="text-xs font-mono font-bold text-[var(--text-muted)]">#{{ task.id }}</span>
+                  </div>
+                  <span class="text-[11px] font-mono text-[var(--text-muted)]">{{ task.version }}</span>
+                </div>
+                <h4 class="text-sm font-bold text-[var(--text-primary)] mb-1">
+                  {{ task.title }}
+                </h4>
+                <p class="text-xs text-[var(--text-secondary)] font-mono">
+                  {{ task.lifecycleSentence }}
+                </p>
+              </div>
+
+              <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-xs text-[var(--text-muted)]">
+                <span>Lead: @{{ task.lead }} · Host: {{ task.host }}</span>
+                <span class="text-[var(--accent-primary)] font-semibold hover:underline">Inspect Task Details →</span>
+              </div>
+            </button>
+          </div>
         </div>
       </div>
 
