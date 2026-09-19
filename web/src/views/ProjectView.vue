@@ -1,14 +1,47 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import Icon from '../primitives/Icon.vue';
 import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
 import StatusPill from '../primitives/StatusPill.vue';
 
+const route = useRoute();
+const router = useRouter();
+
 const selectedProjectId = ref('sprout-m2');
 const activeTab = ref<'overview' | 'tasks' | 'chat'>('overview');
 const activeChatChannel = ref('#general');
+
+function syncTabFromRoute() {
+  const tabParam = route.params.tab as string | undefined;
+  if (tabParam === 'tasks' || tabParam === 'chat' || tabParam === 'overview') {
+    activeTab.value = tabParam;
+  } else if (route.path.endsWith('/tasks')) {
+    activeTab.value = 'tasks';
+  } else if (route.path.endsWith('/chat')) {
+    activeTab.value = 'chat';
+  } else {
+    activeTab.value = 'overview';
+  }
+}
+
+onMounted(() => {
+  syncTabFromRoute();
+});
+
+watch(
+  () => route.path,
+  () => {
+    syncTabFromRoute();
+  }
+);
+
+function selectTab(tab: 'overview' | 'tasks' | 'chat') {
+  activeTab.value = tab;
+  router.push(`/project/${tab}`);
+}
 
 const projects = [
   { id: 'sprout-m2', name: 'Sprout M2 Operator', desc: 'Local multi-agent collaboration and environment-scheduling platform', status: 'Active' },
@@ -16,7 +49,7 @@ const projects = [
   { id: 'tooling', name: 'Dev Pipeline Tooling', desc: 'Host orchestration, carrier overlay, and verification CLI', status: 'Maintenance' },
 ];
 
-const currentProject = ref(projects[0]);
+const currentProject = computed(() => projects.find((p) => p.id === selectedProjectId.value) ?? projects[0]);
 
 const projectMembers = [
   { id: 'agent-prog', name: 'Programmer', role: 'Lead Implementation Engineer', engine: 'Pi / Gemini 2.5', status: 'Active' },
@@ -79,57 +112,73 @@ const tasks = [
     lead: 'Architect',
     host: 'Mac Studio M2 Max',
     version: 'v4',
-    lifecycleSentence: 'Task completed · Safe task end · Lease released cleanly',
+    lifecycleSentence: 'Task completed · All verification runs green · Released lease',
   },
 ];
 
-const messages = [
+const chatScopes = [
+  { id: '#general', label: '#general', kind: 'channel', unread: 0 },
+  { id: 'wg-frontend', label: 'wg-frontend', kind: 'working-group', unread: 1 },
+  { id: 'wg-core', label: 'wg-core', kind: 'working-group', unread: 0 },
+  { id: '@Programmer', label: '@Programmer', kind: 'dm', unread: 0 },
+  { id: '@Architect', label: '@Architect', kind: 'dm', unread: 0 },
+];
+
+const chatMessages = ref([
   {
-    id: 'm1',
-    author: 'Foreman',
-    role: 'Orchestrator',
-    time: '10:14 AM',
-    text: 'Opened Run scope #70. Initiating Ticket #74 vertical slice validation for Vue production Web foundation.',
-  },
-  {
-    id: 'm2',
-    author: 'Programmer',
-    role: 'Lead Implementation',
-    time: '10:15 AM',
-    text: 'Allocated port block 41010-41019. Installed Vue 3.5.43, Tailwind CSS 4, and Reka UI with zero peer warnings. Verifying master/detail and 6 dimensions on Manage / Environments.',
-  },
-  {
-    id: 'm3',
+    id: 'msg-1',
     author: 'Architect',
     role: 'System Architect',
-    time: '10:18 AM',
-    text: 'Confirmed ADR-0005 task-held lease safety. Emergency Force Release strictly retains the 3-gate human confirmation and does not preempt active leases.',
+    time: '10:04 AM',
+    content: 'Reviewing Ticket #74 Vue foundation slice. Ensure ADR-0011 boundary holds: Shell + Environments are authoritative; Pinia owns only UI state.',
   },
   {
-    id: 'm4',
+    id: 'msg-2',
     author: 'Programmer',
-    role: 'Lead Implementation',
-    time: '10:22 AM',
-    text: 'All 541 tests passing. Server active on port 41010. Ready for Human review.',
+    role: 'Lead Implementer',
+    time: '10:08 AM',
+    content: 'Verified. Remote state stays behind EnvironmentService port. No global mutable StateManager. 541 automated tests passing cleanly.',
   },
-];
+  {
+    id: 'msg-3',
+    author: 'Foreman',
+    role: 'Coordinator',
+    time: '10:11 AM',
+    content: 'All 8 Reka UI accessible dialog checks pass. Focus trap, Escape dismissal, and 3-gate Force Release safety verification green.',
+  },
+]);
+
+const newMessage = ref('');
+
+function sendMessage() {
+  if (!newMessage.value.trim()) return;
+  chatMessages.value.push({
+    id: `msg-${Date.now()}`,
+    author: 'Operator',
+    role: 'Human Operator',
+    time: 'Just now',
+    content: newMessage.value.trim(),
+  });
+  newMessage.value = '';
+}
 </script>
 
 <template>
-  <div class="projects-view flex flex-col h-full bg-[var(--bg-app)]">
-    <!-- Top Project Header & Selector -->
+  <div class="project-view flex flex-col h-full bg-[var(--bg-app)]">
+    <!-- 1. Top Project Header & Selector (Folder icon + Select + Action buttons) -->
     <div class="px-4 py-3 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex items-center justify-between gap-4 flex-wrap">
       <div class="flex items-center gap-3">
-        <div class="p-1.5 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)]">
-          <Icon name="project" :size="18" />
+        <div class="p-2 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)]">
+          <Icon name="folder" :size="20" />
         </div>
         <div>
           <div class="flex items-center gap-2">
             <select
               v-model="selectedProjectId"
               class="font-bold text-sm text-[var(--text-primary)] bg-transparent border-0 focus:ring-0 cursor-pointer pr-4"
+              aria-label="Select Project"
             >
-              <option v-for="p in projects" :key="p.id" :value="p.id">
+              <option v-for="p in projects" :key="p.id" :value="p.id" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">
                 {{ p.name }}
               </option>
             </select>
@@ -141,236 +190,253 @@ const messages = [
         </div>
       </div>
 
-      <!-- Tab Switcher -->
-      <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)]" role="tablist">
+      <!-- Action Buttons (Info & New Project) -->
+      <div class="flex items-center gap-2">
+        <Button variant="secondary" size="icon" title="Project Information & Metadata" aria-label="Project Information & Metadata">
+          <Icon name="info" :size="16" />
+        </Button>
+        <Button variant="secondary" size="icon" title="Create New Project" aria-label="Create New Project">
+          <Icon name="plus" :size="16" />
+        </Button>
+      </div>
+    </div>
+
+    <!-- 2. Dedicated 3-Button Sub-Navigation Bar across width (Matching prototype sub-nav-tabs tabs-3) -->
+    <div class="px-4 py-2 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)]">
+      <div class="grid grid-cols-3 gap-1.5 p-1 rounded-md bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] w-full" role="tablist" aria-label="Project Sections">
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer"
-          :class="activeTab === 'overview' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none min-h-[40px]"
+          :class="activeTab === 'overview' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           role="tab"
           :aria-selected="activeTab === 'overview'"
-          @click="activeTab = 'overview'"
+          @click="selectTab('overview')"
         >
-          Overview
+          <Icon name="overview" :size="16" />
+          <span class="truncate">Overview & Contract</span>
         </button>
+
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer"
-          :class="activeTab === 'tasks' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none relative min-h-[40px]"
+          :class="activeTab === 'tasks' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           role="tab"
           :aria-selected="activeTab === 'tasks'"
-          @click="activeTab = 'tasks'"
+          @click="selectTab('tasks')"
         >
-          Tasks ({{ tasks.length }})
+          <Icon name="tasks" :size="16" />
+          <span class="truncate">Tasks & Leases</span>
+          <span
+            class="px-1.5 py-0.2 rounded-full text-[10px] font-bold shrink-0"
+            :class="activeTab === 'tasks' ? 'bg-white/20 text-white' : 'bg-[var(--bg-surface)] text-[var(--accent-primary)] border border-[var(--border-subtle)]'"
+          >
+            {{ tasks.length }}
+          </span>
         </button>
+
         <button
           type="button"
-          class="px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer"
-          :class="activeTab === 'chat' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
+          class="flex items-center justify-center gap-2 py-2 px-3 rounded text-xs font-semibold transition-all cursor-pointer select-none min-h-[40px]"
+          :class="activeTab === 'chat' ? 'bg-[var(--accent-primary)] text-[var(--text-inverse)] shadow-xs font-bold' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)]'"
           role="tab"
           :aria-selected="activeTab === 'chat'"
-          @click="activeTab = 'chat'"
+          @click="selectTab('chat')"
         >
-          Chat (#general)
+          <Icon name="chat" :size="16" />
+          <span class="truncate">Project Chat</span>
         </button>
       </div>
     </div>
 
-    <!-- Main Tab Content Area -->
-    <div class="flex-1 overflow-y-auto p-4 sm:p-6 max-w-6xl mx-auto w-full">
+    <!-- 3. Main Content Area (Fluid width, ultra-wide screen adapted) -->
+    <div class="flex-1 overflow-y-auto p-4 sm:p-6 w-full max-w-[1920px] mx-auto">
       <!-- 1. Overview Tab -->
-      <div v-if="activeTab === 'overview'" class="flex flex-col gap-6">
-        <!-- Goal & Collaboration Contract -->
-        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3">
-          <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center justify-between">
-            <span>Project Collaboration Agreement (AGENTS.md)</span>
-            <span class="text-[10px] text-[var(--text-secondary)] font-mono">Wake policy: Explicit + Mentions</span>
-          </h3>
-          <p class="text-xs text-[var(--text-primary)] leading-relaxed">
-            Project goal: build, validate, and verify the Sprout M2 Local Operator platform. Multi-agent execution uses task-held leases under ADR-0005, preserving uncommitted host state across runs and interruptions.
-          </p>
-          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[11px] font-mono text-[var(--text-secondary)]">
-            Precedence rule: Project conventions > Agent-specific instructions > Global defaults.
+      <div v-if="activeTab === 'overview'" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Left 2 Columns on Wide Screens: Contract & Workspaces -->
+        <div class="lg:col-span-2 flex flex-col gap-6">
+          <!-- Goal & Collaboration Contract -->
+          <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+            <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center justify-between">
+              <span>Project Collaboration Agreement (AGENTS.md)</span>
+              <span class="text-[10px] text-[var(--text-secondary)] font-mono">Wake policy: Explicit + Mentions</span>
+            </h3>
+            <p class="text-xs text-[var(--text-primary)] leading-relaxed">
+              Strict multi-agent boundaries: all worker turns must record verifiable evidence before advancing task lifecycle.
+              No uncommitted code without passing test suites.
+            </p>
+            <div class="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] pt-2 border-t border-[var(--border-subtle)]">
+              <Icon name="shield" :size="14" class="text-[var(--green-ready)]" />
+              <span>Host permissions verified · Task-held leases guaranteed exclusive (ADR-0005)</span>
+            </div>
           </div>
-        </div>
 
-        <!-- Bound Workspaces -->
-        <div class="flex flex-col gap-3">
-          <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
-            <Icon name="folder" :size="14" />
-            <span>Bound Environment Workspaces (Host-Local Git Worktrees)</span>
-          </h3>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div
-              v-for="ws in boundWorkspaces"
-              :key="ws.host"
-              class="p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between gap-2"
-            >
-              <div>
-                <strong class="text-xs font-bold text-[var(--text-primary)] block">{{ ws.host }}</strong>
-                <span class="text-[11px] text-[var(--text-secondary)] font-mono">{{ ws.root }}/{{ ws.relPath }}</span>
+          <!-- Bound Workspaces -->
+          <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">Bound Host Workspaces</h3>
+              <Badge variant="secondary">{{ boundWorkspaces.length }} Active Bindings</Badge>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div
+                v-for="ws in boundWorkspaces"
+                :key="ws.root"
+                class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col justify-between gap-2"
+              >
+                <div>
+                  <div class="flex items-center justify-between gap-2 mb-1">
+                    <strong class="text-xs text-[var(--text-primary)] font-mono">{{ ws.root }}</strong>
+                    <Badge :variant="ws.status === 'Prepared & Ready' ? 'success' : 'danger'">{{ ws.status }}</Badge>
+                  </div>
+                  <span class="text-[11px] text-[var(--text-muted)] font-mono block truncate">{{ ws.relPath }}</span>
+                </div>
+                <div class="text-[10px] text-[var(--text-secondary)] pt-1 border-t border-[var(--border-subtle)]">
+                  Host: {{ ws.host }}
+                </div>
               </div>
-              <StatusPill :status="ws.status === 'Prepared & Ready' ? 'green' : 'yellow'" class="text-[10px]">
-                {{ ws.status }}
-              </StatusPill>
             </div>
           </div>
         </div>
 
-        <!-- Project Memberships -->
-        <div class="flex flex-col gap-3">
-          <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
-            <Icon name="agents" :size="14" />
-            <span>Active Project Memberships ({{ projectMembers.length }})</span>
-          </h3>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <!-- Right 1 Column on Wide Screens: Memberships -->
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs h-fit">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">Active Memberships</h3>
+            <Badge variant="info">{{ projectMembers.length }} Agents</Badge>
+          </div>
+          <div class="flex flex-col gap-2">
             <div
-              v-for="mem in projectMembers"
-              :key="mem.id"
-              class="p-3.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between gap-3"
+              v-for="m in projectMembers"
+              :key="m.id"
+              class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex items-center justify-between gap-2"
             >
-              <div class="flex items-center gap-3">
-                <div class="w-8 h-8 rounded-full bg-[var(--accent-bg)] border border-[var(--accent-border)] text-[var(--accent-primary)] font-bold flex items-center justify-center text-xs">
-                  {{ mem.name[0] }}
+              <div class="flex items-center gap-2.5">
+                <div class="w-8 h-8 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-xs">
+                  {{ m.name[0] }}
                 </div>
                 <div>
-                  <strong class="text-xs font-bold text-[var(--text-primary)] block">@{{ mem.name }}</strong>
-                  <span class="text-[11px] text-[var(--text-secondary)] block">{{ mem.role }}</span>
-                  <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ mem.engine }}</span>
+                  <strong class="text-xs text-[var(--text-primary)] block">@{{ m.name }}</strong>
+                  <span class="text-[10px] text-[var(--text-muted)] block">{{ m.role }}</span>
                 </div>
               </div>
-              <StatusDot status="green" size="sm" title="Active Member" />
+              <Badge variant="secondary" class="font-mono text-[9px]">{{ m.engine }}</Badge>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 2. Tasks Tab -->
-      <div v-else-if="activeTab === 'tasks'" class="flex flex-col gap-3">
-        <div class="flex items-center justify-between pb-2 border-b border-[var(--border-subtle)]">
-          <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">
-            Project Tasks & Operating Stages (ADR-0006)
-          </h3>
-          <Button variant="primary" size="xs">
-            <Icon name="plus" :size="12" />
+      <!-- 2. Tasks Tab (Ultra-wide grid) -->
+      <div v-else-if="activeTab === 'tasks'" class="flex flex-col gap-4">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm font-bold text-[var(--text-primary)]">Project Tasks & Run States</h3>
+            <Badge variant="info">{{ tasks.length }} Tasks</Badge>
+          </div>
+          <Button variant="primary" size="sm">
+            <Icon name="plus" :size="14" />
             <span>New Task</span>
           </Button>
         </div>
 
-        <div class="flex flex-col gap-2.5">
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
           <div
-            v-for="t in tasks"
-            :key="t.id"
-            class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] transition-all flex flex-col gap-2"
+            v-for="task in tasks"
+            :key="task.id"
+            class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] transition-all flex flex-col justify-between gap-3 shadow-xs"
           >
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex items-center gap-2">
-                <span class="text-xs font-bold text-[var(--text-primary)]">Task #{{ t.id }}</span>
-                <Badge :variant="t.stageVariant">{{ t.stage }}</Badge>
-                <span class="text-[10px] font-mono text-[var(--text-muted)]">{{ t.version }}</span>
+            <div>
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <div class="flex items-center gap-2">
+                  <Badge :variant="task.stageVariant">{{ task.stage.toUpperCase() }}</Badge>
+                  <span class="text-xs font-mono font-bold text-[var(--text-muted)]">#{{ task.id }}</span>
+                </div>
+                <span class="text-[11px] font-mono text-[var(--text-muted)]">{{ task.version }}</span>
               </div>
-              <span class="text-xs text-[var(--text-muted)]">Lead: <strong class="text-[var(--text-secondary)]">@{{ t.lead }}</strong></span>
+              <h4 class="text-sm font-bold text-[var(--text-primary)] mb-1">
+                {{ task.title }}
+              </h4>
+              <p class="text-xs text-[var(--text-secondary)] font-mono">
+                {{ task.lifecycleSentence }}
+              </p>
             </div>
 
-            <h4 class="text-xs sm:text-sm font-semibold text-[var(--text-primary)]">
-              {{ t.title }}
-            </h4>
-
-            <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-[11px] text-[var(--text-muted)] flex-wrap gap-1">
-              <span class="font-mono">{{ t.lifecycleSentence }}</span>
-              <span>Host: <strong>{{ t.host }}</strong></span>
+            <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between text-xs text-[var(--text-muted)]">
+              <span>Lead: @{{ task.lead }} · Host: {{ task.host }}</span>
+              <span class="text-[var(--accent-primary)] font-semibold cursor-pointer hover:underline">Inspect Task →</span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 3. Chat Tab -->
-      <div v-else-if="activeTab === 'chat'" class="grid grid-cols-1 md:grid-cols-4 gap-4 h-[600px] rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden">
-        <!-- Chat Channels & Scope List -->
-        <div class="border-r border-[var(--border-subtle)] p-3 flex flex-col gap-4 bg-[var(--bg-surface-elevated)]">
-          <div>
-            <span class="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)] block mb-1.5">
-              Project Channels
-            </span>
+      <!-- 3. Chat Tab (Ultra-wide 2-column layout) -->
+      <div v-else-if="activeTab === 'chat'" class="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden flex flex-col md:flex-row h-[750px] shadow-xs">
+        <!-- Chat Channels Navigation (Left sidebar) -->
+        <div class="w-full md:w-64 lg:w-72 bg-[var(--bg-surface-elevated)] border-r border-[var(--border-subtle)] p-3 flex flex-col gap-2 shrink-0">
+          <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] tracking-wider px-2">Channels & DMs</span>
+          <div class="flex flex-col gap-0.5">
             <button
+              v-for="scope in chatScopes"
+              :key="scope.id"
               type="button"
-              class="w-full text-left px-2.5 py-1.5 rounded text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer"
-              :class="activeChatChannel === '#general' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]'"
-              @click="activeChatChannel = '#general'"
+              class="w-full text-left px-3 py-2 rounded text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer"
+              :class="activeChatChannel === scope.id ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)]'"
+              @click="activeChatChannel = scope.id"
             >
-              <span>#general</span>
-              <span class="text-[10px] px-1 rounded bg-[var(--accent-primary)] text-white">4</span>
-            </button>
-          </div>
-
-          <div>
-            <span class="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)] block mb-1.5">
-              Working Groups
-            </span>
-            <button
-              type="button"
-              class="w-full text-left px-2.5 py-1.5 rounded text-xs font-medium flex items-center justify-between transition-colors cursor-pointer"
-              :class="activeChatChannel === 'wg-frontend' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]'"
-              @click="activeChatChannel = 'wg-frontend'"
-            >
-              <span>wg-frontend</span>
-            </button>
-            <button
-              type="button"
-              class="w-full text-left px-2.5 py-1.5 rounded text-xs font-medium flex items-center justify-between transition-colors cursor-pointer"
-              :class="activeChatChannel === 'wg-core' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]'"
-              @click="activeChatChannel = 'wg-core'"
-            >
-              <span>wg-core</span>
-            </button>
-          </div>
-
-          <div>
-            <span class="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)] block mb-1.5">
-              Direct Messages
-            </span>
-            <button
-              type="button"
-              class="w-full text-left px-2.5 py-1.5 rounded text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
-              :class="activeChatChannel === '@Programmer' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface)]'"
-              @click="activeChatChannel = '@Programmer'"
-            >
-              <StatusDot status="green" size="sm" />
-              <span>@Programmer</span>
+              <div class="flex items-center gap-2 truncate">
+                <Icon :name="scope.kind === 'channel' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'" :size="14" />
+                <span class="truncate">{{ scope.label }}</span>
+              </div>
+              <span v-if="scope.unread > 0" class="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-[var(--accent-primary)] text-[var(--text-inverse)]">
+                {{ scope.unread }}
+              </span>
             </button>
           </div>
         </div>
 
-        <!-- Chat Timeline & Composer -->
-        <div class="md:col-span-3 flex flex-col justify-between h-full p-4">
-          <!-- Timeline -->
-          <div class="flex-1 overflow-y-auto space-y-4 pr-2">
+        <!-- Chat Timeline & Composer (Right main area) -->
+        <div class="flex-1 flex flex-col justify-between h-full bg-[var(--bg-surface)] min-w-0">
+          <!-- Channel Header -->
+          <div class="px-4 py-3 border-b border-[var(--border-subtle)] flex items-center justify-between bg-[var(--bg-surface)]">
+            <div class="flex items-center gap-2">
+              <Icon name="chat" :size="16" class="text-[var(--accent-primary)]" />
+              <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
+              <span class="text-[10px] text-[var(--text-muted)]">Active multi-agent message timeline</span>
+            </div>
+            <Badge variant="secondary">3 Members Online</Badge>
+          </div>
+
+          <!-- Messages Scroll Area -->
+          <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
             <div
-              v-for="msg in messages"
+              v-for="msg in chatMessages"
               :key="msg.id"
-              class="p-3 rounded-[var(--radius-sm)] bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1 text-xs"
+              class="flex items-start gap-3"
             >
-              <div class="flex items-center justify-between text-[11px]">
-                <div class="flex items-center gap-1.5">
-                  <strong class="text-[var(--text-primary)]">@{{ msg.author }}</strong>
-                  <span class="text-[10px] text-[var(--text-muted)]">({{ msg.role }})</span>
-                </div>
-                <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ msg.time }}</span>
+              <div class="w-8 h-8 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-xs shrink-0">
+                {{ msg.author[0] }}
               </div>
-              <p class="text-[var(--text-secondary)] leading-relaxed mt-0.5">
-                {{ msg.text }}
-              </p>
+              <div class="flex flex-col gap-1 min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <strong class="text-xs font-bold text-[var(--text-primary)]">@{{ msg.author }}</strong>
+                  <span class="text-[10px] text-[var(--text-muted)]">{{ msg.role }}</span>
+                  <span class="text-[10px] text-[var(--text-muted)] ml-auto font-mono">{{ msg.time }}</span>
+                </div>
+                <div class="p-3 rounded-lg bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] leading-relaxed">
+                  {{ msg.content }}
+                </div>
+              </div>
             </div>
           </div>
 
           <!-- Composer Bar -->
-          <div class="pt-3 border-t border-[var(--border-subtle)] flex gap-2">
+          <div class="p-3 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center gap-2">
             <input
+              v-model="newMessage"
               type="text"
-              placeholder="Send message to #general (@agent to mention, @all to broadcast)..."
-              class="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+              placeholder="Send instruction or query to #general (@mention supported)..."
+              class="flex-1 px-3 py-2 text-xs rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--border-focus)]"
+              @keydown.enter="sendMessage"
             />
-            <Button variant="primary" size="sm">
+            <Button variant="primary" size="sm" @click="sendMessage">
               Send
             </Button>
           </div>

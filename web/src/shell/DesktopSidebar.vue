@@ -57,12 +57,35 @@ function isActive(path: string): boolean {
         </div>
         <div class="space-y-0.5">
           <RouterLink
-            to="/project"
+            to="/project/overview"
             class="flex items-center gap-2.5 px-3 py-2 rounded-md text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
-            :class="isActive('/project') ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-primary)]'"
+            :class="route.path === '/project' || route.path === '/project/' || route.path === '/project/overview' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-primary)]'"
           >
-            <Icon name="project" :size="16" />
-            <span>Project Multi-View</span>
+            <Icon name="overview" :size="16" />
+            <span>Overview & Contract</span>
+          </RouterLink>
+
+          <RouterLink
+            to="/project/tasks"
+            class="flex items-center justify-between gap-2.5 px-3 py-2 rounded-md text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+            :class="route.path === '/project/tasks' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-primary)]'"
+          >
+            <div class="flex items-center gap-2.5">
+              <Icon name="tasks" :size="16" />
+              <span>Tasks & Leases</span>
+            </div>
+            <span class="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-[var(--accent-bg)] text-[var(--accent-primary)] border border-[var(--accent-border)]">
+              3
+            </span>
+          </RouterLink>
+
+          <RouterLink
+            to="/project/chat"
+            class="flex items-center gap-2.5 px-3 py-2 rounded-md text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+            :class="route.path === '/project/chat' ? 'bg-[var(--accent-bg)] text-[var(--accent-primary)] font-bold' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-primary)]'"
+          >
+            <Icon name="chat" :size="16" />
+            <span>Project Chat</span>
           </RouterLink>
         </div>
       </div>

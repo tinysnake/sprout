@@ -66,8 +66,8 @@ const usageItems = ref([
     <!-- Sub navigation -->
     <SubNav :items="manageSubNavItems" />
 
-    <!-- Main Container -->
-    <div class="p-4 sm:p-6 max-w-6xl mx-auto w-full flex flex-col gap-6">
+    <!-- Main Container (Fluid width, ultra-wide screen adapted) -->
+    <div class="p-4 sm:p-6 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
       <!-- Header -->
       <div class="border-b border-[var(--border-subtle)] pb-4 flex items-center justify-between gap-4 flex-wrap">
         <div>
@@ -83,7 +83,7 @@ const usageItems = ref([
       </div>
 
       <!-- 6-View Tab Strip (ADR-0010) -->
-      <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] overflow-x-auto" role="tablist">
+      <div class="flex items-center gap-1 bg-[var(--bg-surface-elevated)] p-1 rounded-md border border-[var(--border-subtle)] overflow-x-auto w-fit" role="tablist">
         <button
           type="button"
           class="px-3 py-1 rounded text-xs font-semibold whitespace-nowrap cursor-pointer transition-colors"
@@ -134,68 +134,88 @@ const usageItems = ref([
         </button>
       </div>
 
-      <!-- KPI Metric Tiles Grid -->
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div class="p-3.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+      <!-- KPI Metric Tiles Grid (4-column on wide screens) -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1 shadow-xs">
           <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Total Tokens</span>
-          <span class="text-xl font-bold text-[var(--text-primary)]">1,144,570</span>
+          <span class="text-2xl font-bold text-[var(--text-primary)]">1,144,570</span>
           <span class="text-[10px] text-[var(--green-ready)]">Across 2 projects</span>
         </div>
 
-        <div class="p-3.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1 shadow-xs">
           <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Model Duration</span>
-          <span class="text-xl font-bold text-[var(--text-primary)]">38m 47s</span>
+          <span class="text-2xl font-bold text-[var(--text-primary)]">38m 47s</span>
           <span class="text-[10px] text-[var(--text-muted)]">Active inference time</span>
         </div>
 
-        <div class="p-3.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1 shadow-xs">
           <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">API Equivalent Estimate</span>
-          <span class="text-xl font-bold text-[var(--accent-primary)]">$3.90</span>
+          <span class="text-2xl font-bold text-[var(--accent-primary)]">$3.90</span>
           <span class="text-[10px] text-[var(--text-muted)]">Commercial pricing basis</span>
         </div>
 
-        <div class="p-3.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1 shadow-xs">
           <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Telemetry Coverage</span>
-          <span class="text-xl font-bold text-[var(--green-ready)]">99.2%</span>
+          <span class="text-2xl font-bold text-[var(--green-ready)]">99.2%</span>
           <span class="text-[10px] text-[var(--text-muted)]">Complete token trace</span>
         </div>
       </div>
 
-      <!-- ADR-0010 Separation Invariant: Work-Model Runs vs Routing Attempts -->
-      <div class="flex flex-col gap-3">
-        <div class="flex items-center justify-between">
-          <strong class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">
-            Activity Items Breakdown (Work Runs & Routing Separate — ADR-0010)
-          </strong>
-          <span class="text-[10px] text-[var(--text-muted)]">Never merged into one total</span>
+      <!-- ADR-0010 Separation Invariant: 2-Column Split on Wide Screens -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Left 2 Columns: Activity Items Breakdown -->
+        <div class="lg:col-span-2 flex flex-col gap-3">
+          <div class="flex items-center justify-between">
+            <strong class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)]">
+              Activity Items Breakdown (Work Runs & Routing Separate — ADR-0010)
+            </strong>
+            <span class="text-[10px] text-[var(--text-muted)]">Never merged into one total</span>
+          </div>
+
+          <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3 shadow-xs">
+            <div
+              v-for="item in usageItems"
+              :key="item.id"
+              class="flex items-center justify-between p-3.5 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex-wrap gap-2"
+            >
+              <div>
+                <div class="flex items-center gap-2">
+                  <strong class="text-xs font-bold text-[var(--text-primary)]">{{ item.name }}</strong>
+                  <Badge :variant="item.category === 'Work Run' ? 'purple' : 'info'">{{ item.category }}</Badge>
+                </div>
+                <div class="text-[11px] text-[var(--text-secondary)] mt-0.5">
+                  {{ item.agent }} · <span class="font-mono text-[var(--text-muted)]">{{ item.model }}</span>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-4">
+                <div class="text-right text-xs">
+                  <strong class="text-[var(--text-primary)] block">{{ item.tokens }} toks</strong>
+                  <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ item.duration }}</span>
+                </div>
+                <div class="text-right text-xs">
+                  <strong class="text-[var(--accent-primary)] block">{{ item.costEstimate }}</strong>
+                  <span class="text-[9px] text-[var(--text-muted)]">{{ item.provenance }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-3">
-          <div
-            v-for="item in usageItems"
-            :key="item.id"
-            class="flex items-center justify-between p-3 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex-wrap gap-2"
-          >
-            <div>
-              <div class="flex items-center gap-2">
-                <strong class="text-xs font-bold text-[var(--text-primary)]">{{ item.name }}</strong>
-                <Badge :variant="item.category === 'Work Run' ? 'purple' : 'info'">{{ item.category }}</Badge>
-              </div>
-              <div class="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                {{ item.agent }} · <span class="font-mono text-[var(--text-muted)]">{{ item.model }}</span>
-              </div>
-            </div>
-
-            <div class="flex items-center gap-3">
-              <div class="text-right text-xs">
-                <strong class="text-[var(--text-primary)] block">{{ item.tokens }} toks</strong>
-                <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ item.duration }}</span>
-              </div>
-              <div class="text-right text-xs">
-                <strong class="text-[var(--accent-primary)] block">{{ item.costEstimate }}</strong>
-                <span class="text-[9px] text-[var(--text-muted)]">{{ item.provenance }}</span>
-              </div>
-            </div>
+        <!-- Right 1 Column: Telemetry Invariant & Audit Info -->
+        <div class="p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs h-fit">
+          <div class="flex items-center gap-2">
+            <Icon name="shield" :size="16" class="text-[var(--accent-primary)]" />
+            <strong class="text-xs font-bold text-[var(--text-primary)]">Telemetry Invariants (ADR-0010)</strong>
+          </div>
+          <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
+            In Sprout M2, Work-model runs represent purposeful agent output (token charges with task attribution).
+            Routing attempts represent system dispatch overhead and are strictly separated in audit records.
+          </p>
+          <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[11px] flex flex-col gap-1 text-[var(--text-muted)] font-mono">
+            <div>Work Runs: 1,101,970 tokens (96.3%)</div>
+            <div>Routing Overhead: 42,600 tokens (3.7%)</div>
+            <div>Unbilled local execution: $0.00 actual</div>
           </div>
         </div>
       </div>

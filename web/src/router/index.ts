@@ -22,6 +22,11 @@ const routes: RouteRecordRaw[] = [
     component: ProjectView,
   },
   {
+    path: '/project/:tab(overview|tasks|chat)',
+    name: 'project-tab',
+    component: ProjectView,
+  },
+  {
     path: '/manage',
     redirect: '/manage/environments',
   },
