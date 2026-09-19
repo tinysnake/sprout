@@ -64,6 +64,37 @@ export interface HostConfiguration {
 }
 
 /**
+ * The typed configuration of one environment worker (ADR-0003).
+ *
+ * A worker is a separate process that serves exactly one environment instance.
+ * These are the host facts that decide how the core reaches it, where its
+ * Worker-owned workspaces live, which engine binaries it hosts, and how the
+ * environment's platform changes an engine's sandbox posture. Carrier selection
+ * and engine construction remain the worker entry point's business (#80); this
+ * Module only names each variable and its default once.
+ */
+export interface WorkerConfiguration {
+  /** The one environment instance this worker serves. */
+  readonly environmentInstanceId: string;
+  /** Address the worker publishes for the core to dial. */
+  readonly workerHost: string;
+  /** Port the worker binds; `0` asks the host for a free port. */
+  readonly workerPort: number;
+  /** `endpoint` when the core dials this worker, `stdio` when the carrier owns the pipe. */
+  readonly workerTransport: string;
+  /** Worker-owned root for persistent Project workspaces. */
+  readonly workspaceRoot: string;
+  /** Platform the worker runs on when its carrier declares one (`container` inside a container). */
+  readonly environmentPlatform: string | undefined;
+  /** Where the Pi engine keeps its sessions, when the host overrides the default. */
+  readonly piSessionDirectory: string | undefined;
+  /** Path the worker writes its readiness address to, when a carrier needs a file. */
+  readonly readyFile: string | undefined;
+  /** Explicit engine binary overrides, keyed by engine command (`SPROUT_<ENGINE>_BIN`). */
+  readonly engineBinaries: Readonly<Record<string, string>>;
+}
+
+/**
  * The process environment, as the host configuration sees it.
  *
  * Deliberately a plain record so tests can cross this interface without touching
@@ -75,6 +106,12 @@ export type HostEnvironment = Readonly<Record<string, string | undefined>>;
 export interface HostConfigurationDefaults {
   /** The repository root, used for path defaults when the host names none. */
   readonly projectRoot: string;
+}
+
+/** Host facts the Worker entry point cannot discover from the environment alone. */
+export interface WorkerConfigurationDefaults {
+  /** The worker's working directory, used for the workspace-root default. */
+  readonly workingDirectory: string;
 }
 
 /**
@@ -111,6 +148,45 @@ export function parseHostConfiguration(
 }
 
 /**
+ * Parse every supported Worker host setting once.
+ *
+ * The Worker entry point consumes the typed result instead of naming a
+ * `SPROUT_*` variable itself. Defaults and permissiveness are exactly the ones
+ * the entry point used before this existed; the entry point keeps its startup
+ * errors, carrier selection, and engine sandbox decision.
+ */
+export function parseWorkerConfiguration(
+  environment: HostEnvironment,
+  defaults: WorkerConfigurationDefaults,
+): WorkerConfiguration {
+  return {
+    environmentInstanceId: environment['SPROUT_ENV_INSTANCE'] ?? 'local-macos',
+    workerHost: environment['SPROUT_WORKER_HOST'] ?? '127.0.0.1',
+    workerPort: numberValue(environment['SPROUT_WORKER_PORT'], 0),
+    workerTransport: environment['SPROUT_WORKER_TRANSPORT'] ?? 'endpoint',
+    workspaceRoot:
+      environment['SPROUT_WORKSPACE_ROOT'] ??
+      join(defaults.workingDirectory, '.sprout-workspaces'),
+    environmentPlatform: environment['SPROUT_ENV_PLATFORM'],
+    piSessionDirectory: environment['SPROUT_PI_SESSION_DIR'],
+    readyFile: environment['SPROUT_READY_FILE'],
+    engineBinaries: engineBinaryOverrides(environment),
+  };
+}
+
+/**
+ * The environment a spawned Worker process starts with.
+ *
+ * The core communicates the resolved instance to the worker through this one
+ * variable, so the name lives here with the rest of the host surface rather than
+ * in the core entry point. A carrier may add transport-specific facts, but the
+ * instance is always this name.
+ */
+export function workerEnvironment(environmentInstanceId: string): Readonly<Record<string, string>> {
+  return { SPROUT_ENV_INSTANCE: environmentInstanceId };
+}
+
+/**
  * Numeric host settings keep the runtime's original conversion.
  *
  * A missing value takes the default and any other value is handed to `Number`
@@ -119,6 +195,24 @@ export function parseHostConfiguration(
  */
 function numberValue(value: string | undefined, fallback: number): number {
   return value === undefined ? fallback : Number(value);
+}
+
+/**
+ * Explicit engine binary overrides, as `SPROUT_<ENGINE>_BIN` names them.
+ *
+ * A worker may host several engines, so the override is generic rather than one
+ * variable per known engine. This is the only place the pattern is named; the
+ * entry point asks the parsed map by engine command. A name that is not
+ * `SPROUT_<ENGINE>_BIN` is never collected.
+ */
+function engineBinaryOverrides(environment: HostEnvironment): Readonly<Record<string, string>> {
+  const overrides: Record<string, string> = {};
+  for (const [name, value] of Object.entries(environment)) {
+    const engine = /^SPROUT_([A-Z0-9]+)_BIN$/.exec(name)?.[1];
+    if (engine === undefined || value === undefined) continue;
+    overrides[engine.toLowerCase()] = value;
+  }
+  return overrides;
 }
 
 /** The host proxy, translated to the name a container uses for the host. */

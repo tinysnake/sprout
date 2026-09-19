@@ -19,7 +19,7 @@ import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
-import { parseHostConfiguration } from './host-config.ts';
+import { parseHostConfiguration, workerEnvironment } from './host-config.ts';
 
 /**
  * The M1 runtime entry point.
@@ -117,7 +117,7 @@ async function startEnvironmentWorker(requestedInstanceId: string): Promise<Work
   return EndpointCarrier.start({
     command: process.execPath,
     args: [join(here, 'worker', 'main.ts')],
-    env: { ...process.env, SPROUT_ENV_INSTANCE: instanceId },
+    env: { ...process.env, ...workerEnvironment(instanceId) },
     label: 'sprout-worker',
   });
 }

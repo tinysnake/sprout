@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
 
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter } from '../engine/codex.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
+import { parseWorkerConfiguration } from '../host-config.ts';
 import { EnvironmentWorker } from './server.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
@@ -18,28 +18,29 @@ import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
  * deliberately long-lived: the core connects once and reuses it across runs, so
  * runs after the first skip worker start and engine cold start.
  *
- * Configuration is host facts, not product decisions, so it comes from the
- * environment: which instance this worker serves, which engines it hosts, and
- * where the engines live on this machine.
+ * Configuration is host facts, not product decisions, so it is read once from
+ * the environment by the host-configuration Module; this entry point consumes
+ * the typed result and keeps only the Worker's own boundary: which carrier
+ * applies, which engine adapters exist, and which startup errors a missing fact
+ * produces.
  */
 
-const environmentInstanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
-const host = process.env.SPROUT_WORKER_HOST ?? '127.0.0.1';
-const port = Number(process.env.SPROUT_WORKER_PORT ?? 0);
-/**
- * How this worker is reached.
- *
- * `stdio` when the carrier already holds a connected pipe — a container reached
- * through the runtime's exec channel — and `endpoint` when the worker must
- * publish an address for the core to dial, which is the local machine's case.
- * ADR-0003: the protocol is identical either way and only the carrier differs.
- */
-const transportMode = process.env.SPROUT_WORKER_TRANSPORT ?? 'endpoint';
-const workspaceRoot = process.env.SPROUT_WORKSPACE_ROOT ?? join(process.cwd(), '.sprout-workspaces');
+const {
+  environmentInstanceId,
+  workerHost: host,
+  workerPort: port,
+  workerTransport: transportMode,
+  workspaceRoot,
+  environmentPlatform,
+  piSessionDirectory,
+  readyFile: configuredReadyFile,
+  engineBinaries,
+} = parseWorkerConfiguration(process.env, { workingDirectory: process.cwd() });
 
 /** Codex must be launched through its real path; a PATH symlink fails sandboxed. */
 function resolveCodexBinary(): string | undefined {
-  if (process.env.SPROUT_CODEX_BIN !== undefined) return process.env.SPROUT_CODEX_BIN;
+  const override = engineBinaries['codex'];
+  if (override !== undefined) return override;
   // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
   // Unlike pi's .cmd shim, the Windows codex distribution ships an .exe, so the
   // first match is the one that runs.
@@ -68,7 +69,7 @@ if (codexBinary !== undefined) {
    * every turn fails. This is a fact about the environment, so it is decided here
    * where the environment is known, not in the core.
    */
-  const sandbox = process.env.SPROUT_ENV_PLATFORM === 'container' ? 'danger-full-access' : 'read-only';
+  const sandbox = environmentPlatform === 'container' ? 'danger-full-access' : 'read-only';
   engines.set(
     'codex',
     new CodexEngineAdapter({
@@ -81,7 +82,7 @@ if (codexBinary !== undefined) {
 
 /** Pi is resolved the same way, since a worker may host either engine. */
 function resolveBinary(command: string): string | undefined {
-  const override = process.env[`SPROUT_${command.toUpperCase()}_BIN`];
+  const override = engineBinaries[command];
   if (override !== undefined) return override;
   try {
     // Windows has no /bin/sh and no login-shell PATH; `where` is its equivalent.
@@ -109,9 +110,7 @@ if (piBinary !== undefined) {
       binaryPath: piBinary,
       // Sessions live under Sprout's control rather than the user's default, so
       // one agent's conversation does not depend on a machine-local store.
-      ...(process.env.SPROUT_PI_SESSION_DIR !== undefined
-        ? { sessionDirectory: process.env.SPROUT_PI_SESSION_DIR }
-        : {}),
+      ...(piSessionDirectory !== undefined ? { sessionDirectory: piSessionDirectory } : {}),
     }),
   );
 }
@@ -213,7 +212,7 @@ if (transportMode === 'stdio') {
   // A daemon started detached (Windows WMI, no console) has no stdout to read,
   // so the readiness address is also persisted where its provisioning channel
   // can find it. Best-effort: local discovery does not depend on it.
-  const readyFile = process.env.SPROUT_READY_FILE;
+  const readyFile = configuredReadyFile;
   if (readyFile !== undefined && readyFile !== '') {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(readyFile, JSON.stringify(endpoint.ready));

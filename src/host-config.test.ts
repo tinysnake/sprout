@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { parseHostConfiguration, type HostConfiguration, type HostEnvironment } from './host-config.ts';
+import { parseHostConfiguration, parseWorkerConfiguration, workerEnvironment, type HostConfiguration, type HostEnvironment, type WorkerConfiguration } from './host-config.ts';
 
 /**
  * The default host facts are asserted against a synthetic repository root, so no
@@ -12,6 +12,14 @@ const projectRoot = '/synthetic/sprout';
 
 function parseWith(environment: HostEnvironment = {}): HostConfiguration {
   return parseHostConfiguration(environment, { projectRoot });
+}
+
+/**
+ * The Worker configuration is parsed against a synthetic working directory, so
+ * its default workspace root is asserted without recording a real machine path.
+ */
+function parseWorker(environment: HostEnvironment = {}): WorkerConfiguration {
+  return parseWorkerConfiguration(environment, { workingDirectory: '/synthetic/worker-cwd' });
 }
 
 /** The configuration an empty host environment produces. */
@@ -283,4 +291,164 @@ test('the parsed configuration exposes no unrelated host key', () => {
   const configuration = parseWith({ UNRELATED_HOST_FACT: 'not-sprout', SPROUT_UNKNOWN_SETTING: 'ignored' });
   assert.equal('UNRELATED_HOST_FACT' in configuration, false);
   assert.equal('SPROUT_UNKNOWN_SETTING' in configuration, false);
+});
+
+/**
+ * One row per supported Worker host setting, mirroring the core table above so
+ * the whole host surface crosses the same typed boundary. `worker/main.ts` names
+ * no variable itself; it consumes these values.
+ */
+type WorkerSetting = {
+  readonly variable: string;
+  readonly read: (configuration: WorkerConfiguration) => unknown;
+  readonly missing: unknown;
+  readonly present: HostEnvironment;
+  readonly parsed: unknown;
+};
+
+const workerSettings: readonly WorkerSetting[] = [
+  {
+    variable: 'SPROUT_ENV_INSTANCE',
+    read: (c) => c.environmentInstanceId,
+    missing: 'local-macos',
+    present: { SPROUT_ENV_INSTANCE: 'instance-b' },
+    parsed: 'instance-b',
+  },
+  {
+    variable: 'SPROUT_WORKER_HOST',
+    read: (c) => c.workerHost,
+    missing: '127.0.0.1',
+    present: { SPROUT_WORKER_HOST: '127.0.0.1' },
+    parsed: '127.0.0.1',
+  },
+  {
+    variable: 'SPROUT_WORKER_PORT',
+    read: (c) => c.workerPort,
+    missing: 0,
+    present: { SPROUT_WORKER_PORT: '41020' },
+    parsed: 41020,
+  },
+  {
+    variable: 'SPROUT_WORKER_TRANSPORT',
+    read: (c) => c.workerTransport,
+    missing: 'endpoint',
+    present: { SPROUT_WORKER_TRANSPORT: 'stdio' },
+    parsed: 'stdio',
+  },
+  {
+    variable: 'SPROUT_WORKSPACE_ROOT',
+    read: (c) => c.workspaceRoot,
+    missing: join('/synthetic/worker-cwd', '.sprout-workspaces'),
+    present: { SPROUT_WORKSPACE_ROOT: '/synthetic/workspaces' },
+    parsed: '/synthetic/workspaces',
+  },
+  {
+    variable: 'SPROUT_ENV_PLATFORM',
+    read: (c) => c.environmentPlatform,
+    missing: undefined,
+    present: { SPROUT_ENV_PLATFORM: 'container' },
+    parsed: 'container',
+  },
+  {
+    variable: 'SPROUT_PI_SESSION_DIR',
+    read: (c) => c.piSessionDirectory,
+    missing: undefined,
+    present: { SPROUT_PI_SESSION_DIR: '/synthetic/pi-sessions' },
+    parsed: '/synthetic/pi-sessions',
+  },
+  {
+    variable: 'SPROUT_READY_FILE',
+    read: (c) => c.readyFile,
+    missing: undefined,
+    present: { SPROUT_READY_FILE: 'C:/synthetic/worker-ready.json' },
+    parsed: 'C:/synthetic/worker-ready.json',
+  },
+  {
+    variable: 'SPROUT_CODEX_BIN',
+    read: (c) => c.engineBinaries['codex'],
+    missing: undefined,
+    present: { SPROUT_CODEX_BIN: '/synthetic/bin/codex' },
+    parsed: '/synthetic/bin/codex',
+  },
+];
+
+for (const { variable, read, missing, present, parsed } of workerSettings) {
+  test(`worker ${variable} defaults to ${String(missing)} when missing`, () => {
+    assert.deepEqual(read(parseWorker()), missing);
+  });
+  test(`worker ${variable} is parsed when present`, () => {
+    assert.deepEqual(read(parseWorker(present)), parsed);
+  });
+}
+
+test('a worker with no host settings takes exactly the documented defaults', () => {
+  assert.deepEqual(parseWorker(), {
+    environmentInstanceId: 'local-macos',
+    workerHost: '127.0.0.1',
+    workerPort: 0,
+    workerTransport: 'endpoint',
+    workspaceRoot: join('/synthetic/worker-cwd', '.sprout-workspaces'),
+    environmentPlatform: undefined,
+    piSessionDirectory: undefined,
+    readyFile: undefined,
+    engineBinaries: {},
+  });
+});
+
+/**
+ * The engine binary override is generic: a worker may host several engines, so
+ * any `SPROUT_<ENGINE>_BIN` name is collected and keyed by engine command. Only
+ * that pattern is collected, so an unrelated `SPROUT_*_BIN` does not leak in.
+ */
+test('every generic engine binary override crosses the boundary, keyed by engine command', () => {
+  const configuration = parseWorker({
+    SPROUT_PI_BIN: '/synthetic/bin/pi',
+    SPROUT_AGY_BIN: '/synthetic/bin/agy',
+    SPROUT_OPENCODE_BIN: '/synthetic/bin/opencode',
+  });
+  assert.deepEqual(configuration.engineBinaries, {
+    pi: '/synthetic/bin/pi',
+    agy: '/synthetic/bin/agy',
+    opencode: '/synthetic/bin/opencode',
+  });
+});
+
+test('an engine binary override is case-insensitive in its engine name', () => {
+  assert.deepEqual(parseWorker({ SPROUT_PI_BIN: '/synthetic/bin/pi' }).engineBinaries, {
+    pi: '/synthetic/bin/pi',
+  });
+});
+
+/**
+ * The override pattern is generic by design — a worker may host several engines —
+ * so any `SPROUT_<name>_BIN` name is collected. That is deliberately permissive:
+ * an engine this build never resolves is simply never queried, exactly as the
+ * entry point's original per-command lookup behaved, and no stricter validation
+ * is invented. The per-engine read is asserted in the table above.
+ */
+test('the generic engine binary override surface is permissive, not allowlisted', () => {
+  const configuration = parseWorker({ SPROUT_UNRELATED_BIN: '/synthetic/bin/other' });
+  assert.deepEqual(configuration.engineBinaries, { unrelated: '/synthetic/bin/other' });
+});
+
+/**
+ * The Worker keeps the runtime's lenient numeric conversion, like the core: an
+ * unparseable port is not a new startup error.
+ */
+test('an unparseable worker port stays NaN rather than becoming a new error', () => {
+  assert.ok(Number.isNaN(parseWorker({ SPROUT_WORKER_PORT: 'not-a-port' }).workerPort));
+});
+
+test('the parsed worker configuration exposes no unrelated host key', () => {
+  const configuration = parseWorker({ UNRELATED_HOST_FACT: 'not-sprout', SPROUT_UNKNOWN_SETTING: 'ignored' });
+  assert.equal('UNRELATED_HOST_FACT' in configuration, false);
+  assert.equal('SPROUT_UNKNOWN_SETTING' in configuration, false);
+});
+
+/**
+ * The core hands its resolved instance to a spawned Worker through this one
+ * helper, so the core entry point names no `SPROUT_*` variable itself.
+ */
+test('a spawned worker receives exactly the resolved instance variable', () => {
+  assert.deepEqual(workerEnvironment('instance-b'), { SPROUT_ENV_INSTANCE: 'instance-b' });
 });
