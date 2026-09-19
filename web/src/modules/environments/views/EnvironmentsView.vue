@@ -179,10 +179,10 @@ async function handleUnenroll(id: string) {
       back-to="/manage/environments"
     />
 
-    <!-- Standard Header & Filter Bar (shown on desktop, or mobile when not drilled down) -->
+    <!-- Standard Header & Filter Bar (always shown on desktop, shown on mobile when not drilled down) -->
     <div
-      v-if="!isMobileDetailRoute"
-      class="envs-header-card p-4 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex flex-col gap-3"
+      class="envs-header-card p-4 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex-col gap-3"
+      :class="isMobileDetailRoute ? 'hidden md:flex' : 'flex'"
     >
       <div class="envs-header-top-row flex items-center justify-between gap-2 flex-wrap sm:flex-nowrap">
         <h2 class="text-sm sm:text-base font-bold text-[var(--text-primary)] flex items-center gap-2 truncate">

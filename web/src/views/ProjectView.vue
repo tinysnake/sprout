@@ -24,6 +24,9 @@ function syncTabFromRoute() {
   } else {
     activeTab.value = 'overview';
   }
+  if (activeTab.value !== 'chat') {
+    isMobileChatDetailOpen.value = false;
+  }
 }
 
 onMounted(() => {
@@ -208,38 +211,41 @@ function sendMessage() {
 
 <template>
   <div class="project-view flex flex-col h-full bg-[var(--bg-app)]">
-    <!-- 1. Top Project Header & Selector (Without redundant sub-navigation tab strip) -->
-    <div class="px-4 py-3 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex items-center justify-between gap-4 flex-wrap">
-      <div class="flex items-center gap-3">
-        <div class="p-2 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)]">
-          <Icon name="folder" :size="20" />
+    <!-- 1. Top Project Header & Selector -->
+    <div
+      class="px-3 sm:px-4 py-3 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex items-center justify-between gap-2 flex-nowrap"
+      :class="{ 'hidden md:flex': activeTab === 'chat' && isMobileChatDetailOpen }"
+    >
+      <div class="flex items-center gap-2.5 min-w-0 flex-1">
+        <div class="p-1.5 sm:p-2 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)] shrink-0">
+          <Icon name="folder" :size="18" />
         </div>
-        <div>
-          <div class="flex items-center gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5 flex-nowrap">
             <select
               v-model="selectedProjectId"
-              class="font-bold text-sm text-[var(--text-primary)] bg-transparent border-0 focus:ring-0 cursor-pointer pr-4"
+              class="font-bold text-xs sm:text-sm text-[var(--text-primary)] bg-transparent border-0 focus:ring-0 cursor-pointer pr-3 truncate max-w-[150px] sm:max-w-none"
               aria-label="Select Project"
             >
               <option v-for="p in projects" :key="p.id" :value="p.id" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">
                 {{ p.name }}
               </option>
             </select>
-            <Badge variant="success">Active</Badge>
+            <Badge variant="success" class="shrink-0">Active</Badge>
           </div>
-          <span class="text-[11px] text-[var(--text-muted)] block">
+          <span class="text-[10px] sm:text-[11px] text-[var(--text-muted)] block truncate">
             {{ currentProject.desc }}
           </span>
         </div>
       </div>
 
-      <!-- Action Buttons (Info & New Project) -->
-      <div class="flex items-center gap-2">
-        <Button variant="secondary" size="icon" title="Project Information & Metadata" aria-label="Project Information & Metadata">
-          <Icon name="info" :size="16" />
+      <!-- Action Buttons (Info & New Project) - strictly right-aligned, shrink-0, no wrapping on narrow screens -->
+      <div class="flex items-center gap-1.5 shrink-0 ml-auto">
+        <Button variant="secondary" size="icon" title="Project Information & Metadata" aria-label="Project Information & Metadata" class="h-8 w-8">
+          <Icon name="info" :size="15" />
         </Button>
-        <Button variant="secondary" size="icon" title="Create New Project" aria-label="Create New Project">
-          <Icon name="plus" :size="16" />
+        <Button variant="secondary" size="icon" title="Create New Project" aria-label="Create New Project" class="h-8 w-8">
+          <Icon name="plus" :size="15" />
         </Button>
       </div>
     </div>
