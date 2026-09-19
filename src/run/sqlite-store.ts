@@ -9,12 +9,7 @@ import {
   type SessionKeyIdentity,
   type StoredSessionKey,
 } from './session-key-store.ts';
-import {
-  assertSchemaCompatibility,
-  CURRENT_SCHEMA_VERSION,
-  getSchemaVersion,
-  setSchemaVersion,
-} from '../store/schema.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed storage for the run domain (ADR-0002).
@@ -70,12 +65,14 @@ export class SqliteRunStore implements RunStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
-      assertSchemaCompatibility(this.#db, undefined, options.filename);
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
-    if (this.#ownsDb && getSchemaVersion(this.#db) === 0) {
-      setSchemaVersion(this.#db, CURRENT_SCHEMA_VERSION);
-    }
   }
 
   #init(): void {
@@ -190,12 +187,14 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
-      assertSchemaCompatibility(this.#db, undefined, options.filename);
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
-    if (this.#ownsDb && getSchemaVersion(this.#db) === 0) {
-      setSchemaVersion(this.#db, CURRENT_SCHEMA_VERSION);
-    }
   }
 
   #init(): void {

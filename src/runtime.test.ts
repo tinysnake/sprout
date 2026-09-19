@@ -28,6 +28,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentDefinition } from './agent/registry.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
@@ -40,6 +44,7 @@ import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
 import { InMemoryTaskStore } from './task/store.ts';
+import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
   MissingEnvironmentEngineError,
@@ -490,4 +495,99 @@ test('scripted engine sessions are started per run, never by construction', asyn
   assert.equal(requests.length, 1);
 
   await runtime.close();
+});
+
+test('runtime construction failure closes environment and worker resources without leaking', async () => {
+  let environmentClosed = 0;
+  const env: RuntimeEnvironment = {
+    async adapters() {
+      return new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]);
+    },
+    async contexts() {
+      throw new Error('unused');
+    },
+    async close() {
+      environmentClosed++;
+    },
+  };
+
+  // 1. Missing engine closes environment
+  await assert.rejects(
+    () =>
+      createSproutRuntime({
+        configuration: hostConfiguration({ engineId: 'nonexistent-engine' }),
+        projectRoot: '/synthetic/root',
+        environment: env,
+      }),
+    (err: unknown) => err instanceof MissingEnvironmentEngineError,
+  );
+  assert.equal(environmentClosed, 1, 'environment must be closed on missing engine failure');
+
+  // 2. Failure during store/project setup closes environment
+  let storesClosed = 0;
+  const failingStores: RuntimeStores = {
+    runs: new InMemoryRunStore(),
+    leases: new InMemoryLeaseStore(),
+    projects: {
+      async save() {},
+      async get() {
+        return undefined;
+      },
+      async list() {
+        throw new Error('simulated store load failure');
+      },
+    },
+    sessionKeys: new InMemorySessionKeyStore(),
+    collaboration: new InMemoryCollaborationStore(),
+    tasks: new InMemoryTaskStore(),
+    close() {
+      storesClosed++;
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      createSproutRuntime({
+        configuration: hostConfiguration(),
+        projectRoot: '/synthetic/root',
+        environment: env,
+        stores: failingStores,
+      }),
+    (err: unknown) => err instanceof Error && err.message.includes('simulated store load failure'),
+  );
+  assert.equal(environmentClosed, 2, 'environment must be closed on store/project setup failure');
+  assert.equal(storesClosed, 1, 'the acquired store must be closed on setup failure');
+});
+
+test('a schema refusal after environment acquisition closes the worker before propagating', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-schema-refusal-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, 'future-schema.db');
+  const database = new DatabaseSync(databasePath);
+  database.exec('PRAGMA user_version = 2; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.close();
+
+  let environmentClosed = 0;
+  const environment: RuntimeEnvironment = {
+    async adapters() {
+      return new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]);
+    },
+    async contexts() {
+      throw new Error('unused');
+    },
+    async close() {
+      environmentClosed++;
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      createSproutRuntime({
+        configuration: hostConfiguration({ databasePath }),
+        projectRoot: '/synthetic/root',
+        environment,
+      }),
+    (error: unknown) => error instanceof SchemaTooNewError,
+  );
+  assert.equal(environmentClosed, 1, 'the acquired worker is closed before a schema refusal escapes');
 });

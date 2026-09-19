@@ -10,12 +10,7 @@ import type {
 import type { TaskFilter, TaskStore } from './store.ts';
 import type { EnvironmentLease, TaskLeaseBinding } from '../environment/pool.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from '../store/transaction.ts';
-import {
-  assertSchemaCompatibility,
-  CURRENT_SCHEMA_VERSION,
-  getSchemaVersion,
-  setSchemaVersion,
-} from '../store/schema.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed Task storage (ticket #28, ADR-0002).
@@ -57,12 +52,14 @@ export class SqliteTaskStore implements TaskStore {
       this.#ownsDb = true;
       this.#leases = options.leases;
       this.#transactions = createTransactionCoordinator(this.#db);
-      assertSchemaCompatibility(this.#db, undefined, options.filename);
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
-    if (this.#ownsDb && getSchemaVersion(this.#db) === 0) {
-      setSchemaVersion(this.#db, CURRENT_SCHEMA_VERSION);
-    }
   }
 
   #init(): void {

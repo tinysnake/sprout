@@ -30,6 +30,8 @@ export {
   setSchemaVersion,
   isDatabaseEmpty,
   sanitizePath,
+  migrateOrInitializeDatabase,
+  assertSchemaCompatibility,
 } from './schema.ts';
 
 /**

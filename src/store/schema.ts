@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -43,14 +43,21 @@ export const SUPPORTED_SCHEMA_RANGE: SchemaVersionRange = {
 /**
  * Sanitize a file path for safe display in error messages and host guidance.
  *
- * Replaces user home directories (e.g. `/Users/<user>`, `/home/<user>`, `C:\Users\<user>`)
- * with `~` and formats relative paths when inside the current working directory.
+ * Replaces every absolute path with a bounded category placeholder. A schema
+ * refusal may reach an operator log, so retaining even a sanitized-looking path
+ * suffix could still disclose an identity, host layout, or network share.
+ * Relative paths inside the current working directory remain useful and safe.
  */
 export function sanitizePath(filePath: string): string {
   if (!filePath || filePath === ':memory:') {
     return filePath;
   }
   let normalized = filePath.replace(/\\/g, '/');
+
+  const isAbsoluteUnix = normalized.startsWith('/');
+  const isAbsoluteWin = /^[A-Za-z]:\//.test(normalized);
+  const isUnc = normalized.startsWith('//');
+
   const cwd = process.cwd().replace(/\\/g, '/');
   if (normalized.startsWith(cwd + '/')) {
     return normalized.slice(cwd.length + 1);
@@ -58,13 +65,37 @@ export function sanitizePath(filePath: string): string {
   if (normalized === cwd) {
     return '.';
   }
+
   const home = (process.env.HOME || process.env.USERPROFILE || '').replace(/\\/g, '/');
   if (home && (normalized.startsWith(home + '/') || normalized === home)) {
-    return normalized.replace(home, '~');
+    return '<home-path>';
   }
-  normalized = normalized.replace(/^(\/Users\/[^\/]+)/, '~');
-  normalized = normalized.replace(/^(\/home\/[^\/]+)/, '~');
-  normalized = normalized.replace(/^([A-Za-z]:\/Users\/[^\/]+)/, '~');
+
+  // UNC network shares
+  if (isUnc) {
+    return '<network-share-path>';
+  }
+
+  // User home directories. Keep the category but never the account name or
+  // any suffix, which may identify the host or its owner.
+  if (/^\/(Users|home)\//.test(normalized) || /^[A-Za-z]:\/Users\//i.test(normalized)) {
+    return '<home-path>';
+  }
+
+  // Temporary directories can contain generated identifiers and user-scoped
+  // subdirectories, so they are also a category rather than a partial path.
+  if (
+    /^(\/private)?\/(tmp|var\/folders)(\/|$)/.test(normalized) ||
+    /^[A-Za-z]:\/(Windows\/)?Temp(\/|$)/i.test(normalized)
+  ) {
+    return '<temporary-path>';
+  }
+
+  // Arbitrary local absolute paths
+  if (isAbsoluteWin || isAbsoluteUnix) {
+    return '<absolute-path>';
+  }
+
   return normalized;
 }
 
@@ -112,7 +143,7 @@ export class SchemaTooNewError extends UnsupportedSchemaVersionError {
     const guidance =
       `The database schema version (v${input.version}) was created by a newer release of Sprout and cannot be opened by this build ` +
       `(supported range: v${input.supportedRange.min}..v${input.supportedRange.max}). ` +
-      `Please upgrade Sprout to a version supporting schema v${input.version}, or restore a compatible database.`;
+      `Please ensure the service is stopped, upgrade Sprout to a release supporting schema v${input.version}, or restore a compatible database from backup.`;
     super({
       version: input.version,
       supportedRange: input.supportedRange,
@@ -136,7 +167,7 @@ export class SchemaTooOldError extends UnsupportedSchemaVersionError {
     const guidance =
       `The database schema version (v${input.version}) is older than the minimum version supported by this build ` +
       `(supported range: v${input.supportedRange.min}..v${input.supportedRange.max}). ` +
-      `Direct automatic migration is not available. Please upgrade using an intermediate Sprout release, or restore from backup.`;
+      `Direct automatic migration is not available. Please ensure the service is stopped, upgrade sequentially using an intermediate Sprout release, or restore a compatible database from backup.`;
     super({
       version: input.version,
       supportedRange: input.supportedRange,
@@ -153,29 +184,25 @@ export class MigrationSafetyCopyError extends SchemaError {
   readonly fromVersion: number;
   readonly toVersion: number;
   readonly safetyCopyPath: string;
-  readonly causeError: unknown;
 
   constructor(input: {
     readonly databasePath: string;
     readonly safetyCopyPath: string;
     readonly fromVersion: number;
     readonly toVersion: number;
-    readonly cause: unknown;
   }) {
     const sanitizedDb = sanitizePath(input.databasePath);
     const sanitizedCopy = sanitizePath(input.safetyCopyPath);
-    const reason = input.cause instanceof Error ? input.cause.message : String(input.cause);
-    const message = `Failed to create pre-migration safety copy for "${sanitizedDb}" at "${sanitizedCopy}": ${reason}`;
+    const message = `Failed to create pre-migration safety copy for database "${sanitizedDb}" at "${sanitizedCopy}".`;
     const guidance =
       `Sprout refused to migrate the database from schema v${input.fromVersion} to v${input.toVersion} because creating the safety copy failed. ` +
       `The database has been preserved without modification. ` +
-      `Please check host disk space and write permissions at "${sanitizedCopy}" before restarting Sprout.`;
+      `Please ensure the service is stopped, verify host disk space and write permissions for "${sanitizedCopy}", and resolve storage issues before restarting Sprout.`;
     super(message, { guidance, databasePath: input.databasePath });
     this.name = 'MigrationSafetyCopyError';
     this.fromVersion = input.fromVersion;
     this.toVersion = input.toVersion;
-    this.safetyCopyPath = input.safetyCopyPath;
-    this.causeError = input.cause;
+    this.safetyCopyPath = sanitizedCopy;
   }
 }
 
@@ -184,32 +211,28 @@ export class SchemaMigrationError extends SchemaError {
   readonly fromVersion: number;
   readonly toVersion: number;
   readonly safetyCopyPath: string | undefined;
-  readonly causeError: unknown;
 
   constructor(input: {
     readonly databasePath: string;
     readonly safetyCopyPath?: string | undefined;
     readonly fromVersion: number;
     readonly toVersion: number;
-    readonly cause: unknown;
   }) {
     const sanitizedDb = sanitizePath(input.databasePath);
     const sanitizedCopy = input.safetyCopyPath ? sanitizePath(input.safetyCopyPath) : undefined;
-    const reason = input.cause instanceof Error ? input.cause.message : String(input.cause);
-    const message = `Schema migration from v${input.fromVersion} to v${input.toVersion} failed for "${sanitizedDb}": ${reason}`;
+    const message = `Schema migration from v${input.fromVersion} to v${input.toVersion} failed for database "${sanitizedDb}".`;
     const copyNotice = sanitizedCopy
-      ? `A pre-migration safety copy is preserved at "${sanitizedCopy}". `
+      ? ` A pre-migration safety copy is preserved at "${sanitizedCopy}".`
       : '';
     const guidance =
       `Schema migration from v${input.fromVersion} to v${input.toVersion} failed and was rolled back. ` +
-      `The database was not modified. ${copyNotice}` +
-      `Please check host diagnostics and resolve the issue before restarting Sprout.`;
+      `The database was not modified.${copyNotice} ` +
+      `Please ensure the service is stopped, inspect host diagnostics, verify database integrity, and resolve the issue or restore from the pre-migration safety copy before restarting Sprout.`;
     super(message, { guidance, databasePath: input.databasePath });
     this.name = 'SchemaMigrationError';
     this.fromVersion = input.fromVersion;
     this.toVersion = input.toVersion;
-    this.safetyCopyPath = input.safetyCopyPath;
-    this.causeError = input.cause;
+    this.safetyCopyPath = sanitizedCopy;
   }
 }
 
@@ -241,7 +264,9 @@ export function defaultSafetyCopyPath(databasePath: string): string {
 /**
  * Create a consistent pre-migration safety copy of the database file.
  *
- * Uses SQLite's `VACUUM INTO` to produce a complete, checkpointed, and clean snapshot.
+ * Uses SQLite's `VACUUM INTO` into a temporary file first, then atomically replaces
+ * any existing safety copy only after the snapshot creation succeeds. If snapshot
+ * creation fails, any previous valid safety copy is preserved.
  */
 export function createDatabaseSafetyCopy(
   sourceDb: DatabaseSync,
@@ -255,10 +280,23 @@ export function createDatabaseSafetyCopy(
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  if (existsSync(safetyCopyPath)) {
-    unlinkSync(safetyCopyPath);
+  const tempCopyPath = `${safetyCopyPath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  try {
+    if (existsSync(tempCopyPath)) {
+      unlinkSync(tempCopyPath);
+    }
+    sourceDb.exec(`VACUUM INTO '${tempCopyPath.replace(/'/g, "''")}'`);
+    renameSync(tempCopyPath, safetyCopyPath);
+  } catch (error) {
+    if (existsSync(tempCopyPath)) {
+      try {
+        unlinkSync(tempCopyPath);
+      } catch {
+        // ignore temp cleanup failure
+      }
+    }
+    throw error;
   }
-  sourceDb.exec(`VACUUM INTO '${safetyCopyPath.replace(/'/g, "''")}'`);
 }
 
 /** Definition of a forward schema migration step. */
@@ -329,16 +367,32 @@ export function migrateOrInitializeDatabase(
   const copyFn = options.createSafetyCopy ?? createDatabaseSafetyCopy;
   const safetyCopyPath = options.safetyCopyPath ?? defaultSafetyCopyPath(options.filename);
 
+  // 1. Validate targetVersion against supportedRange before touching database
+  if (targetVersion > supportedRange.max) {
+    throw new SchemaTooNewError({
+      version: targetVersion,
+      supportedRange,
+      databasePath: options.filename,
+    });
+  }
+  if (targetVersion < supportedRange.min) {
+    throw new SchemaTooOldError({
+      version: targetVersion,
+      supportedRange,
+      databasePath: options.filename,
+    });
+  }
+
   const currentVersion = getSchemaVersion(db);
   const empty = isDatabaseEmpty(db);
 
-  // 1. If empty, initialize directly at target version (no safety copy needed)
+  // 2. If empty, initialize directly at target version (no safety copy needed)
   if (empty) {
     setSchemaVersion(db, targetVersion);
     return;
   }
 
-  // 2. Refuse schemas newer than supported range
+  // 3. Refuse schemas newer than supported range or target
   if (currentVersion > supportedRange.max || currentVersion > targetVersion) {
     throw new SchemaTooNewError({
       version: currentVersion,
@@ -347,7 +401,7 @@ export function migrateOrInitializeDatabase(
     });
   }
 
-  // 3. Refuse schemas older than supported range
+  // 4. Refuse schemas older than supported range
   if (currentVersion < supportedRange.min) {
     throw new SchemaTooOldError({
       version: currentVersion,
@@ -356,12 +410,12 @@ export function migrateOrInitializeDatabase(
     });
   }
 
-  // 4. If already at target version, no migration needed
+  // 5. If already at target version, no migration needed
   if (currentVersion === targetVersion) {
     return;
   }
 
-  // 5. Build forward migration chain
+  // 6. Build forward migration chain
   const chain = findMigrationChain(currentVersion, targetVersion, migrations);
   if (!chain) {
     throw new SchemaTooOldError({
@@ -371,42 +425,40 @@ export function migrateOrInitializeDatabase(
     });
   }
 
-  // 6. Create pre-migration safety copy for non-empty store before changing anything
+  // 7. Create pre-migration safety copy for non-empty store before changing anything
   if (options.filename !== ':memory:') {
     try {
       copyFn(db, options.filename, safetyCopyPath);
-    } catch (error) {
+    } catch {
       throw new MigrationSafetyCopyError({
         databasePath: options.filename,
         safetyCopyPath,
         fromVersion: currentVersion,
         toVersion: targetVersion,
-        cause: error,
       });
     }
   }
 
-  // 7. Execute forward migration chain transactionally
-  for (const step of chain) {
-    db.exec('BEGIN IMMEDIATE');
-    try {
+  // 8. Execute entire forward migration chain inside a single transactional boundary
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const step of chain) {
       step.migrate(db);
       setSchemaVersion(db, step.toVersion);
-      db.exec('COMMIT');
-    } catch (error) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        // preserve original error
-      }
-      throw new SchemaMigrationError({
-        databasePath: options.filename,
-        safetyCopyPath: options.filename !== ':memory:' ? safetyCopyPath : undefined,
-        fromVersion: step.fromVersion,
-        toVersion: step.toVersion,
-        cause: error,
-      });
     }
+    db.exec('COMMIT');
+  } catch {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // preserve original error
+    }
+    throw new SchemaMigrationError({
+      databasePath: options.filename,
+      safetyCopyPath: options.filename !== ':memory:' ? safetyCopyPath : undefined,
+      fromVersion: currentVersion,
+      toVersion: targetVersion,
+    });
   }
 }
 

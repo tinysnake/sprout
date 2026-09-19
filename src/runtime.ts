@@ -272,190 +272,201 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       onWorkerLog: options.onWorkerLog ?? ((line) => process.stderr.write(`[env-worker] ${line}\n`)),
     });
 
-  // Fail fast on a misconfigured engine rather than discovering it per run. The
-  // port is closed before the error propagates so a refused build leaves nothing
-  // running; durable state has not been opened yet.
-  let engines: ReadonlyMap<string, EngineAdapter>;
+  let stores: RuntimeStores | undefined;
   try {
-    engines = await environment.adapters(instanceId);
+    // Fail fast on a misconfigured engine rather than discovering it per run. The
+    // port is closed before the error propagates so a refused build leaves nothing
+    // running; durable state has not been opened yet.
+    const engines = await environment.adapters(instanceId);
+    if (!engines.has(engineId)) {
+      throw new MissingEnvironmentEngineError({
+        engineId,
+        hostedEngineIds: [...engines.keys()],
+      });
+    }
+
+    const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
+
+    stores = options.stores ?? new SqliteStore({ filename: databasePath });
+
+    const agents = new AgentRegistry(runtimeConfiguration.agents ?? defaultAgents(engineId));
+    const pool = new EnvironmentPool({
+      definitions: [definition],
+      instances: [instance],
+      store: stores.leases,
+    });
+    const projects = new ProjectRegistry([
+      runtimeConfiguration.project ?? defaultProject({ projectId, instanceId }),
+    ]);
+    // The default Project above is host-derived configuration, like the environment
+    // definitions. Additional Projects hydrate from the durable store, which is the
+    // same store the runs and leases use (ADR-0002); in-memory entries win.
+    await projects.load(stores.projects);
+
+    /**
+     * The durable Task service (#28).
+     *
+     * It shares the orchestrator (to submit Task runs) and the primary store (so
+     * Task rows and their run links survive a restart). The orchestrator is wired
+     * to it through the two small run-seam contracts rather than importing the Task
+     * service, so the Task and Message lifecycles stay independent.
+     *
+     * The service is declared first as a forward reference so the orchestrator's
+     * `onTaskRunSettled` option can close over the same instance it is given below.
+     */
+    let tasks: TaskService;
+    let taskLifecycle: TaskEnvironmentLifecycle;
+
+    const orchestrator = new RunOrchestrator({
+      // Resolved per run *for the resolved instance*, so a worker that died is
+      // replaced before the next run instead of failing it against a dead channel
+      // (ADR-0003), and so execution follows the leased instance (F1, #18).
+      engines: (requestedInstanceId) => environment.adapters(requestedInstanceId),
+      agents,
+      projects,
+      pool,
+      store: stores.runs,
+      // Durable engine session keys, so the same agent on the same environment and
+      // working directory continues its prior conversation across runs (O5, #20).
+      sessionKeys: stores.sessionKeys,
+      tasks: {
+        prompt: (input) => tasks.prompt(input),
+        link: (input) => tasks.link(input),
+      },
+      onTaskRunSettled: (input) => tasks.onRunSettled(input),
+      leaseTtlMs,
+    });
+
+    taskLifecycle = new TaskEnvironmentLifecycle({
+      store: stores.tasks,
+      pool,
+      agents,
+      projects,
+      runs: orchestrator,
+      worker: {
+        prepare: async (input) =>
+          (await environment.contexts(input.environmentInstanceId)).prepare(input),
+        recycle: async (input) =>
+          (await environment.contexts(input.environmentInstanceId)).recycle(input),
+      },
+      leaseTtlMs,
+    });
+    tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
+
+    /**
+     * The collaboration coordinator: durable Messages, the M1 wake contract, and
+     * automatic final-result projection (#26).
+     *
+     * It shares the process's one durable store and the run orchestrator, so a
+     * reply is projected from the same run record the core persisted. No wake model
+     * is configured at M1, which the contract handles explicitly: an unaddressed
+     * project-channel Message fails open to one wake per other member (see
+     * `src/collaboration/wake.ts`) rather than being silently dropped.
+     */
+    const collaboration = new CollaborationCoordinator({
+      projects,
+      store: stores.collaboration,
+      runs: orchestrator,
+      onObservation:
+        options.onObservation ??
+        (({ messageId, observation }) => {
+          process.stderr.write(
+            `[collaboration] ${observation.status} (${observation.agentId}) ` +
+              `on message ${messageId}: ${observation.detail}\n`,
+          );
+        }),
+    });
+
+    const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
+    const api = createRunApi({
+      orchestrator,
+      agents,
+      // The project channel is served over the same core: delivery, wake dispatch,
+      // and projected replies all go through the one coordinator above.
+      collaboration,
+      // Members the Web composer may address (#27); read-only from the registry.
+      projects,
+      // Durable multi-run Tasks (#28): create, list, inspect, and advance.
+      tasks,
+      staticRoot,
+      readFile: options.readFile ?? defaultReadFile,
+    });
+
+    /** The last reconciliation result, so `startupReport` reports what ran. */
+    let lastReconciliation: SproutReconciliation | undefined;
+
+    const activeStores = stores;
+
+    return {
+      api,
+      orchestrator,
+      tasks,
+      collaboration,
+      pool,
+      agents,
+      projects,
+      definition,
+      instance,
+      stores: activeStores,
+      engines,
+
+      /** Reconcile runs, then Task lifecycle, then collaboration; runs first so no
+       * reply can ever be fabricated for an orphaned run. */
+      async reconcile(): Promise<SproutReconciliation> {
+        const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
+        await tasks.reconcileEnvironmentLifecycle();
+        const reconciled = await collaboration.reconcile();
+        const result: SproutReconciliation = {
+          recoveredRuns,
+          admittedRunIds: reconciled.admittedRunIds,
+          projectedMessageIds: reconciled.projectedMessageIds,
+        };
+        lastReconciliation = result;
+        return result;
+      },
+
+      startupReport(boundPort: number): string {
+        return renderStartupReport({
+          boundPort,
+          agents,
+          engines,
+          instanceId,
+          definition,
+          environmentKind,
+          containerName,
+          workingDirectory,
+          databasePath,
+          reconciled: lastReconciliation,
+          leases: pool.leases(),
+        });
+      },
+
+      async close(): Promise<void> {
+        // End every open event stream before anything else: `server.close` waits
+        // for existing connections, and an SSE stream never ends by itself.
+        await api.close();
+        // The environment port owns its worker channels. A *container* is not
+        // destroyed here: `rm` is the only irrecoverable action (#4), so its
+        // lifecycle is an explicit operator decision rather than a side effect.
+        await environment.close();
+        activeStores.close();
+      },
+    };
   } catch (error) {
-    await environment.close();
+    if (stores) {
+      try {
+        stores.close();
+      } catch {
+        // ignore store close error
+      }
+    }
+    try {
+      await environment.close();
+    } catch {
+      // ignore environment close error
+    }
     throw error;
   }
-  if (!engines.has(engineId)) {
-    const failure = new MissingEnvironmentEngineError({
-      engineId,
-      hostedEngineIds: [...engines.keys()],
-    });
-    await environment.close();
-    throw failure;
-  }
-
-  const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
-
-  const stores = options.stores ?? new SqliteStore({ filename: databasePath });
-
-  const agents = new AgentRegistry(runtimeConfiguration.agents ?? defaultAgents(engineId));
-  const pool = new EnvironmentPool({
-    definitions: [definition],
-    instances: [instance],
-    store: stores.leases,
-  });
-  const projects = new ProjectRegistry([
-    runtimeConfiguration.project ?? defaultProject({ projectId, instanceId }),
-  ]);
-  // The default Project above is host-derived configuration, like the environment
-  // definitions. Additional Projects hydrate from the durable store, which is the
-  // same store the runs and leases use (ADR-0002); in-memory entries win.
-  await projects.load(stores.projects);
-
-  /**
-   * The durable Task service (#28).
-   *
-   * It shares the orchestrator (to submit Task runs) and the primary store (so
-   * Task rows and their run links survive a restart). The orchestrator is wired
-   * to it through the two small run-seam contracts rather than importing the Task
-   * service, so the Task and Message lifecycles stay independent.
-   *
-   * The service is declared first as a forward reference so the orchestrator's
-   * `onTaskRunSettled` option can close over the same instance it is given below.
-   */
-  let tasks: TaskService;
-  let taskLifecycle: TaskEnvironmentLifecycle;
-
-  const orchestrator = new RunOrchestrator({
-    // Resolved per run *for the resolved instance*, so a worker that died is
-    // replaced before the next run instead of failing it against a dead channel
-    // (ADR-0003), and so execution follows the leased instance (F1, #18).
-    engines: (requestedInstanceId) => environment.adapters(requestedInstanceId),
-    agents,
-    projects,
-    pool,
-    store: stores.runs,
-    // Durable engine session keys, so the same agent on the same environment and
-    // working directory continues its prior conversation across runs (O5, #20).
-    sessionKeys: stores.sessionKeys,
-    tasks: {
-      prompt: (input) => tasks.prompt(input),
-      link: (input) => tasks.link(input),
-    },
-    onTaskRunSettled: (input) => tasks.onRunSettled(input),
-    leaseTtlMs,
-  });
-
-  taskLifecycle = new TaskEnvironmentLifecycle({
-    store: stores.tasks,
-    pool,
-    agents,
-    projects,
-    runs: orchestrator,
-    worker: {
-      prepare: async (input) =>
-        (await environment.contexts(input.environmentInstanceId)).prepare(input),
-      recycle: async (input) =>
-        (await environment.contexts(input.environmentInstanceId)).recycle(input),
-    },
-    leaseTtlMs,
-  });
-  tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
-
-  /**
-   * The collaboration coordinator: durable Messages, the M1 wake contract, and
-   * automatic final-result projection (#26).
-   *
-   * It shares the process's one durable store and the run orchestrator, so a
-   * reply is projected from the same run record the core persisted. No wake model
-   * is configured at M1, which the contract handles explicitly: an unaddressed
-   * project-channel Message fails open to one wake per other member (see
-   * `src/collaboration/wake.ts`) rather than being silently dropped.
-   */
-  const collaboration = new CollaborationCoordinator({
-    projects,
-    store: stores.collaboration,
-    runs: orchestrator,
-    onObservation:
-      options.onObservation ??
-      (({ messageId, observation }) => {
-        process.stderr.write(
-          `[collaboration] ${observation.status} (${observation.agentId}) ` +
-            `on message ${messageId}: ${observation.detail}\n`,
-        );
-      }),
-  });
-
-  const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
-  const api = createRunApi({
-    orchestrator,
-    agents,
-    // The project channel is served over the same core: delivery, wake dispatch,
-    // and projected replies all go through the one coordinator above.
-    collaboration,
-    // Members the Web composer may address (#27); read-only from the registry.
-    projects,
-    // Durable multi-run Tasks (#28): create, list, inspect, and advance.
-    tasks,
-    staticRoot,
-    readFile: options.readFile ?? defaultReadFile,
-  });
-
-  /** The last reconciliation result, so `startupReport` reports what ran. */
-  let lastReconciliation: SproutReconciliation | undefined;
-
-  return {
-    api,
-    orchestrator,
-    tasks,
-    collaboration,
-    pool,
-    agents,
-    projects,
-    definition,
-    instance,
-    stores,
-    engines,
-
-    /** Reconcile runs, then Task lifecycle, then collaboration; runs first so no
-     * reply can ever be fabricated for an orphaned run. */
-    async reconcile(): Promise<SproutReconciliation> {
-      const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
-      await tasks.reconcileEnvironmentLifecycle();
-      const reconciled = await collaboration.reconcile();
-      const result: SproutReconciliation = {
-        recoveredRuns,
-        admittedRunIds: reconciled.admittedRunIds,
-        projectedMessageIds: reconciled.projectedMessageIds,
-      };
-      lastReconciliation = result;
-      return result;
-    },
-
-    startupReport(boundPort: number): string {
-      return renderStartupReport({
-        boundPort,
-        agents,
-        engines,
-        instanceId,
-        definition,
-        environmentKind,
-        containerName,
-        workingDirectory,
-        databasePath,
-        reconciled: lastReconciliation,
-        leases: pool.leases(),
-      });
-    },
-
-    async close(): Promise<void> {
-      // End every open event stream before anything else: `server.close` waits
-      // for existing connections, and an SSE stream never ends by itself.
-      await api.close();
-      // The environment port owns its worker channels. A *container* is not
-      // destroyed here: `rm` is the only irrecoverable action (#4), so its
-      // lifecycle is an explicit operator decision rather than a side effect.
-      await environment.close();
-      stores.close();
-    },
-  };
 }
 
 /**
