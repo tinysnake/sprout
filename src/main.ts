@@ -19,7 +19,7 @@ import { EndpointCarrier, type WorkerConnection } from './worker/carrier.ts';
 import { ContainerCarrier, containerWorkerEntry } from './worker/container-carrier.ts';
 import { SshTunnelCarrier, readWindowsReadyFile } from './worker/windows-carrier.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
-import { parseRuntimeConfiguration } from './runtime-config.ts';
+import { parseHostConfiguration } from './host-config.ts';
 
 /**
  * The M1 runtime entry point.
@@ -33,44 +33,33 @@ import { parseRuntimeConfiguration } from './runtime-config.ts';
  * only thing that differs between a local machine and a container is the
  * **carrier** (ADR-0003): the protocol and its semantics are identical either way.
  *
- * Configuration is read from the environment with local defaults, because these
- * are host facts rather than product decisions.
+ * Configuration is host facts rather than product decisions, so it is read once
+ * from the environment by the host-configuration Module; this entry point only
+ * consumes the typed result.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(here, '..');
 
-const databasePath = process.env.SPROUT_DATABASE ?? join(projectRoot, 'sprout.db');
-const workingDirectory = process.env.SPROUT_WORKDIR ?? projectRoot;
-const port = Number(process.env.SPROUT_PORT ?? 5174);
-const instanceId = process.env.SPROUT_ENV_INSTANCE ?? 'local-macos';
-const engineId = process.env.SPROUT_ENGINE ?? 'codex';
-const runtimeConfiguration = parseRuntimeConfiguration(process.env.SPROUT_RUNTIME_CONFIG);
-/** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
-const environmentKind = process.env.SPROUT_ENV_KIND ?? 'local';
-/** For a container environment: the instance's container name. */
-const containerName = process.env.SPROUT_CONTAINER_NAME ?? instanceId;
-/** For a Windows environment: the SSH target of the host running the daemon. */
-const windowsTarget = process.env.SPROUT_WINDOWS_TARGET;
-/** For a Windows environment: where the readiness file lives on that host. */
-const windowsReadyFile = process.env.SPROUT_WINDOWS_READY_FILE ?? 'C:/sprout-daemon/worker-ready.json';
-
-/**
- * Where the worker's code lives inside the environment.
- *
- * A container mounts the repository, so it runs the same worker source as the
- * core; that keeps a stale image a mount problem rather than a silent protocol
- * mismatch.
- */
-const containerMountRoot = process.env.SPROUT_CONTAINER_MOUNT ?? '/sprout';
-
-/** The host proxy, translated to the name a container uses for the host. */
-function containerProxy(): Record<string, string> {
-  const raw = process.env.SPROUT_DOCKER_PROXY ?? process.env.HTTPS_PROXY ?? process.env.https_proxy;
-  if (!raw) return {};
-  const translated = raw.replace(/127\.0\.0\.1|localhost/g, 'host.docker.internal');
-  return { HTTPS_PROXY: translated, HTTP_PROXY: translated, NO_PROXY: 'localhost,127.0.0.1' };
-}
+const {
+  databasePath,
+  workingDirectory,
+  port,
+  environmentInstanceId: instanceId,
+  engineId,
+  runtimeConfiguration,
+  environmentKind,
+  containerName,
+  windowsTarget,
+  windowsReadyFile,
+  containerMountRoot,
+  containerCodexHome,
+  containerProxy,
+  windowsTunnelPort,
+  windowsWorkDirectory: windowsRunWorkdir,
+  projectId,
+  leaseTtlMs,
+} = parseHostConfiguration(process.env, { projectRoot });
 
 /**
  * Starts a worker for this build's configured environment. Called again after a
@@ -100,8 +89,8 @@ async function startEnvironmentWorker(requestedInstanceId: string): Promise<Work
       environmentInstanceId: instanceId,
       workingDirectory: containerMountRoot,
       environment: {
-        CODEX_HOME: process.env.SPROUT_CONTAINER_CODEX_HOME ?? '/codexhome',
-        ...containerProxy(),
+        CODEX_HOME: containerCodexHome,
+        ...containerProxy,
       },
       label: `container:${containerName}`,
       onLog: (line) => process.stderr.write(`[container-worker] ${line}\n`),
@@ -119,7 +108,7 @@ async function startEnvironmentWorker(requestedInstanceId: string): Promise<Work
       daemonPort: ready.port,
       // Collisions across concurrent cores on this machine are an operator
       // concern at M1 size; the port is stable so reconnects are predictable.
-      localPort: Number(process.env.SPROUT_WINDOWS_TUNNEL_PORT ?? 12741),
+      localPort: windowsTunnelPort,
       label: `windows:${windowsTarget}`,
       onLog: (line) => process.stderr.write(`[windows-worker] ${line}\n`),
     }).start();
@@ -191,7 +180,6 @@ const environmentDefinitions: readonly EnvironmentDefinition[] = [definition];
  * It therefore lives on the instance, so the same agent works unchanged on a host
  * and inside a container whose path differs (F1 suggestion, #18).
  */
-const windowsRunWorkdir = process.env.SPROUT_WINDOWS_WORKDIR ?? 'C:/sprout-work';
 const environmentInstances: readonly EnvironmentInstance[] = [
   {
     id: instanceId,
@@ -223,7 +211,7 @@ const agents: readonly AgentDefinition[] = runtimeConfiguration.agents ?? defaul
  * instance here is what makes it usable — the agent no longer names a device.
  */
 const sampleProject: Project = {
-  id: process.env.SPROUT_PROJECT ?? 'sprout',
+  id: projectId,
   goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
   rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
   availableEnvironmentInstanceIds: [instanceId],
@@ -283,7 +271,7 @@ const orchestrator = new RunOrchestrator({
     link: (input) => tasks.link(input),
   },
   onTaskRunSettled: (input) => tasks.onRunSettled(input),
-  leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
+  leaseTtlMs,
 });
 
 taskLifecycle = new TaskEnvironmentLifecycle({
@@ -296,7 +284,7 @@ taskLifecycle = new TaskEnvironmentLifecycle({
     prepare: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).prepare(input),
     recycle: async (input) => (await environmentWorkers.contexts(input.environmentInstanceId)).recycle(input),
   },
-  leaseTtlMs: Number(process.env.SPROUT_LEASE_TTL_MS ?? 900_000),
+  leaseTtlMs,
 });
 tasks = new TaskService({ store: store.tasks, runs: orchestrator, lifecycle: taskLifecycle });
 
