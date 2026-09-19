@@ -3,6 +3,10 @@ import { ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAppStore } from '../stores/app.ts';
 import Icon from '../primitives/Icon.vue';
+import Badge from '../primitives/Badge.vue';
+import StatusDot from '../primitives/StatusDot.vue';
+import FilterPillGroup from '../primitives/FilterPillGroup.vue';
+import FilterPill from '../primitives/FilterPill.vue';
 
 const router = useRouter();
 const appStore = useAppStore();
@@ -136,7 +140,7 @@ const activities = ref([
   {
     id: 'act-1',
     kind: 'envs',
-    badgeKind: 'green',
+    badgeKind: 'green' as const,
     title: 'Readiness probe passed on Mac Studio M2 Max',
     projectName: 'Sprout M2 Operator',
     subtitle: 'Carrier probe confirmed protocol v2.1 & all 4 engines ready (14ms latency).',
@@ -147,7 +151,7 @@ const activities = ref([
   {
     id: 'act-2',
     kind: 'messages',
-    badgeKind: 'blue',
+    badgeKind: 'blue' as const,
     title: '@Programmer sent message to #general',
     projectName: 'Sprout M2 Operator',
     subtitle: 'Verified Reka UI AlertDialog focus trap and escape dismissal.',
@@ -158,7 +162,7 @@ const activities = ref([
   {
     id: 'act-3',
     kind: 'envs',
-    badgeKind: 'red',
+    badgeKind: 'red' as const,
     title: 'Windows Workstation 01 carrier disconnected',
     projectName: 'Sprout M2 Operator',
     subtitle: 'Carrier heartbeat lost; task-held lease #104 automatically locked in recovery.',
@@ -169,7 +173,7 @@ const activities = ref([
   {
     id: 'act-4',
     kind: 'tasks',
-    badgeKind: 'purple',
+    badgeKind: 'purple' as const,
     title: 'Task #101 acquired exclusive lease',
     projectName: 'Sprout M2 Operator',
     subtitle: 'Acquired exclusive lease on Mac Studio M2 Max under ADR-0005 guarantee.',
@@ -180,7 +184,7 @@ const activities = ref([
   {
     id: 'act-5',
     kind: 'usage',
-    badgeKind: 'yellow',
+    badgeKind: 'yellow' as const,
     title: 'Usage telemetry milestone: 1.14M tokens recorded',
     projectName: 'Sprout M2 Operator',
     subtitle: 'Work-model runs (1.10M tokens) and Project routing attempts (42.6K tokens) tracked separately.',
@@ -236,134 +240,122 @@ function handleNavigate(path: string) {
 </script>
 
 <template>
-  <div class="view-container feed-view p-4 sm:p-6 max-w-6xl mx-auto flex flex-col gap-6">
+  <div class="p-4 sm:p-6 max-w-6xl mx-auto flex flex-col gap-6 w-full">
     <!-- 1. Top Header -->
-    <div class="view-header feed-header">
-      <div class="view-header-title flex items-center justify-between gap-3 flex-wrap">
-        <h2 class="text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
+    <div class="flex flex-col gap-2">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <h2 class="text-base sm:text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
           <Icon name="feed" :size="20" />
           <span>Operations Feed & Human Attention</span>
         </h2>
-        <span class="badge badge-info">Cross-Project Landing Surface</span>
+        <Badge variant="info">Cross-Project Landing Surface</Badge>
       </div>
-      <p class="text-xs text-[var(--text-secondary)] mt-1">
+      <p class="text-xs text-[var(--text-secondary)]">
         Central surface for cross-project discovery, urgent Human interventions, active work telemetry, and background collaboration history.
       </p>
 
       <!-- Top Scope Selector Dropdown -->
-      <div class="feed-scope-filter-bar mt-3">
-        <div class="feed-scope-inner flex items-center gap-2 p-2 rounded-[var(--radius-sm)] bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] w-fit">
-          <span class="feed-scope-icon text-[var(--text-secondary)]">
-            <Icon name="project" :size="16" />
+      <div class="mt-1">
+        <div class="inline-flex items-center gap-2 p-1.5 rounded-[var(--radius-sm)] bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+          <span class="text-[var(--text-secondary)] pl-1">
+            <Icon name="project" :size="15" />
           </span>
           <label for="feed-scope-select" class="text-xs text-[var(--text-muted)] font-semibold">Scope:</label>
           <select
             id="feed-scope-select"
             v-model="activeScope"
-            class="form-select feed-scope-select bg-transparent text-xs text-[var(--text-primary)] font-medium border-0 cursor-pointer focus:ring-0"
+            class="bg-transparent text-xs text-[var(--text-primary)] font-medium border-0 cursor-pointer pr-4 focus:ring-0 focus:outline-none"
             aria-label="Select Project Scope"
           >
-            <option value="all">All Projects (Sprout Workspace)</option>
-            <option value="sprout-m2">Sprout M2 Operator</option>
-            <option value="infra">Infrastructure & Hosts</option>
+            <option value="all" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">All Projects (Sprout Workspace)</option>
+            <option value="sprout-m2" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">Sprout M2 Operator</option>
+            <option value="infra" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">Infrastructure & Hosts</option>
           </select>
         </div>
       </div>
     </div>
 
     <!-- 2. Section 1: Prominent Human Attention Section -->
-    <section class="feed-section attention-section flex flex-col gap-3">
-      <div class="section-title-bar flex items-center justify-between gap-2 flex-wrap">
+    <section class="flex flex-col gap-3">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
           <Icon name="alert" :size="18" class="text-[var(--yellow-attention)]" />
           <h3 class="text-sm font-bold text-[var(--text-primary)]">Human Attention Required</h3>
-          <span class="badge badge-red font-bold">{{ actionRequiredCount }} Action</span>
+          <Badge variant="red">{{ actionRequiredCount }} Action</Badge>
         </div>
         <span class="text-[11px] text-[var(--text-muted)]">Discovery only; mutations happen on authoritative pages</span>
       </div>
 
-      <!-- 4 Streamlined Urgency Pills -->
-      <div class="urgency-pills flex items-center gap-1.5 overflow-x-auto py-1" role="group" aria-label="Filter attention items">
-        <button
-          type="button"
-          class="urgency-pill-btn flex-1 min-w-[75px]"
-          :class="activeUrgency === 'all' ? 'active' : ''"
-          :aria-pressed="activeUrgency === 'all'"
-          title="All Attention Items"
+      <!-- 4 Streamlined Urgency Pills using FilterPillGroup -->
+      <FilterPillGroup label="Filter attention items by urgency">
+        <FilterPill
+          filter-key="all"
+          label="All"
+          :count="attentionItems.length"
+          status="purple"
+          :active="activeUrgency === 'all'"
           @click="activeUrgency = 'all'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot purple"></span> {{ attentionItems.length }}</span>
-          <span class="urgency-pill-bottom">All</span>
-        </button>
-        <button
-          type="button"
-          class="urgency-pill-btn flex-1 min-w-[75px]"
-          :class="activeUrgency === 'action_required' ? 'active' : ''"
-          :aria-pressed="activeUrgency === 'action_required'"
-          title="Action Required"
+        />
+        <FilterPill
+          filter-key="action_required"
+          label="Action Required"
+          :count="actionRequiredCount"
+          status="red"
+          :active="activeUrgency === 'action_required'"
           @click="activeUrgency = 'action_required'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot red"></span> {{ actionRequiredCount }}</span>
-          <span class="urgency-pill-bottom">Action Required</span>
-        </button>
-        <button
-          type="button"
-          class="urgency-pill-btn flex-1 min-w-[75px]"
-          :class="activeUrgency === 'attention' ? 'active' : ''"
-          :aria-pressed="activeUrgency === 'attention'"
-          title="Attention Needed"
+        />
+        <FilterPill
+          filter-key="attention"
+          label="Attention"
+          :count="attentionCount"
+          status="yellow"
+          :active="activeUrgency === 'attention'"
           @click="activeUrgency = 'attention'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot yellow"></span> {{ attentionCount }}</span>
-          <span class="urgency-pill-bottom">Attention</span>
-        </button>
-        <button
-          type="button"
-          class="urgency-pill-btn flex-1 min-w-[75px]"
-          :class="activeUrgency === 'info' ? 'active' : ''"
-          :aria-pressed="activeUrgency === 'info'"
-          title="Informational Items"
+        />
+        <FilterPill
+          filter-key="info"
+          label="Info"
+          :count="infoCount"
+          status="neutral"
+          :active="activeUrgency === 'info'"
           @click="activeUrgency = 'info'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot blue"></span> {{ infoCount }}</span>
-          <span class="urgency-pill-bottom">Info</span>
-        </button>
-      </div>
+        />
+      </FilterPillGroup>
 
       <!-- Attention Cards List -->
-      <div class="attention-cards-container grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-1">
         <button
           v-for="item in filteredAttentionItems"
           :key="item.id"
           type="button"
-          class="attention-card text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs transition-all cursor-pointer select-none"
-          :class="item.severity === 'action_required' ? 'severity-action-required border-l-4 border-l-[var(--red-action)]' : item.severity === 'attention' ? 'severity-attention border-l-4 border-l-[var(--yellow-attention)]' : 'severity-info border-l-4 border-l-[var(--purple-agent)]'"
+          class="text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
+          :class="item.severity === 'action_required' ? 'border-l-4 border-l-[var(--red-action)] border-[var(--border-subtle)]' : item.severity === 'attention' ? 'border-l-4 border-l-[var(--yellow-attention)] border-[var(--border-subtle)]' : 'border-l-4 border-l-[var(--purple-agent)] border-[var(--border-subtle)]'"
           @click="handleNavigate(item.targetPath)"
         >
           <div class="w-full">
-            <div class="attention-card-header flex items-center justify-between gap-2 mb-2">
+            <div class="flex items-center justify-between gap-2 mb-2">
               <div class="flex items-center gap-1.5 flex-wrap">
-                <span class="category-icon-pill flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
+                <span class="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
                   <Icon :name="item.icon" :size="12" />
                   <span>{{ item.categoryName }}</span>
                 </span>
-                <span v-if="item.projectName" class="badge badge-info text-[10px]">{{ item.projectName }}</span>
+                <Badge v-if="item.projectName" variant="info">{{ item.projectName }}</Badge>
               </div>
-              <span class="status-dot" :class="item.severity === 'action_required' ? 'red' : item.severity === 'attention' ? 'yellow' : 'blue'"></span>
+              <StatusDot :status="item.severity === 'action_required' ? 'red' : item.severity === 'attention' ? 'yellow' : 'blue'" size="sm" />
             </div>
 
             <strong class="text-xs sm:text-sm font-bold text-[var(--text-primary)] leading-tight block mb-1">
               {{ item.title }}
             </strong>
-            <div class="lifecycle-sentence text-[11px] font-mono text-[var(--text-muted)] mb-2">
+            <div class="text-[11px] font-mono text-[var(--text-muted)] mb-2">
               {{ item.lifecycleSentence }}
             </div>
-            <p class="attention-card-summary text-xs text-[var(--text-secondary)] leading-relaxed">
+            <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
               {{ item.summary }}
             </p>
           </div>
 
-          <div class="attention-card-footer pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 w-full text-[11px] text-[var(--text-muted)]">
+          <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 w-full text-[11px] text-[var(--text-muted)]">
             <div class="flex items-center gap-1.5 font-mono text-[10px]">
               <span>{{ item.attribution }}</span>
               <span>•</span>
@@ -378,42 +370,44 @@ function handleNavigate(path: string) {
     </section>
 
     <!-- 3. Section 2: Live In-Flight Work -->
-    <section class="feed-section active-work-section flex flex-col gap-3">
-      <div class="section-title-bar flex items-center justify-between gap-2 flex-wrap">
+    <section class="flex flex-col gap-3">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
           <Icon name="tasks" :size="18" />
           <h3 class="text-sm font-bold text-[var(--text-primary)]">Live In-Flight Work</h3>
-          <span class="badge badge-info">{{ activeTasks.length }} Active</span>
+          <Badge variant="info">{{ activeTasks.length }} Active</Badge>
         </div>
         <span class="text-[11px] text-[var(--text-muted)]">Active Task leases held under ADR-0005</span>
       </div>
 
-      <div class="active-tasks-grid grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <button
           v-for="task in activeTasks"
           :key="task.id"
           type="button"
-          class="card active-task-card text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
+          class="text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
           @click="handleNavigate(task.targetPath)"
         >
           <div>
             <div class="flex items-start justify-between gap-2 mb-2">
               <div>
                 <div class="flex items-center gap-1.5 flex-wrap mb-1">
-                  <span class="badge badge-info text-[10px]">{{ task.projectName }}</span>
-                  <span class="status-pill purple text-[10px]">Task active · Run running · Lease held</span>
+                  <Badge variant="info">{{ task.projectName }}</Badge>
+                  <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--purple-agent-bg)] text-[var(--purple-agent)] border border-[var(--purple-agent-border)]">
+                    Task active · Lease held
+                  </span>
                 </div>
                 <h4 class="text-xs sm:text-sm font-bold text-[var(--text-primary)]">
                   #{{ task.id }}: {{ task.title }}
                 </h4>
               </div>
-              <span class="status-dot pulsing blue shrink-0 mt-1" title="In Progress"></span>
+              <StatusDot status="blue" size="sm" class="shrink-0 mt-1" />
             </div>
 
             <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] text-xs flex flex-col gap-1 text-[var(--text-secondary)]">
               <div class="flex justify-between flex-wrap gap-1 text-[11px]">
                 <span><strong>Lead:</strong> @{{ task.lead }} · <strong>Env:</strong> {{ task.environment }}</span>
-                <span class="font-mono">{{ task.engine }}</span>
+                <span class="font-mono text-[10px]">{{ task.engine }}</span>
               </div>
               <div class="text-[10px] text-[var(--text-muted)] mt-0.5 line-clamp-2">
                 Goal: {{ task.goal }}
@@ -429,95 +423,85 @@ function handleNavigate(path: string) {
     </section>
 
     <!-- 4. Section 3: Recent Operational Activity Stream -->
-    <section class="feed-section activity-section flex flex-col gap-3">
-      <div class="section-title-bar flex items-center justify-between gap-2 flex-wrap">
+    <section class="flex flex-col gap-3">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
           <Icon name="lightning" :size="18" />
           <h3 class="text-sm font-bold text-[var(--text-primary)]">Recent Operational Activity</h3>
-          <span class="badge badge-info">{{ activities.length }} Total</span>
+          <Badge variant="info">{{ activities.length }} Total</Badge>
         </div>
         <span class="text-[11px] text-[var(--text-muted)]">Audit log scoped to project</span>
       </div>
 
       <!-- 5 Streamlined Activity Filter Pills -->
-      <div class="activity-filter-pills flex items-center gap-1.5 overflow-x-auto py-1" role="group" aria-label="Filter activity stream">
-        <button
-          type="button"
-          class="activity-filter-pill-btn flex-1 min-w-[65px]"
-          :class="activeActivityFilter === 'all' ? 'active' : ''"
-          :aria-pressed="activeActivityFilter === 'all'"
+      <FilterPillGroup label="Filter activity stream">
+        <FilterPill
+          filter-key="all"
+          label="All"
+          :count="activities.length"
+          status="purple"
+          :active="activeActivityFilter === 'all'"
           @click="activeActivityFilter = 'all'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot purple"></span> {{ activities.length }}</span>
-          <span class="urgency-pill-bottom">All</span>
-        </button>
-        <button
-          type="button"
-          class="activity-filter-pill-btn flex-1 min-w-[65px]"
-          :class="activeActivityFilter === 'tasks' ? 'active' : ''"
-          :aria-pressed="activeActivityFilter === 'tasks'"
+        />
+        <FilterPill
+          filter-key="tasks"
+          label="Tasks"
+          :count="1"
+          status="neutral"
+          :active="activeActivityFilter === 'tasks'"
           @click="activeActivityFilter = 'tasks'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot blue"></span> 1</span>
-          <span class="urgency-pill-bottom">Tasks</span>
-        </button>
-        <button
-          type="button"
-          class="activity-filter-pill-btn flex-1 min-w-[65px]"
-          :class="activeActivityFilter === 'messages' ? 'active' : ''"
-          :aria-pressed="activeActivityFilter === 'messages'"
+        />
+        <FilterPill
+          filter-key="messages"
+          label="Chat"
+          :count="1"
+          status="green"
+          :active="activeActivityFilter === 'messages'"
           @click="activeActivityFilter = 'messages'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot green"></span> 1</span>
-          <span class="urgency-pill-bottom">Chat</span>
-        </button>
-        <button
-          type="button"
-          class="activity-filter-pill-btn flex-1 min-w-[65px]"
-          :class="activeActivityFilter === 'envs' ? 'active' : ''"
-          :aria-pressed="activeActivityFilter === 'envs'"
+        />
+        <FilterPill
+          filter-key="envs"
+          label="Envs"
+          :count="2"
+          status="yellow"
+          :active="activeActivityFilter === 'envs'"
           @click="activeActivityFilter = 'envs'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot yellow"></span> 2</span>
-          <span class="urgency-pill-bottom">Envs</span>
-        </button>
-        <button
-          type="button"
-          class="activity-filter-pill-btn flex-1 min-w-[65px]"
-          :class="activeActivityFilter === 'usage' ? 'active' : ''"
-          :aria-pressed="activeActivityFilter === 'usage'"
+        />
+        <FilterPill
+          filter-key="usage"
+          label="Usage"
+          :count="1"
+          status="neutral"
+          :active="activeActivityFilter === 'usage'"
           @click="activeActivityFilter = 'usage'"
-        >
-          <span class="urgency-pill-top"><span class="status-dot neutral"></span> 1</span>
-          <span class="urgency-pill-bottom">Usage</span>
-        </button>
-      </div>
+        />
+      </FilterPillGroup>
 
       <!-- Activity List Items -->
-      <div class="card p-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+      <div class="p-1 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-0.5">
         <button
           v-for="act in filteredActivities"
           :key="act.id"
           type="button"
-          class="list-item list-item-interactive activity-feed-row text-left p-3 rounded flex items-center justify-between gap-3 hover:bg-[var(--bg-surface-elevated)] transition-colors cursor-pointer select-none"
+          class="text-left p-3 rounded flex items-center justify-between gap-3 hover:bg-[var(--bg-surface-elevated)] transition-colors cursor-pointer select-none"
           @click="handleNavigate(act.targetPath)"
         >
-          <div class="list-item-leading flex items-center shrink-0">
-            <span class="status-dot" :class="act.badgeKind"></span>
+          <div class="flex items-center shrink-0">
+            <StatusDot :status="act.badgeKind" size="sm" />
           </div>
 
-          <div class="list-item-body flex-1 min-w-0">
-            <div class="list-item-title flex items-center gap-1.5 flex-wrap">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5 flex-wrap">
               <strong class="text-xs text-[var(--text-primary)]">{{ act.title }}</strong>
-              <span class="badge badge-info text-[9px]">{{ act.projectName }}</span>
+              <Badge variant="info">{{ act.projectName }}</Badge>
             </div>
-            <div class="list-item-subtitle text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
+            <div class="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
               {{ act.subtitle }}
             </div>
           </div>
 
-          <div class="list-item-trailing flex items-center gap-2 shrink-0">
-            <span class="provenance-tag time text-[10px] text-[var(--text-muted)] font-mono">{{ act.relativeTime }}</span>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ act.relativeTime }}</span>
             <Icon name="chevron-right" :size="14" class="text-[var(--text-muted)]" />
           </div>
         </button>

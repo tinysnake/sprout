@@ -140,16 +140,17 @@ const connectionAgeLabel = computed(() => {
       </span>
     </button>
 
-    <!-- Quick Probe Action Button (matched to prototype absolute positioning) -->
-    <button
-      type="button"
-      class="btn btn-ghost btn-xs quick-probe-btn text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+    <!-- Quick Probe Action Button -->
+    <Button
+      variant="ghost"
+      size="xs"
+      class="quick-probe-btn absolute right-3 bottom-2.5 z-10 text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
       title="Request quick live probe"
       aria-label="Request quick live probe"
       @click.stop="emit('probe', env.id)"
     >
       <Icon name="lightning" :size="12" />
       <span>Probe</span>
-    </button>
+    </Button>
   </div>
 </template>
