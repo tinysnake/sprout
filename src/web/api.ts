@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { TLSSocket } from 'node:tls';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
@@ -109,6 +109,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
+    // A request stream is one-shot. Routers and preserved routes share this
+    // memoized reader so an exploratory router cannot consume another route's
+    // command payload.
+    const readBody = memoizedJsonReader(request);
     let browserSession: AuthenticatedBrowserSession | undefined;
 
     // Credential exchange is the only anonymous API operation. The credential
@@ -119,7 +123,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 503, { error: 'operator access is unavailable; initialize it on the host' });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const credential = typeof body.credential === 'string' ? body.credential : '';
       const signedIn = await auth.signIn(credential);
       if (!signedIn) {
@@ -192,7 +196,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         searchParams: url.searchParams,
         segments,
         ...(browserSession !== undefined ? { operatorSessionId: browserSession.id } : {}),
-        readBody: () => readJson(request),
+        readBody,
       })
     ) {
       return;
@@ -201,7 +205,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     // POST /api/messages — deliver one Message to a project channel and wake
     // whoever the M1 wake contract addresses.
     if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const channel = body.channel;
       const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
@@ -300,7 +304,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // POST /api/tasks — create a durable multi-run Task (#28).
     if (request.method === 'POST' && url.pathname === '/api/tasks' && tasks) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const title = typeof body.title === 'string' ? body.title : '';
       const goal = typeof body.goal === 'string' ? body.goal : '';
@@ -370,7 +374,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : undefined;
       const prompt = typeof body.prompt === 'string' ? body.prompt : undefined;
       try {
@@ -396,7 +400,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
       try {
@@ -421,7 +425,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'recovery' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
       catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
@@ -468,7 +472,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const status = parseTaskStatus(body.status);
       if (status === 'invalid') {
         sendJson(response, 400, { error: `unknown task status: ${String(body.status)}` });
@@ -517,7 +521,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // POST /api/runs — submit a request to an agent.
     if (request.method === 'POST' && url.pathname === '/api/runs') {
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
       if (agentId === '' || prompt === '') {
@@ -663,20 +667,19 @@ export function createRunApi(options: RunApiOptions): RunApi {
     response.flushHeaders();
     streams.add(response);
 
-    let cursor = parseEventCursor(headerValue(request, 'last-event-id'), eventLog.epoch);
+    // Hydrate before interpreting the cursor. The cursor identifies a durable
+    // projection, not this API process, so it remains meaningful after a
+    // restart and can retain its replay boundary.
+    for (const run of await listRuns()) eventLog.publish(toRunView(run));
+    const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
     const send = (record: SseRecord) => {
-      if (record.cursor <= cursor || response.writableEnded) return;
-      cursor = record.cursor;
-      writeEvent(response, record.event, record.data, eventLog.cursorId(record.cursor));
+      if (response.writableEnded) return;
+      writeEvent(response, record.event, record.data, record.cursor);
     };
     // Replay before attaching a listener. Both operations are synchronous, so
     // there is no missed interval between the cursor snapshot and subscription.
     for (const record of eventLog.after(cursor)) send(record);
     const unsubscribe = eventLog.subscribe(send);
-    // Existing durable Runs become cursor-bearing snapshots exactly once. A
-    // reconnect starts after Last-Event-ID and cannot receive those snapshots
-    // again from this transport process.
-    for (const run of await listRuns()) eventLog.publish(toRunView(run));
 
     const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
@@ -755,7 +758,7 @@ function writeEvent(response: ServerResponse, event: string, data: unknown, curs
 }
 
 interface SseRecord {
-  readonly cursor: number;
+  readonly cursor: string;
   readonly event: 'run';
   readonly data: ReturnType<typeof toRunView>;
 }
@@ -764,13 +767,11 @@ interface SseRecord {
  * A transport replay log over immutable Web projections.
  *
  * Run events remain durable in the Run store; this log does not create another
- * domain event source. It assigns each distinct durable snapshot one SSE cursor
- * while this transport is serving. A restart rebuilds its baseline from the
- * durable Run store.
+ * domain event source. It assigns each distinct durable snapshot a stable,
+ * opaque cursor. A restart rebuilds its baseline from the durable Run store,
+ * preserving a cursor whose snapshot remains in that baseline.
  */
 class SseEventLog {
-  /** A restart changes epoch, so an old browser cursor safely rehydrates. */
-  readonly epoch = randomUUID();
   readonly #records: SseRecord[] = [];
   readonly #fingerprints = new Set<string>();
   readonly #listeners = new Set<(record: SseRecord) => void>();
@@ -779,13 +780,18 @@ class SseEventLog {
     const fingerprint = JSON.stringify(data);
     if (this.#fingerprints.has(fingerprint)) return;
     this.#fingerprints.add(fingerprint);
-    const record: SseRecord = { cursor: this.#records.length + 1, event: 'run', data };
+    const record: SseRecord = { cursor: durableEventCursor(fingerprint), event: 'run', data };
     this.#records.push(record);
     for (const listener of this.#listeners) listener(record);
   }
 
-  after(cursor: number): readonly SseRecord[] {
-    return this.#records.filter((record) => record.cursor > cursor);
+  after(cursor: string | undefined): readonly SseRecord[] {
+    if (cursor === undefined) return this.#records;
+    const index = this.#records.findIndex((record) => record.cursor === cursor);
+    // An unknown but well-formed cursor is outside this replay log. Rehydrate
+    // from its safe boundary rather than treating it as a future position and
+    // suppressing every current or later durable snapshot.
+    return index === -1 ? this.#records : this.#records.slice(index + 1);
   }
 
   subscribe(listener: (record: SseRecord) => void): () => void {
@@ -793,15 +799,22 @@ class SseEventLog {
     return () => this.#listeners.delete(listener);
   }
 
-  cursorId(cursor: number): string {
-    return `${this.epoch}:${cursor}`;
-  }
 }
 
-function parseEventCursor(value: string | undefined, epoch: string): number {
-  if (value === undefined) return 0;
-  const match = new RegExp(`^${epoch}:(\\d+)$`).exec(value);
-  return match === null ? 0 : Number(match[1]);
+function durableEventCursor(fingerprint: string): string {
+  return `v1:${createHash('sha256').update(fingerprint).digest('hex')}`;
+}
+
+function parseEventCursor(value: string | undefined): string | undefined {
+  return value !== undefined && /^v1:[a-f0-9]{64}$/.test(value) ? value : undefined;
+}
+
+function memoizedJsonReader(request: IncomingMessage): () => Promise<Record<string, unknown>> {
+  let body: Promise<Record<string, unknown>> | undefined;
+  return () => {
+    body ??= readJson(request);
+    return body;
+  };
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {

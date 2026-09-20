@@ -51,6 +51,27 @@ test('browser transport sends CSRF only for immediate commands and exposes loadi
   assert.equal(request?.body, undefined);
 });
 
+test('browser transport remains loading until every concurrent request settles', async () => {
+  const resolvers: Array<(response: Response) => void> = [];
+  const transport = createBrowserTransport({
+    fetch: () => new Promise<Response>((resolve) => resolvers.push(resolve)),
+  });
+
+  const first = transport.request<{ readonly request: number }>('/api/first');
+  const second = transport.request<{ readonly request: number }>('/api/second');
+  assert.equal(transport.state().loading, true);
+  assert.equal(resolvers.length, 2);
+
+  resolvers[0]!(new Response(JSON.stringify({ request: 1 }), { status: 200 }));
+  assert.deepEqual(await first, { request: 1 });
+  assert.equal(transport.state().loading, true, 'the second request is still pending');
+
+  resolvers[1]!(new Response(JSON.stringify({ request: 2 }), { status: 200 }));
+  assert.deepEqual(await second, { request: 2 });
+  assert.equal(transport.state().loading, false);
+  assert.equal(transport.state().connection, 'online');
+});
+
 test('browser transport identifies authenticated failures without exposing response bodies', async () => {
   const transport = createBrowserTransport({ fetch: async () => new Response('credential-or-host-detail', { status: 401 }) });
   await assert.rejects(
@@ -94,8 +115,16 @@ test('browser transport reports reconnecting, online, stale, and offline SSE sta
   assert.equal(transport.state().connection, 'reconnecting');
   source.open();
   assert.equal(transport.state().connection, 'online');
-  source.emitRun({ id: 'run-1' }, '12');
-  assert.deepEqual(received, [{ type: 'run', data: { id: 'run-1' }, cursor: '12' }]);
+  source.emitRun({ id: 'run-1' }, 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  source.emitRun({ id: 'run-1' }, 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  source.emitRun({ id: 'run-1', status: 'completed' }, 'v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.deepEqual(received, [
+    { type: 'run', data: { id: 'run-1' }, cursor: 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    {
+      type: 'run', data: { id: 'run-1', status: 'completed' },
+      cursor: 'v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    },
+  ]);
   assert.ok(stale);
   stale();
   assert.equal(transport.state().connection, 'stale');

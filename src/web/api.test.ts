@@ -214,6 +214,46 @@ test('an additive domain router composes without changing preserved M1 routes', 
   }
 });
 
+test('a non-matching router cannot consume the matching router request body', async () => {
+  const context = build();
+  const inspectingRouter: ApiRouter = {
+    name: 'inspecting-non-match',
+    async handle(request) {
+      await request.readBody();
+      return false;
+    },
+  };
+  const matchingRouter: ApiRouter = {
+    name: 'matching-domain',
+    async handle(request) {
+      if (request.method !== 'POST' || request.pathname !== '/api/future-command') return false;
+      const body = await request.readBody();
+      request.response.writeHead(200, { 'content-type': 'application/json' });
+      request.response.end(JSON.stringify(body));
+      return true;
+    },
+  };
+  const api = createRunApi({
+    orchestrator: context.orchestrator,
+    agents: new AgentRegistry([
+      { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+    ]),
+    routers: [inspectingRouter, matchingRouter],
+  });
+  const { port } = await api.listen(0);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/future-command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ command: 'preserve-this-payload' }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { command: 'preserve-this-payload' });
+  } finally {
+    await api.close();
+  }
+});
+
 test('a user can submit a request from the Web client and inspect the result', async () => {
   await withServer(async (base) => {
     const submit = await fetch(`${base}/api/runs`, {
@@ -458,6 +498,128 @@ test('SSE Last-Event-ID replays only later run snapshots', async () => {
     await reader.cancel();
     assert.match(received, new RegExp(secondId));
     assert.equal(received.includes(firstId), false, 'a durable snapshot before the cursor is not replayed');
+  });
+});
+
+test('an SSE durable cursor remains a replay boundary after an API restart', async () => {
+  const store = new InMemoryRunStore();
+  const registry = new AgentRegistry([
+    { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+  ]);
+  const first = new RunOrchestrator({
+    engines: new Map([['scripted', new ScriptedEngineAdapter({
+      turns: [{ events: [{ type: 'message', text: 'first', final: true }], result: { status: 'completed', text: 'first' } }],
+    })]]),
+    agents: registry,
+    projects,
+    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    store,
+  });
+  const firstApi = createRunApi({ orchestrator: first, agents: registry });
+  let secondApi: ReturnType<typeof createRunApi> | undefined;
+  try {
+    const { port: firstPort } = await firstApi.listen(0);
+    const submitted = await fetch(`http://127.0.0.1:${firstPort}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'first durable snapshot' }),
+    });
+    const { id: firstId } = await submitted.json() as { id: string };
+    await first.waitFor(firstId);
+
+    const initial = await fetch(`http://127.0.0.1:${firstPort}/api/events`);
+    const initialReader = initial.body?.getReader();
+    assert.ok(initialReader);
+    let initialText = '';
+    while (!initialText.includes('"status":"completed"')) {
+      const chunk = await initialReader.read();
+      if (chunk.done) break;
+      initialText += new TextDecoder().decode(chunk.value);
+    }
+    const cursor = [...initialText.matchAll(/^id: ([^\n]+)$/gm)].at(-1)?.[1];
+    assert.match(cursor ?? '', /^v1:[a-f0-9]{64}$/);
+    await initialReader.cancel();
+    await firstApi.close();
+
+    const second = new RunOrchestrator({
+      engines: new Map([['scripted', new ScriptedEngineAdapter({
+        turns: [{ events: [{ type: 'message', text: 'second', final: true }], result: { status: 'completed', text: 'second' } }],
+      })]]),
+      agents: registry,
+      projects,
+      pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+      store,
+    });
+    secondApi = createRunApi({ orchestrator: second, agents: registry });
+    const { port: secondPort } = await secondApi.listen(0);
+    const resumed = await fetch(`http://127.0.0.1:${secondPort}/api/events`, {
+      headers: { 'last-event-id': cursor! },
+    });
+    const reader = resumed.body?.getReader();
+    assert.ok(reader);
+    const secondSubmitted = await fetch(`http://127.0.0.1:${secondPort}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'second durable snapshot' }),
+    });
+    const { id: secondId } = await secondSubmitted.json() as { id: string };
+    let replayed = '';
+    while (!replayed.includes(secondId)) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      replayed += new TextDecoder().decode(chunk.value);
+    }
+    await reader.cancel();
+    assert.match(replayed, new RegExp(secondId));
+    assert.equal(replayed.includes(firstId), false, 'the consumed durable snapshot is not replayed after restart');
+  } finally {
+    await secondApi?.close();
+    await firstApi.close().catch(() => undefined);
+  }
+});
+
+test('an out-of-range SSE cursor rehydrates current and later durable snapshots', async () => {
+  await withServer(async (base) => {
+    const firstSubmitted = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'cursor boundary' }),
+    });
+    const { id: firstId } = await firstSubmitted.json() as { id: string };
+    await waitForTerminal(base, firstId);
+
+    const initial = await fetch(`${base}/api/events`);
+    const initialReader = initial.body?.getReader();
+    assert.ok(initialReader);
+    let initialText = '';
+    while (!initialText.includes(firstId)) {
+      const chunk = await initialReader.read();
+      if (chunk.done) break;
+      initialText += new TextDecoder().decode(chunk.value);
+    }
+    const cursor = [...initialText.matchAll(/^id: ([^\n]+)$/gm)].at(-1)?.[1];
+    assert.ok(cursor);
+    await initialReader.cancel();
+    const beyondLogCursor = `${cursor.slice(0, -1)}${cursor.endsWith('0') ? '1' : '0'}`;
+
+    const resumed = await fetch(`${base}/api/events`, { headers: { 'last-event-id': beyondLogCursor } });
+    const reader = resumed.body?.getReader();
+    assert.ok(reader);
+    const secondSubmitted = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'future after cursor boundary' }),
+    });
+    const { id: secondId } = await secondSubmitted.json() as { id: string };
+    let replayed = '';
+    while (!replayed.includes(secondId)) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      replayed += new TextDecoder().decode(chunk.value);
+    }
+    await reader.cancel();
+    assert.match(replayed, new RegExp(firstId), 'the safe replay boundary includes current durable state');
+    assert.match(replayed, new RegExp(secondId), 'later durable state is not suppressed');
   });
 });
 
