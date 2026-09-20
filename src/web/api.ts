@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { TLSSocket } from 'node:tls';
+import { randomUUID } from 'node:crypto';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
@@ -9,6 +10,7 @@ import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
+import { composeApiRouters, type ApiRouter } from './router.ts';
 import {
   summarizeRunHistory,
   toMessageView,
@@ -76,6 +78,8 @@ export interface RunApiOptions {
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
   /** Interval for SSE keep-alive comments. Exposed so tests need not wait. */
   readonly keepAliveMs?: number;
+  /** Additive M2 domain routers, run after transport authorization. */
+  readonly routers?: readonly ApiRouter[];
 }
 
 export interface RunApi {
@@ -88,6 +92,12 @@ export function createRunApi(options: RunApiOptions): RunApi {
   const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
+  const additiveRouters = composeApiRouters(options.routers ?? []);
+  const eventLog = new SseEventLog();
+  // One subscription fans out through the cursor log. This avoids one
+  // orchestrator subscription per browser and gives reconnects a stable replay
+  // boundary without changing the durable Run/event contract.
+  const unsubscribeRunEvents = orchestrator.subscribe((run) => eventLog.publish(toRunView(run)));
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
       sendJson(response, 500, {
@@ -171,6 +181,20 @@ export function createRunApi(options: RunApiOptions): RunApi {
       }
       if (id === browserSession!.id) response.setHeader('set-cookie', expiredSessionCookie(isTransportSecure(request)));
       sendJson(response, 200, { revoked: true });
+      return;
+    }
+
+    if (
+      await additiveRouters.handle({
+        method: request.method,
+        response,
+        pathname: url.pathname,
+        searchParams: url.searchParams,
+        segments,
+        ...(browserSession !== undefined ? { operatorSessionId: browserSession.id } : {}),
+        readBody: () => readJson(request),
+      })
+    ) {
       return;
     }
 
@@ -605,7 +629,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/events — every run's progress, pushed as it changes.
     if (request.method === 'GET' && url.pathname === '/api/events') {
-      openEventStream(request, response);
+      await openEventStream(request, response);
       return;
     }
 
@@ -627,7 +651,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     return orchestrator.list();
   }
 
-  function openEventStream(request: IncomingMessage, response: ServerResponse): void {
+  async function openEventStream(request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -639,13 +663,20 @@ export function createRunApi(options: RunApiOptions): RunApi {
     response.flushHeaders();
     streams.add(response);
 
-    const unsubscribe = orchestrator.subscribe((run) => {
-      writeEvent(response, 'run', toRunView(run));
-    });
-
-    void listRuns().then((runs) => {
-      for (const run of runs) writeEvent(response, 'run', toRunView(run));
-    });
+    let cursor = parseEventCursor(headerValue(request, 'last-event-id'), eventLog.epoch);
+    const send = (record: SseRecord) => {
+      if (record.cursor <= cursor || response.writableEnded) return;
+      cursor = record.cursor;
+      writeEvent(response, record.event, record.data, eventLog.cursorId(record.cursor));
+    };
+    // Replay before attaching a listener. Both operations are synchronous, so
+    // there is no missed interval between the cursor snapshot and subscription.
+    for (const record of eventLog.after(cursor)) send(record);
+    const unsubscribe = eventLog.subscribe(send);
+    // Existing durable Runs become cursor-bearing snapshots exactly once. A
+    // reconnect starts after Last-Event-ID and cannot receive those snapshots
+    // again from this transport process.
+    for (const run of await listRuns()) eventLog.publish(toRunView(run));
 
     const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
@@ -675,6 +706,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         // connections, and an SSE stream never ends by itself.
         for (const stream of streams) stream.end();
         streams.clear();
+        unsubscribeRunEvents();
         server.closeAllConnections?.();
         server.close((error) => (error ? reject(error) : resolve()));
       }),
@@ -718,8 +750,58 @@ function parseStringArray(value: unknown): readonly string[] | undefined {
   return value as readonly string[];
 }
 
-function writeEvent(response: ServerResponse, event: string, data: unknown): void {
-  response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+function writeEvent(response: ServerResponse, event: string, data: unknown, cursor?: string): void {
+  response.write(`${cursor === undefined ? '' : `id: ${cursor}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+interface SseRecord {
+  readonly cursor: number;
+  readonly event: 'run';
+  readonly data: ReturnType<typeof toRunView>;
+}
+
+/**
+ * A transport replay log over immutable Web projections.
+ *
+ * Run events remain durable in the Run store; this log does not create another
+ * domain event source. It assigns each distinct durable snapshot one SSE cursor
+ * while this transport is serving. A restart rebuilds its baseline from the
+ * durable Run store.
+ */
+class SseEventLog {
+  /** A restart changes epoch, so an old browser cursor safely rehydrates. */
+  readonly epoch = randomUUID();
+  readonly #records: SseRecord[] = [];
+  readonly #fingerprints = new Set<string>();
+  readonly #listeners = new Set<(record: SseRecord) => void>();
+
+  publish(data: ReturnType<typeof toRunView>): void {
+    const fingerprint = JSON.stringify(data);
+    if (this.#fingerprints.has(fingerprint)) return;
+    this.#fingerprints.add(fingerprint);
+    const record: SseRecord = { cursor: this.#records.length + 1, event: 'run', data };
+    this.#records.push(record);
+    for (const listener of this.#listeners) listener(record);
+  }
+
+  after(cursor: number): readonly SseRecord[] {
+    return this.#records.filter((record) => record.cursor > cursor);
+  }
+
+  subscribe(listener: (record: SseRecord) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  cursorId(cursor: number): string {
+    return `${this.epoch}:${cursor}`;
+  }
+}
+
+function parseEventCursor(value: string | undefined, epoch: string): number {
+  if (value === undefined) return 0;
+  const match = new RegExp(`^${epoch}:(\\d+)$`).exec(value);
+  return match === null ? 0 : Number(match[1]);
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {

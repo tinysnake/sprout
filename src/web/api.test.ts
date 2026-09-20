@@ -11,6 +11,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
 import { createRunApi, summarizeRunHistory, type RunView } from './api.ts';
+import type { ApiRouter } from './router.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { randomBytes } from 'node:crypto';
@@ -185,6 +186,31 @@ test('protected API lists and revokes sessions without exposing bearer values', 
     assert.equal((await fetch(`${protectedRuntime.base}/api/runs`, { headers: { cookie: second.cookie } })).status, 401);
   } finally {
     await protectedRuntime.api.close();
+  }
+});
+
+test('an additive domain router composes without changing preserved M1 routes', async () => {
+  const context = build();
+  const futureRouter: ApiRouter = {
+    name: 'future-domain',
+    async handle(request) {
+      if (request.method !== 'GET' || request.pathname !== '/api/future') return false;
+      const payload = JSON.stringify({ source: 'future-domain' });
+      request.response.writeHead(200, { 'content-type': 'application/json' });
+      request.response.end(payload);
+      return true;
+    },
+  };
+  const api = createRunApi({ orchestrator: context.orchestrator, agents: new AgentRegistry([
+    { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+  ]), routers: [futureRouter] });
+  const { port } = await api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    assert.deepEqual(await (await fetch(`${base}/api/future`)).json(), { source: 'future-domain' });
+    assert.equal((await fetch(`${base}/api/runs`)).status, 200, 'the M1 route remains composed after the new domain route');
+  } finally {
+    await api.close();
   }
 });
 
@@ -389,6 +415,50 @@ test('progress is pushed to the client before the run settles', async () => {
     },
     { settleAfterMs: 60 },
   );
+});
+
+test('SSE Last-Event-ID replays only later run snapshots', async () => {
+  await withServer(async (base) => {
+    const first = await fetch(`${base}/api/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'first stream run' }),
+    });
+    const { id: firstId } = await first.json() as { id: string };
+    await waitForTerminal(base, firstId);
+
+    const initial = await fetch(`${base}/api/events`);
+    const initialReader = initial.body?.getReader();
+    assert.ok(initialReader);
+    let initialText = '';
+    while (!initialText.includes('"status":"completed"')) {
+      const chunk = await initialReader.read();
+      if (chunk.done) break;
+      initialText += new TextDecoder().decode(chunk.value);
+    }
+    const cursor = [...initialText.matchAll(/^id: ([^\n]+)$/gm)].at(-1)?.[1];
+    assert.ok(cursor, 'the initial durable snapshot has an SSE cursor');
+    await initialReader.cancel();
+
+    const resumed = await fetch(`${base}/api/events`, { headers: { 'last-event-id': cursor } });
+    const reader = resumed.body?.getReader();
+    assert.ok(reader);
+    const second = await fetch(`${base}/api/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'second stream run' }),
+    });
+    const { id: secondId } = await second.json() as { id: string };
+
+    let received = '';
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !received.includes(secondId)) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += new TextDecoder().decode(chunk.value);
+    }
+    await reader.cancel();
+    assert.match(received, new RegExp(secondId));
+    assert.equal(received.includes(firstId), false, 'a durable snapshot before the cursor is not replayed');
+  });
 });
 
 test('runs persisted by a previous process are listed after a restart', async () => {
