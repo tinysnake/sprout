@@ -18,6 +18,7 @@ import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
 import Card from '../primitives/Card.vue';
 import ClampedText from '../primitives/ClampedText.vue';
+import EmptyState from '../primitives/EmptyState.vue';
 import Dialog from '../primitives/Dialog.vue';
 
 const route = useRoute();
@@ -25,7 +26,11 @@ const router = useRouter();
 const announcer = useAnnouncer();
 
 const selectedProjectId = ref('sprout-m2');
-const activeChatChannel = ref('#general');
+/**
+ * The scope shown for the unscoped `/project/chat` entry. An open scope always
+ * comes from the route instead, so this never shadows a deep-linked record.
+ */
+const defaultChatChannel = ref('#general');
 
 const selectedTask = ref<any>(null);
 const activeTaskFilter = ref('all');
@@ -57,7 +62,10 @@ const openChatScopeId = computed(() =>
 );
 
 watch(openChatScopeId, (scopeId) => {
-  if (scopeId) activeChatChannel.value = scopeId;
+  // Only an existing scope may become the default against which the unscoped
+  // chat list resolves: an unknown route id must never be adopted as if it
+  // named a real conversation.
+  if (scopeId && chatScopes.some((scope) => scope.id === scopeId)) defaultChatChannel.value = scopeId;
 });
 
 watch(
@@ -288,6 +296,13 @@ const filteredTasks = computed(() => {
 /** The open record resolves from the route id, never from a parallel selection ref. */
 const routeTask = computed(() => (openTaskId.value ? tasks.find((t) => t.id === openTaskId.value) : undefined));
 
+/**
+ * A deep link to a Task id that does not exist. It is never satisfied by
+ * another record: the view renders an explicit not-found state instead of
+ * silently falling back to the list under a URL that names a missing Task.
+ */
+const missingTaskId = computed(() => openTaskId.value !== '' && routeTask.value === undefined);
+
 watch(
   routeTask,
   (task) => {
@@ -353,7 +368,28 @@ const chatScopes: ChatScope[] = [
   },
 ];
 
-const activeScope = computed(() => chatScopes.find((s) => s.id === activeChatChannel.value) ?? chatScopes[0]);
+/** The scope the URL names, or undefined when that id does not exist. */
+const openChatScope = computed(() => chatScopes.find((s) => s.id === openChatScopeId.value));
+
+/**
+ * A deep link to a Chat scope that does not exist. It is never satisfied by
+ * another scope: the view renders an explicit not-found state instead of
+ * substituting the first scope and allowing a mutation under the wrong URL.
+ */
+const missingChatScope = computed(() => openChatScopeId.value !== '' && openChatScope.value === undefined);
+
+/**
+ * The scope whose conversation is rendered. When the route names a scope, only
+ * that record resolves; the `#general` fallback applies solely to the
+ * unscoped `/project/chat` entry, never to a missing nested detail deep link.
+ */
+const activeScope = computed(() => {
+  if (openChatScopeId.value !== '') return openChatScope.value;
+  return chatScopes.find((s) => s.id === defaultChatChannel.value) ?? chatScopes[0];
+});
+
+/** The scope id rendered in headers and the composer. Display-only. */
+const activeChatChannel = computed(() => activeScope.value?.id ?? defaultChatChannel.value);
 
 const chatMessages = ref([
   {
@@ -384,6 +420,10 @@ function closeChatScope() {
 }
 
 function sendMessage() {
+  // The shared conversation may only be mutated from an existing scope. A URL
+  // naming a missing scope offers no composer, and this guard keeps the
+  // invariant even if a send is ever dispatched from another path.
+  if (missingChatScope.value) return;
   if (!newMessage.value.trim()) return;
   chatMessages.value.push({
     id: `msg-${Date.now()}`,
@@ -531,8 +571,26 @@ function sendMessage() {
 
       <!-- 2. Tasks Tab (Prototype Operating Loop: List vs Dedicated Detail Drill-down) -->
       <div v-else-if="activeTab === 'tasks'" class="flex flex-col gap-4">
+        <!-- Missing Task deep link: never satisfied by the list or another record. -->
+        <div v-if="missingTaskId" class="tasks-not-found-state flex items-center justify-center p-8 h-full">
+          <EmptyState
+            icon="alert"
+            title="Task Not Found"
+            description="No task matches this URL. Choose a task from the list instead."
+          >
+            <Button
+              variant="primary"
+              size="sm"
+              class="tasks-not-found-return text-xs"
+              @click="closeTaskDetail"
+            >
+              <span>Back to Tasks List</span>
+            </Button>
+          </EmptyState>
+        </div>
+
         <!-- 2.1 Dedicated Task Detail View (Matching prototype renderTaskDetailPage) -->
-        <div v-if="selectedTask" class="flex flex-col gap-4">
+        <div v-else-if="selectedTask" class="flex flex-col gap-4">
           <!-- Back Navigation Bar -->
           <div class="flex items-center justify-between gap-3 p-3 rounded-[var(--radius-sm)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex-wrap shadow-xs">
             <button
@@ -763,7 +821,27 @@ function sendMessage() {
 
       <!-- 3. Chat Tab (Responsive: Wide screen side-by-side, narrow screen drill-down with back button) -->
       <div v-else-if="activeTab === 'chat'" class="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden flex flex-col md:flex-row h-[750px] shadow-xs">
+        <!-- Missing Chat scope deep link: never substitute another scope or offer
+             its composer, so no message can be written under the wrong URL. -->
+        <div v-if="missingChatScope" class="chat-not-found-state w-full flex items-center justify-center p-8 h-full">
+          <EmptyState
+            icon="alert"
+            title="Conversation Not Found"
+            description="No conversation matches this URL. Choose a conversation from the list instead."
+          >
+            <Button
+              variant="primary"
+              size="sm"
+              class="chat-not-found-return text-xs"
+              @click="closeChatScope"
+            >
+              <span>Back to Conversations</span>
+            </Button>
+          </EmptyState>
+        </div>
+
         <!-- Chat Channels Cards / List: Visible on Desktop, or on Mobile when NOT drilled down -->
+        <template v-else>
         <div
           class="w-full md:w-72 lg:w-80 bg-[var(--bg-surface-elevated)] md:border-r border-[var(--border-subtle)] p-3 flex flex-col gap-2 shrink-0 overflow-y-auto"
           :class="openChatScopeId ? 'hidden md:flex' : 'flex'"
@@ -872,6 +950,7 @@ function sendMessage() {
             <div
               v-for="msg in chatMessages"
               :key="msg.id"
+              :data-message-id="msg.id"
               class="flex items-start gap-3"
             >
               <div class="w-8 h-8 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-xs shrink-0">
@@ -904,6 +983,7 @@ function sendMessage() {
             </Button>
           </div>
         </div>
+        </template>
       </div>
     </div>
 

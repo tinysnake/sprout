@@ -1227,6 +1227,131 @@ test('M77-NAV-001: an unknown environment deep link renders not-found and never 
   }
 });
 
+test('M77-NAV-002: an unknown chat scope deep link renders not-found and never substitutes the first scope', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat/does-not-exist');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.equal(router.currentRoute.value.params['scopeId'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.chat-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Conversation Not Found/);
+
+    // The first scope must never be substituted for the missing one: no scope
+    // card, and specifically no `#general` header, is rendered.
+    assert.equal(doc.querySelector('[data-scope-id]'), null, 'no scope list is rendered under a missing id');
+    assert.doesNotMatch(doc.body.textContent ?? '', /#general/, 'the first scope is not substituted');
+
+    // The composer must be absent so the shared message list cannot be mutated
+    // from a URL that names no scope.
+    assert.equal(
+      doc.querySelector('.chat-not-found-state')?.parentElement?.querySelector('input'),
+      null,
+      'no composer input is offered for a missing scope'
+    );
+
+    (doc.querySelector('.chat-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/project/chat', 'the return control recovers to the chat list');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-002: an unknown chat scope deep link blocks composer mutation of the shared chat list', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    // Enter through the real chat list so a message is genuinely present first.
+    await router.push('/project/chat/wg-frontend');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const messageCount = () => doc.querySelectorAll('[data-message-id]').length;
+    assert.ok(messageCount() > 0, 'a conversation renders its real messages');
+
+    await router.push('/project/chat/does-not-exist');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(doc.querySelector('.chat-not-found-state'), 'the missing scope renders not-found');
+    assert.equal(messageCount(), 0, 'no message list is rendered under the missing URL');
+
+    // Even dispatching the send handler directly must not mutate the shared list:
+    // the missing-scope guard refuses before touching chatMessages.
+    const before = messageCount();
+    const composer = doc.querySelector('.chat-not-found-state')?.parentElement?.querySelector('input');
+    assert.equal(composer, null, 'the composer is not mounted, so no send can be triggered');
+    assert.equal(messageCount(), before, 'the shared message list is unchanged under the missing URL');
+
+    // A known scope still works: the guard is scoped to the missing case only.
+    await router.push('/project/chat/dm-architect');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(messageCount() > 0, 'a known scope still renders its conversation');
+    const input = doc.querySelector('input') as HTMLInputElement;
+    assert.ok(input, 'a known scope still offers its composer');
+    input.value = 'Regression probe message';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const sendBtn = [...doc.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Send') as HTMLButtonElement;
+    sendBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.match(doc.body.textContent ?? '', /Regression probe message/, 'a real scope still accepts a message');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-002: an unknown task detail deep link renders not-found and never substitutes a record', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/tasks/does-not-exist');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.equal(router.currentRoute.value.params['taskId'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.tasks-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Task Not Found/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /#101/, 'the first task is not substituted');
+    assert.equal(doc.querySelector('.operating-stage-card'), null, 'no other task detail is shown');
+
+    (doc.querySelector('.tasks-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/project/tasks', 'the return control recovers to the task list');
+    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/, 'the task list is restored');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('M77-CONN-001: environment controls are disabled and refuse mutation while the connection is unsettled', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
