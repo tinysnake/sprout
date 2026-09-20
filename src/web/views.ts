@@ -25,7 +25,14 @@ import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
-import { sanitizeOperatorText, DEFAULT_DECISION_REASON } from '../environment/privacy.ts';
+import {
+  sanitizeIdentifier,
+  sanitizeOperatorText,
+  sanitizeProtocolVersion,
+  DEFAULT_COMPATIBILITY_DETAIL,
+  DEFAULT_DECISION_REASON,
+  DEFAULT_PROBE_SUMMARY,
+} from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
 /**
@@ -409,6 +416,14 @@ export function toEnvironmentReadinessView(input: {
   readonly summary: EnvironmentReadinessSummary;
 }): EnvironmentReadinessView {
   const { readiness, summary } = input;
+  // The view is the last boundary before the wire. The service sanitizes the
+  // stored facts, but a caller that hands this projection a raw readiness
+  // document (a repair tool, a test, a future adapter) still must not leak a
+  // legacy hostname, path, address, credential, or protocol string. Engine and
+  // capability names are structured enums; models keep their vendor characters;
+  // free text passes the operator boundary; an invalid protocol version is
+  // dropped rather than echoed.
+  const protocolVersion = sanitizeProtocolVersion(readiness.compatibility.workerProtocolVersion);
   return {
     environmentInstanceId: input.environmentInstanceId,
     summary: { level: summary.level, reason: summary.reason },
@@ -421,24 +436,27 @@ export function toEnvironmentReadinessView(input: {
     },
     compatibility: {
       state: readiness.compatibility.state,
-      ...(readiness.compatibility.workerProtocolVersion !== undefined
-        ? { workerProtocolVersion: readiness.compatibility.workerProtocolVersion }
-        : {}),
+      ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
       ...(readiness.compatibility.detail !== undefined
-        ? { detail: readiness.compatibility.detail }
+        ? { detail: sanitizeOperatorText(readiness.compatibility.detail, { fallback: DEFAULT_COMPATIBILITY_DETAIL }) }
         : {}),
     },
     capabilities: readiness.capabilities.map((capability) => ({
-      name: capability.name,
+      name: sanitizeIdentifier(capability.name, { fallback: 'unknown-capability', kind: 'capability' }),
       permission: capability.permission,
       required: capability.required,
     })),
     engines: readiness.engines.map((engine) => ({
-      engine: engine.engine,
+      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
       installed: engine.installed,
       readiness: engine.readiness,
       required: engine.required,
-      models: { state: engine.models.state, models: engine.models.models },
+      models: {
+        state: engine.models.state,
+        models: engine.models.models.map((model) =>
+          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+        ),
+      },
     })),
     ...(readiness.probe !== undefined
       ? {
@@ -447,7 +465,7 @@ export function toEnvironmentReadinessView(input: {
             latencyMs: readiness.probe.latencyMs,
             protocolOk: readiness.probe.protocolOk,
             enginesOk: readiness.probe.enginesOk,
-            summary: readiness.probe.summary,
+            summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
           },
         }
       : {}),

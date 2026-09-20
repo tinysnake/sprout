@@ -103,17 +103,53 @@ test('ordinary and machine hostnames are removed, without eating a decisive reas
 test('named credential assignments are removed whatever the secret characters are', () => {
   for (const secret of [
     'password=hunter2correcthorse',
+    'password is hunter2correcthorse',
+    'password: hunter2correcthorse',
+    'passwd=hunter2',
+    'pwd=hunter2',
     'token=abc123def456ghi789',
     'api_key=ABCDEF0123456789',
+    'api key = ABCDEF0123456789',
     'secret: supersecretvalue123',
     'client_secret=0123456789abcdef',
+    'client secret is abcdefghijkl',
+    'auth token: abcdefghijklmnop',
+    'private_key=AAAAbbbbccccdddd',
     'passphrase=correct horse',
+    'credentials=abcdefghijklmnop',
   ]) {
     const redacted = redactSensitiveText(`auth failed ${secret}`);
     assert.match(redacted, /auth failed/);
     assert.equal(redacted.includes(secret), false, `${secret} leaked`);
-    assert.equal(/hunter2|abc123def456|ABCDEF0123456789|supersecretvalue123|0123456789abcdef/.test(redacted), false, `${secret} value leaked`);
+    assert.equal(
+      /hunter2|abc123def456|ABCDEF0123456789|supersecretvalue123|0123456789abcdef|AAAAbbbb|correct horse|abcdefghijklmnop/.test(redacted),
+      false,
+      `${secret} value leaked`,
+    );
   }
+});
+
+test('an ordinary decisive sentence is not eaten by the credential rules', () => {
+  for (const reason of [
+    'host retired after water damage',
+    'the worker is offline',
+    'token bucket exhausted',
+    'password rotation required',
+    'the api key file was missing',
+    'kept secret from the operator',
+  ]) {
+    assert.equal(sanitizeOperatorText(reason, { fallback: 'fallback' }), reason);
+  }
+});
+
+test('a model identifier is not mistaken for a hostname', () => {
+  // Regression for M77-PRIV-001 rework 3: the earlier dotted-host rule ate the
+  // vendor/version part of a model id. A model id must survive free text and the
+  // structured model field while a real hostname still does not.
+  for (const model of ['gpt-5-codex', 'gpt-5.1-codex', 'claude-3-5-sonnet', 'gemini-1.5-flash', 'gpt-5.6-terra']) {
+    assert.equal(redactSensitiveText(`engine ${model} ready`), `engine ${model} ready`);
+  }
+  assert.equal(redactSensitiveText('connect to app.internal refused').includes('app.internal'), false);
 });
 
 test('a named host assignment is removed as a topology fact', () => {
@@ -161,9 +197,51 @@ test('long text is bounded rather than persisted unbounded', () => {
 test('an identifier keeps only the characters an identifier may contain', () => {
   assert.equal(sanitizeIdentifier('codex', { fallback: 'unknown-engine' }), 'codex');
   assert.equal(sanitizeIdentifier('gpt-5.1-codex', { fallback: 'unknown-model' }), 'gpt-5.1-codex');
-  // A path or token typed into an identifier is reduced to identifier characters.
-  assert.equal(sanitizeIdentifier('/Users/example/secret', { fallback: 'unknown-engine' }), 'Usersexamplesecret');
+  // A path or token typed into an identifier is refused outright, never reduced
+  // to its punctuation-stripped characters.
+  assert.equal(sanitizeIdentifier('/Users/example/secret', { fallback: 'unknown-engine' }), 'unknown-engine');
   assert.equal(sanitizeIdentifier('///', { fallback: 'unknown-engine' }), 'unknown-engine');
+});
+
+test('a structured identifier is category-aware, so a bypass by punctuation stripping is impossible', () => {
+  // M77-PRIV-001 rework 3: removing punctuation alone left the credential value
+  // intact (`password=hunter2correcthorse` -> `passwordhunter2correcthorse`) and
+  // a machine hostname in the structured fields. Each category now has a
+  // positive safe shape, and the structural boundary rejects the rest.
+  assert.equal(
+    sanitizeIdentifier('password=hunter2correcthorse', { fallback: 'unknown-model' }),
+    'unknown-model',
+    'a credential assignment never survives as an identifier',
+  );
+  assert.equal(
+    sanitizeIdentifier('token:abc123def456', { fallback: 'unknown-model' }),
+    'unknown-model',
+    'a credential assignment never survives as an identifier',
+  );
+  for (const host of ['buildbox-07', 'somehost.local', 'worker.node1.tailnet.example']) {
+    assert.equal(sanitizeIdentifier(host, { fallback: 'unknown-engine' }), 'unknown-engine', `${host} must not be an engine`);
+    assert.equal(sanitizeIdentifier(host, { fallback: 'unknown-capability' }), 'unknown-capability', `${host} must not be a capability`);
+  }
+  // An engine and a capability are lowercase word enums; a hostname-shaped token
+  // (`buildbox-07`) is not, but a real one is.
+  assert.equal(sanitizeIdentifier('codex', { fallback: 'unknown-engine', kind: 'engine' }), 'codex');
+  assert.equal(sanitizeIdentifier('agent-run', { fallback: 'unknown-capability', kind: 'capability' }), 'agent-run');
+  assert.equal(sanitizeIdentifier('buildbox-07', { fallback: 'unknown-engine', kind: 'engine' }), 'unknown-engine');
+  // A model id keeps its vendor/version characters; a hostname or credential does not.
+  assert.equal(sanitizeIdentifier('gpt-5.1-codex', { fallback: 'unknown-model', kind: 'model' }), 'gpt-5.1-codex');
+  assert.equal(sanitizeIdentifier('somehost.local', { fallback: 'unknown-model', kind: 'model' }), 'unknown-model');
+  assert.equal(sanitizeIdentifier('sk-live-abcdefghijklmnopqrst', { fallback: 'unknown-model', kind: 'model' }), 'unknown-model');
+  // A digest is opaque hex only, so legacy PEM/key material cannot pass.
+  assert.equal(sanitizeIdentifier('a'.repeat(64), { fallback: '', kind: 'digest' }), 'a'.repeat(64));
+  assert.equal(
+    sanitizeIdentifier('-----BEGIN OPENSSH PRIVATE KEY-----AAAAsecretbodyAAAA-----END OPENSSH PRIVATE KEY-----', {
+      fallback: '',
+      kind: 'digest',
+    }),
+    '',
+    'a legacy PEM body must not survive as an identity digest',
+  );
+  assert.equal(sanitizeIdentifier('legacy-digest', { fallback: '', kind: 'digest' }), '', 'a non-hex digest is refused');
 });
 
 test('a protocol version is a bounded token or nothing', () => {

@@ -493,6 +493,182 @@ try {
     check('M77-PRIV-001', 'a legacy durable reason is sanitized on the wire', legacyWire.includes(genericPath));
     check('M77-PRIV-001', 'a legacy invalid protocol version is refused, not echoed', legacyWire.includes('/srv/leak'));
     check('M77-PRIV-001', 'the legacy decisive reason survives to the wire', !legacyWire.includes('retired'));
+
+    // -----------------------------------------------------------------------
+    // M77-PRIV-001 category-aware boundary (rework 3).
+    //
+    // The previous rework removed punctuation, so a named credential value and
+    // a machine hostname survived as identifier characters. Each category now
+    // has an independent adversarial probe plus a mutation-strength check: the
+    // sanitizer is applied twice, and its output is fed back with the punctuation
+    // removed, to prove that no stripping or re-entry can recover the secret.
+    // -----------------------------------------------------------------------
+    const { sanitizeIdentifier } = await import('../src/environment/privacy.ts');
+    const credentialVariants = [
+      'password=hunter2correcthorse',
+      'password is hunter2correcthorse',
+      'password: hunter2correcthorse',
+      'passwd=hunter2',
+      'pwd=hunter2',
+      'passphrase=correct horse',
+      'private_key=AAAAbbbbccccdddd',
+      'private key = AAAAbbbbccccdddd',
+      'api_key=ABCDEF0123456789',
+      'api key = ABCDEF0123456789',
+      'access-key: abcdefghijklmnop',
+      'client_secret=0123456789abcdef',
+      'client secret is abcdefghijkl',
+      'auth_token=abcdefghijklmnop',
+      'credentials=abcdefghijklmnop',
+      'secret: supersecretvalue123',
+      'token=abc123def456ghi789',
+    ];
+    const categories = ['engine', 'model', 'capability', 'digest', 'generic'] as const;
+    for (const secret of credentialVariants) {
+      for (const kind of categories) {
+        const sanitized = sanitizeIdentifier(secret, { fallback: 'safe-placeholder', kind });
+        // Mutation strength: neither the original value nor the value with the
+        // punctuation removed may survive, in one pass or two.
+        const mutated = sanitized.replace(/[^A-Za-z0-9]/g, '');
+        const secretMutated = secret.replace(/[^A-Za-z0-9]/g, '');
+        const leaked =
+          sanitized.includes(secret) ||
+          sanitized.includes(secretMutated) ||
+          mutated.includes('hunter2correcthorse') ||
+          mutated.includes('ABCDEF0123456789') ||
+          mutated.includes('supersecretvalue123') ||
+          mutated.includes('AAAAbbbb');
+        const reentered = sanitizeIdentifier(sanitized, { fallback: 'safe-placeholder', kind });
+        check('M77-PRIV-001', `a named credential never survives as a ${kind} identifier (${secret})`, leaked);
+        check('M77-PRIV-001', `an identifier sanitiser is idempotent for a ${kind} (${secret})`, reentered !== sanitized);
+      }
+    }
+
+    // A machine hostname must not pass as a structured identifier in any
+    // category, but a real engine/capability/model must keep working.
+    for (const host of ['buildbox-07', 'somehost.local', 'worker.node1.tailnet.example', '10.0.0.5', '/srv/node/01']) {
+      for (const kind of categories) {
+        check(
+          'M77-PRIV-001',
+          `a hostname/address/path never survives as a ${kind} identifier (${host})`,
+          sanitizeIdentifier(host, { fallback: 'safe-placeholder', kind }).includes(host),
+        );
+      }
+    }
+    check(
+      'M77-PRIV-001',
+      'a real engine, capability, and model still pass the category boundary',
+      sanitizeIdentifier('codex', { fallback: 'x', kind: 'engine' }) !== 'codex' ||
+        sanitizeIdentifier('agent-run', { fallback: 'x', kind: 'capability' }) !== 'agent-run' ||
+        sanitizeIdentifier('gpt-5.1-codex', { fallback: 'x', kind: 'model' }) !== 'gpt-5.1-codex' ||
+        sanitizeIdentifier('gpt-4', { fallback: 'x', kind: 'model' }) !== 'gpt-4' ||
+        sanitizeIdentifier('claude-3-5-sonnet', { fallback: 'x', kind: 'model' }) !== 'claude-3-5-sonnet',
+    );
+
+    // A legacy durable identity digest that is not a safe one-way digest (a PEM
+    // body, a public key) must be replaced, never echoed after normalization.
+    const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsecretbodyAAAA\n-----END OPENSSH PRIVATE KEY-----';
+    const legacyKey = normalizeEnrollment({
+      id: 'legacy-key',
+      environmentInstanceId: 'env-falsify',
+      displayName: 'Env',
+      status: 'revoked',
+      everApproved: true,
+      worker: {
+        identityDigest: pem,
+        platform: 'macos',
+        capabilityRequests: [],
+        engineFacts: [{ engine: 'codex', installed: true, authenticated: true, models: [] }],
+      },
+      capabilityPermissions: {},
+      invalidatedIdentityDigests: [pem],
+      requiresFreshIdentity: false,
+      createdAt: 1,
+      updatedAt: 1,
+      decisions: [{ kind: 'revoked', actor: 'operator', at: 1, reason: 'retired' }],
+    } as unknown as EnvironmentEnrollment);
+    const legacyKeyWire = JSON.stringify(toEnrollmentView(legacyKey));
+    check('M77-PRIV-001', 'a legacy PEM identity digest is replaced, not echoed', legacyKeyWire.includes('secretbody'));
+    check('M77-PRIV-001', 'a legacy PEM digest does not leak its PEM markers', /BEGIN OPENSSH/.test(legacyKeyWire));
+    check('M77-PRIV-001', 'a legacy invalidated digest does not leak key material', legacyKey.invalidatedIdentityDigests.length !== 0);
+
+    // A legacy decision actor must be re-sanitized, and legacy worker fields must
+    // not carry a host/path/credential to the read and wire projections.
+    const legacyActor = normalizeEnrollment({
+      id: 'legacy-actor',
+      environmentInstanceId: 'env-falsify',
+      displayName: ordinaryHost,
+      status: 'revoked',
+      everApproved: true,
+      worker: {
+        identityDigest: workerIdentityFixture().digest,
+        platform: 'macos',
+        protocolVersion: '2.1',
+        capabilityRequests: [genericPath],
+        engineFacts: [{ engine: `codex ${ordinaryHost}`, installed: true, authenticated: false, models: [genericPath] }],
+      },
+      capabilityPermissions: { 'agent-run': true },
+      invalidatedIdentityDigests: [],
+      requiresFreshIdentity: false,
+      createdAt: 1,
+      updatedAt: 1,
+      decisions: [
+        { kind: 'revoked', actor: `operator@${ordinaryHost} ${genericPath} ${namedSecret}`, at: 1, reason: `retired ${ordinaryHost}` },
+      ],
+    } as unknown as EnvironmentEnrollment);
+    const legacyActorWire = JSON.stringify(toEnrollmentView(legacyActor));
+    check('M77-PRIV-001', 'a legacy decision actor is re-sanitized', /operator@|\/srv\/|hunter2/.test(legacyActorWire));
+    check(
+      'M77-PRIV-001',
+      'a legacy worker engine/model field drops a host/path',
+      JSON.stringify(legacyActor.worker.engineFacts).includes(ordinaryHost) ||
+        JSON.stringify(legacyActor.worker.engineFacts).includes(genericPath),
+    );
+    check(
+      'M77-PRIV-001',
+      'a legacy capability request drops a path',
+      legacyActor.worker.capabilityRequests.some((capability) => capability.includes('srv')),
+    );
+    check('M77-PRIV-001', 'the legacy actor-sanitized reason keeps its decisive text', !legacyActorWire.includes('retired'));
+
+    // A legacy readiness row is sanitized on the readiness wire projection too,
+    // not only the enrollment view. A raw durable document handed straight to
+    // the projection must not leak a host, path, address, credential, or an
+    // invalid protocol version in any engine, model, capability, or free text.
+    const { toEnvironmentReadinessView } = await import('../src/web/views.ts');
+    const legacyReadinessWire = JSON.stringify(
+      toEnvironmentReadinessView({
+        environmentInstanceId: 'env-falsify',
+        readiness: {
+          enrollmentStatus: 'approved',
+          connection: { state: 'online' },
+          compatibility: {
+            state: 'incompatible',
+            workerProtocolVersion: '2.1 /srv/leak',
+            detail: `mismatch at ${genericPath} on ${ordinaryHost} with ${namedSecret}`,
+          },
+          capabilities: [{ name: genericPath, permission: 'allowed', required: true }],
+          engines: [
+            {
+              engine: ordinaryHost,
+              installed: true,
+              readiness: 'ready',
+              required: true,
+              models: { state: 'available', models: [genericPath, ordinaryHost] },
+            },
+          ],
+          probe: { at: 1, latencyMs: 1, protocolOk: true, enginesOk: true, summary: `ok ${genericPath} ${namedSecret}` },
+          workSafety: { state: 'clear' },
+        },
+        summary: { level: 'red', reason: 'blocked' },
+      }),
+    );
+    check('M77-PRIV-001', 'a legacy readiness engine drops a hostname', legacyReadinessWire.includes(ordinaryHost));
+    check('M77-PRIV-001', 'a legacy readiness model drops a path', legacyReadinessWire.includes(genericPath));
+    check('M77-PRIV-001', 'a legacy readiness capability drops a path', legacyReadinessWire.includes(genericPath));
+    check('M77-PRIV-001', 'a legacy readiness detail drops a credential', legacyReadinessWire.includes('hunter2'));
+    check('M77-PRIV-001', 'a legacy readiness protocol version is refused, not echoed', legacyReadinessWire.includes('/srv/leak'));
+    check('M77-PRIV-001', 'a legacy readiness probe summary is sanitized', legacyReadinessWire.includes('hunter2'));
   }
 
   process.stdout.write(

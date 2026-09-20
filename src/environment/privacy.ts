@@ -21,20 +21,44 @@
 
 /** Categories this boundary removes before text can be persisted or returned. */
 const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: string }[] = [
-  // Private key material first: its body must never be partially exposed.
+  // Private key material first: its body must never be partially exposed. A
+  // PEM block is removed whole, before any keyword rule can leave its body.
   {
     pattern: /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,
     replacement: '<redacted-private-key>',
   },
-  { pattern: /-----BEGIN [A-Z ]+-----/g, replacement: '<redacted-pem-block>' },
-  { pattern: /\bprivate[ _-]?key\b/gi, replacement: '<redacted-private-key>' },
-  // Credential assignments: the keyword names the secret and the value follows.
-  // A named host is the ordinary-hostname case, since a bare word is
-  // indistinguishable from prose without this label.
+  { pattern: /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
+  { pattern: /-----BEGIN [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
+  // A named credential assignment is removed as a **whole** key/value pair, not
+  // punctuation-stripped: the keyword names the secret and the value must not
+  // survive in any form. The separator may be `=` or `:` (optionally spaced) and
+  // the keyword itself may contain a space (`api key`, `private key`);
+  // `passphrase`/`passcode` are phrases, so their value may span a few words or
+  // follow a copula. A bare-space separator is kept deliberately narrow in the
+  // last rule (a quoted value or a long unbroken run) so an ordinary sentence
+  // like "token bucket exhausted" or "password rotation required" survives.
+  //
+  // These run before the standalone `private key` keyword rule so
+  // `private_key=secret` is removed entirely rather than leaving the value.
   {
-    pattern: /\b(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|credentials?)\b\s*[:=]\s*[^\s,;]+/gi,
+    pattern: /\b(?:passphrase|passcode)\b\s*(?::|=|is|was|are|were)\s*(?:"[^"]*"|'[^']*'|[^\s,;]+(?:\s+[^\s,;]+){0,3})/gi,
     replacement: '<redacted-credential>',
   },
+  {
+    pattern: /\b(?:password|passwd|pwd|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+    replacement: '<redacted-credential>',
+  },
+  {
+    pattern: /\b(?:password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s+(?:is|was|are|were)\s+(?:"[^"]*"|'[^']*'|\S{12,})/gi,
+    replacement: '<redacted-credential>',
+  },
+  {
+    pattern: /\b(?:password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s+(?:"[^"]*"|'[^']*'|\S{12,})/gi,
+    replacement: '<redacted-credential>',
+  },
+  { pattern: /\bprivate[ _-]?key\b/gi, replacement: '<redacted-private-key>' },
+  // A named host is the ordinary-hostname case, since a bare word is
+  // indistinguishable from prose without this label.
   {
     pattern: /\b(?:host|hostname|server|machine|node|port)\b\s*[:=]\s*[^\s,;]+/gi,
     replacement: '<redacted-host>',
@@ -66,10 +90,14 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   { pattern: /\b(?:[A-Za-z0-9-]+\.)+(?:local|internal|lan|home|corp|intranet|localdomain)\b/gi, replacement: '<redacted-host>' },
   // Any dotted host, even one whose suffix is not a known private one: a
   // free-text reason has no legitimate FQDN, and a decisive reason does not need
-  // one to stay decisive.
-  { pattern: /\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b/g, replacement: '<redacted-host>' },
-  // A machine-style bare hostname, which carries a numeric suffix (`node-01`).
-  { pattern: /\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{1,5}\b/g, replacement: '<redacted-host>' },
+  // one to stay decisive. The boundaries stop a model identifier like
+  // `gpt-5.6-terra` (whose internal `6.terra` is not a host) from matching.
+  { pattern: /(?<![\w.-])(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}(?![\w.-])/g, replacement: '<redacted-host>' },
+  // A machine-style bare hostname, which carries a multi-digit numeric suffix
+  // (`buildbox-07`, `node-01`). Two or more digits are required so a versioned
+  // model id (`gpt-4`) is not mistaken for a host, while the boundaries keep a
+  // dotted model id (`gpt-5.1-codex`) and an ordinary hyphenated token intact.
+  { pattern: /(?<![\w.-])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{2,}(?![\w.-])/g, replacement: '<redacted-host>' },
   { pattern: /\blocalhost\b/gi, replacement: '<redacted-host>' },
   // Raw diagnostics: stack frames, node internals, and bare stderr markers.
   { pattern: /^\s+at\s+.*(?::\d+:\d+\)?)\s*$/gm, replacement: '' },
@@ -136,15 +164,76 @@ export const DEFAULT_DECISION_REASON =
   'The enrollment decision was recorded; its detail was withheld as sensitive.';
 
 /**
- * Keep only the characters a neutral engine, capability, or model identifier may
- * contain. These strings are not free text: they appear in readiness reasons and
- * the wire contract, so a path or token typed into one is dropped rather than
- * displayed as if it were an identifier.
+ * The category a structured identifier belongs to.
+ *
+ * Each category has its own positive, safe shape, so a hostname, path, address,
+ * or credential cannot pass merely because it happens to use identifier
+ * characters. An unknown category falls back to the conservative generic shape.
  */
-export function sanitizeIdentifier(value: string, options: { readonly fallback: string; readonly maxLength?: number }): string {
+export type IdentifierKind = 'engine' | 'model' | 'capability' | 'digest' | 'generic';
+
+export interface SanitizeIdentifierOptions {
+  readonly fallback: string;
+  readonly maxLength?: number;
+  /** The identifier category whose safe shape is enforced. Defaults to generic. */
+  readonly kind?: IdentifierKind;
+}
+
+/**
+ * Keep only an identifier that matches its category's safe shape.
+ *
+ * An identifier is not free text: it has a small, constrained shape and no
+ * legitimate reason to carry a hostname, path, address, credential, or key
+ * material. The boundary is therefore applied in two stages: first the same
+ * structural redaction used for free text, and then a positive shape check for
+ * the category. If either stage rejects the value, the product-owned fallback is
+ * used — never a punctuation-stripped version that could still contain a
+ * credential value (e.g. `password=hunter2correcthorse` must not become
+ * `passwordhunter2correcthorse`).
+ *
+ * - `digest` is an opaque one-way hash: lowercase or uppercase hex only, so a
+ *   legacy PEM body or a public key cannot survive as an "identity digest".
+ * - `engine` and `capability` are lowercase word enums, so a machine hostname
+ *   (`buildbox-07`) or an address cannot masquerade as one.
+ * - `model` keeps the vendor/version characters a model id really uses, but the
+ *   structural redaction still refuses a hostname or credential in that field.
+ */
+export function sanitizeIdentifier(value: string, options: SanitizeIdentifierOptions): string {
   const maxLength = options.maxLength ?? 64;
-  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '').slice(0, maxLength);
-  return cleaned === '' ? options.fallback : cleaned;
+  const kind = options.kind ?? 'generic';
+  const trimmed = (value ?? '').trim();
+  // Stage 1: the structural boundary. A named credential assignment, a
+  // hostname/FQDN, a host path, an address, a URL, or key material is rejected
+  // outright rather than reduced to its non-punctuation characters.
+  const redacted = redactSensitiveText(trimmed);
+  if (redacted !== trimmed || /<redacted-[a-z-]+>/i.test(redacted)) return options.fallback;
+  // Stage 2: drop characters no identifier category may contain and bound it.
+  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]/g, '').slice(0, maxLength);
+  if (cleaned === '') return options.fallback;
+  if (!matchesIdentifierShape(cleaned, kind)) return options.fallback;
+  return cleaned;
+}
+
+/** Whether a cleaned identifier matches the positive shape for its category. */
+function matchesIdentifierShape(value: string, kind: IdentifierKind): boolean {
+  switch (kind) {
+    case 'digest':
+      // An opaque one-way hash. A PEM body, a base64 key, or a hostname is not.
+      return /^[A-Fa-f0-9]{16,200}$/.test(value);
+    case 'engine':
+    case 'capability':
+      // A lowercase word enum: `codex`, `pi`, `agent-run`. No digits-only segment,
+      // so `buildbox-07` and `host-12` are not accepted as an engine/capability.
+      return /^[a-z][a-z0-9]*(?:[._-][a-z][a-z0-9]*)*$/.test(value);
+    case 'model':
+      // A model id may carry version digits (`gpt-5.1-codex`, `claude-3-5-sonnet`).
+      // The structural redaction has already rejected a hostname, address, or
+      // credential in this field, so no extra shape narrowing is needed here.
+      return /^[A-Za-z][A-Za-z0-9._-]*$/.test(value);
+    case 'generic':
+    default:
+      return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+  }
 }
 
 /**

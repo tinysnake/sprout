@@ -57,13 +57,15 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
         : {}),
     },
     engines: observed.engines.map((engine) => ({
-      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
       installed: engine.installed,
       readiness: engine.readiness,
       required: engine.required,
       models: {
         state: engine.models.state,
-        models: engine.models.models.map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
+        models: engine.models.models.map((model) =>
+          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+        ),
       },
     })),
   };

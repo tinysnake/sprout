@@ -178,20 +178,22 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
       // text: a path or token typed into one is dropped rather than preserved in
       // the durable record or the readiness reason.
       capabilityRequests: input.capabilityRequests.map((capability) =>
-        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability', kind: 'capability' }),
       ),
       engineFacts: input.engineFacts.map((engine) => ({
         installed: engine.installed,
         authenticated: engine.authenticated,
-        models: engine.models.map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
-        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+        models: engine.models.map((model) =>
+          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+        ),
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
       })),
     },
     invalidatedIdentityDigests: [],
     requiresFreshIdentity: false,
     capabilityPermissions: Object.fromEntries(
       input.capabilityRequests.map((capability) => [
-        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability', kind: 'capability' }),
         false,
       ]),
     ),
@@ -457,28 +459,34 @@ export function normalizeEnrollment(enrollment: EnvironmentEnrollment): Environm
     worker: {
       ...workerRest,
       platform: SUPPORTED_PLATFORMS.has(enrollment.worker.platform) ? enrollment.worker.platform : 'unknown',
-      identityDigest: sanitizeIdentifier(enrollment.worker.identityDigest, { fallback: '', maxLength: 200 }),
+      identityDigest: sanitizeIdentifier(enrollment.worker.identityDigest, {
+        fallback: '',
+        maxLength: 200,
+        kind: 'digest',
+      }),
       ...(protocolVersion !== undefined ? { protocolVersion } : {}),
       capabilityRequests: (enrollment.worker.capabilityRequests ?? []).map((capability) =>
-        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability', kind: 'capability' }),
       ),
       engineFacts: (enrollment.worker.engineFacts ?? []).map((engine) => ({
         installed: engine.installed === true,
         authenticated: engine.authenticated === true,
-        models: (engine.models ?? []).map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
-        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+        models: (engine.models ?? []).map((model) =>
+          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+        ),
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
       })),
     },
     capabilityPermissions: Object.fromEntries(
       Object.entries(enrollment.capabilityPermissions ?? {}).map(([capability, allowed]) => [
-        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability', kind: 'capability' }),
         allowed === true,
       ]),
     ),
     invalidatedIdentityDigests: Array.isArray(enrollment.invalidatedIdentityDigests)
-      ? enrollment.invalidatedIdentityDigests.map((digest) =>
-          sanitizeIdentifier(digest, { fallback: '', maxLength: 200 }),
-        )
+      ? enrollment.invalidatedIdentityDigests
+          .map((digest) => sanitizeIdentifier(digest, { fallback: '', maxLength: 200, kind: 'digest' }))
+          .filter((digest) => digest !== '')
       : [],
     requiresFreshIdentity: enrollment.requiresFreshIdentity === true,
     decisions: (enrollment.decisions ?? []).map(sanitizeDecision),
@@ -502,8 +510,15 @@ const DECISION_REASON_FALLBACKS: Readonly<Record<EnrollmentDecisionKind, string>
   'duplicate-new-key-refused': 'A different Worker key cannot replace the existing binding; reset the enrollment first.',
 };
 
-/** Re-apply the privacy boundary to one durable decision reason. */
+/** Re-apply the privacy boundary to one durable decision reason and actor. */
 function sanitizeDecision(decision: EnrollmentDecision): EnrollmentDecision {
   const fallback = DECISION_REASON_FALLBACKS[decision.kind] ?? DEFAULT_DECISION_REASON;
-  return { ...decision, reason: sanitizeOperatorText(decision.reason, { fallback }) };
+  return {
+    ...decision,
+    // The actor is a structured enum (`operator`, `worker`), never free text: a
+    // legacy row that stored a host path, credential, or address in it is
+    // replaced by the product-owned actor rather than partially echoed.
+    actor: sanitizeIdentifier(decision.actor ?? '', { fallback: 'operator', maxLength: 64 }),
+    reason: sanitizeOperatorText(decision.reason, { fallback }),
+  };
 }
