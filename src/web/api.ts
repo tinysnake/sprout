@@ -1,14 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { TLSSocket } from 'node:tls';
+import { createHash } from 'node:crypto';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
-import type { AgentRun } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
+import { composeApiRouters, type ApiRouter } from './router.ts';
 import {
   summarizeRunHistory,
   toMessageView,
@@ -76,6 +77,8 @@ export interface RunApiOptions {
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
   /** Interval for SSE keep-alive comments. Exposed so tests need not wait. */
   readonly keepAliveMs?: number;
+  /** Additive M2 domain routers, run after transport authorization. */
+  readonly routers?: readonly ApiRouter[];
 }
 
 export interface RunApi {
@@ -88,6 +91,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
   const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
+  const additiveRouters = composeApiRouters(options.routers ?? []);
+  const eventLog = new SseEventLog();
+  // One subscription fans out through the cursor log. This avoids one
+  // orchestrator subscription per browser and gives reconnects a stable replay
+  // boundary without changing the durable Run/event contract.
+  const unsubscribeRunEvents = orchestrator.subscribe((run, replaySequence) =>
+    eventLog.publish(toRunView(run), replaySequence),
+  );
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
       sendJson(response, 500, {
@@ -99,6 +110,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
+    // A request stream is one-shot. Routers and preserved routes share this
+    // memoized reader so an exploratory router cannot consume another route's
+    // command payload.
+    const readBody = memoizedJsonReader(request);
     let browserSession: AuthenticatedBrowserSession | undefined;
 
     // Credential exchange is the only anonymous API operation. The credential
@@ -109,7 +124,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 503, { error: 'operator access is unavailable; initialize it on the host' });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const credential = typeof body.credential === 'string' ? body.credential : '';
       const signedIn = await auth.signIn(credential);
       if (!signedIn) {
@@ -174,10 +189,24 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    if (
+      await additiveRouters.handle({
+        method: request.method,
+        response,
+        pathname: url.pathname,
+        searchParams: url.searchParams,
+        segments,
+        ...(browserSession !== undefined ? { operatorSessionId: browserSession.id } : {}),
+        readBody,
+      })
+    ) {
+      return;
+    }
+
     // POST /api/messages — deliver one Message to a project channel and wake
     // whoever the M1 wake contract addresses.
     if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const channel = body.channel;
       const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
@@ -276,7 +305,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // POST /api/tasks — create a durable multi-run Task (#28).
     if (request.method === 'POST' && url.pathname === '/api/tasks' && tasks) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const title = typeof body.title === 'string' ? body.title : '';
       const goal = typeof body.goal === 'string' ? body.goal : '';
@@ -346,7 +375,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : undefined;
       const prompt = typeof body.prompt === 'string' ? body.prompt : undefined;
       try {
@@ -372,7 +401,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
       try {
@@ -397,7 +426,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'recovery' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
       catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
@@ -444,7 +473,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const status = parseTaskStatus(body.status);
       if (status === 'invalid') {
         sendJson(response, 400, { error: `unknown task status: ${String(body.status)}` });
@@ -493,7 +522,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // POST /api/runs — submit a request to an agent.
     if (request.method === 'POST' && url.pathname === '/api/runs') {
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
       if (agentId === '' || prompt === '') {
@@ -605,7 +634,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/events — every run's progress, pushed as it changes.
     if (request.method === 'GET' && url.pathname === '/api/events') {
-      openEventStream(request, response);
+      await openEventStream(request, response);
       return;
     }
 
@@ -621,13 +650,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     sendJson(response, 404, { error: 'not found' });
   }
 
-  async function listRuns(): Promise<readonly AgentRun[]> {
-    // The orchestrator merges live state with persisted runs, so a restarted
-    // process shows previous work instead of an empty history.
-    return orchestrator.list();
-  }
-
-  function openEventStream(request: IncomingMessage, response: ServerResponse): void {
+  async function openEventStream(request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -639,13 +662,24 @@ export function createRunApi(options: RunApiOptions): RunApi {
     response.flushHeaders();
     streams.add(response);
 
-    const unsubscribe = orchestrator.subscribe((run) => {
-      writeEvent(response, 'run', toRunView(run));
-    });
-
-    void listRuns().then((runs) => {
-      for (const run of runs) writeEvent(response, 'run', toRunView(run));
-    });
+    // Hydrate before interpreting the cursor. The cursor identifies a durable
+    // projection, not this API process, so it remains meaningful after a
+    // restart and can retain its replay boundary.
+    // HTTP history remains newest-first. SSE uses the store's monotonic write
+    // positions instead: observer arrival and restart hydration therefore share
+    // one forward order even when timestamps tie or ids sort against arrival.
+    for (const snapshot of await orchestrator.replaySnapshots()) {
+      eventLog.publish(toRunView(snapshot.run), snapshot.sequence);
+    }
+    const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
+    const send = (record: SseRecord) => {
+      if (response.writableEnded) return;
+      writeEvent(response, record.event, record.data, record.cursor);
+    };
+    // Replay before attaching a listener. Both operations are synchronous, so
+    // there is no missed interval between the cursor snapshot and subscription.
+    for (const record of eventLog.after(cursor)) send(record);
+    const unsubscribe = eventLog.subscribe(send);
 
     const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
@@ -675,6 +709,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         // connections, and an SSE stream never ends by itself.
         for (const stream of streams) stream.end();
         streams.clear();
+        unsubscribeRunEvents();
         server.closeAllConnections?.();
         server.close((error) => (error ? reject(error) : resolve()));
       }),
@@ -718,8 +753,82 @@ function parseStringArray(value: unknown): readonly string[] | undefined {
   return value as readonly string[];
 }
 
-function writeEvent(response: ServerResponse, event: string, data: unknown): void {
-  response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+function writeEvent(response: ServerResponse, event: string, data: unknown, cursor?: string): void {
+  response.write(`${cursor === undefined ? '' : `id: ${cursor}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+interface SseRecord {
+  readonly cursor: string;
+  readonly event: 'run';
+  readonly data: ReturnType<typeof toRunView>;
+  readonly replaySequence: number;
+}
+
+/**
+ * A transport replay log over immutable Web projections.
+ *
+ * Run events remain durable in the Run store; this log does not create another
+ * domain event source. It assigns each distinct durable snapshot a stable,
+ * opaque cursor. A restart rebuilds its baseline from the durable Run store,
+ * preserving a cursor whose snapshot remains in that baseline.
+ */
+class SseEventLog {
+  readonly #records: SseRecord[] = [];
+  readonly #fingerprints = new Set<string>();
+  readonly #listeners = new Set<(record: SseRecord) => void>();
+
+  publish(data: ReturnType<typeof toRunView>, replaySequence: number): void {
+    const fingerprint = JSON.stringify(data);
+    if (this.#fingerprints.has(fingerprint)) return;
+    this.#fingerprints.add(fingerprint);
+    const record: SseRecord = {
+      cursor: durableEventCursor(fingerprint, replaySequence),
+      event: 'run',
+      data,
+      replaySequence,
+    };
+    this.#records.push(record);
+    for (const listener of this.#listeners) listener(record);
+  }
+
+  after(cursor: string | undefined): readonly SseRecord[] {
+    if (cursor === undefined) {
+      return this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence);
+    }
+    const boundary = this.#records.find((record) => record.cursor === cursor);
+    // An unknown but well-formed cursor is outside this replay log. Rehydrate
+    // from its safe boundary rather than treating it as a future position and
+    // suppressing every current or later durable snapshot.
+    return boundary === undefined
+      ? this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence)
+      : this.#records
+          .filter((record) => record.replaySequence > boundary.replaySequence)
+          .toSorted((left, right) => left.replaySequence - right.replaySequence);
+  }
+
+  subscribe(listener: (record: SseRecord) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+}
+
+function durableEventCursor(fingerprint: string, replaySequence: number): string {
+  return `v2:${replaySequence}:${createHash('sha256').update(fingerprint).digest('hex')}`;
+}
+
+function parseEventCursor(value: string | undefined): string | undefined {
+  return value !== undefined && /^(?:v1:[a-f0-9]{64}|v2:[1-9][0-9]*:[a-f0-9]{64})$/.test(value)
+    ? value
+    : undefined;
+}
+
+function memoizedJsonReader(request: IncomingMessage): () => Promise<Record<string, unknown>> {
+  let body: Promise<Record<string, unknown>> | undefined;
+  return () => {
+    body ??= readJson(request);
+    return body;
+  };
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {

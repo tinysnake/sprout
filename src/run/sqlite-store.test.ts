@@ -184,6 +184,26 @@ test('listing runs returns them newest first', async () => {
   store.close();
 });
 
+test('replay snapshots retain durable write order across equal timestamps and restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-replay-order-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ id: 'run-b', createdAt: 1_000 }));
+  await writer.save(sampleRun({ id: 'run-a', createdAt: 1_000 }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const snapshots = await reader.replaySnapshots();
+  reader.close();
+
+  assert.deepEqual(
+    snapshots.map((snapshot) => snapshot.run.id),
+    ['run-b', 'run-a'],
+    'store write order, not id order, is the restart replay order',
+  );
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.sequence), [1, 2]);
+});
+
 test('an unknown run is undefined rather than an error', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   assert.equal(await store.get('nope'), undefined);

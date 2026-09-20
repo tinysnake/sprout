@@ -6,7 +6,7 @@
  * any store test noticing:
  *
  * 1. **The physical schema is byte-identical.** Every table, column, declared
- *    type, primary key, `UNIQUE` constraint, and the one explicit index is
+ *    type, primary key, `UNIQUE` constraint, and explicit indexes are
  *    asserted literally, so a moved `CREATE TABLE` that quietly renames or
  *    reorders a column fails here.
  * 2. **The rehomed adapters and the shared handle address the same tables.** A
@@ -81,6 +81,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'hand_off', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'task_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'token_usage', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'replay_sequence', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
   environment_leases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
@@ -226,10 +227,16 @@ test('explicit indexes keep their names, tables, and column order', async () => 
     assert.deepEqual(
       indexes.map((index) => ({ name: index.name, tbl: index.tbl_name })),
       [
+        { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
         { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
         { name: 'task_run_links_by_task', tbl: 'task_run_links' },
       ],
     );
+
+    const replayColumns = store.db.prepare('PRAGMA index_info(agent_runs_replay_sequence_idx)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(replayColumns.map((column) => column.name), ['replay_sequence']);
 
     const sessionColumns = store.db.prepare('PRAGMA index_info(browser_sessions_active_idx)').all() as unknown as readonly {
       readonly name: string;

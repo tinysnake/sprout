@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 3;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 4;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -366,6 +366,33 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         UPDATE browser_sessions
         SET absolute_expires_at = created_at + ${BROWSER_SESSION_ABSOLUTE_LIFETIME_MS},
             idle_expires_at = MIN(last_seen_at + ${BROWSER_SESSION_IDLE_LIFETIME_MS}, created_at + ${BROWSER_SESSION_ABSOLUTE_LIFETIME_MS});
+      `);
+    },
+  },
+  {
+    fromVersion: 3,
+    toVersion: 4,
+    name: 'durable_run_replay_order',
+    migrate: (db) => {
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+      ).get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'replay_sequence')) {
+        db.exec('ALTER TABLE agent_runs ADD COLUMN replay_sequence INTEGER');
+      }
+      const rows = db.prepare(
+        'SELECT id FROM agent_runs WHERE replay_sequence IS NULL ORDER BY created_at ASC, id ASC',
+      ).all() as unknown as readonly { id: string }[];
+      const update = db.prepare('UPDATE agent_runs SET replay_sequence = ? WHERE id = ?');
+      let sequence = (db.prepare(
+        'SELECT COALESCE(MAX(replay_sequence), 0) AS sequence FROM agent_runs',
+      ).get() as { sequence: number }).sequence;
+      for (const row of rows) update.run(++sequence, row.id);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
+          ON agent_runs (replay_sequence)
       `);
     },
   },

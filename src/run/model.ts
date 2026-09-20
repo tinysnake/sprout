@@ -51,7 +51,11 @@ export interface AgentRun {
   readonly completedAt?: number;
 }
 
-export type RunObserver = (run: AgentRun) => void;
+/**
+ * `replaySequence` is the durable write position assigned before notification.
+ * It is transport metadata, not part of the AgentRun domain record.
+ */
+export type RunObserver = (run: AgentRun, replaySequence: number) => void;
 
 /**
  * The fact-form context attached to a run that moved to another environment.
