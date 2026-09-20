@@ -11,8 +11,12 @@
  * The redaction is **structural**: it removes the sensitive categories and keeps
  * the decisive operator-facing remainder, so a reason stays useful ("host
  * retired", "worker protocol 3.0 is newer than the maximum v2") while a leaked
- * path or credential is replaced by a bounded category placeholder. This Module
- * is deliberately free of `node:*` so the browser wire contract can import it.
+ * path or credential is replaced by a bounded category placeholder. Coverage is
+ * general rather than a list of known host roots: any absolute POSIX path, any
+ * dotted or machine-style hostname, and any `credential=value` assignment is
+ * removed, because the boundary exists precisely for the text nobody
+ * anticipated. This Module is deliberately free of `node:*` so the browser wire
+ * contract can import it.
  */
 
 /** Categories this boundary removes before text can be persisted or returned. */
@@ -23,7 +27,18 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
     replacement: '<redacted-private-key>',
   },
   { pattern: /-----BEGIN [A-Z ]+-----/g, replacement: '<redacted-pem-block>' },
-  { pattern: /\bPRIVATE KEY\b/gi, replacement: '<redacted-private-key>' },
+  { pattern: /\bprivate[ _-]?key\b/gi, replacement: '<redacted-private-key>' },
+  // Credential assignments: the keyword names the secret and the value follows.
+  // A named host is the ordinary-hostname case, since a bare word is
+  // indistinguishable from prose without this label.
+  {
+    pattern: /\b(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|credentials?)\b\s*[:=]\s*[^\s,;]+/gi,
+    replacement: '<redacted-credential>',
+  },
+  {
+    pattern: /\b(?:host|hostname|server|machine|node|port)\b\s*[:=]\s*[^\s,;]+/gi,
+    replacement: '<redacted-host>',
+  },
   // Credential-like tokens.
   { pattern: /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g, replacement: '<redacted-credential>' },
   { pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, replacement: '<redacted-credential>' },
@@ -32,9 +47,11 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: '<redacted-credential>' },
   { pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, replacement: '<redacted-token>' },
   { pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{12,}/g, replacement: 'Bearer <redacted-credential>' },
-  // Absolute host paths (home/root/system roots, Windows drives, UNC shares).
+  // Absolute host paths. The POSIX rule is general on purpose: any `/`-rooted
+  // path is a host path, so `/srv/...`, `/data/...`, and a bare `/secret` are
+  // removed rather than only the enumerated system roots.
   {
-    pattern: /(^|[\s"'(=`])((?:\/(?:Users|home|root|var|tmp|private|opt|etc|usr|mnt|Volumes|Applications)\/)[^\s"')`\]]*)/g,
+    pattern: /(^|[\s"'(=`])((?:\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*))/g,
     replacement: '$1<redacted-path>',
   },
   { pattern: /\b[A-Za-z]:\\[^\s"')`\]]*/g, replacement: '<redacted-path>' },
@@ -47,11 +64,17 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   // hex letter. A bare colon-separated decimal run (`12:30:45`) is left alone.
   { pattern: /\b(?:[0-9a-fA-F]{1,4}::(?:[0-9a-fA-F:]{0,30})|[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]*(?::[0-9a-fA-F]{0,4}){2,})/g, replacement: '<redacted-address>' },
   { pattern: /\b(?:[A-Za-z0-9-]+\.)+(?:local|internal|lan|home|corp|intranet|localdomain)\b/gi, replacement: '<redacted-host>' },
+  // Any dotted host, even one whose suffix is not a known private one: a
+  // free-text reason has no legitimate FQDN, and a decisive reason does not need
+  // one to stay decisive.
+  { pattern: /\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b/g, replacement: '<redacted-host>' },
+  // A machine-style bare hostname, which carries a numeric suffix (`node-01`).
+  { pattern: /\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{1,5}\b/g, replacement: '<redacted-host>' },
   { pattern: /\blocalhost\b/gi, replacement: '<redacted-host>' },
   // Raw diagnostics: stack frames, node internals, and bare stderr markers.
   { pattern: /^\s+at\s+.*(?::\d+:\d+\)?)\s*$/gm, replacement: '' },
   { pattern: /\bnode:internal\/[^\s"')`\]]*/g, replacement: '<redacted-diagnostic>' },
-  { pattern: /\b(?:raw stderr|stack trace)\b/gi, replacement: '<redacted-diagnostic>' },
+  { pattern: /\b(?:raw stderr|stack trace|internal\/modules)\/?[^\s"')`\]]*/gi, replacement: '<redacted-diagnostic>' },
 ];
 
 /**
@@ -104,6 +127,13 @@ export const DEFAULT_RESET_REASON = 'Human reset the enrollment; the old Worker 
 /** The fallback for a compatibility detail and a probe summary. */
 export const DEFAULT_COMPATIBILITY_DETAIL = 'The Worker protocol compatibility detail was withheld.';
 export const DEFAULT_PROBE_SUMMARY = 'Test summary withheld.';
+
+/**
+ * The fallback for a durable enrollment decision whose kind has no specific
+ * product-owned text (a legacy row, or a sanitized-to-nothing reason).
+ */
+export const DEFAULT_DECISION_REASON =
+  'The enrollment decision was recorded; its detail was withheld as sensitive.';
 
 /**
  * Keep only the characters a neutral engine, capability, or model identifier may

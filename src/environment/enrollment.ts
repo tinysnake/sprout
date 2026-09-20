@@ -17,6 +17,7 @@ import {
   sanitizeOperatorText,
   sanitizeIdentifier,
   sanitizeProtocolVersion,
+  DEFAULT_DECISION_REASON,
   DEFAULT_RESET_REASON,
   DEFAULT_REVOKE_REASON,
 } from './privacy.ts';
@@ -429,19 +430,80 @@ function recordDecision(enrollment: EnvironmentEnrollment, decision: EnrollmentD
 }
 
 /**
- * Read a durable enrollment document additively.
+ * Read a durable enrollment document additively and defensively.
  *
  * Older documents written before the identity-proof rework lack the
  * `invalidatedIdentityDigests` and `requiresFreshIdentity` fields. Defaulting
  * them here keeps an upgrade additive instead of turning a valid record into
  * `undefined`-shaped breakage; the stored document is not rewritten on read.
+ *
+ * Reading also re-applies the privacy boundary. A row written by an earlier
+ * build, or by an adapter that bypassed the service, can hold an unsanitized
+ * `displayName`, identity field, or decision reason; returning it verbatim would
+ * leak exactly the categories ADR-0009 forbids. The free text is therefore
+ * re-sanitized here as well as on write, an invalid protocol version is dropped
+ * rather than echoed, and an opaque digest/identifier is reduced to the
+ * characters such a value may contain. The product-owned fallback keeps the
+ * decisive fact when the whole value was sensitive.
  */
 export function normalizeEnrollment(enrollment: EnvironmentEnrollment): EnvironmentEnrollment {
+  const protocolVersion = sanitizeProtocolVersion(enrollment.worker.protocolVersion);
+  // Destructure the version out so an invalid one is dropped rather than left
+  // in place by the spread; an arbitrary string is refused, not echoed.
+  const { protocolVersion: _rawProtocolVersion, ...workerRest } = enrollment.worker;
   return {
     ...enrollment,
+    displayName: sanitizeOperatorText(enrollment.displayName, { fallback: 'Environment', maxLength: 120 }),
+    worker: {
+      ...workerRest,
+      platform: SUPPORTED_PLATFORMS.has(enrollment.worker.platform) ? enrollment.worker.platform : 'unknown',
+      identityDigest: sanitizeIdentifier(enrollment.worker.identityDigest, { fallback: '', maxLength: 200 }),
+      ...(protocolVersion !== undefined ? { protocolVersion } : {}),
+      capabilityRequests: (enrollment.worker.capabilityRequests ?? []).map((capability) =>
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+      ),
+      engineFacts: (enrollment.worker.engineFacts ?? []).map((engine) => ({
+        installed: engine.installed === true,
+        authenticated: engine.authenticated === true,
+        models: (engine.models ?? []).map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+      })),
+    },
+    capabilityPermissions: Object.fromEntries(
+      Object.entries(enrollment.capabilityPermissions ?? {}).map(([capability, allowed]) => [
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        allowed === true,
+      ]),
+    ),
     invalidatedIdentityDigests: Array.isArray(enrollment.invalidatedIdentityDigests)
-      ? [...enrollment.invalidatedIdentityDigests]
+      ? enrollment.invalidatedIdentityDigests.map((digest) =>
+          sanitizeIdentifier(digest, { fallback: '', maxLength: 200 }),
+        )
       : [],
     requiresFreshIdentity: enrollment.requiresFreshIdentity === true,
+    decisions: (enrollment.decisions ?? []).map(sanitizeDecision),
   };
+}
+
+/**
+ * The product-owned reason for each decision kind.
+ *
+ * A legacy or bypassing writer can leave a decision reason empty or entirely
+ * sensitive. Falling back to the kind's own product text keeps the decision
+ * explainable without weakening the redaction.
+ */
+const DECISION_REASON_FALLBACKS: Readonly<Record<EnrollmentDecisionKind, string>> = {
+  requested: 'Pending enrollment created in Web; awaiting Worker proof and Human approval.',
+  approved: 'Human approved the Worker identity and its capability permissions.',
+  revoked: DEFAULT_REVOKE_REASON,
+  reset: DEFAULT_RESET_REASON,
+  'duplicate-same-key': 'The known Worker identity reconnected.',
+  'identity-claimed': 'A newly generated Worker identity claimed the reset enrollment; fresh Human approval is required.',
+  'duplicate-new-key-refused': 'A different Worker key cannot replace the existing binding; reset the enrollment first.',
+};
+
+/** Re-apply the privacy boundary to one durable decision reason. */
+function sanitizeDecision(decision: EnrollmentDecision): EnrollmentDecision {
+  const fallback = DECISION_REASON_FALLBACKS[decision.kind] ?? DEFAULT_DECISION_REASON;
+  return { ...decision, reason: sanitizeOperatorText(decision.reason, { fallback }) };
 }

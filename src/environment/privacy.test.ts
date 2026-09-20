@@ -78,6 +78,50 @@ test('raw diagnostics are removed', () => {
   assert.equal(/raw stderr/i.test(redacted), false);
 });
 
+test('the boundary is general for paths, not a list of known host roots', () => {
+  // Regression for M77-PRIV-001 rework 2: `/srv/...` and `/data/...` are not
+  // system roots, but they are still absolute host paths.
+  for (const path of ['/srv/sprout/worker', '/data/volumes/secret', '/opt/app/conf', '/secret']) {
+    const redacted = redactSensitiveText(`failed at ${path} please retry`);
+    assert.equal(redacted.includes(path), false, `${path} leaked`);
+    assert.match(redacted, /failed at/);
+    assert.match(redacted, /please retry/);
+  }
+});
+
+test('ordinary and machine hostnames are removed, without eating a decisive reason', () => {
+  for (const host of ['buildbox-07', 'worker.node1.tailnet.example', 'app.internal', 'somehost.local']) {
+    const redacted = redactSensitiveText(`connect to ${host} refused`);
+    assert.equal(redacted.includes(host), false, `${host} leaked`);
+    assert.match(redacted, /refused/);
+  }
+  // A decisive reason that merely mentions a host is still decisive afterwards.
+  const retired = sanitizeOperatorText('host retired after water damage', { fallback: 'fallback' });
+  assert.equal(retired, 'host retired after water damage');
+});
+
+test('named credential assignments are removed whatever the secret characters are', () => {
+  for (const secret of [
+    'password=hunter2correcthorse',
+    'token=abc123def456ghi789',
+    'api_key=ABCDEF0123456789',
+    'secret: supersecretvalue123',
+    'client_secret=0123456789abcdef',
+    'passphrase=correct horse',
+  ]) {
+    const redacted = redactSensitiveText(`auth failed ${secret}`);
+    assert.match(redacted, /auth failed/);
+    assert.equal(redacted.includes(secret), false, `${secret} leaked`);
+    assert.equal(/hunter2|abc123def456|ABCDEF0123456789|supersecretvalue123|0123456789abcdef/.test(redacted), false, `${secret} value leaked`);
+  }
+});
+
+test('a named host assignment is removed as a topology fact', () => {
+  const redacted = redactSensitiveText('target host=worker-01 port=5174');
+  assert.equal(/worker-01/.test(redacted), false);
+  assert.equal(/5174/.test(redacted), false);
+});
+
 test('a decisive operator reason is preserved while sensitive parts are removed', () => {
   const sanitized = sanitizeOperatorText(
     'host retired after water damage; log at /Users/example/secret and token sk-live-abcdefghijklmnopqrst',

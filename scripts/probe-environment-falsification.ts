@@ -21,7 +21,8 @@
  * - M77-READY-001: an empty engine configuration must not fabricate a dual-engine
  *   requirement; only an explicit requirement may block work.
  * - M77-PRIV-001: free-form reasons/details/summaries must be sanitized before
- *   persistence and the wire contract.
+ *   persistence and the wire contract, including generic absolute paths,
+ *   ordinary hostnames, named credential assignments, and legacy durable rows.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -32,7 +33,7 @@ import { EnvironmentEnrollmentService } from '../src/environment/enrollment-serv
 import { InMemoryEnrollmentStore } from '../src/environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../src/environment/readiness-store.ts';
 import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
-import { generateWorkerIdentity } from '../src/environment/worker-proof.ts';
+import { generateWorkerIdentity, WorkerProofAuthority } from '../src/environment/worker-proof.ts';
 import type { EnvironmentEnrollment } from '../src/environment/enrollment.ts';
 import { WorkerSupervisor, EnvironmentWorkerRegistry } from '../src/worker/supervisor.ts';
 import type { EngineAdapter, EngineSession, EngineTurn, StartSessionRequest } from '../src/engine/port.ts';
@@ -237,6 +238,28 @@ try {
     });
     check('M77-AUTH-003', 'a valid proof still reconnects (no over-blocking)', outcome.outcome !== 'reconnected');
     check('M77-AUTH-003', 'the public key and signature are never retained', JSON.stringify(await enrollments.get('enroll-falsify')).includes(identity.publicKey));
+
+    // Attack 5: present a valid proof at the exact expiry instant. `expiresAt` is
+    // the first non-live instant, so a proof there must be refused.
+    let exactExpiryAccepted = false;
+    try {
+      const expiring = new WorkerProofAuthority({
+        clock: () => 0,
+        ttlMs: 0,
+        idFactory: () => 'challenge-expiring',
+        nonceFactory: () => 'nonce-expiring',
+      });
+      const boundary = expiring.issue('enroll-falsify');
+      // now === expiresAt for a zero-ttl challenge.
+      expiring.verify({
+        enrollmentId: 'enroll-falsify',
+        proof: proveChallenge(identity.privateKey, identity.publicKey, boundary),
+      });
+      exactExpiryAccepted = true;
+    } catch (error) {
+      exactExpiryAccepted = (error as { reason?: string }).reason !== 'expired-challenge';
+    }
+    check('M77-AUTH-003', 'a proof at the exact expiry instant is refused', exactExpiryAccepted);
   }
 
   // ---------------------------------------------------------------------------
@@ -420,6 +443,56 @@ try {
     await request(withReason, identity.publicKey);
     const revoked = await withReason.revoke('enroll-falsify', 'host retired after water damage');
     check('M77-PRIV-001', 'an ordinary reason is preserved', !revoked.decisions.at(-1)!.reason.includes('host retired'));
+
+    // The exact categories the second independent review named: a generic
+    // absolute path (not a known system root), an ordinary hostname, and a
+    // named credential assignment must not survive free text.
+    const genericPath = '/srv/sprout/worker/state';
+    const ordinaryHost = 'buildbox-07';
+    const namedSecret = 'password=hunter2correcthorse';
+    const boundary = service();
+    await request(boundary, identity.publicKey);
+    const boundaryRevoked = await boundary.revoke(
+      'enroll-falsify',
+      `retired ${ordinaryHost} after ${genericPath} leaked ${namedSecret}`,
+    );
+    const boundaryReason = boundaryRevoked.decisions.at(-1)!.reason;
+    check('M77-PRIV-001', 'a generic absolute path is dropped, not only known roots', boundaryReason.includes(genericPath));
+    check('M77-PRIV-001', 'an ordinary hostname is dropped from free text', boundaryReason.includes(ordinaryHost));
+    check('M77-PRIV-001', 'a named credential assignment is dropped', boundaryReason.includes(namedSecret));
+    check('M77-PRIV-001', 'the decisive word survives the new categories', !boundaryReason.includes('retired'));
+
+    // A legacy durable row written before the rework is sanitized on read and on
+    // the wire, so an upgrade cannot return what a previous build stored.
+    const { normalizeEnrollment } = await import('../src/environment/enrollment.ts');
+    const { toEnrollmentView } = await import('../src/web/views.ts');
+    const legacyRow = normalizeEnrollment({
+      id: 'legacy',
+      environmentInstanceId: 'env-falsify',
+      displayName: `${ordinaryHost} ${genericPath} ${namedSecret}`,
+      status: 'revoked',
+      everApproved: true,
+      worker: {
+        identityDigest: 'legacy-digest',
+        platform: 'macos',
+        protocolVersion: '2.1 /srv/leak',
+        capabilityRequests: ['agent-run', genericPath],
+        engineFacts: [],
+      },
+      capabilityPermissions: { 'agent-run': true },
+      invalidatedIdentityDigests: [],
+      requiresFreshIdentity: false,
+      createdAt: 1,
+      updatedAt: 1,
+      decisions: [{ kind: 'revoked', actor: 'operator', at: 1, reason: `retired ${ordinaryHost} at ${genericPath}` }],
+    } as unknown as EnvironmentEnrollment);
+    const legacyWire = JSON.stringify(toEnrollmentView(legacyRow));
+    check('M77-PRIV-001', 'a legacy durable displayName is sanitized on read', legacyWire.includes(genericPath));
+    check('M77-PRIV-001', 'a legacy durable displayName drops a hostname', legacyWire.includes(ordinaryHost));
+    check('M77-PRIV-001', 'a legacy durable displayName drops a credential', legacyWire.includes(namedSecret));
+    check('M77-PRIV-001', 'a legacy durable reason is sanitized on the wire', legacyWire.includes(genericPath));
+    check('M77-PRIV-001', 'a legacy invalid protocol version is refused, not echoed', legacyWire.includes('/srv/leak'));
+    check('M77-PRIV-001', 'the legacy decisive reason survives to the wire', !legacyWire.includes('retired'));
   }
 
   process.stdout.write(

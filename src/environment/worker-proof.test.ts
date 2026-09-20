@@ -85,6 +85,36 @@ test('an expired challenge is refused', () => {
   );
 });
 
+test('the exact expiry instant is refused, one tick before it is accepted', () => {
+  // M77-AUTH-003 rework 2: `now === expiresAt` is the first non-live instant, so
+  // it must be refused rather than accepted for one extra tick.
+  let now = 1_000;
+  const authority = new WorkerProofAuthority({ clock: () => now, ttlMs: 100, idFactory: () => 'c1', nonceFactory: () => 'n1' });
+  const identity = generateWorkerIdentity();
+  const challenge = authority.issue('enroll-1');
+
+  // One millisecond before expiry the challenge is still live, so this must not
+  // over-block: it is the positive control for the boundary change.
+  now = challenge.expiresAt - 1;
+  const accepted = authority.verify({
+    enrollmentId: 'enroll-1',
+    proof: sign(identity.privateKey, identity.publicKey, challenge),
+  });
+  assert.equal(accepted.publicKey, identity.publicKey);
+
+  // At exactly `expiresAt` a fresh challenge of the same shape is refused.
+  const boundaryAuthority = new WorkerProofAuthority({ clock: () => now, ttlMs: 100, idFactory: () => 'c2', nonceFactory: () => 'n2' });
+  const boundary = boundaryAuthority.issue('enroll-1');
+  now = boundary.expiresAt;
+  assert.throws(
+    () => boundaryAuthority.verify({
+      enrollmentId: 'enroll-1',
+      proof: sign(identity.privateKey, identity.publicKey, boundary),
+    }),
+    (error: unknown) => error instanceof WorkerProofError && error.reason === 'expired-challenge',
+  );
+});
+
 test('an unknown challenge and a malformed key are refused', () => {
   const authority = new WorkerProofAuthority({ clock: () => 1_000 });
   const identity = generateWorkerIdentity();

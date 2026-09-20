@@ -24,7 +24,8 @@
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
-import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
+import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
+import { sanitizeOperatorText, DEFAULT_DECISION_REASON } from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
 /**
@@ -343,24 +344,29 @@ export interface EnrollmentDecisionView {
 }
 
 export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentView {
+  // The view is the last boundary before the wire. Normalizing here as well as
+  // in the store read means a caller that hands a projection a raw durable
+  // document (a repair tool, a test, a future adapter) still cannot leak an
+  // unsanitized display name or decision reason to a browser.
+  const safe = normalizeEnrollment(enrollment);
   return {
-    id: enrollment.id,
-    environmentInstanceId: enrollment.environmentInstanceId,
-    displayName: enrollment.displayName,
-    status: enrollment.status,
-    platform: enrollment.worker.platform,
-    identityDigest: enrollment.worker.identityDigest,
-    ...(enrollment.worker.protocolVersion !== undefined
-      ? { protocolVersion: enrollment.worker.protocolVersion }
+    id: safe.id,
+    environmentInstanceId: safe.environmentInstanceId,
+    displayName: safe.displayName,
+    status: safe.status,
+    platform: safe.worker.platform,
+    identityDigest: safe.worker.identityDigest,
+    ...(safe.worker.protocolVersion !== undefined
+      ? { protocolVersion: safe.worker.protocolVersion }
       : {}),
-    capabilityPermissions: enrollment.capabilityPermissions,
-    createdAt: enrollment.createdAt,
-    updatedAt: enrollment.updatedAt,
-    decisions: enrollment.decisions.map((decision) => ({
+    capabilityPermissions: safe.capabilityPermissions,
+    createdAt: safe.createdAt,
+    updatedAt: safe.updatedAt,
+    decisions: safe.decisions.map((decision) => ({
       kind: decision.kind,
       actor: decision.actor,
       at: decision.at,
-      reason: decision.reason,
+      reason: sanitizeOperatorText(decision.reason, { fallback: DEFAULT_DECISION_REASON }),
     })),
   };
 }

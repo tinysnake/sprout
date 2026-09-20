@@ -99,7 +99,7 @@ export class WorkerProofAuthority {
     // Drop expired challenges so an outstanding-challenge map cannot grow without
     // bound on a long-lived process; an expired challenge is refused anyway.
     for (const [id, existing] of this.#challenges) {
-      if (existing.expiresAt < at) this.#challenges.delete(id);
+      if (existing.expiresAt <= at) this.#challenges.delete(id);
     }
     const challenge: WorkerIdentityChallenge = {
       id: this.#idFactory(),
@@ -117,6 +117,10 @@ export class WorkerProofAuthority {
    *
    * A challenge is consumed only after the signature verifies, so a failed
    * attempt does not deny a legitimate retry; a successful attempt is single-use.
+   *
+   * Expiry is refused at the exact boundary: `expiresAt` is the first instant the
+   * challenge is no longer live, so a proof presented at `now === expiresAt` is
+   * refused rather than accepted for one extra tick.
    */
   verify(input: { readonly enrollmentId: string; readonly proof: WorkerIdentityProof }): {
     readonly publicKey: string;
@@ -132,7 +136,7 @@ export class WorkerProofAuthority {
         'The Worker identity challenge was issued for a different enrollment.',
       );
     }
-    if (this.#clock() > challenge.expiresAt) {
+    if (this.#clock() >= challenge.expiresAt) {
       throw new WorkerProofError('expired-challenge', 'The Worker identity challenge has expired; request a new one.');
     }
 

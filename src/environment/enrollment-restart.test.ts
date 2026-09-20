@@ -367,7 +367,65 @@ test('work safety is projected from the lease registry into the Red summary', as
   }
 });
 
-test('a durable document written before the identity-proof rework is read additively', async () => {
+test('a legacy durable enrollment row with unsanitized text is sanitized on read', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const store = stores(path);
+    // Simulate an earlier writer that persisted an unsanitized display name and
+    // decision reason, plus a credential typed into an identifier and an
+    // arbitrary protocol string. The read must not return any of it.
+    const legacy = {
+      id: 'enroll-1',
+      environmentInstanceId: 'local-macos',
+      displayName: 'buildbox-07 /srv/sprout/worker password=hunter2correcthorse',
+      status: 'revoked',
+      everApproved: true,
+      worker: {
+        identityDigest: workerIdentityDigest('legacy-public-key'),
+        platform: 'macos',
+        protocolVersion: '2.1 /srv/leak',
+        capabilityRequests: ['agent-run', '/srv/leak'],
+        engineFacts: [{ engine: '/srv/engine', installed: true, authenticated: false, models: ['/srv/model'] }],
+      },
+      capabilityPermissions: { 'agent-run': true, '/srv/cap': true },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+      decisions: [
+        {
+          kind: 'revoked',
+          actor: 'operator',
+          at: 1_000,
+          reason: 'retired /srv/sprout/worker on buildbox-07 with password=hunter2correcthorse and token=abc123def456ghi789',
+        },
+      ],
+    };
+    const { DatabaseSync } = await import('node:sqlite');
+    const raw = new DatabaseSync(path);
+    raw
+      .prepare('INSERT INTO environment_enrollments (id, environment_instance_id, document) VALUES (?, ?, ?)')
+      .run('enroll-1', 'local-macos', JSON.stringify(legacy));
+    raw.close();
+
+    const enrollments = service(store);
+    const readBack = await enrollments.get('enroll-1');
+    const serialized = JSON.stringify(readBack);
+    assert.equal(/\/srv\//.test(serialized), false, 'the legacy absolute path is sanitized on read');
+    assert.equal(/buildbox-07/.test(serialized), false, 'the legacy hostname is sanitized on read');
+    assert.equal(/hunter2correcthorse/.test(serialized), false, 'the legacy credential is sanitized on read');
+    assert.equal(/abc123def456ghi789/.test(serialized), false, 'the legacy token is sanitized on read');
+    assert.match(readBack!.decisions[0]!.reason, /retired/i, 'the decisive legacy reason survives');
+    // The wire projection is the last boundary and applies the same rule.
+    const { toEnrollmentView } = await import('../web/views.ts');
+    const viewText = JSON.stringify(toEnrollmentView(readBack!));
+    assert.equal(/\/srv\//.test(viewText), false, 'the wire view sanitizes a legacy display name');
+    assert.equal(/hunter2correcthorse/.test(viewText), false, 'the wire view sanitizes a legacy reason');
+    store.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a legacy durable document written before the identity-proof rework is read additively', async () => {
   const { directory, path } = databasePath();
   try {
     const store = stores(path);
