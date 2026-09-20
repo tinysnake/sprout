@@ -32,7 +32,19 @@ const successEvents: readonly AgentRunEvent[] = [
 
 interface ConnectedWorker {
   readonly adapters: ReadonlyMap<string, WorkerClient>;
-  readonly info: { readonly pid: number; readonly environmentInstanceId: string };
+  readonly info: {
+    readonly pid: number;
+    readonly environmentInstanceId: string;
+    readonly readiness?: {
+      readonly protocolVersion: string;
+      readonly engines: readonly {
+        readonly engine: string;
+        readonly readiness: string;
+        readonly modelAvailability: string;
+        readonly models: readonly string[];
+      }[];
+    };
+  };
   readonly engine: ScriptedEngineAdapter;
   readonly worker: EnvironmentWorker;
   /** Requests the worker received, in order, as seen on the wire. */
@@ -686,4 +698,64 @@ test('an out-of-band adapter that reports no delivery logs nothing', async (t) =
     0,
     'no delivery means no delivery line, never a false report',
   );
+});
+
+test('worker/info reports neutral protocol and engine readiness without engine details (#87)', async (t) => {
+  const worker = await connectedWorker({ turns: [] });
+  t.after(() => worker.killChannel());
+
+  const readiness = worker.info.readiness;
+  assert.ok(readiness, 'the Worker reports a neutral readiness projection');
+  assert.equal(readiness.protocolVersion, '2');
+  // An adapter with no readiness source is honestly `unknown`, never falsely
+  // ready, so an unverified engine cannot make an Environment look green.
+  assert.deepEqual(readiness.engines, [
+    { engine: 'scripted', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] },
+  ]);
+  // No engine-internal facts leak through the neutral projection.
+  assert.equal(JSON.stringify(readiness).includes('binaryPath'), false);
+});
+
+test('an injected readiness provider carries only neutral facts across the worker boundary (#87)', async (t) => {
+  const coreToWorker = new PassThrough();
+  const workerToCore = new PassThrough();
+  const engine = new ScriptedEngineAdapter({ turns: [] });
+  const worker = new EnvironmentWorker({
+    environmentInstanceId: 'mac-mini-1',
+    engines: new Map([['scripted', engine]]),
+    input: coreToWorker,
+    output: workerToCore,
+    readiness: () => ({
+      protocolVersion: '2',
+      engines: [
+        {
+          engine: 'scripted',
+          installed: true,
+          readiness: 'login-required',
+          modelAvailability: 'available',
+          models: ['scripted-model'],
+        },
+      ],
+    }),
+  });
+  const transport = new LineJsonRpcTransport({ input: workerToCore, output: coreToWorker });
+  const connected = await WorkerClient.connect(transport);
+  t.after(() => {
+    workerToCore.destroy();
+    coreToWorker.destroy();
+    void worker;
+  });
+
+  assert.deepEqual(connected.info.readiness, {
+    protocolVersion: '2',
+    engines: [
+      {
+        engine: 'scripted',
+        installed: true,
+        readiness: 'login-required',
+        modelAvailability: 'available',
+        models: ['scripted-model'],
+      },
+    ],
+  });
 });

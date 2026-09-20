@@ -24,6 +24,17 @@
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
+import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
+import {
+  sanitizeIdentifier,
+  sanitizeOperatorText,
+  sanitizeProtocolVersion,
+  DEFAULT_COMPATIBILITY_DETAIL,
+  DEFAULT_DECISION_REASON,
+  DEFAULT_PROBE_SUMMARY,
+  DEFAULT_READINESS_SUMMARY,
+} from '../environment/privacy.ts';
+import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
 /**
  * The client-facing shape of a run.
@@ -309,5 +320,161 @@ export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
           },
         }
       : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one Environment enrollment (#87).
+ *
+ * Only portable facts: the opaque Worker identity digest, platform, declared
+ * protocol version, and neutral engine facts. No private key, engine credential,
+ * hostname, address, topology, or absolute path has a field in this projection.
+ */
+export interface EnrollmentView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly displayName: string;
+  readonly status: string;
+  readonly platform: string;
+  readonly identityDigest: string;
+  readonly protocolVersion?: string;
+  readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly decisions: readonly EnrollmentDecisionView[];
+}
+
+export interface EnrollmentDecisionView {
+  readonly kind: string;
+  readonly actor: string;
+  readonly at: number;
+  readonly reason: string;
+}
+
+export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentView {
+  // The view is the last boundary before the wire. Normalizing here as well as
+  // in the store read means a caller that hands a projection a raw durable
+  // document (a repair tool, a test, a future adapter) still cannot leak an
+  // unsanitized display name or decision reason to a browser.
+  const safe = normalizeEnrollment(enrollment);
+  return {
+    id: safe.id,
+    environmentInstanceId: safe.environmentInstanceId,
+    displayName: safe.displayName,
+    status: safe.status,
+    platform: safe.worker.platform,
+    identityDigest: safe.worker.identityDigest,
+    ...(safe.worker.protocolVersion !== undefined
+      ? { protocolVersion: safe.worker.protocolVersion }
+      : {}),
+    capabilityPermissions: safe.capabilityPermissions,
+    createdAt: safe.createdAt,
+    updatedAt: safe.updatedAt,
+    decisions: safe.decisions.map((decision) => ({
+      kind: decision.kind,
+      actor: decision.actor,
+      at: decision.at,
+      reason: sanitizeOperatorText(decision.reason, { fallback: DEFAULT_DECISION_REASON }),
+    })),
+  };
+}
+
+/** The client-facing shape of one Environment's independent readiness facts. */
+export interface EnvironmentReadinessView {
+  readonly environmentInstanceId: string;
+  readonly summary: { readonly level: string; readonly reason: string };
+  readonly enrollmentStatus: string;
+  readonly connection: {
+    readonly state: string;
+    readonly lastConfirmedAt?: number;
+  };
+  readonly compatibility: {
+    readonly state: string;
+    readonly workerProtocolVersion?: string;
+    readonly detail?: string;
+  };
+  readonly capabilities: readonly { readonly name: string; readonly permission: string; readonly required: boolean }[];
+  readonly engines: readonly {
+    readonly engine: string;
+    readonly installed: boolean;
+    readonly readiness: string;
+    readonly required: boolean;
+    readonly models: { readonly state: string; readonly models: readonly string[] };
+  }[];
+  readonly probe?: {
+    readonly at: number;
+    readonly latencyMs: number;
+    readonly protocolOk: boolean;
+    readonly enginesOk: boolean;
+    readonly summary: string;
+  };
+  readonly workSafety: { readonly state: string };
+}
+
+export function toEnvironmentReadinessView(input: {
+  readonly environmentInstanceId: string;
+  readonly readiness: EnvironmentReadiness;
+  readonly summary: EnvironmentReadinessSummary;
+}): EnvironmentReadinessView {
+  const { readiness, summary } = input;
+  // The view is the last boundary before the wire. The service sanitizes the
+  // stored facts, but a caller that hands this projection a raw readiness
+  // document (a repair tool, a test, a future adapter) still must not leak a
+  // legacy hostname, path, address, credential, or protocol string. Engine and
+  // capability names are structured enums; models keep their vendor characters;
+  // free text passes the operator boundary; an invalid protocol version is
+  // dropped rather than echoed. The summary reason is free text too — it can be
+  // the compatibility detail, and a legacy document can hold anything — so it
+  // passes the same boundary instead of being copied verbatim.
+  const protocolVersion = sanitizeProtocolVersion(readiness.compatibility.workerProtocolVersion);
+  return {
+    environmentInstanceId: input.environmentInstanceId,
+    summary: {
+      level: summary.level,
+      reason: sanitizeOperatorText(summary.reason, { fallback: DEFAULT_READINESS_SUMMARY }),
+    },
+    enrollmentStatus: readiness.enrollmentStatus,
+    connection: {
+      state: readiness.connection.state,
+      ...(readiness.connection.lastConfirmedAt !== undefined
+        ? { lastConfirmedAt: readiness.connection.lastConfirmedAt }
+        : {}),
+    },
+    compatibility: {
+      state: readiness.compatibility.state,
+      ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
+      ...(readiness.compatibility.detail !== undefined
+        ? { detail: sanitizeOperatorText(readiness.compatibility.detail, { fallback: DEFAULT_COMPATIBILITY_DETAIL }) }
+        : {}),
+    },
+    capabilities: readiness.capabilities.map((capability) => ({
+      name: sanitizeIdentifier(capability.name, { fallback: 'unknown-capability', kind: 'capability' }),
+      permission: capability.permission,
+      required: capability.required,
+    })),
+    engines: readiness.engines.map((engine) => ({
+      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+      installed: engine.installed,
+      readiness: engine.readiness,
+      required: engine.required,
+      models: {
+        state: engine.models.state,
+        models: engine.models.models.map((model) =>
+          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+        ),
+      },
+    })),
+    ...(readiness.probe !== undefined
+      ? {
+          probe: {
+            at: readiness.probe.at,
+            latencyMs: readiness.probe.latencyMs,
+            protocolOk: readiness.probe.protocolOk,
+            enginesOk: readiness.probe.enginesOk,
+            summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
+          },
+        }
+      : {}),
+    workSafety: { state: readiness.workSafety.state },
   };
 }

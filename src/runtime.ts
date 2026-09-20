@@ -11,6 +11,12 @@ import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import { EnvironmentPool, type LeaseStore } from './environment/pool.ts';
+import type { EnrollmentStore } from './environment/enrollment-store.ts';
+import type { EnvironmentReadinessStore } from './environment/readiness-store.ts';
+import {
+  EnvironmentEnrollmentService,
+  type EnvironmentEnrollmentServiceOptions,
+} from './environment/enrollment-service.ts';
 import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
@@ -28,7 +34,9 @@ import {
 } from './task/environment-lifecycle.ts';
 import { TaskService } from './task/service.ts';
 import type { TaskStore } from './task/store.ts';
+import type { WorkerInfo } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
+import { createEnvironmentRouter } from './web/environment-router.ts';
 import {
   createEnvironmentWorkerFactory,
   localWorkerEnvironment,
@@ -88,6 +96,10 @@ export interface RuntimeStores {
   readonly tasks: TaskStore;
   /** The durable one-Operator identity and browser-session boundary. */
   readonly operatorSessions: OperatorSessionStore;
+  /** The durable Environment enrollment authority decisions (#87). */
+  readonly enrollments: EnrollmentStore;
+  /** The durable observed Environment readiness facts (#87). */
+  readonly environmentReadiness: EnvironmentReadinessStore;
   close(): void;
 }
 
@@ -104,6 +116,11 @@ export interface RuntimeEnvironment {
   adapters(environmentInstanceId: string): Promise<ReadonlyMap<string, EngineAdapter>>;
   /** Worker-owned Task context operations for one environment instance. */
   contexts(environmentInstanceId: string): Promise<TaskContextWorker>;
+  /**
+   * The neutral Worker facts one environment instance reported on `worker/info`,
+   * when it is connected (optional: readiness is an additive observation #87).
+   */
+  info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
   /** End the port and fail anything still in flight. */
   close(): Promise<void>;
 }
@@ -155,6 +172,8 @@ export interface SproutRuntime {
   /** The one environment instance this build serves. */
   readonly instance: EnvironmentInstance;
   readonly stores: RuntimeStores;
+  /** The Environment enrollment and readiness capability (#87). */
+  readonly enrollments: EnvironmentEnrollmentService;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -163,6 +182,15 @@ export interface SproutRuntime {
    * Idempotent, so a clean restart changes nothing.
    */
   reconcile(): Promise<SproutReconciliation>;
+  /**
+   * Record the live Worker's reported readiness onto one approved enrollment (#87).
+   *
+   * The facts come from the Worker's own `worker/info` declaration; this maps
+   * them onto the durable observed facts without inventing an installation,
+   * login, or model state the Worker did not state. When no Worker is connected
+   * the observation is skipped: absence of a Worker is not evidence of unreadiness.
+   */
+  observeWorkerReadiness(enrollmentId: string): Promise<void>;
   /**
    * The operator-visible startup report, using the last `reconcile()` result.
    *
@@ -390,6 +418,20 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     });
 
     const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
+    // Environment enrollment and readiness (#87). It reads the durable enrollment
+    // and observed-readiness stores and projects work safety from the same lease
+    // registry the run and Task domains use, so the facts never diverge.
+    const enrollmentOptions: EnvironmentEnrollmentServiceOptions = {
+      enrollments: stores.enrollments,
+      readiness: stores.environmentReadiness,
+      leases: () => pool.leases(),
+      // The one engine this build's configured Agents actually run on is the one
+      // engine its configured use requires. Nothing here names a second engine,
+      // so an Environment that hosts only this engine is complete rather than a
+      // fabricated dual-engine failure (ADR-0008).
+      requiredEngines: [engineId],
+    };
+    const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
     const api = createRunApi({
       orchestrator,
       agents,
@@ -403,6 +445,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       auth: operatorSessions,
       staticRoot,
       readFile: options.readFile ?? defaultReadFile,
+      // The Environment enrollment/readiness domain is composed through the #85
+      // additive seam, so no central dispatcher grows for it.
+      routers: [createEnvironmentRouter({ enrollments })],
     });
 
     /** The last reconciliation result, so `startupReport` reports what ran. */
@@ -421,6 +466,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       definition,
       instance,
       stores: activeStores,
+      enrollments,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then collaboration; runs first so no
@@ -436,6 +482,18 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         };
         lastReconciliation = result;
         return result;
+      },
+
+      /** Observe the live Worker's reported readiness onto one approved
+       * enrollment; the mapping stays honest by recording only what the Worker
+       * actually declared on `worker/info`. */
+      async observeWorkerReadiness(enrollmentId: string): Promise<void> {
+        if (environment.info === undefined) return;
+        const enrollment = await enrollments.get(enrollmentId);
+        if (enrollment === undefined || enrollment.status !== 'approved') return;
+        const info = await environment.info(enrollment.environmentInstanceId);
+        if (info === undefined || info.readiness === undefined) return;
+        await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
       },
 
       startupReport(boundPort: number): string {

@@ -711,6 +711,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
         streams.clear();
         unsubscribeRunEvents();
         server.closeAllConnections?.();
+        // A transport that never listened (construction refused, or the caller
+        // closed before opening the surface) has nothing to stop.
+        if (!server.listening) return resolve();
         server.close((error) => (error ? reject(error) : resolve()));
       }),
   };
