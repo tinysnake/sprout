@@ -13,6 +13,7 @@ import {
   type ProtocolVersionRange,
   type WorkSafetyState,
 } from './readiness.ts';
+import { workSafetyFromRecovery, type EnvironmentRecoveryPhase } from './recovery.ts';
 
 /**
  * Assemble one Environment's independent readiness facts and its summary (#87).
@@ -52,6 +53,18 @@ export interface AssembleReadinessInput {
       }
     | undefined;
   readonly leases: readonly LeaseSafetyFact[];
+  /**
+   * The open recovery records for this Environment (#88).
+   *
+   * When supplied, these are authoritative over the lease registry, so a
+   * `reconciling` state (evidence still synchronizing) is distinguishable from
+   * `recovery` (facts in, Human decision required) instead of both collapsing to
+   * the lease's `recovering` state.
+   */
+  readonly recoveryRecords?: readonly {
+    readonly environmentInstanceId: string;
+    readonly phase: EnvironmentRecoveryPhase;
+  }[];
   readonly requiredEngines: readonly string[];
   readonly probe?: EnvironmentReadiness['probe'];
   readonly supportedProtocol: ProtocolVersionRange;
@@ -97,10 +110,13 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
     };
   });
 
-  const workSafetyState: WorkSafetyState = workSafetyFromLeases(
-    input.leases,
-    input.enrollment.environmentInstanceId,
-  );
+  const workSafetyState: WorkSafetyState = input.recoveryRecords !== undefined
+    ? workSafetyFromRecovery(
+        input.recoveryRecords,
+        input.leases,
+        input.enrollment.environmentInstanceId,
+      )
+    : workSafetyFromLeases(input.leases, input.enrollment.environmentInstanceId);
 
   const readiness: EnvironmentReadiness = {
     enrollmentStatus: input.enrollment.status,

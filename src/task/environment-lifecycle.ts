@@ -62,6 +62,27 @@ export interface TaskEnvironmentLifecycleOptions {
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
   readonly leaseTtlMs?: number;
+  /**
+   * Told when a Task entered recovery (#88).
+   *
+   * Optional and injected so the Task lifecycle keeps importing no Environment
+   * domain module directly; the recovery service uses this to open the durable
+   * recovery record that protects the lease it just moved into recovery. The
+   * callback must not change the Task's state: the lifecycle owns that ordering.
+   */
+  readonly onRecovery?: (input: {
+    readonly taskId: string;
+    readonly leaseId: string;
+    readonly hadActiveRun: boolean;
+  }) => Promise<void>;
+  /**
+   * How the Environment domain resolves a permanent Force Release (#88).
+   *
+   * `pool` deliberately refuses a Task-held lease, so the emergency end needs the
+   * capability that explicitly authorizes the override. Absent means the overdue
+   * `ending` state is preserved rather than silently marked clean.
+   */
+  readonly forceReleaseLease?: (leaseId: string) => boolean;
   /** Test-only durable-write crash hooks; production leaves them absent. */
   readonly faults?: {
     readonly afterBeginningCommit?: () => void;
@@ -83,6 +104,8 @@ export class TaskEnvironmentLifecycle {
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
   readonly #leaseTtlMs: number;
+  readonly #onRecovery: NonNullable<TaskEnvironmentLifecycleOptions['onRecovery']> | undefined;
+  readonly #forceReleaseLease: NonNullable<TaskEnvironmentLifecycleOptions['forceReleaseLease']> | undefined;
   readonly #faults: NonNullable<TaskEnvironmentLifecycleOptions['faults']> | undefined;
 
   constructor(options: TaskEnvironmentLifecycleOptions) {
@@ -95,6 +118,8 @@ export class TaskEnvironmentLifecycle {
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
+    this.#onRecovery = options.onRecovery;
+    this.#forceReleaseLease = options.forceReleaseLease;
     this.#faults = options.faults;
   }
 
@@ -185,7 +210,7 @@ export class TaskEnvironmentLifecycle {
       // than leaving a running Task with no submitted run.
       prepared = await this.#prepare(running, agentId);
     } catch (error) {
-      await this.#toRecovery(running, 'running');
+      await this.#toRecovery(running, 'running', true);
       throw error;
     }
     const workspacePath = this.#workspacePath(task.projectId, task.environmentInstanceId);
@@ -205,7 +230,7 @@ export class TaskEnvironmentLifecycle {
     if (!task || task.activeRunId !== run.id) return; // idempotent restart redelivery
     if (run.status === 'queued' || run.status === 'running') return;
     if (run.status === 'interrupted' || isWorkerLoss(run)) {
-      await this.#toRecovery(task, 'running');
+      await this.#toRecovery(task, 'running', true);
       return;
     }
     const next: Task = {
@@ -273,8 +298,58 @@ export class TaskEnvironmentLifecycle {
   async reconcile(): Promise<void> {
     for (const task of await this.#store.list()) {
       if (!task.environmentLeaseId || ['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')) continue;
-      await this.#toRecovery(task, task.environmentLifecycleState ?? 'beginning');
+      await this.#toRecovery(task, task.environmentLifecycleState ?? 'beginning', task.activeRunId !== undefined);
     }
+  }
+
+  /**
+   * Emergency Task end for a Human Force Release (#88, ADR-0009).
+   *
+   * Records `cancelled` with a permanent forced-release disposition, keeps the
+   * interrupted run as history, and releases the Task-held lease. It never
+   * deletes the Project workspace and records unrecycled Task context as leftover
+   * data rather than pretending cleanup finished. This is the only path that ends
+   * a Task whose context cleanup could not be proved.
+   */
+  async forceRelease(
+    taskId: string,
+    input: {
+      readonly actor: string;
+      readonly reason: string;
+      readonly unresolvedFacts: readonly string[];
+      readonly at: number;
+    },
+  ): Promise<readonly string[]> {
+    const task = await this.#require(taskId);
+    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
+      throw new Error(`task ${taskId} is ${task.status} and cannot be force released`);
+    }
+    const affectedRunIds = (await this.#store.listRuns(taskId)).map((link) => link.runId);
+    if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
+    const forced: Task = omit(
+      omit(
+        {
+          ...task,
+          status: 'cancelled' as const,
+          completedAt: input.at,
+          environmentLifecycleState: 'discarded' as const,
+          blockerReason: 'Force Released by the Human operator; unresolved facts recorded.',
+          updatedAt: input.at,
+        },
+        'recoveryState',
+      ),
+      'activeRunId',
+    );
+    if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
+      // One transaction commits the terminal Task row and the Task-held lease
+      // release together, exactly like an ordinary Task end, so the override can
+      // never leave a cancelled Task whose lease is still held.
+      await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
+      this.#forceReleaseLease(task.environmentLeaseId);
+    } else {
+      await this.#store.save(forced);
+    }
+    return [...new Set(affectedRunIds)];
   }
 
   async #recycleThenRelease(task: Task, terminal: 'ended' | 'discarded'): Promise<Task> {
@@ -306,10 +381,24 @@ export class TaskEnvironmentLifecycle {
     }
   }
 
-  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>): Promise<void> {
+  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false): Promise<void> {
     if (task.environmentLeaseId) this.#pool.markRecovering(task.environmentLeaseId);
     const recovering: Task = { ...task, environmentLifecycleState: 'recovery', recoveryState: prior, updatedAt: this.#clock.now() };
     await this.#store.save(recovering);
+    // The durable recovery record (#88) is opened after the Task state is durable,
+    // so the record always describes a Task that really entered recovery. A
+    // failure here must not roll back the protection: the lease is already
+    // `recovering`, which already blocks reassignment.
+    if (this.#onRecovery !== undefined && task.environmentLeaseId !== undefined) {
+      try {
+        await this.#onRecovery({ taskId: task.id, leaseId: task.environmentLeaseId, hadActiveRun });
+      } catch (error) {
+        process.stderr.write(
+          `[recovery] failed to open the recovery record for task ${task.id}: ` +
+            `${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
   }
 
   /** Render portable durable facts; only the Worker turns them into files. */

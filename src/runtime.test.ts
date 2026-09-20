@@ -48,6 +48,7 @@ import { InMemoryTaskStore } from './task/store.ts';
 import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
+import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
@@ -126,6 +127,7 @@ function inMemoryStores(): MemoryStores {
     operatorSessions: new InMemoryOperatorSessionStore(),
     enrollments: new InMemoryEnrollmentStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
+    recovery: new InMemoryRecoveryStore(),
     runsStore: runs,
     close: () => {
       closes += 1;
@@ -551,6 +553,7 @@ test('runtime construction failure closes environment and worker resources witho
           operatorSessions: new InMemoryOperatorSessionStore(),
     enrollments: new InMemoryEnrollmentStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
+    recovery: new InMemoryRecoveryStore(),
     close() {
       storesClosed++;
     },
@@ -575,7 +578,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 6; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 7; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;

@@ -86,6 +86,67 @@ export interface WorkerIdentityChallengeView {
   readonly expiresAt: number;
 }
 
+/**
+ * The wire shape of one Environment recovery record (#88).
+ *
+ * Mirrors `src/web/views.ts` so the browser adapter and the server projection
+ * cannot drift into two different contracts. Only neutral evidence facts,
+ * product-owned unresolved facts, and sanitized decision reasons cross the wire.
+ */
+export interface EnvironmentRecoveryView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly leaseId: string;
+  readonly holderKind: string;
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly cause: string;
+  readonly phase: string;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly reconnectObservedAt?: number;
+  readonly evidence?: {
+    readonly retainedEventCount: number;
+    readonly turnSettlementObserved: boolean;
+    readonly engineSessionStopped: boolean;
+    readonly taskContextRecycled: boolean;
+  };
+  readonly unresolvedFacts: readonly string[];
+  readonly evidenceSynchronized: boolean;
+  readonly decisions: readonly {
+    readonly kind: string;
+    readonly actor: string;
+    readonly at: number;
+    readonly reason: string;
+  }[];
+}
+
+/** The wire shape of one permanent Force Release outcome (#88). */
+export interface ForceReleaseView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly leaseId: string;
+  readonly holderKind: string;
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly actor: string;
+  readonly at: number;
+  readonly reason: string;
+  readonly risksAcknowledged: boolean;
+  readonly unresolvedFacts: readonly string[];
+  readonly affectedRunIds: readonly string[];
+  readonly projectWorkspacePreserved: boolean;
+  readonly unrecycledTaskContext: boolean;
+}
+
+/** The neutral retained evidence a reconnected Worker synchronizes. */
+export interface RetainedEvidenceView {
+  readonly retainedEventCount: number;
+  readonly turnSettlementObserved: boolean;
+  readonly engineSessionStopped: boolean;
+  readonly taskContextRecycled: boolean;
+}
+
 export interface EnvironmentEnrollmentBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
@@ -123,6 +184,45 @@ export interface EnvironmentEnrollmentBrowserAdapter {
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
   readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[] }>;
   recordProbe(id: string, probe: ProbeResultView): Promise<ProbeResultView>;
+  /**
+   * The open recovery record plus the permanent Force Release history for one
+   * Environment (#88). No mutation: a reconnect alone never proves safety.
+   */
+  recovery(enrollmentId: string): Promise<{
+    readonly recovery: readonly EnvironmentRecoveryView[];
+    readonly forceReleases: readonly ForceReleaseView[];
+  }>;
+  /** Record a verified same-identity reconnect; moves the record to reconciling. */
+  observeReconnect(leaseId: string, input: {
+    readonly enrollmentId: string;
+    readonly environmentInstanceId: string;
+    readonly identityVerified: boolean;
+    readonly protocolCompatible: boolean;
+    readonly permissionsAllowed: boolean;
+    readonly hadActiveRun: boolean;
+    readonly evidence?: RetainedEvidenceView;
+  }): Promise<EnvironmentRecoveryView>;
+  /** Synchronize retained evidence; the only path that can resolve or reach recovery. */
+  synchronizeEvidence(leaseId: string, input: {
+    readonly evidence: RetainedEvidenceView;
+    readonly hadActiveRun: boolean;
+  }): Promise<EnvironmentRecoveryView>;
+  /** Ordinary Resume: keep the interrupted run as history on the same lease. */
+  resumeRecovery(leaseId: string, reason?: string): Promise<EnvironmentRecoveryView>;
+  /** Ordinary Discard: safe Task end that recycles context before release. */
+  discardRecovery(leaseId: string, reason?: string): Promise<EnvironmentRecoveryView>;
+  /** Ordinary Release of a one-round run-held lease. */
+  releaseRecovery(leaseId: string, reason?: string): Promise<EnvironmentRecoveryView>;
+  /**
+   * Human-only emergency Force Release. Requires the exact typed confirmation,
+   * risk acknowledgement, and a reason; it is refused unless the record is in
+   * `recovery` with a concrete unresolved fact.
+   */
+  forceRelease(leaseId: string, input: {
+    readonly acknowledgedRisks: boolean;
+    readonly typedConfirmation: string;
+    readonly reason: string;
+  }): Promise<ForceReleaseView>;
 }
 
 export function createEnvironmentEnrollmentBrowserAdapter(
@@ -195,6 +295,50 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand(probe),
       );
       return response.probe;
+    },
+    recovery: (id) =>
+      transport.request(`/api/environments/enrollments/${encodeURIComponent(id)}/recovery`),
+    async observeReconnect(leaseId, input) {
+      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/reconnect`,
+        jsonCommand(input),
+      );
+      return response.recovery;
+    },
+    async synchronizeEvidence(leaseId, input) {
+      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/evidence`,
+        jsonCommand(input),
+      );
+      return response.recovery;
+    },
+    async resumeRecovery(leaseId, reason) {
+      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/resume`,
+        jsonCommand(reason === undefined ? {} : { reason }),
+      );
+      return response.recovery;
+    },
+    async discardRecovery(leaseId, reason) {
+      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/discard`,
+        jsonCommand(reason === undefined ? {} : { reason }),
+      );
+      return response.recovery;
+    },
+    async releaseRecovery(leaseId, reason) {
+      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/release`,
+        jsonCommand(reason === undefined ? {} : { reason }),
+      );
+      return response.recovery;
+    },
+    async forceRelease(leaseId, input) {
+      const response = await transport.request<{ readonly forceRelease: ForceReleaseView }>(
+        `/api/environments/recovery/${encodeURIComponent(leaseId)}/force-release`,
+        jsonCommand(input),
+      );
+      return response.forceRelease;
     },
   };
 }
