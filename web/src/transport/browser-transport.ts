@@ -139,20 +139,22 @@ export function createBrowserTransport(options: BrowserTransportOptions = {}): B
       else setConnection('reconnecting');
       const source = makeEventSource('/api/events');
       let closed = false;
-      // A durable cursor is stable across an API restart. Keep it for this
-      // EventSource lifetime so a replay cannot publish an already-observed
-      // durable run snapshot to its adapter again.
-      const receivedDurableCursors = new Set<string>();
+      // Keep durable snapshot identities for this EventSource lifetime. Data,
+      // rather than cursor text, remains stable when a safe replay upgrades an
+      // older cursor version after an API/schema restart.
+      const receivedRunSnapshots = new Set<string>();
       const received = (event: MessageEvent<string>, type: string) => {
         if (closed) return;
         resetStaleTimer();
         setConnection('online');
         try {
-          if (type === 'run' && event.lastEventId) {
-            if (receivedDurableCursors.has(event.lastEventId)) return;
-            receivedDurableCursors.add(event.lastEventId);
+          const data = JSON.parse(event.data) as unknown;
+          if (type === 'run') {
+            const snapshot = JSON.stringify(data);
+            if (receivedRunSnapshots.has(snapshot)) return;
+            receivedRunSnapshots.add(snapshot);
           }
-          listener({ type, data: JSON.parse(event.data), ...(event.lastEventId ? { cursor: event.lastEventId } : {}) });
+          listener({ type, data, ...(event.lastEventId ? { cursor: event.lastEventId } : {}) });
         } catch {
           // Malformed transport data is not passed to a domain adapter.
         }

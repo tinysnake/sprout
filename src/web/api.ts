@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
-import type { AgentRun } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
@@ -97,7 +96,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
   // One subscription fans out through the cursor log. This avoids one
   // orchestrator subscription per browser and gives reconnects a stable replay
   // boundary without changing the durable Run/event contract.
-  const unsubscribeRunEvents = orchestrator.subscribe((run) => eventLog.publish(toRunView(run)));
+  const unsubscribeRunEvents = orchestrator.subscribe((run, replaySequence) =>
+    eventLog.publish(toRunView(run), replaySequence),
+  );
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
       sendJson(response, 500, {
@@ -649,12 +650,6 @@ export function createRunApi(options: RunApiOptions): RunApi {
     sendJson(response, 404, { error: 'not found' });
   }
 
-  async function listRuns(): Promise<readonly AgentRun[]> {
-    // The orchestrator merges live state with persisted runs, so a restarted
-    // process shows previous work instead of an empty history.
-    return orchestrator.list();
-  }
-
   async function openEventStream(request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.writeHead(200, {
       'content-type': 'text/event-stream',
@@ -670,11 +665,12 @@ export function createRunApi(options: RunApiOptions): RunApi {
     // Hydrate before interpreting the cursor. The cursor identifies a durable
     // projection, not this API process, so it remains meaningful after a
     // restart and can retain its replay boundary.
-    // `RunOrchestrator.list()` deliberately serves the UI newest-first. SSE
-    // cursors instead mark a forward-only durable replay order, so rebuilding
-    // the log must use the inverse, oldest-first order.  Do not depend on Map
-    // insertion order here: equal timestamps get a stable id tie-breaker.
-    for (const run of (await listRuns()).toSorted(compareDurableRunOrder)) eventLog.publish(toRunView(run));
+    // HTTP history remains newest-first. SSE uses the store's monotonic write
+    // positions instead: observer arrival and restart hydration therefore share
+    // one forward order even when timestamps tie or ids sort against arrival.
+    for (const snapshot of await orchestrator.replaySnapshots()) {
+      eventLog.publish(toRunView(snapshot.run), snapshot.sequence);
+    }
     const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
     const send = (record: SseRecord) => {
       if (response.writableEnded) return;
@@ -765,6 +761,7 @@ interface SseRecord {
   readonly cursor: string;
   readonly event: 'run';
   readonly data: ReturnType<typeof toRunView>;
+  readonly replaySequence: number;
 }
 
 /**
@@ -780,22 +777,33 @@ class SseEventLog {
   readonly #fingerprints = new Set<string>();
   readonly #listeners = new Set<(record: SseRecord) => void>();
 
-  publish(data: ReturnType<typeof toRunView>): void {
+  publish(data: ReturnType<typeof toRunView>, replaySequence: number): void {
     const fingerprint = JSON.stringify(data);
     if (this.#fingerprints.has(fingerprint)) return;
     this.#fingerprints.add(fingerprint);
-    const record: SseRecord = { cursor: durableEventCursor(fingerprint), event: 'run', data };
+    const record: SseRecord = {
+      cursor: durableEventCursor(fingerprint, replaySequence),
+      event: 'run',
+      data,
+      replaySequence,
+    };
     this.#records.push(record);
     for (const listener of this.#listeners) listener(record);
   }
 
   after(cursor: string | undefined): readonly SseRecord[] {
-    if (cursor === undefined) return this.#records;
-    const index = this.#records.findIndex((record) => record.cursor === cursor);
+    if (cursor === undefined) {
+      return this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence);
+    }
+    const boundary = this.#records.find((record) => record.cursor === cursor);
     // An unknown but well-formed cursor is outside this replay log. Rehydrate
     // from its safe boundary rather than treating it as a future position and
     // suppressing every current or later durable snapshot.
-    return index === -1 ? this.#records : this.#records.slice(index + 1);
+    return boundary === undefined
+      ? this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence)
+      : this.#records
+          .filter((record) => record.replaySequence > boundary.replaySequence)
+          .toSorted((left, right) => left.replaySequence - right.replaySequence);
   }
 
   subscribe(listener: (record: SseRecord) => void): () => void {
@@ -805,17 +813,14 @@ class SseEventLog {
 
 }
 
-function durableEventCursor(fingerprint: string): string {
-  return `v1:${createHash('sha256').update(fingerprint).digest('hex')}`;
-}
-
-/** Stable forward order for replay; the run-list HTTP projection remains newest-first. */
-function compareDurableRunOrder(left: AgentRun, right: AgentRun): number {
-  return left.createdAt - right.createdAt || left.id.localeCompare(right.id);
+function durableEventCursor(fingerprint: string, replaySequence: number): string {
+  return `v2:${replaySequence}:${createHash('sha256').update(fingerprint).digest('hex')}`;
 }
 
 function parseEventCursor(value: string | undefined): string | undefined {
-  return value !== undefined && /^v1:[a-f0-9]{64}$/.test(value) ? value : undefined;
+  return value !== undefined && /^(?:v1:[a-f0-9]{64}|v2:[1-9][0-9]*:[a-f0-9]{64})$/.test(value)
+    ? value
+    : undefined;
 }
 
 function memoizedJsonReader(request: IncomingMessage): () => Promise<Record<string, unknown>> {

@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun, AgentRunStatus, RunHandOff, TokenUsage } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
-import type { RunStore } from './store.ts';
+import type { RunReplaySnapshot, RunStore } from './store.ts';
 import {
   sessionKeyId,
   type SessionKeyStore,
@@ -52,6 +52,7 @@ interface RunRow {
   readonly completed_at: number | null;
   readonly hand_off: string | null;
   readonly token_usage: string | null;
+  readonly replay_sequence: number | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -92,7 +93,8 @@ export class SqliteRunStore implements RunStore {
         completed_at INTEGER,
         hand_off TEXT,
         task_id TEXT,
-        token_usage TEXT
+        token_usage TEXT,
+        replay_sequence INTEGER
       );
     `);
     // Added after the table shipped; a database from before this column still
@@ -101,6 +103,12 @@ export class SqliteRunStore implements RunStore {
     this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'token_usage', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'replay_sequence', 'INTEGER');
+    this.#backfillReplaySequences();
+    this.#db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
+        ON agent_runs (replay_sequence)
+    `);
   }
 
   #addColumnIfMissing(table: string, column: string, type: string): void {
@@ -112,12 +120,26 @@ export class SqliteRunStore implements RunStore {
     }
   }
 
-  async save(run: AgentRun): Promise<void> {
+  #backfillReplaySequences(): void {
+    let sequence = (this.#db.prepare(
+      'SELECT COALESCE(MAX(replay_sequence), 0) AS sequence FROM agent_runs',
+    ).get() as { sequence: number }).sequence;
+    const missing = this.#db.prepare(
+      'SELECT id FROM agent_runs WHERE replay_sequence IS NULL ORDER BY created_at ASC, id ASC',
+    ).all() as unknown as readonly { id: string }[];
+    const update = this.#db.prepare('UPDATE agent_runs SET replay_sequence = ? WHERE id = ?');
+    for (const row of missing) update.run(++sequence, row.id);
+  }
+
+  async save(run: AgentRun): Promise<number> {
+    const replaySequence = (this.#db.prepare(
+      'SELECT COALESCE(MAX(replay_sequence), 0) + 1 AS sequence FROM agent_runs',
+    ).get() as { sequence: number }).sequence;
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -127,7 +149,8 @@ export class SqliteRunStore implements RunStore {
            completed_at = excluded.completed_at,
            hand_off = excluded.hand_off,
            task_id = excluded.task_id,
-           token_usage = excluded.token_usage`,
+           token_usage = excluded.token_usage,
+           replay_sequence = excluded.replay_sequence`,
       )
       .run(
         run.id,
@@ -145,7 +168,9 @@ export class SqliteRunStore implements RunStore {
         run.completedAt ?? null,
         run.handOff ? JSON.stringify(run.handOff) : null,
         run.tokenUsage ? JSON.stringify(run.tokenUsage) : null,
+        replaySequence,
       );
+    return replaySequence;
   }
 
   async get(runId: string): Promise<AgentRun | undefined> {
@@ -160,6 +185,13 @@ export class SqliteRunStore implements RunStore {
       .prepare('SELECT * FROM agent_runs ORDER BY created_at DESC')
       .all() as unknown as RunRow[];
     return rows.map(toRun);
+  }
+
+  async replaySnapshots(): Promise<readonly RunReplaySnapshot[]> {
+    const rows = this.#db
+      .prepare('SELECT * FROM agent_runs ORDER BY replay_sequence ASC')
+      .all() as unknown as RunRow[];
+    return rows.map((row) => ({ sequence: row.replay_sequence!, run: toRun(row) }));
   }
 
   close(): void {

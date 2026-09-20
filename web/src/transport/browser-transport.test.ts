@@ -116,13 +116,13 @@ test('browser transport reports reconnecting, online, stale, and offline SSE sta
   source.open();
   assert.equal(transport.state().connection, 'online');
   source.emitRun({ id: 'run-1' }, 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-  source.emitRun({ id: 'run-1' }, 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-  source.emitRun({ id: 'run-1', status: 'completed' }, 'v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  source.emitRun({ id: 'run-1' }, 'v2:1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc');
+  source.emitRun({ id: 'run-1', status: 'completed' }, 'v2:2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
   assert.deepEqual(received, [
     { type: 'run', data: { id: 'run-1' }, cursor: 'v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
     {
       type: 'run', data: { id: 'run-1', status: 'completed' },
-      cursor: 'v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      cursor: 'v2:2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     },
   ]);
   assert.ok(stale);

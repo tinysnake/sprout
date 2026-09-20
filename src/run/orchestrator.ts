@@ -9,7 +9,7 @@ import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
-import type { RunStore } from './store.ts';
+import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 
@@ -410,6 +410,11 @@ export class RunOrchestrator {
     return [...this.#runs.values()].sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /** Latest durable run snapshots in their store-assigned forward replay order. */
+  async replaySnapshots(): Promise<readonly RunReplaySnapshot[]> {
+    return this.#store.replaySnapshots();
+  }
+
   /**
    * Mark runs left mid-flight by a previous process as failed and transition
    * their active leases into recovery.
@@ -593,9 +598,12 @@ export class RunOrchestrator {
         ? resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent)
         : `project-workspace:${workspace.projectWorkspaceId}`;
       const assembled = await this.#assembleInput(initial, agent, running.id);
-      prepared = await this.#advance(running, {
-        ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
-      });
+      // Do not persist and notify an unchanged observable run state. Replay
+      // cursors use durable write positions as forward boundaries, so a no-op
+      // state must not move an already-issued boundary past another run.
+      if (assembled.handOff !== undefined) {
+        prepared = await this.#advance(running, { handOff: assembled.handOff });
+      }
 
       // The continuation slot is `(agent, engine, environment instance, working
       // directory)`. All four must match for a stored key to be reusable: the key
@@ -866,8 +874,8 @@ export class RunOrchestrator {
   async #advance(run: AgentRun, patch: Partial<AgentRun>): Promise<AgentRun> {
     const next: AgentRun = { ...run, ...patch };
     this.#runs.set(next.id, next);
-    await this.#store.save(next);
-    for (const observer of this.#observers) observer(next);
+    const replaySequence = await this.#store.save(next);
+    for (const observer of this.#observers) observer(next, replaySequence);
     return next;
   }
 }
