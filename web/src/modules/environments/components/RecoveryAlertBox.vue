@@ -7,6 +7,7 @@ import Icon from '../../../primitives/Icon.vue';
 
 const props = defineProps<{
   env: EnvironmentInstance;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -73,6 +74,7 @@ const unresolvedFacts = computed(() => {
         variant="secondary"
         size="sm"
         class="btn-resume-recovery text-xs"
+        :disabled="disabled"
         @click="emit('resume', taskId)"
       >
         <Icon name="play" :size="13" />
@@ -83,6 +85,7 @@ const unresolvedFacts = computed(() => {
         variant="secondary"
         size="sm"
         class="btn-discard-recovery text-xs"
+        :disabled="disabled"
         @click="emit('discard', taskId)"
       >
         <Icon name="close" :size="13" />
@@ -93,6 +96,7 @@ const unresolvedFacts = computed(() => {
         variant="danger"
         size="sm"
         class="force-release-btn text-xs"
+        :disabled="disabled"
         @click="emit('forceRelease', env.id)"
       >
         <Icon name="warning" :size="13" />

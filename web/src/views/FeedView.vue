@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
-import { useRouter } from 'vue-router';
+import { ref, computed, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { useAppStore } from '../stores/app.ts';
+import { useAnnouncer } from '../primitives/announcer.ts';
 import Icon from '../primitives/Icon.vue';
 import Badge from '../primitives/Badge.vue';
 import StatusDot from '../primitives/StatusDot.vue';
@@ -10,12 +11,41 @@ import FilterPill from '../primitives/FilterPill.vue';
 import Dialog from '../primitives/Dialog.vue';
 import Button from '../primitives/Button.vue';
 
+const route = useRoute();
 const router = useRouter();
 const appStore = useAppStore();
+const announcer = useAnnouncer();
 
-const activeScope = ref('all');
-const activeUrgency = ref<'all' | 'action_required' | 'attention' | 'info'>('all');
-const activeActivityFilter = ref<'all' | 'tasks' | 'messages' | 'envs' | 'usage'>('all');
+const scopes = ['all', 'sprout-m2', 'infra'] as const;
+const urgencies = ['all', 'action_required', 'attention', 'info'] as const;
+const activityKinds = ['all', 'tasks', 'messages', 'envs', 'usage'] as const;
+
+type Scope = (typeof scopes)[number];
+type Urgency = (typeof urgencies)[number];
+type ActivityKind = (typeof activityKinds)[number];
+
+/** Restores the Feed's own filters from the URL so a return trip is not a reset. */
+function fromQuery<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
+const activeScope = ref<Scope>(fromQuery(route.query['scope'], scopes, 'all'));
+const activeUrgency = ref<Urgency>(fromQuery(route.query['urgency'], urgencies, 'all'));
+const activeActivityFilter = ref<ActivityKind>(fromQuery(route.query['activity'], activityKinds, 'all'));
+
+/** The Feed's filters belong in the URL: that is what a return link restores. */
+const feedQuery = computed(() => ({
+  scope: activeScope.value,
+  urgency: activeUrgency.value,
+  activity: activeActivityFilter.value,
+}));
+
+watch(feedQuery, (query) => {
+  // Replace, not push: filter changes are refinements of the current page, so
+  // they must not each become a browser history entry the operator has to
+  // press Back through.
+  router.replace({ name: 'feed', query });
+});
 
 interface AttentionItem {
   id: string;
@@ -116,8 +146,9 @@ function openTaskDetail(task: any) {
 function navigateToTaskEnv() {
   if (selectedTask.value?.targetPath) {
     const target = selectedTask.value.targetPath;
+    const label = `Task #${selectedTask.value.id}`;
     isTaskDetailOpen.value = false;
-    handleNavigate(target);
+    handleNavigate(target, label);
   }
 }
 
@@ -248,11 +279,14 @@ const filteredActivities = computed(() => {
   return activities.value.filter((a) => a.kind === activeActivityFilter.value);
 });
 
-function handleNavigate(path: string) {
+function handleNavigate(path: string, label: string) {
+  // Return to the exact Feed context the operator left, filters included,
+  // rather than a bare `/feed` that would silently reset their scope.
   appStore.setReturnContext({
     title: 'Back to Feed',
-    to: '/feed',
+    to: router.resolve({ name: 'feed', query: feedQuery.value }).fullPath,
   });
+  announcer.announce(`Opening ${label}. Back to Feed is available.`);
   router.push(path);
 }
 </script>
@@ -352,7 +386,7 @@ function handleNavigate(path: string) {
               type="button"
               class="feed-attention-card text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
               :class="item.severity === 'action_required' ? 'border-l-4 border-l-[var(--red-action)] border-[var(--border-subtle)]' : item.severity === 'attention' ? 'border-l-4 border-l-[var(--yellow-attention)] border-[var(--border-subtle)]' : 'border-l-4 border-l-[var(--purple-agent)] border-[var(--border-subtle)]'"
-              @click="handleNavigate(item.targetPath)"
+              @click="handleNavigate(item.targetPath, item.title)"
             >
               <div class="w-full">
                 <div class="flex items-center justify-between gap-2 mb-2">
@@ -502,7 +536,7 @@ function handleNavigate(path: string) {
               :key="act.id"
               type="button"
               class="text-left p-3 rounded flex items-center justify-between gap-3 hover:bg-[var(--bg-surface-elevated)] transition-colors cursor-pointer select-none"
-              @click="handleNavigate(act.targetPath)"
+              @click="handleNavigate(act.targetPath, act.title)"
             >
               <div class="flex items-center shrink-0">
                 <StatusDot :status="act.badgeKind" size="sm" />

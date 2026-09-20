@@ -5,6 +5,7 @@ import Button from '../../../primitives/Button.vue';
 
 defineProps<{
   env: EnvironmentInstance;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -36,6 +37,7 @@ const emit = defineEmits<{
             variant="primary"
             size="xs"
             class="approve-enroll-btn text-[10px] h-6 px-2"
+            :disabled="disabled"
             @click="emit('approve', env.id)"
           >
             Approve

@@ -17,6 +17,8 @@ import ForcedReleaseAuditBox from './ForcedReleaseAuditBox.vue';
 
 defineProps<{
   env: EnvironmentInstance;
+  /** True while the connection is unsettled: every control action is refused. */
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -54,11 +56,12 @@ const emit = defineEmits<{
       </div>
 
       <!-- 1–4. Core Operational Status & Safety Dimensions -->
-      <HealthDimensionsGrid :env="env" @approve="emit('approve', $event)" />
+      <HealthDimensionsGrid :env="env" :disabled="disabled" @approve="emit('approve', $event)" />
 
       <!-- 5. Capability Permissions (Granular & Safety Guarded) -->
       <CapabilityPermissionsGrid
         :permissions="env.capabilityPermissions"
+        :disabled="disabled"
         @toggle="emit('togglePermission', $event)"
       />
 
@@ -94,6 +97,7 @@ const emit = defineEmits<{
               variant="secondary"
               size="xs"
               class="unbind-env-btn text-[10px] h-6 px-2"
+              :disabled="disabled"
               @click="emit('unbindWorkspace', { projectId: ws.projectId, envId: env.id })"
             >
               Unbind
@@ -111,11 +115,13 @@ const emit = defineEmits<{
     <ReconcilingBox
       v-if="env.workSafety === 'reconciling'"
       :env="env"
+      :disabled="disabled"
       @reconcile="emit('reconcile', $event)"
     />
     <RecoveryAlertBox
       v-else-if="env.workSafety === 'recovery'"
       :env="env"
+      :disabled="disabled"
       @resume="emit('resume', $event)"
       @discard="emit('discard', $event)"
       @force-release="emit('forceRelease', $event)"
@@ -136,6 +142,7 @@ const emit = defineEmits<{
         variant="primary"
         size="sm"
         class="approve-enroll-btn text-xs"
+        :disabled="disabled"
         @click="emit('approve', env.id)"
       >
         <Icon name="check" :size="13" />
@@ -146,6 +153,7 @@ const emit = defineEmits<{
         variant="secondary"
         size="sm"
         class="run-probe-btn text-xs"
+        :disabled="disabled"
         @click="emit('probe', env.id)"
       >
         <Icon name="lightning" :size="13" />
@@ -157,6 +165,7 @@ const emit = defineEmits<{
         variant="secondary"
         size="sm"
         class="archive-env-btn text-xs"
+        :disabled="disabled"
         @click="emit('archive', env.id)"
       >
         <Icon name="archive" :size="13" />
@@ -168,6 +177,7 @@ const emit = defineEmits<{
         variant="secondary"
         size="sm"
         class="restore-env-btn text-xs"
+        :disabled="disabled"
         @click="emit('restore', env.id)"
       >
         <Icon name="refresh" :size="13" />
@@ -179,6 +189,7 @@ const emit = defineEmits<{
         variant="ghost"
         size="sm"
         class="unenroll-env-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)]"
+        :disabled="disabled"
         @click="emit('unenroll', env.id)"
       >
         <Icon name="trash" :size="13" />

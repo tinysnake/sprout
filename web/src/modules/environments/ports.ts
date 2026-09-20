@@ -1,3 +1,4 @@
+import type { InjectionKey } from 'vue';
 import type {
   CapabilityKey,
   EnvironmentInstance,
@@ -24,3 +25,15 @@ export interface EnvironmentService {
   restoreEnvironment(id: string): Promise<void>;
   unenrollEnvironment(id: string): Promise<void>;
 }
+
+/**
+ * The typed adapter the Environment route requires.
+ *
+ * A production route never constructs its own authority: the bootstrap wires a
+ * real adapter here and deterministic tests inject a fixture one explicitly.
+ * When nothing is provided the route fails closed with an explicit unavailable
+ * state rather than falling back to fixture facts.
+ */
+export const ENVIRONMENT_SERVICE: InjectionKey<EnvironmentService> = Symbol(
+  'sprout.environments.service'
+);

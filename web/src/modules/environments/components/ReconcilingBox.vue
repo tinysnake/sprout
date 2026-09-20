@@ -6,6 +6,7 @@ import Icon from '../../../primitives/Icon.vue';
 
 defineProps<{
   env: EnvironmentInstance;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +35,7 @@ const emit = defineEmits<{
         variant="warning"
         size="sm"
         class="btn-reconcile-evidence text-xs"
+        :disabled="disabled"
         @click="emit('reconcile', env.id)"
       >
         <Icon name="check" :size="13" />
