@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun, AgentRunStatus, RunHandOff, TokenUsage } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
+import type { AgentWorkOption } from '../agent/model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import {
   sessionKeyId,
@@ -53,6 +54,8 @@ interface RunRow {
   readonly hand_off: string | null;
   readonly token_usage: string | null;
   readonly replay_sequence: number | null;
+  readonly work_option: string | null;
+  readonly configuration_version: number | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -104,6 +107,11 @@ export class SqliteRunStore implements RunStore {
     this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'token_usage', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'replay_sequence', 'INTEGER');
+    // Work-option admission facts (#90). A database from before these columns
+    // still has its runs; they simply carry no recorded option (pre-#90
+    // attribution), which the view layer presents as unspecified.
+    this.#addColumnIfMissing('agent_runs', 'work_option', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
     this.#backfillReplaySequences();
     this.#db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
@@ -138,8 +146,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -150,7 +158,9 @@ export class SqliteRunStore implements RunStore {
            hand_off = excluded.hand_off,
            task_id = excluded.task_id,
            token_usage = excluded.token_usage,
-           replay_sequence = excluded.replay_sequence`,
+           replay_sequence = excluded.replay_sequence,
+           work_option = excluded.work_option,
+           configuration_version = excluded.configuration_version`,
       )
       .run(
         run.id,
@@ -169,6 +179,8 @@ export class SqliteRunStore implements RunStore {
         run.handOff ? JSON.stringify(run.handOff) : null,
         run.tokenUsage ? JSON.stringify(run.tokenUsage) : null,
         replaySequence,
+        run.workOption ? JSON.stringify(run.workOption) : null,
+        run.configurationVersion ?? null,
       );
     return replaySequence;
   }
@@ -295,6 +307,8 @@ function toRun(row: RunRow): AgentRun {
     row.hand_off !== null ? (JSON.parse(row.hand_off) as RunHandOff) : undefined;
   const tokenUsage =
     row.token_usage !== null ? (JSON.parse(row.token_usage) as TokenUsage) : undefined;
+  const workOption =
+    row.work_option !== null ? (JSON.parse(row.work_option) as AgentWorkOption) : undefined;
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -309,6 +323,8 @@ function toRun(row: RunRow): AgentRun {
     ...(row.failure !== null ? { failure: row.failure } : {}),
     ...(result !== undefined ? { result } : {}),
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+    ...(workOption !== undefined ? { workOption } : {}),
+    ...(row.configuration_version !== null ? { configurationVersion: row.configuration_version } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
   };

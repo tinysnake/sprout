@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 6;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 7;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -43,6 +43,7 @@ export const SUPPORTED_SCHEMA_RANGE: SchemaVersionRange = {
   max: MAX_SUPPORTED_SCHEMA_VERSION,
   current: CURRENT_SCHEMA_VERSION,
 };
+
 
 /**
  * Sanitize a file path for safe display in error messages and host guidance.
@@ -459,6 +460,27 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         );
         CREATE INDEX IF NOT EXISTS environment_force_releases_instance_idx
           ON environment_force_releases (environment_instance_id, at);
+      `);
+    },
+  },
+  {
+    fromVersion: 6,
+    toVersion: 7,
+    name: 'agent_identities_and_work_options',
+    migrate: (db) => {
+      // A portable Agent is one JSON document keyed by its stable id, holding
+      // its display name, optional standing instructions, and ordered work
+      // options plus the append-only configuration history every run's
+      // attribution depends on (ADR-0008). All fields are sanitized at the
+      // write boundary, so no credential, hostname, address, or absolute path
+      // has a column here. Archiving is a status inside the document; there is
+      // no delete.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agents (
+          id TEXT PRIMARY KEY,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
       `);
     },
   },
