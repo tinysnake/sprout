@@ -17,17 +17,19 @@ const emit = defineEmits<{
 }>();
 
 const recovery = computed(() => props.env.leaseRecovery);
-const taskId = computed(() => props.env.activeLeaseHolder?.holderId ?? '104');
+const holder = computed(() => props.env.activeLeaseHolder);
+const taskId = computed(() => holder.value?.holderId ?? recovery.value?.leaseId ?? '');
+const isRunHolder = computed(() => holder.value?.holderKind === 'run');
 
-const unresolvedFacts = computed(() => {
-  return (
-    recovery.value?.unresolvedFacts ?? [
-      'Worker process unreachable over carrier overlay',
-      'Engine process status unverified',
-      'Task scratch context directory not yet recycled',
-    ]
-  );
-});
+/**
+ * The ordinary decisions act through the holder, and both need the retained
+ * evidence synchronized first (ADR-0009). Force Release is available in
+ * `recovery` even before the evidence arrives — it is the emergency escape.
+ */
+const evidenceReady = computed(() => recovery.value?.evidenceSynchronized === true);
+const hasHolder = computed(() => taskId.value !== '');
+
+const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
 </script>
 
 <template>
@@ -47,7 +49,7 @@ const unresolvedFacts = computed(() => {
     </div>
 
     <div v-if="recovery?.interruptedRunId" class="text-[11px] text-[var(--text-secondary)] font-mono">
-      Interrupted Run: <code>{{ recovery.interruptedRunId }}</code> ({{ recovery.interruptedRunAgent ?? 'Agent Lead' }})
+      Interrupted Run: <code>{{ recovery.interruptedRunId }}</code>
     </div>
 
     <!-- Unresolved Facts Manifest -->
@@ -70,27 +72,29 @@ const unresolvedFacts = computed(() => {
 
     <!-- Action Buttons -->
     <div class="flex items-center justify-end gap-2 pt-2 border-t border-[var(--red-action-border)] flex-wrap">
-      <Button
-        variant="secondary"
-        size="sm"
-        class="btn-resume-recovery text-xs"
-        :disabled="disabled"
-        @click="emit('resume', taskId)"
-      >
-        <Icon name="play" :size="13" />
-        <span>Resume Task on Same Host</span>
-      </Button>
+      <template v-if="evidenceReady && hasHolder && !isRunHolder">
+        <Button
+          variant="secondary"
+          size="sm"
+          class="btn-resume-recovery text-xs"
+          :disabled="disabled"
+          @click="emit('resume', taskId)"
+        >
+          <Icon name="play" :size="13" />
+          <span>Resume Task on Same Host</span>
+        </Button>
 
-      <Button
-        variant="secondary"
-        size="sm"
-        class="btn-discard-recovery text-xs"
-        :disabled="disabled"
-        @click="emit('discard', taskId)"
-      >
-        <Icon name="close" :size="13" />
-        <span>Discard Task & Safe Release</span>
-      </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          class="btn-discard-recovery text-xs"
+          :disabled="disabled"
+          @click="emit('discard', taskId)"
+        >
+          <Icon name="close" :size="13" />
+          <span>Discard Task & Safe Release</span>
+        </Button>
+      </template>
 
       <Button
         variant="danger"

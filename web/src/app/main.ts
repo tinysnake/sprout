@@ -3,6 +3,9 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import { createAppRouter } from '../router/index.js';
 import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.js';
+import { createEnvironmentEnrollmentBrowserAdapter } from '../adapters/environment-api.js';
+import { ProductionEnvironmentService } from '../modules/environments/adapters/production-adapter.js';
+import { createBrowserTransport } from '../transport/browser-transport.js';
 import type { ShellConnectionSource } from '../shell/connection.js';
 import { SHELL_CONNECTION_SOURCE } from '../shell/use-shell-connection.js';
 import { ANNOUNCER_KEY, ANNOUNCER_MESSAGE_KEY, createAnnouncerChannel } from '../primitives/announcer.js';
@@ -59,7 +62,19 @@ export function createSproutApp(options: SproutAppOptions = {}) {
 if (typeof window !== 'undefined' && !(window as unknown as Record<string, unknown>).__SPROUT_TEST_MANUAL_MOUNT__) {
   const mountEl = document.getElementById('app');
   if (mountEl) {
-    const { app, router } = createSproutApp();
+    // The production bootstrap wires the real typed Environment adapter over the
+    // shared #85 transport. Deterministic tests never run this branch (they set
+    // __SPROUT_TEST_MANUAL_MOUNT__ and inject a fixture explicitly), so a fixture
+    // can never become the production authority. The transport reports the
+    // connection fact the Shell and the control boundary read.
+    const transport = createBrowserTransport();
+    const environmentService = new ProductionEnvironmentService(
+      createEnvironmentEnrollmentBrowserAdapter(transport),
+    );
+    const { app, router } = createSproutApp({
+      environmentService,
+      connectionSource: transport,
+    });
     router.isReady().then(() => {
       app.mount(mountEl);
     });

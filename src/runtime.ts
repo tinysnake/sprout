@@ -41,6 +41,7 @@ import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
+import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
   createEnvironmentWorkerFactory,
   localWorkerEnvironment,
@@ -488,6 +489,15 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       requiredEngines: [engineId],
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
+    // Non-destructive archive/restore (#89, ADR-0008). It reads the same lease
+    // registry and open recovery records, so an Environment with dependent work
+    // can never be archived, and its decisions are ordinary durable enrollment
+    // decisions in the same append-only history.
+    const archive = new EnvironmentArchiveService({
+      enrollments: stores.enrollments,
+      leases: pool,
+      recovery,
+    });
     const api = createRunApi({
       orchestrator,
       agents,
@@ -505,7 +515,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // additive seam, so no central dispatcher grows for it. The recovery routes
       // (#88) are composed through the same seam and delegate every safety rule
       // to the recovery service.
-      routers: [createEnvironmentRouter({ enrollments, recovery })],
+      routers: [createEnvironmentRouter({ enrollments, recovery, archive })],
     });
 
     /** The last reconciliation result, so `startupReport` reports what ran. */

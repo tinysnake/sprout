@@ -122,3 +122,53 @@ test('no adapter request path carries credentials, hostnames, or absolute paths'
   // A path segment is escaped, so it cannot traverse to another route.
   assert.equal(serialized.includes('e1/../'), false);
 });
+
+test('archive and restore use explicit POST routes and echo the enrollment decision', async () => {
+  const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/archive')) return { enrollment: { id: 'e1', status: 'archived' } };
+    return { enrollment: { id: 'e1', status: 'approved' } };
+  });
+  const adapter = createEnvironmentEnrollmentBrowserAdapter(transport);
+
+  const archived = await adapter.archiveEnvironment('e1');
+  const restored = await adapter.restoreEnvironment('e1');
+
+  assert.equal(archived.status, 'archived');
+  assert.equal(restored.status, 'approved');
+  assert.deepEqual(
+    calls.map((call) => `${call.init?.method} ${call.path}`),
+    [
+      'POST /api/environments/enrollments/e1/archive',
+      'POST /api/environments/enrollments/e1/restore',
+    ],
+  );
+});
+
+test('environmentFacts composes the enrollment, readiness, and recovery reads without mutating anything', async () => {
+  const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/readiness')) {
+      return { readiness: { environmentInstanceId: 'inst-1', summary: { level: 'green', reason: 'ready' } }, probes: [] };
+    }
+    if (path.endsWith('/recovery')) {
+      return { recovery: [], forceReleases: [] };
+    }
+    return { enrollment: { id: 'e1', status: 'approved' } };
+  });
+  const adapter = createEnvironmentEnrollmentBrowserAdapter(transport);
+
+  const facts = await adapter.environmentFacts('e1');
+  assert.equal(facts.enrollment.id, 'e1');
+  assert.equal(facts.readiness.summary.level, 'green');
+  assert.deepEqual(facts.recovery, []);
+  assert.deepEqual(facts.forceReleases, []);
+
+  // Every composed read is a GET; composing facts never issues a command.
+  assert.deepEqual(
+    calls.map((call) => `${call.init?.method ?? 'GET'} ${call.path}`),
+    [
+      'GET /api/environments/enrollments/e1',
+      'GET /api/environments/enrollments/e1/readiness',
+      'GET /api/environments/enrollments/e1/recovery',
+    ],
+  );
+});

@@ -79,3 +79,31 @@ test('Privacy Boundary: fixtures and returned facts contain no private host path
     assert.ok(validEngineStatuses.has(env.engineReadiness.opencode));
   }
 });
+
+test('Privacy Boundary: display names and reasons stay free of identity and infrastructure facts', async () => {
+  const service = new FixtureEnvironmentService();
+  const envs = await service.listEnvironments();
+
+  for (const env of envs) {
+    // The opaque Worker identity is never displayed; only its presence is.
+    assert.equal(
+      /identity[:=]\s*\S{8,}/i.test(env.trafficLightReason),
+      false,
+      `reason must not display an identity value: ${env.trafficLightReason}`,
+    );
+    for (const probe of env.probeHistory) {
+      assert.equal(
+        /wss?:\/\/|https?:\/\//i.test(probe.summary),
+        false,
+        `probe summary must not display a transport address: ${probe.summary}`,
+      );
+    }
+    for (const ws of env.boundWorkspaces) {
+      assert.equal(
+        /[A-Za-z]:\\|\~\//.test(`${ws.workspaceRoot}/${ws.relativeWorkspacePath}`),
+        false,
+        `workspace label must stay neutral: ${ws.workspaceRoot}/${ws.relativeWorkspacePath}`,
+      );
+    }
+  }
+});

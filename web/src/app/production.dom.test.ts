@@ -1456,3 +1456,116 @@ test('M77-PROJECT-001: Project Chat renders each scope from its typed discrimina
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// #89: archive/restore parity on phone drill-down, and the offline state.
+// ---------------------------------------------------------------------------
+
+test('M89-PARITY: phone drill-down exposes the same archive and restore capabilities as desktop', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    // A cold start on the phone detail route: the same capabilities must be
+    // reachable without a desktop master/detail split. The degraded row is
+    // approved with no lease and clear work safety, so archive is offered.
+    await router.push('/manage/environments/env-degraded');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.ok(doc.querySelector('.envs-mobile-detail-wrapper'), 'the phone detail view renders');
+    const archiveBtn = doc.querySelector('.archive-env-btn') as HTMLButtonElement;
+    assert.ok(archiveBtn, 'Archive Instance is offered on phone drill-down');
+    archiveBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Archived Instance/, 'the row becomes archived');
+    const restoreBtn = doc.querySelector('.restore-env-btn') as HTMLButtonElement;
+    assert.ok(restoreBtn, 'Restore Instance is offered on phone drill-down');
+    restoreBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /Degraded/, 'restore returns the row to its valid enrollment');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: an environment with a force-release audit is distinct from an ordinary held lease', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // Drive the recovery row through the three-gate Force Release.
+    const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
+    recoveryCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    (doc.querySelector('.force-release-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const typedInput = doc.querySelector('.force-confirm-typed') as HTMLInputElement;
+    typedInput.value = 'FORCE RELEASE';
+    typedInput.dispatchEvent(new dom.window.Event('input'));
+    (doc.querySelector('.ack-risks-checkbox') as HTMLInputElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    (doc.querySelector('.confirm-force-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Green: Ready/, 'the row returns to Green');
+    assert.match(doc.body.textContent ?? '', /Durable Forced Release Audit Event/, 'the audit box renders');
+    assert.equal(doc.querySelector('.recovery-alert-box'), null, 'the recovery box is gone');
+    assert.equal(doc.querySelector('.active-lease-box'), null, 'no lease box masquerades as the audit');
+    // The audit is distinguishable from an ordinary held lease (env-ready).
+    assert.ok(doc.querySelector('.forced-release-audit-box'), 'the audit box is rendered');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: a pasted deep link to an archived environment renders its archived detail', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/env-archived');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Archived Instance/, 'the archived state renders its own banner title');
+    assert.match(banner.textContent ?? '', /New work admission barred/, 'the archived decisive reason renders');
+    assert.ok(doc.querySelector('.restore-env-btn'), 'Restore is the offered action');
+    assert.equal(doc.querySelector('.archive-env-btn'), null, 'Archive is not offered twice');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});

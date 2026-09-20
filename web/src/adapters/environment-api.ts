@@ -223,6 +223,26 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly typedConfirmation: string;
     readonly reason: string;
   }): Promise<ForceReleaseView>;
+
+  /**
+   * Non-destructive archive and restore (ADR-0008, #89). Archive bars new work
+   * while preserving enrollment, history, and decisions; restore reuses the
+   * still-valid enrollment.
+   */
+  archiveEnvironment(id: string, reason?: string): Promise<EnrollmentView>;
+  restoreEnvironment(id: string, reason?: string): Promise<EnrollmentView>;
+
+  /** The composed read-only facts behind one Environment page row. */
+  environmentFacts(id: string): Promise<EnvironmentFactsView>;
+}
+
+/** The composed facts behind one Environment page row (all reads, no mutation). */
+export interface EnvironmentFactsView {
+  readonly enrollment: EnrollmentView;
+  readonly readiness: EnvironmentReadinessView;
+  readonly probes: readonly ProbeResultView[];
+  readonly recovery: readonly EnvironmentRecoveryView[];
+  readonly forceReleases: readonly ForceReleaseView[];
 }
 
 export function createEnvironmentEnrollmentBrowserAdapter(
@@ -339,6 +359,41 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand(input),
       );
       return response.forceRelease;
+    },
+    async archiveEnvironment(id, reason) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/archive`,
+        jsonCommand(reason === undefined ? {} : { reason }),
+      );
+      return response.enrollment;
+    },
+    async restoreEnvironment(id, reason) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/restore`,
+        jsonCommand(reason === undefined ? {} : { reason }),
+      );
+      return response.enrollment;
+    },
+    async environmentFacts(id): Promise<EnvironmentFactsView> {
+      const encoded = encodeURIComponent(id);
+      const [enrollment, readiness, recovery] = await Promise.all([
+        transport.request<{ readonly enrollment: EnrollmentView }>(
+          `/api/environments/enrollments/${encoded}`,
+        ),
+        transport.request<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[] }>(
+          `/api/environments/enrollments/${encoded}/readiness`,
+        ),
+        transport.request<{ readonly recovery: readonly EnvironmentRecoveryView[]; readonly forceReleases: readonly ForceReleaseView[] }>(
+          `/api/environments/enrollments/${encoded}/recovery`,
+        ),
+      ]);
+      return {
+        enrollment: enrollment.enrollment,
+        readiness: readiness.readiness,
+        probes: readiness.probes,
+        recovery: recovery.recovery,
+        forceReleases: recovery.forceReleases,
+      };
     },
   };
 }

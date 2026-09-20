@@ -20,15 +20,19 @@ import {
   DEFAULT_DECISION_REASON,
   DEFAULT_RESET_REASON,
   DEFAULT_REVOKE_REASON,
+  DEFAULT_ARCHIVE_REASON,
+  DEFAULT_RESTORE_REASON,
 } from './privacy.ts';
 
-export type EnrollmentStatus = 'pending' | 'approved' | 'revoked';
+export type EnrollmentStatus = 'pending' | 'approved' | 'revoked' | 'archived';
 
 export type EnrollmentDecisionKind =
   | 'requested'
   | 'approved'
   | 'revoked'
   | 'reset'
+  | 'archived'
+  | 'restored'
   | 'duplicate-same-key'
   | 'identity-claimed'
   | 'duplicate-new-key-refused';
@@ -505,6 +509,8 @@ const DECISION_REASON_FALLBACKS: Readonly<Record<EnrollmentDecisionKind, string>
   approved: 'Human approved the Worker identity and its capability permissions.',
   revoked: DEFAULT_REVOKE_REASON,
   reset: DEFAULT_RESET_REASON,
+  archived: DEFAULT_ARCHIVE_REASON,
+  restored: DEFAULT_RESTORE_REASON,
   'duplicate-same-key': 'The known Worker identity reconnected.',
   'identity-claimed': 'A newly generated Worker identity claimed the reset enrollment; fresh Human approval is required.',
   'duplicate-new-key-refused': 'A different Worker key cannot replace the existing binding; reset the enrollment first.',

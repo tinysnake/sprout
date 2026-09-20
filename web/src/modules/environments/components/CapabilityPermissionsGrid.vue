@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { CapabilityKey, CapabilityPermissions } from '../types.js';
 import Button from '../../../primitives/Button.vue';
 
-defineProps<{
+const props = defineProps<{
   permissions: CapabilityPermissions;
   disabled?: boolean;
 }>();
@@ -10,6 +11,32 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'toggle', cap: CapabilityKey): void;
 }>();
+
+function capabilityLabel(cap: string): string {
+  if (cap === 'fileReadWrite') return 'File R/W';
+  if (cap === 'processExecution') return 'Process Exec';
+  if (cap === 'networkAccess') return 'Network';
+  if (cap === 'guiAutomation') return 'GUI Auto';
+  return cap;
+}
+
+/**
+ * The rows the enrollment actually declared. The prototype's four canonical
+ * capabilities keep their representative order; any further declared capability
+ * follows them. A capability with no stored permission renders honestly as
+ * Refused, because an ungranted permission grants nothing.
+ */
+const capabilityRows = computed(() => {
+  const canonical = ['fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'].filter(
+    (cap) => cap in props.permissions,
+  );
+  const declared = Object.keys(props.permissions).filter((cap) => !canonical.includes(cap));
+  return [...canonical, ...declared].map((cap) => ({
+    cap,
+    label: capabilityLabel(cap),
+    allowed: props.permissions[cap] === true,
+  }));
+});
 </script>
 
 <template>
@@ -21,67 +48,22 @@ const emit = defineEmits<{
     </div>
 
     <div class="permissions-2x2-grid grid grid-cols-2 sm:grid-cols-4 gap-2">
-      <!-- File Read/Write -->
-      <div class="permission-toggle-item p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-1.5">
-        <span class="permission-item-label text-xs font-semibold text-[var(--text-primary)]">File R/W</span>
+      <div
+        v-for="row in capabilityRows"
+        :key="row.cap"
+        class="permission-toggle-item p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-1.5"
+      >
+        <span class="permission-item-label text-xs font-semibold text-[var(--text-primary)]">{{ row.label }}</span>
         <Button
           size="xs"
-          :variant="permissions.fileReadWrite ? 'primary' : 'secondary'"
+          :variant="row.allowed ? 'primary' : 'secondary'"
           class="perm-toggle-btn w-full text-[10px] h-6"
-          :class="permissions.fileReadWrite ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
+          :class="row.allowed ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
           :disabled="disabled"
-          data-cap="fileReadWrite"
-          @click="emit('toggle', 'fileReadWrite')"
+          :data-cap="row.cap"
+          @click="emit('toggle', row.cap)"
         >
-          {{ permissions.fileReadWrite ? 'Granted' : 'Refused' }}
-        </Button>
-      </div>
-
-      <!-- Process Execution -->
-      <div class="permission-toggle-item p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-1.5">
-        <span class="permission-item-label text-xs font-semibold text-[var(--text-primary)]">Process Exec</span>
-        <Button
-          size="xs"
-          :variant="permissions.processExecution ? 'primary' : 'secondary'"
-          class="perm-toggle-btn w-full text-[10px] h-6"
-          :class="permissions.processExecution ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
-          :disabled="disabled"
-          data-cap="processExecution"
-          @click="emit('toggle', 'processExecution')"
-        >
-          {{ permissions.processExecution ? 'Granted' : 'Refused' }}
-        </Button>
-      </div>
-
-      <!-- Network Access -->
-      <div class="permission-toggle-item p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-1.5">
-        <span class="permission-item-label text-xs font-semibold text-[var(--text-primary)]">Network</span>
-        <Button
-          size="xs"
-          :variant="permissions.networkAccess ? 'primary' : 'secondary'"
-          class="perm-toggle-btn w-full text-[10px] h-6"
-          :class="permissions.networkAccess ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
-          :disabled="disabled"
-          data-cap="networkAccess"
-          @click="emit('toggle', 'networkAccess')"
-        >
-          {{ permissions.networkAccess ? 'Granted' : 'Refused' }}
-        </Button>
-      </div>
-
-      <!-- GUI Automation -->
-      <div class="permission-toggle-item p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-1.5">
-        <span class="permission-item-label text-xs font-semibold text-[var(--text-primary)]">GUI Auto</span>
-        <Button
-          size="xs"
-          :variant="permissions.guiAutomation ? 'primary' : 'secondary'"
-          class="perm-toggle-btn w-full text-[10px] h-6"
-          :class="permissions.guiAutomation ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
-          :disabled="disabled"
-          data-cap="guiAutomation"
-          @click="emit('toggle', 'guiAutomation')"
-        >
-          {{ permissions.guiAutomation ? 'Granted' : 'Refused' }}
+          {{ row.allowed ? 'Granted' : 'Refused' }}
         </Button>
       </div>
     </div>

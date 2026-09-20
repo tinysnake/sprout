@@ -402,6 +402,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
     if (env.leaseRecovery) {
+      env.leaseRecovery.evidenceSynchronized = true;
       env.leaseRecovery.reconciledEvidence = {
         retainedEventsCount: 4,
         engineStoppedProof: true,

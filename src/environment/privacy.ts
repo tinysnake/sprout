@@ -271,6 +271,12 @@ export function sanitizeOperatorText(value: string | undefined, options: Sanitiz
 export const DEFAULT_REVOKE_REASON = 'Human revoked the Worker identity and reconnection authority.';
 export const DEFAULT_RESET_REASON = 'Human reset the enrollment; the old Worker identity can no longer reconnect.';
 
+/** The fallbacks for the archive and restore authority decisions (ADR-0008). */
+export const DEFAULT_ARCHIVE_REASON =
+  'Human archived the Environment instance; enrollment and history are preserved and new work is barred.';
+export const DEFAULT_RESTORE_REASON =
+  'Human restored the archived Environment instance; its valid enrollment is reused.';
+
 /** The fallback for a compatibility detail and a probe summary. */
 export const DEFAULT_COMPATIBILITY_DETAIL = 'The Worker protocol compatibility detail was withheld.';
 export const DEFAULT_PROBE_SUMMARY = 'Test summary withheld.';

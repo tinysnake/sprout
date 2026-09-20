@@ -16,6 +16,7 @@ import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
 import { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
 import { InMemoryRecoveryStore } from '../environment/recovery-store.ts';
+import { EnvironmentArchiveService } from '../environment/archive.ts';
 import { FORCE_RELEASE_CONFIRMATION } from '../environment/recovery.ts';
 import { workerIdentityFixture } from '../environment/worker-identity-fixture.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
@@ -50,6 +51,7 @@ interface EnrollmentRuntime {
   readonly enrollments: EnvironmentEnrollmentService;
   readonly pool: EnvironmentPool;
   readonly recovery: EnvironmentRecoveryService;
+  readonly archive: EnvironmentArchiveService;
 }
 
 async function enrollmentApi(options: { readonly requiredEngines?: readonly string[] } = {}): Promise<EnrollmentRuntime> {
@@ -77,8 +79,9 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
   const credential = randomBytes(32).toString('base64url');
   await auth.initializeOrRecover(credential);
+  const enrollmentsStore = new InMemoryEnrollmentStore();
   const enrollments = new EnvironmentEnrollmentService({
-    enrollments: new InMemoryEnrollmentStore(),
+    enrollments: enrollmentsStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
     leases: () => pool.leases(),
     ...(options.requiredEngines !== undefined ? { requiredEngines: options.requiredEngines } : {}),
@@ -93,13 +96,19 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
     clock: () => 10_000,
     idFactory: () => `rec-${++recoveryRecordIndex}`,
   });
+  const archive = new EnvironmentArchiveService({
+    enrollments: enrollmentsStore,
+    leases: pool,
+    recovery,
+    clock: () => 10_000,
+  });
   const api = createRunApi({
     orchestrator,
     agents: new AgentRegistry([
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
     auth,
-    routers: [createEnvironmentRouter({ enrollments, recovery })],
+    routers: [createEnvironmentRouter({ enrollments, recovery, archive })],
   });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
@@ -111,7 +120,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   assert.equal(response.status, 201);
   const cookie = (response.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
   const { csrfToken } = (await response.json()) as { csrfToken: string };
-  return { api, base, cookie, csrf: csrfToken, enrollments, pool, recovery };
+  return { api, base, cookie, csrf: csrfToken, enrollments, pool, recovery, archive };
 }
 
 function command(
@@ -843,6 +852,72 @@ test('recovery routes require an authenticated session like every other route', 
     );
     // The record and the lease remain untouched.
     assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'recovering');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('archive and restore are authorized durable decisions with their ADR-0008 guard', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    // An unknown enrollment is a sanitized 404, never a verifier.
+    const missing = await command(runtime.base, '/api/environments/enrollments/nope/archive', runtime, {});
+    assert.equal(missing.status, 404);
+
+    const identity = workerIdentityFixture();
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      publicKey: identity.publicKey,
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+    });
+
+    // A held lease bars archive: active work depends on the instance.
+    const acquired = runtime.pool.acquireLease({
+      instanceId: 'mac-mini-1',
+      capability: 'agent-run',
+      holderId: 'agent-scout',
+      ttlMs: 60_000,
+    });
+    assert.ok(acquired.ok);
+    const blocked = await command(runtime.base, '/api/environments/enrollments/enroll-1/archive', runtime, {
+      reason: 'host retired for the week',
+    });
+    assert.equal(blocked.status, 409, 'an active lease refuses archive');
+
+    runtime.pool.releaseLease(acquired.lease.id);
+    const archived = await command(runtime.base, '/api/environments/enrollments/enroll-1/archive', runtime, {});
+    assert.equal(archived.status, 200);
+    const archivedBody = (await archived.json()) as {
+      enrollment: { readonly status: string; readonly decisions: readonly { readonly kind: string }[] };
+    };
+    assert.equal(archivedBody.enrollment.status, 'archived');
+    assert.ok(
+      archivedBody.enrollment.decisions.some((decision) => decision.kind === 'archived'),
+      'the archive is a durable decision in the append-only history',
+    );
+
+    // Restore reuses the still-valid approved enrollment.
+    const restored = await command(runtime.base, '/api/environments/enrollments/enroll-1/restore', runtime, {});
+    assert.equal(restored.status, 200);
+    const restoredBody = (await restored.json()) as {
+      enrollment: { readonly status: string; readonly decisions: readonly { readonly kind: string }[] };
+    };
+    assert.equal(restoredBody.enrollment.status, 'approved');
+    assert.ok(
+      restoredBody.enrollment.decisions.some((decision) => decision.kind === 'restored'),
+      'the restore is a durable decision in the append-only history',
+    );
+
+    // Both routes are closed to anonymous callers.
+    assert.equal(
+      (await fetch(`${runtime.base}/api/environments/enrollments/enroll-1/restore`, { method: 'POST' })).status,
+      401,
+    );
   } finally {
     await runtime.api.close();
   }
