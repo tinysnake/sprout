@@ -82,6 +82,8 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'task_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'token_usage', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'replay_sequence', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'work_option', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'configuration_version', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
   environment_leases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
@@ -201,6 +203,11 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  agents: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
 };
 
 function withStore(run: (store: SqliteStore) => Promise<void> | void): Promise<void> {
@@ -297,6 +304,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
       [
         'agent_runs',
         'agent_session_keys',
+        'agents',
         'browser_sessions',
         'browser_sessions',
         'collaboration_messages',

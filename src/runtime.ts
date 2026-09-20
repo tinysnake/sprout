@@ -3,6 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
+import type { AgentStore } from './agent/store.ts';
+import { AgentService } from './agent/service.ts';
+import type { Agent } from './agent/model.ts';
+import { currentOptions } from './agent/model.ts';
+import { projectAgentCompatibility } from './agent/compatibility.ts';
 import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
@@ -41,6 +46,8 @@ import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
+import { createAgentRouter } from './web/agent-router.ts';
+import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
   createEnvironmentWorkerFactory,
@@ -107,6 +114,8 @@ export interface RuntimeStores {
   readonly environmentReadiness: EnvironmentReadinessStore;
   /** The durable Environment recovery records and Force Release outcomes (#88). */
   readonly recovery: RecoveryStore;
+  /** The durable portable Agent identities (#90). */
+  readonly agentIdentities: AgentStore;
   close(): void;
 }
 
@@ -183,6 +192,8 @@ export interface SproutRuntime {
   readonly enrollments: EnvironmentEnrollmentService;
   /** The Environment reconciliation and recovery capability (#88). */
   readonly recovery: EnvironmentRecoveryService;
+  /** The portable Agent identity capability (#90). */
+  readonly agentService: AgentService;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -340,6 +351,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     await operatorSessions.initializeOrRecover(configuration.operatorCredential);
 
     const agents = new AgentRegistry(runtimeConfiguration.agents ?? defaultAgents(engineId));
+    // The durable portable Agent identities (#90). The configured runtime
+    // definitions stay the M1 seed registry; the Agent service composes over
+    // the same durable handle every other M2 domain uses.
+    const agentService = new AgentService({ store: stores.agentIdentities });
     const pool = new EnvironmentPool({
       definitions: [definition],
       instances: [instance],
@@ -384,6 +399,20 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => environment.adapters(requestedInstanceId),
       agents,
+      // Observed engine facts (#87) per instance, so run admission can take the
+      // Agent's first compatible work option before any engine accepts the
+      // work (#90, ADR-0008). The facts are the readiness store's durable
+      // observations for the enrollment of that instance; an unobserved
+      // instance admits the Agent's first option unchanged.
+      engineFacts: async (requestedInstanceId) => {
+        const readiness = await durableStores.environmentReadiness.getReadiness(requestedInstanceId);
+        return (readiness?.engines ?? []).map((engine) => ({
+          engine: engine.engine,
+          installed: engine.installed,
+          readiness: engine.readiness,
+          models: engine.models,
+        }));
+      },
       projects,
       pool,
       store: stores.runs,
@@ -515,7 +544,41 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // additive seam, so no central dispatcher grows for it. The recovery routes
       // (#88) are composed through the same seam and delegate every safety rule
       // to the recovery service.
-      routers: [createEnvironmentRouter({ enrollments, recovery, archive })],
+      routers: [
+        createEnvironmentRouter({ enrollments, recovery, archive }),
+        // Portable Agent identities and ordered work options (#90). The
+        // compatibility projection reads the same durable observed readiness
+        // facts the readiness summary does, so the browser and admission can
+        // never disagree about what the Environments support.
+        createAgentRouter({
+          agents: agentService,
+          compatibility: async (agent: Agent) => {
+            const readiness = await durableStores.environmentReadiness.getReadiness(instance.id);
+            const projection = projectAgentCompatibility({
+              workOptions: currentOptions(agent),
+              availableEngines: readiness?.engines ?? [],
+            });
+            return {
+              agentId: agent.id,
+              environmentInstanceId: instance.id,
+              available: projection.available,
+              ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
+              ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
+              options: projection.options,
+            };
+          },
+          runAttribution: async (runId: string) => {
+            const run = await orchestrator.load(runId);
+            if (run === undefined) return undefined;
+            return {
+              runId: run.id,
+              agentId: run.agentId,
+              environmentInstanceId: run.environmentInstanceId,
+              attribution: toRunWorkOptionAttribution(run),
+            };
+          },
+        }),
+      ],
     });
 
     /** The last reconciliation result, so `startupReport` reports what ran. */
@@ -536,6 +599,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       stores: activeStores,
       enrollments,
       recovery,
+      agentService,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then

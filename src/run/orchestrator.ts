@@ -1,4 +1,6 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
+import { effectiveWorkOptions, type AgentWorkOption } from '../agent/model.ts';
+import { selectAdmissibleWorkOption, type AgentWorkOptionEngineFact } from '../agent/admission.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
@@ -88,6 +90,18 @@ export interface RunOrchestratorOptions {
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
+  /**
+   * The observed engine facts (#87) for one environment instance, when this
+   * build wires Environment readiness.
+   *
+   * Supplied by the runtime from the enrollment/readiness store. Optional so
+   * existing callers and the preserved M1 graphs — which never derived
+   * compatibility from facts — stay unchanged; absent means admission takes
+   * the Agent's first option as before, without fabricating an observation.
+   */
+  readonly engineFacts?: (
+    environmentInstanceId: string,
+  ) => Promise<readonly AgentWorkOptionEngineFact[]>;
 }
 
 export interface SubmitRunRequest {
@@ -168,6 +182,9 @@ export class RunOrchestrator {
   readonly #onTaskRunSettled: TaskRunObserver | undefined;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
+  readonly #engineFacts:
+    | ((environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>)
+    | undefined;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -188,6 +205,7 @@ export class RunOrchestrator {
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
+    this.#engineFacts = options.engineFacts;
   }
 
   /**
@@ -312,10 +330,30 @@ export class RunOrchestrator {
       return { id: taskRun.id };
     }
 
+    // Run admission picks the first work option that is compatible with the
+    // resolved Environment's current facts (ADR-0008). The choice happens
+    // entirely *before* an engine accepts the work, and it is recorded on the
+    // durable run so the engine, work model, effort, and configuration version
+    // the run actually used remain historically attributable. Once an engine
+    // accepts the run, this choice is never revisited: a later failure is
+    // reported as-is and never replayed through a lower-priority option.
+    const admittedOption = await this.#admitWorkOption(agent, resolution.instanceId);
+    if (!admittedOption.ok) {
+      await this.settleTaskRun(
+        await this.#finish(taskRun, 'failed', {
+          status: 'failed',
+          message: admittedOption.message,
+        }),
+      );
+      return { id: taskRun.id };
+    }
+
     const recorded: AgentRun = {
       ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
+      workOption: admittedOption.option,
+      configurationVersion: admittedOption.configurationVersion,
       ...(request.environmentLeaseId !== undefined ? { leaseId: request.environmentLeaseId } : {}),
     };
     this.#runs.set(recorded.id, recorded);
@@ -385,6 +423,56 @@ export class RunOrchestrator {
     return reason === 'no-project'
       ? `no project grants agent ${agent.id} access to an environment for capability: ${agent.capability}`
       : `no available environment for capability: ${agent.capability}`;
+  }
+
+  /**
+   * Pick the Agent's first work option compatible with one Environment's
+   * current facts, before any engine accepts the work (ADR-0008).
+   *
+   * Compatibility is derived from the Environment's observed engine facts
+   * (#87), never from a stored state or a probe of a live process. An option
+   * the Environment cannot yet observe is not admissible here — `unknown` is
+   * honest, and admitting onto an unverified engine would fabricate readiness.
+   * An Agent whose every option is incompatible therefore fails admission with
+   * an explicit reason; the Agent itself stays valid and visibly unavailable
+   * through the compatibility projection.
+   *
+   * When the engine facts for the instance are genuinely absent (a build with
+   * no enrollment/readiness wiring, or the single-instance M1 graphs), the
+   * projection receives no facts and every option reports `unknown`; this
+   * orchestrator then admits the first option unchanged, preserving the
+   * behaviour of callers that never opted into Environment facts. A build that
+   * supplies facts gets the full ordered evaluation.
+   */
+  async #admitWorkOption(
+    agent: AgentDefinition,
+    environmentInstanceId: string,
+  ): Promise<
+    | { readonly ok: true; readonly option: AgentWorkOption; readonly configurationVersion: number }
+    | { readonly ok: false; readonly message: string }
+  > {
+    const options = effectiveWorkOptions(agent);
+    const observed = this.#engineFacts
+      ? await this.#engineFacts(environmentInstanceId)
+      : undefined;
+    // Facts govern admission only when the Environment has actually reported
+    // some. An instance with no observation at all is not evidence of
+    // unreadiness (#87's rule that a missing Worker is not evidence), so
+    // admission takes the Agent's first option unchanged there — the pre-#90
+    // behaviour. Once any fact exists for the instance, the ordered evaluation
+    // is authoritative: an option must be verified, never assumed.
+    const admitted = observed === undefined || observed.length === 0
+      ? options[0]
+      : selectAdmissibleWorkOption(options, observed);
+    if (admitted === undefined) {
+      return {
+        ok: false,
+        message:
+          `no compatible work option for agent ${agent.id} on environment instance ${environmentInstanceId}: ` +
+          options.map((option) => option.engine).join(', '),
+      };
+    }
+    return { ok: true, option: admitted, configurationVersion: agent.configurationVersion ?? 1 };
   }
 
   /** The current observable state of a run. */
@@ -531,6 +619,11 @@ export class RunOrchestrator {
     agent: AgentDefinition,
     workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
+    // The run executes under the option it was admitted with (#90): the
+    // engine, work model, and effort recorded before any engine accepted the
+    // work. This is deliberately not re-derived here — re-deriving could move
+    // the run to another option after acceptance, which ADR-0008 forbids.
+    const option = initial.workOption ?? effectiveWorkOptions(agent)[0]!;
     // Adapters are resolved *for the instance this run resolved and will lease*,
     // never from a global pool: a run that leases container-1 must execute on
     // container-1's worker, or the run record would name a machine it never used.
@@ -548,11 +641,11 @@ export class RunOrchestrator {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    const adapter = engines.get(agent.engine);
+    const adapter = engines.get(option.engine);
     if (!adapter) {
       return this.#finish(initial, 'failed', {
         status: 'failed',
-        message: `no engine adapter registered for: ${agent.engine}`,
+        message: `no engine adapter registered for: ${option.engine}`,
       });
     }
     const nestedTaskLease = initial.taskId !== undefined && initial.leaseId !== undefined;
@@ -613,7 +706,7 @@ export class RunOrchestrator {
       // fallback is an explicit failed run, not a rejected promise that leaks a lease.
       const identity: SessionKeyIdentity = {
         agentId: agent.id,
-        engine: agent.engine,
+        engine: option.engine,
         environmentInstanceId: initial.environmentInstanceId,
         workingDirectory,
       };
@@ -622,6 +715,7 @@ export class RunOrchestrator {
       let attempt = await this.#runSession(
         adapter,
         agent,
+        option,
         assembled.prompt,
         prepared,
         stored?.key,
@@ -646,6 +740,7 @@ export class RunOrchestrator {
         attempt = await this.#runSession(
           adapter,
           agent,
+          option,
           assembled.prompt,
           prepared,
           undefined,
@@ -698,6 +793,7 @@ export class RunOrchestrator {
   async #runSession(
     adapter: EngineAdapter,
     agent: AgentDefinition,
+    option: AgentWorkOption,
     prompt: string,
     running: AgentRun,
     resumeKey: string | undefined,
@@ -711,8 +807,8 @@ export class RunOrchestrator {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory,
-        ...(agent.model !== undefined ? { model: agent.model } : {}),
-        ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
+        ...(option.workModel !== '' ? { model: option.workModel } : {}),
+        ...(option.effort !== '' ? { effort: option.effort } : {}),
         // The assembled project contract is re-sent on every run, because it is
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).

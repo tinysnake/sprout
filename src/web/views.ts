@@ -23,6 +23,7 @@
 
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
+import type { Agent } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
@@ -67,6 +68,13 @@ export interface RunView {
    * the environment identity stay server-side like the other run internals.
    */
   readonly handOffAttached: boolean;
+  /**
+   * The work option this run was admitted under (#90), when the durable record
+   * carries one: the engine, work model, effort, and Agent configuration
+   * version the run actually used. Absent on a pre-#90 run, which is reported
+   * as unspecified rather than invented.
+   */
+  readonly workOption?: RunWorkOptionAttributionView;
   readonly failure?: string;
   readonly result?: unknown;
   readonly tokenUsage?: TokenUsage;
@@ -120,6 +128,7 @@ export function toRunView(run: AgentRun): RunView {
     events: run.events,
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
     handOffAttached: run.handOff !== undefined,
+    ...(toRunWorkOptionAttribution(run) !== undefined ? { workOption: toRunWorkOptionAttribution(run)! } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
     ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
@@ -602,5 +611,104 @@ export function toForceReleaseView(record: ForceReleaseRecord): ForceReleaseView
     affectedRunIds: [...record.affectedRunIds],
     projectWorkspacePreserved: true,
     unrecycledTaskContext: record.unrecycledTaskContext === true,
+  };
+}
+
+/**
+ * The client-facing shape of a portable Agent (#90, ADR-0008).
+ *
+ * Portable state only: stable identity, display name, status, standing
+ * instructions, ordered work options, and the append-only configuration
+ * history. No host path, engine credential, hostname, address, or run
+ * transcript can appear here — the wire projection re-applies the privacy
+ * boundary on read so a legacy or hand-written durable document cannot leak.
+ */
+export interface AgentWorkOptionView {
+  readonly id: string;
+  readonly engine: string;
+  readonly workModel: string;
+  readonly effort: string;
+}
+
+export interface AgentConfigurationVersionView {
+  readonly version: number;
+  readonly at: number;
+  readonly reason: string;
+  readonly options: readonly AgentWorkOptionView[];
+  readonly instructions?: string;
+}
+
+export interface AgentView {
+  /** Preserved M1 field: the stable identity the client addresses runs by. */
+  readonly id: string;
+  /** Preserved M1 field, kept in sync with the current display name. */
+  readonly name: string;
+  readonly displayName: string;
+  readonly status: string;
+  readonly configuration: {
+    readonly currentVersion: number;
+    readonly versions: readonly AgentConfigurationVersionView[];
+  };
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export function toAgentView(agent: Agent): AgentView {
+  const displayName = sanitizeOperatorText(agent.displayName, { fallback: 'Agent', maxLength: 120 });
+  return {
+    id: sanitizeIdentifier(agent.id, { fallback: 'unknown-agent', kind: 'generic' }),
+    // The M1 composer renders `name`; the M2 identity carries `displayName`.
+    // One value, two names, so the preserved client keeps working unchanged.
+    name: displayName,
+    displayName,
+    status: agent.status === 'archived' ? 'archived' : 'active',
+    configuration: {
+      currentVersion: agent.configuration.currentVersion,
+      versions: agent.configuration.versions.map((version) => ({
+        version: version.version,
+        at: version.at,
+        reason: sanitizeOperatorText(version.reason, {
+          fallback: 'The Agent configuration was recorded; its detail was withheld as sensitive.',
+        }),
+        options: version.options.map((option) => ({
+          id: sanitizeIdentifier(option.id, { fallback: `option-${option.engine}`, kind: 'generic' }),
+          engine: sanitizeIdentifier(option.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+          workModel: sanitizeIdentifier(option.workModel, { fallback: 'unknown-model', kind: 'model' }),
+          effort: sanitizeIdentifier(option.effort, { fallback: 'unknown-effort', kind: 'model' }),
+        })),
+        ...(version.instructions !== undefined
+          ? {
+              instructions: sanitizeOperatorText(version.instructions, {
+                fallback: 'The standing instructions were withheld as sensitive.',
+                maxLength: 4_000,
+              }),
+            }
+          : {}),
+      })),
+    },
+    createdAt: agent.createdAt,
+    updatedAt: agent.updatedAt,
+  };
+}
+
+/**
+ * The client-facing run attribution (#90): which work option and Agent
+ * configuration version one run actually used. Projected from the durable run
+ * record, never re-derived from the Agent's current configuration.
+ */
+export interface RunWorkOptionAttributionView {
+  readonly engine: string;
+  readonly workModel?: string;
+  readonly effort?: string;
+  readonly configurationVersion: number;
+}
+
+export function toRunWorkOptionAttribution(run: AgentRun): RunWorkOptionAttributionView | undefined {
+  if (run.workOption === undefined) return undefined;
+  return {
+    engine: sanitizeIdentifier(run.workOption.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+    ...(run.workOption.workModel !== '' ? { workModel: run.workOption.workModel } : {}),
+    ...(run.workOption.effort !== '' ? { effort: run.workOption.effort } : {}),
+    configurationVersion: run.configurationVersion ?? 1,
   };
 }

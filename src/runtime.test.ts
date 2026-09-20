@@ -49,6 +49,7 @@ import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
 import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
+import { InMemoryAgentStore } from './agent/store.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
@@ -128,6 +129,7 @@ function inMemoryStores(): MemoryStores {
     enrollments: new InMemoryEnrollmentStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     recovery: new InMemoryRecoveryStore(),
+    agentIdentities: new InMemoryAgentStore(),
     runsStore: runs,
     close: () => {
       closes += 1;
@@ -554,6 +556,7 @@ test('runtime construction failure closes environment and worker resources witho
     enrollments: new InMemoryEnrollmentStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     recovery: new InMemoryRecoveryStore(),
+    agentIdentities: new InMemoryAgentStore(),
     close() {
       storesClosed++;
     },
@@ -578,7 +581,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 7; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 8; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -751,4 +754,71 @@ test('the runtime records the live Worker\'s declared readiness onto an approved
   } finally {
     await runtime.close();
   }
+});
+
+test('a Message run records its admitted work option and configuration version (#90)', async () => {
+  const { runtime } = await build({ turns: [scriptedTurn('option reply')] });
+
+  const delivered = await runtime.collaboration.deliver({
+    projectId: PROJECT_ID,
+    channel: 'project',
+    author: { id: 'human', kind: 'human' },
+    body: '@scout please answer',
+    deliveryKey: 'option-delivery-1',
+    awaitReply: true,
+  });
+  assert.equal(delivered.admittedRunIds.length, 1);
+
+  const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
+  assert.equal(run.status, 'completed', run.failure ?? 'run failed');
+  // The run names the option it was admitted under: the definition-era agent
+  // projects its single engine as one option, at configuration version 1.
+  assert.deepEqual(run.workOption, {
+    id: 'primary',
+    engine: 'scripted',
+    workModel: '',
+    effort: '',
+  });
+  assert.equal(run.configurationVersion, 1);
+
+  // The attribution is durable: the same facts come back from the store.
+  const stored = await runtime.stores.runs.get(run.id);
+  assert.equal(stored?.workOption?.engine, 'scripted');
+  assert.equal(stored?.configurationVersion, 1);
+
+  await runtime.close();
+});
+
+test('the Agent service composes over the shared durable store and archives safely (#90)', async () => {
+  const { runtime, stores } = await build({ listen: false });
+
+  // Create a portable Agent identity through the composed service.
+  const agent = await runtime.agentService.create({
+    id: 'programmer',
+    displayName: 'Programmer',
+    instructions: 'Check pure functions.',
+    workOptions: [
+      { id: 'opt-1', engine: 'scripted', workModel: 'glm-5', effort: 'medium' },
+    ],
+  });
+  assert.equal(agent.status, 'active');
+  assert.equal(agent.configuration.currentVersion, 1);
+  assert.equal((await stores.agentIdentities.get('programmer'))?.displayName, 'Programmer');
+
+  // Reconfigure: the version history appends, never rewrites.
+  const updated = await runtime.agentService.reconfigure('programmer', {
+    workOptions: [{ id: 'opt-1', engine: 'scripted', workModel: 'glm-5', effort: 'high' }],
+    reason: 'raise effort',
+  });
+  assert.equal(updated.configuration.currentVersion, 2);
+  assert.equal(updated.configuration.versions.length, 2);
+
+  // Archive with no active work succeeds; restore brings the identity back.
+  const archived = await runtime.agentService.archive('programmer');
+  assert.equal(archived.status, 'archived');
+  assert.equal((await runtime.agentService.get('programmer'))?.configuration.versions.length, 2);
+  const restored = await runtime.agentService.restore('programmer');
+  assert.equal(restored.status, 'active');
+
+  await runtime.close();
 });

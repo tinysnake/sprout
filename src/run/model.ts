@@ -1,4 +1,5 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage } from '../engine/port.ts';
+import type { AgentWorkOption } from '../agent/model.ts';
 
 export type { TokenUsage } from '../engine/port.ts';
 
@@ -34,6 +35,23 @@ export interface AgentRun {
   readonly taskId?: string;
   readonly status: AgentRunStatus;
   readonly events: readonly AgentRunEvent[];
+  /**
+   * The work option this run was admitted under (#90, ADR-0008).
+   *
+   * Chosen from the Agent's ordered options before any engine accepted the
+   * work, against the resolved Environment's current facts, and never revisited
+   * afterwards. Recorded with the run so the engine, work model, and effort it
+   * actually used remain historically attributable.
+   */
+  readonly workOption?: AgentWorkOption;
+  /**
+   * The Agent configuration version this run was admitted under (#90).
+   *
+   * Together with `workOption` this is what makes every run's actual
+   * configuration historically attributable: an older version is never
+   * rewritten, so this number always resolves to the options the run saw.
+   */
+  readonly configurationVersion?: number;
   /**
    * The hand-off context attached to this run's input, when there was one.
    *
