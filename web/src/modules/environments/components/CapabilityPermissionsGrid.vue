@@ -4,6 +4,7 @@ import Button from '../../../primitives/Button.vue';
 
 defineProps<{
   permissions: CapabilityPermissions;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -28,6 +29,7 @@ const emit = defineEmits<{
           :variant="permissions.fileReadWrite ? 'primary' : 'secondary'"
           class="perm-toggle-btn w-full text-[10px] h-6"
           :class="permissions.fileReadWrite ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
+          :disabled="disabled"
           data-cap="fileReadWrite"
           @click="emit('toggle', 'fileReadWrite')"
         >
@@ -43,6 +45,7 @@ const emit = defineEmits<{
           :variant="permissions.processExecution ? 'primary' : 'secondary'"
           class="perm-toggle-btn w-full text-[10px] h-6"
           :class="permissions.processExecution ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
+          :disabled="disabled"
           data-cap="processExecution"
           @click="emit('toggle', 'processExecution')"
         >
@@ -58,6 +61,7 @@ const emit = defineEmits<{
           :variant="permissions.networkAccess ? 'primary' : 'secondary'"
           class="perm-toggle-btn w-full text-[10px] h-6"
           :class="permissions.networkAccess ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
+          :disabled="disabled"
           data-cap="networkAccess"
           @click="emit('toggle', 'networkAccess')"
         >
@@ -73,6 +77,7 @@ const emit = defineEmits<{
           :variant="permissions.guiAutomation ? 'primary' : 'secondary'"
           class="perm-toggle-btn w-full text-[10px] h-6"
           :class="permissions.guiAutomation ? 'btn-success bg-[var(--green-ready)] hover:bg-[var(--green-ready)]/90 text-white' : ''"
+          :disabled="disabled"
           data-cap="guiAutomation"
           @click="emit('toggle', 'guiAutomation')"
         >

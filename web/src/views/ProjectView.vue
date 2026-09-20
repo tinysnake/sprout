@@ -296,9 +296,23 @@ watch(
   { immediate: true }
 );
 
+/**
+ * A Chat scope's kind is a typed discriminator. The icon and the human label
+ * both resolve from it, so a channel, a working group, and a direct message can
+ * never be rendered with each other's semantics.
+ */
+type ChatScopeKind = 'channel' | 'working-group' | 'direct-message';
+
+const CHAT_SCOPE_ICONS: Record<ChatScopeKind, string> = {
+  channel: 'chat',
+  'working-group': 'project',
+  'direct-message': 'agents',
+};
+
 interface ChatScope {
   id: string;
   label: string;
+  kind: ChatScopeKind;
   kindLabel: string;
   lastSnippet: string;
   lastTime: string;
@@ -310,6 +324,7 @@ const chatScopes: ChatScope[] = [
   {
     id: '#general',
     label: '#general',
+    kind: 'channel',
     kindLabel: 'Project channel',
     lastSnippet: 'All accessible dialog checks pass on both viewports.',
     lastTime: '10:11 AM',
@@ -319,6 +334,7 @@ const chatScopes: ChatScope[] = [
   {
     id: 'wg-frontend',
     label: 'wg-frontend',
+    kind: 'working-group',
     kindLabel: 'Working group',
     lastSnippet: 'Focus ring contrast measured at 5.1:1.',
     lastTime: '09:48 AM',
@@ -328,6 +344,7 @@ const chatScopes: ChatScope[] = [
   {
     id: 'dm-architect',
     label: '@Architect',
+    kind: 'direct-message',
     kindLabel: 'Direct message',
     lastSnippet: 'Lease recovery evidence attached.',
     lastTime: '09:20 AM',
@@ -762,6 +779,8 @@ function sendMessage() {
               v-for="scope in chatScopes"
               :key="scope.id"
               type="button"
+              :data-scope-id="scope.id"
+              :data-scope-kind="scope.kind"
               class="w-full text-left p-3 rounded-[var(--radius-sm)] border transition-all cursor-pointer select-none flex flex-col gap-1"
               :class="activeChatChannel === scope.id ? 'bg-[var(--bg-surface)] border-[var(--accent-primary)] shadow-xs ring-1 ring-[var(--accent-primary)]' : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]'"
               @click="selectChannel(scope.id)"
@@ -769,9 +788,10 @@ function sendMessage() {
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 truncate">
                   <div class="p-1 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
-                    <Icon :name="scope.kind === 'channel' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'" :size="14" />
+                    <Icon :name="CHAT_SCOPE_ICONS[scope.kind]" :size="14" />
                   </div>
                   <strong class="text-xs font-bold text-[var(--text-primary)] truncate">{{ scope.label }}</strong>
+                  <span class="text-[9px] uppercase tracking-wider text-[var(--text-muted)] shrink-0">{{ scope.kindLabel }}</span>
                 </div>
                 <span class="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{{ scope.lastTime }}</span>
               </div>
@@ -808,8 +828,9 @@ function sendMessage() {
             </button>
             <div class="flex items-center gap-2 truncate">
               <div class="flex items-center gap-1.5 truncate">
-                <Icon name="chat" :size="14" class="text-[var(--accent-primary)]" />
-                <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeChatChannel }}</strong>
+                <Icon :name="activeScope ? CHAT_SCOPE_ICONS[activeScope.kind] : 'chat'" :size="14" class="text-[var(--accent-primary)]" />
+                <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeScope?.label ?? activeChatChannel }}</strong>
+                <span v-if="activeScope" class="text-[9px] uppercase tracking-wider text-[var(--text-muted)] shrink-0">{{ activeScope.kindLabel }}</span>
               </div>
               <Button
                 variant="secondary"
@@ -827,9 +848,9 @@ function sendMessage() {
           <!-- Standard Channel Header (Always visible on Desktop) -->
           <div class="hidden md:flex px-4 py-3 border-b border-[var(--border-subtle)] items-center justify-between bg-[var(--bg-surface)]">
             <div class="flex items-center gap-2">
-              <Icon name="chat" :size="16" class="text-[var(--accent-primary)]" />
-              <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
-              <span class="text-[10px] text-[var(--text-muted)]">Active multi-agent message timeline</span>
+              <Icon :name="activeScope ? CHAT_SCOPE_ICONS[activeScope.kind] : 'chat'" :size="16" class="text-[var(--accent-primary)]" />
+              <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeScope?.label ?? activeChatChannel }}</strong>
+              <span v-if="activeScope" class="text-[10px] text-[var(--text-muted)]">{{ activeScope.kindLabel }}</span>
             </div>
             <div class="flex items-center gap-2">
               <Badge variant="secondary">3 Members Online</Badge>

@@ -9,6 +9,7 @@ import Checkbox from '../../../primitives/Checkbox.vue';
 const props = defineProps<{
   open: boolean;
   env: EnvironmentInstance;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -32,6 +33,7 @@ const unresolvedFacts = computed(() => {
 
 const isFormValid = computed(() => {
   return (
+    !props.disabled &&
     typedConfirmation.value.trim() === 'FORCE RELEASE' &&
     acknowledgedRisks.value &&
     operatorReason.value.trim().length > 0

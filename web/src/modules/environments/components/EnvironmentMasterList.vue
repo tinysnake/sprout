@@ -3,10 +3,17 @@ import type { EnvironmentInstance } from '../types.js';
 import EnvironmentMasterCard from './EnvironmentMasterCard.vue';
 import EmptyState from '../../../primitives/EmptyState.vue';
 
-defineProps<{
-  environments: EnvironmentInstance[];
-  selectedId?: string;
-}>();
+withDefaults(
+  defineProps<{
+    environments: EnvironmentInstance[];
+    selectedId?: string;
+    /** True while the connection is unsettled: the card's own action is refused. */
+    disabled?: boolean;
+    /** True only when the page can actually carry a control action. */
+    canControl?: boolean;
+  }>(),
+  { selectedId: undefined, disabled: false, canControl: true }
+);
 
 const emit = defineEmits<{
   (e: 'select', id: string): void;
@@ -21,6 +28,8 @@ const emit = defineEmits<{
       :key="env.id"
       :env="env"
       :selected="env.id === selectedId"
+      :disabled="disabled"
+      :can-control="canControl"
       @select="emit('select', $event)"
       @probe="emit('probe', $event)"
     />

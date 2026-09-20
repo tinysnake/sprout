@@ -2,7 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import App from './App.vue';
 import { createAppRouter } from '../router/index.js';
-import type { EnvironmentService } from '../modules/environments/ports.js';
+import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.js';
 import type { ShellConnectionSource } from '../shell/connection.js';
 import { SHELL_CONNECTION_SOURCE } from '../shell/use-shell-connection.js';
 import { ANNOUNCER_KEY, ANNOUNCER_MESSAGE_KEY, createAnnouncerChannel } from '../primitives/announcer.js';
@@ -10,6 +10,14 @@ import '../tokens/theme.css';
 
 export interface SproutAppOptions {
   routerBase?: string;
+  /**
+   * The typed environment authority for `/manage/environments`.
+   *
+   * Production wiring supplies a real adapter here. Deterministic DOM tests
+   * inject a fixture adapter explicitly. When it is omitted the route renders an
+   * explicit unavailable state rather than defaulting to fixture facts, so a
+   * production route can never expose fixture-backed behaviour.
+   */
   environmentService?: EnvironmentService;
   /**
    * A page-owned connection source.
@@ -38,7 +46,7 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   app.provide(ANNOUNCER_MESSAGE_KEY, announcerChannel.message);
 
   if (options.environmentService) {
-    app.provide('environmentService', options.environmentService);
+    app.provide(ENVIRONMENT_SERVICE, options.environmentService);
   }
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);

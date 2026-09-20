@@ -89,6 +89,18 @@ async function setupHarness(url = 'http://sprout-operator.test/app/feed'): Promi
 
 const settle = (ms = 90) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * The route suite injects the deterministic fixture authority explicitly.
+ * Production never defaults to it: an omitted adapter renders an unavailable
+ * state rather than fixture facts.
+ */
+async function deterministicAppOptions(vite: ViteDevServer) {
+  const module = (await vite.ssrLoadModule(
+    '/src/modules/environments/adapters/fixture-adapter.ts'
+  )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+  return { routerBase: '/app/', environmentService: new module.FixtureEnvironmentService() };
+}
+
 /** Routes the operator can actually reach, with the content each must compose. */
 const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: string; expect: RegExp }[] = [
   { path: '/feed', destination: 'feed', expect: /Operations Feed & Human Attention/ },
@@ -108,7 +120,7 @@ test('every reachable route is URL-addressable and resolves to its destination a
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     for (const route of REACHABLE_ROUTES) {
@@ -135,7 +147,7 @@ test('a pasted deep link renders the same record a click would, without navigato
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     // A cold start at a detail URL: no prior navigation, so this is exactly a
     // pasted link or a page refresh.
     await router.push('/manage/environments/env-recovery');
@@ -159,7 +171,7 @@ test('browser history moves between nested records and restores each context', a
   const { vite, dom, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     await router.push('/feed');
@@ -196,7 +208,7 @@ test('the return context restores the Feed with the filters the operator had set
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     // Narrow the Feed, then deep-link out of it.
@@ -234,7 +246,7 @@ test('a destination URL that is reached directly keeps its destination current i
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/usage');
     await router.isReady();
     app.mount(mount);
@@ -258,7 +270,7 @@ test('the phone bottom navigation shows the nested entries of the active destina
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     const navKeys = () => [...doc.querySelectorAll('.mobile-bottom-nav [data-nav]')].map((el) => el.getAttribute('data-nav'));
@@ -286,7 +298,7 @@ test('the phone return control leaves the nested destination for the root destin
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/agents');
     await router.isReady();
     app.mount(mount);
@@ -314,7 +326,7 @@ test('no reachable route renders a fixture control, viewport switcher, review UI
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     for (const route of REACHABLE_ROUTES) {
@@ -351,7 +363,7 @@ test('the prototype archive is not reachable from any production navigation or p
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(mount);
 
     // The production route table itself must contain no prototype path.

@@ -11,6 +11,10 @@ import { cn } from '../../../lib/utils.js';
 const props = defineProps<{
   env: EnvironmentInstance;
   selected?: boolean;
+  /** True while the connection is unsettled: the quick probe is refused. */
+  disabled?: boolean;
+  /** True only when the page can actually carry a control action. */
+  canControl?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -68,6 +72,7 @@ const connectionAgeLabel = computed(() => {
       as="button"
       :interactive="true"
       :selected="selected"
+      :disabled="disabled"
       class="env-master-card w-full text-left p-3.5 select-none relative"
       :data-env="env.id"
       :aria-label="`Open Environment ${env.displayName}`"
@@ -144,7 +149,8 @@ const connectionAgeLabel = computed(() => {
       class="quick-probe-btn absolute right-3 bottom-2.5 z-10 text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
       title="Request quick live probe"
       aria-label="Request quick live probe"
-      @click.stop="emit('probe', env.id)"
+      :disabled="disabled"
+      @click.stop="canControl && emit('probe', env.id)"
     >
       <Icon name="lightning" :size="12" />
       <span>Probe</span>

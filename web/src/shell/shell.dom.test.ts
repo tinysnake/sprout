@@ -378,6 +378,67 @@ test('shared primitives expose their accessible state: skeleton, empty state, li
   }
 });
 
+test('an interactive non-button card is focusable, exposes role=button, and activates from the keyboard', async () => {
+  const { vite, dom, cleanup } = await setupHarness();
+  try {
+    const { createApp, h, ref } = await import('vue');
+    const Card = componentOf(await vite.ssrLoadModule('/src/primitives/Card.vue'));
+
+    const host = document.createElement('div');
+    document.body.append(host);
+    const activations = ref(0);
+
+    const app = createApp({
+      render: () =>
+        h('div', [
+          // A non-button interactive card: focus and keyboard activation must be real.
+          h(
+            Card as never,
+            {
+              interactive: true,
+              class: 'option-card',
+              onClick: () => { activations.value += 1; },
+            },
+            { default: () => h('span', 'Option A') }
+          ),
+          // A button card must not accidentally submit an enclosing form.
+          h(
+            Card as never,
+            { as: 'button', interactive: true, class: 'button-card' },
+            { default: () => h('span', 'Option B') }
+          ),
+        ]),
+    });
+    app.mount(host);
+    await settle(60);
+
+    const option = host.querySelector('.option-card') as HTMLElement;
+    assert.ok(option, 'the interactive card renders');
+    assert.equal(option.tagName.toLowerCase(), 'div', 'the default card stays a non-button element');
+    assert.equal(option.getAttribute('tabindex'), '0', 'the non-button card is in the tab sequence');
+    assert.equal(option.getAttribute('role'), 'button', 'the non-button card exposes button semantics');
+
+    // The Enter/Space path is reachable because the element can receive focus.
+    option.focus();
+    assert.equal(document.activeElement, option, 'the card can actually receive focus');
+    option.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await settle(30);
+    assert.equal(activations.value, 1, 'Enter activates the card once');
+    option.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+    await settle(30);
+    assert.equal(activations.value, 2, 'Space activates the card once');
+
+    const button = host.querySelector('.button-card') as HTMLButtonElement;
+    assert.ok(button, 'the button card renders as a real button');
+    assert.equal(button.tagName.toLowerCase(), 'button');
+    assert.equal(button.getAttribute('type'), 'button', 'a card button never submits an enclosing form');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('the tab strip provides real tab semantics with roving focus and arrow-key movement', async () => {
   const { vite, dom, cleanup } = await setupHarness();
   try {
