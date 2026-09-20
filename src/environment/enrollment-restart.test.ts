@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
+import { EnvironmentArchiveService, ArchiveError } from './archive.ts';
+import { approveEnrollment } from './enrollment.ts';
 import { SqliteEnrollmentStore } from './sqlite-enrollment-store.ts';
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { workerIdentityFixture, type WorkerIdentityFixture } from './worker-identity-fixture.ts';
@@ -108,8 +110,7 @@ test('an approved enrollment and its capability permissions survive a store reop
   }
 });
 
-test('a revocation survives reopen and still refuses reconnection', async () => {
-  const { directory, path } = databasePath();
+test('a revocation survives reopen and still refuses reconnection', async () => {  const { directory, path } = databasePath();
   try {
     const first = stores(path);
     const enrollments = service(first);
@@ -557,6 +558,59 @@ test('the durable enrollment document contains no private key, public key, signa
     assert.equal(/PRIVATE KEY/.test(serialized), false);
     assert.equal(/\/Users\//.test(serialized), false);
     store.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('M89-AUTHORITY-003: archive refusal and sticky-revocation restore survive a SQLite reopen', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const first = stores(path);
+    const enrollments = service(first);
+    const worker = workerIdentityFixture();
+    await request(enrollments, worker);
+    await enrollments.approve('enroll-1', { capabilityPermissions: {} });
+    await enrollments.revoke('enroll-1', 'worker host left the fleet');
+    first.close();
+
+    // Reopen: the archive Module reads the same durable record, so the revoked
+    // archive refusal and the sticky restore derive from durable facts, not
+    // in-memory state.
+    const second = stores(path);
+    const archive = new EnvironmentArchiveService({
+      enrollments: second.enrollments,
+      leases: { leases: () => [] },
+      clock: () => 20_000,
+    });
+    await assert.rejects(
+      archive.archive('enroll-1'),
+      (error: unknown) => error instanceof ArchiveError && error.code === 'revoked-enrollment',
+    );
+
+    // A legacy-archived revoked record (written before the guard) restores as
+    // revoked after reopen: the decision history is the authority, and the old
+    // digest still refuses approval and reconnection exactly as before.
+    const stored = await second.enrollments.get('enroll-1');
+    assert.ok(stored);
+    await second.enrollments.save({ ...stored, status: 'archived' });
+    const restored = await archive.restore('enroll-1');
+    assert.equal(restored.status, 'revoked');
+    assert.equal(restored.worker.identityDigest, worker.digest);
+    assert.throws(
+      () => approveEnrollment(restored, { capabilityPermissions: {}, at: 21_000 }),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'revoked-enrollment',
+    );
+    const reopenedEnrollments = service(second);
+    const reconnect = await reopenedEnrollments.connectWorker({
+      enrollmentId: 'enroll-1',
+      proof: await worker.prove(reopenedEnrollments, 'enroll-1'),
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+    assert.equal(reconnect.outcome, 'revoked-refused');
+    second.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

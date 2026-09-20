@@ -229,6 +229,14 @@ async function handleUnenroll(id: string) {
     await runControl((service) => service.unenrollEnvironment(id));
   }
 }
+
+/**
+ * Retained settlement evidence is a Worker fact (ADR-0009). The page offers the
+ * reconcile action only when the injected authority really reaches a Worker
+ * evidence port; production never does, so its reconciling box renders
+ * read-only with an explicit not-synchronized state instead of a button.
+ */
+const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenceReconciliation === true);
 </script>
 
 <template>
@@ -398,6 +406,7 @@ async function handleUnenroll(id: string) {
               v-if="selectedEnv"
               :env="selectedEnv"
               :disabled="controlsDisabled"
+              :can-reconcile="canReconcileEvidence"
               @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
@@ -423,6 +432,7 @@ async function handleUnenroll(id: string) {
             <EnvironmentDetail
               :env="selectedEnv"
               :disabled="controlsDisabled"
+              :can-reconcile="canReconcileEvidence"
               @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"

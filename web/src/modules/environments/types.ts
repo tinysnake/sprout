@@ -6,21 +6,16 @@ export type ProtocolCompatibility = 'compatible' | 'incompatible' | 'unknown';
 export type WorkSafety = 'clear' | 'held' | 'reconciling' | 'recovery';
 export type EngineStatus = 'ready' | 'login-required' | 'missing' | 'unknown';
 
-export type CapabilityKey = 'fileReadWrite' | 'processExecution' | 'networkAccess' | 'guiAutomation';
+export type CapabilityKey = string;
 
-export interface CapabilityPermissions {
-  fileReadWrite: boolean;
-  processExecution: boolean;
-  networkAccess: boolean;
-  guiAutomation: boolean;
-}
-
-export interface EngineReadiness {
-  codex: EngineStatus;
-  pi: EngineStatus;
-  agy: EngineStatus;
-  opencode: EngineStatus;
-}
+/**
+ * The engine readiness rows the page renders.
+ *
+ * The production adapter reports whatever engines the Worker declared plus the
+ * required set; the prototype's fixed Codex/Pi/agy/opencode quadrants are the
+ * fixture's one representative ordering, not the schema. Components iterate.
+ */
+export type EngineReadiness = Record<string, EngineStatus>;
 
 export interface EngineDetailInfo {
   version: string;
@@ -31,7 +26,7 @@ export interface EngineDetailInfo {
 
 export interface ActiveLeaseHolder {
   holderId: string;
-  holderKind: 'task';
+  holderKind: 'task' | 'run';
   taskTitle?: string;
   projectId: string;
   leadAgentName?: string;
@@ -41,12 +36,18 @@ export interface ActiveLeaseHolder {
 export interface ReconciledEvidence {
   retainedEventsCount: number;
   engineStoppedProof: boolean;
+  turnSettlementObserved?: boolean;
+  taskContextRecycled?: boolean;
 }
 
 export interface LeaseRecovery {
   cause: string;
+  /** The open recovery record's lease id, the target of every decision. */
+  leaseId?: string;
   interruptedRunId?: string;
   interruptedRunAgent?: string;
+  /** True once evidence was synchronized; it gates the ordinary decisions. */
+  evidenceSynchronized?: boolean;
   unresolvedFacts: string[];
   reconciledEvidence?: ReconciledEvidence;
 }
@@ -64,6 +65,9 @@ export interface ProbeRecord {
   enginesOk: boolean;
   summary: string;
 }
+
+/** The capabilities the enrollment actually declared, keyed by name. */
+export type CapabilityPermissions = Record<string, boolean>;
 
 export interface BoundWorkspace {
   projectId: string;

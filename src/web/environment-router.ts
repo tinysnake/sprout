@@ -1,5 +1,8 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import {
+  ArchiveError,
+} from '../environment/archive.ts';
+import {
   EnrollmentError,
   type EnrollmentEngineFact,
 } from '../environment/enrollment.ts';
@@ -8,6 +11,7 @@ import type { EnvironmentRecoveryService } from '../environment/recovery-service
 import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
 import type { RetainedEvidence } from '../environment/recovery.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
+import type { EnvironmentArchivePort } from '../environment/archive.ts';
 import type {
   CompatibilityFact,
   ConnectionFact,
@@ -41,10 +45,19 @@ export interface EnvironmentRouterOptions {
    * have exactly one implementation.
    */
   readonly recovery?: EnvironmentRecoveryService;
+  /**
+   * The archive/restore authority (ADR-0008, additive for #89).
+   *
+   * Optional so the #87/#88 contracts remain usable without it; when present
+   * the archive and restore routes are enabled. The ADR-0008 safety rules
+   * (no archive during active work; restore may reuse a valid enrollment) live
+   * in the port's implementation, so this router stays a thin projection.
+   */
+  readonly archive?: EnvironmentArchivePort;
 }
 
 export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiRouter {
-  const { enrollments, recovery } = options;
+  const { enrollments, recovery, archive } = options;
 
   return {
     name: 'environment-enrollment',
@@ -337,6 +350,44 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
+      // POST /api/environments/enrollments/:id/archive — non-destructive archive
+      // (ADR-0008). Bars new work; preserves enrollment, history, and decisions.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'archive' &&
+        archive
+      ) {
+        try {
+          const archived = await archive.archive(segments[3] ?? '');
+          return json(context, 200, { enrollment: toEnrollmentView(archived) });
+        } catch (error) {
+          return archiveFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/enrollments/:id/restore — restore an archived
+      // Environment; it may reuse its still-valid enrollment.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'restore' &&
+        archive
+      ) {
+        try {
+          const restored = await archive.restore(segments[3] ?? '');
+          return json(context, 200, { enrollment: toEnrollmentView(restored) });
+        } catch (error) {
+          return archiveFailure(context, error);
+        }
+      }
+
       // POST /api/environments/recovery/:leaseId/reconnect — a verified same-identity
       // reconnect. Moves the record to `reconciling`; it never resolves it.
       if (
@@ -515,6 +566,14 @@ function enrollmentFailure(context: ApiRequestContext, error: unknown): true {
     return json(context, status, { error: error.message, code: error.code });
   }
   return json(context, 500, { error: 'environment enrollment could not be completed' });
+}
+
+function archiveFailure(context: ApiRequestContext, error: unknown): true {
+  if (error instanceof ArchiveError) {
+    const status = error.code === 'unknown-enrollment' ? 404 : 409;
+    return json(context, status, { error: error.message, code: error.code });
+  }
+  return json(context, 500, { error: 'environment archive could not be completed' });
 }
 
 function recoveryFailure(context: ApiRequestContext, error: unknown): true {

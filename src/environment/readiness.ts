@@ -15,7 +15,7 @@
  *   colour never carries the distinction alone (ADR-0009).
  */
 
-export type EnrollmentStatus = 'pending' | 'approved' | 'revoked';
+export type EnrollmentStatus = 'pending' | 'approved' | 'revoked' | 'archived';
 export type ConnectionState = 'never-connected' | 'online' | 'reconnecting' | 'offline';
 export type ProtocolCompatibility = 'unknown' | 'compatible' | 'incompatible';
 export type CapabilityPermission = 'allowed' | 'denied' | 'not-configured';
@@ -222,9 +222,15 @@ export function summarizeEnvironmentReadiness(
   options: SummarizeEnvironmentOptions,
 ): EnvironmentReadinessSummary {
   const red = (reason: string): EnvironmentReadinessSummary => ({ level: 'red', reason });
+  const yellow = (reason: string): EnvironmentReadinessSummary => ({ level: 'yellow', reason });
 
   if (readiness.enrollmentStatus === 'revoked') {
     return red('Enrollment is revoked; a fresh reset and Human approval are required.');
+  }
+  // An archived instance admits no new work (ADR-0008) without being a safety
+  // block: it stays Yellow with its own decisive reason, distinct from revoked.
+  if (readiness.enrollmentStatus === 'archived') {
+    return yellow('The Environment instance is archived; restore it before new work.');
   }
   if (readiness.compatibility.state === 'incompatible') {
     return red(readiness.compatibility.detail ?? 'The Worker protocol is incompatible.');
@@ -235,8 +241,6 @@ export function summarizeEnvironmentReadiness(
   if (readiness.workSafety.state === 'recovery') {
     return red('Lease recovery is required.');
   }
-
-  const yellow = (reason: string): EnvironmentReadinessSummary => ({ level: 'yellow', reason });
 
   // A pending enrollment is Yellow, not Red (ADR-0009). Its ungranted
   // capabilities and unprobed engines are expected while the Human decides, so
