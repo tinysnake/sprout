@@ -6,6 +6,8 @@ import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
+import { SqliteEnrollmentStore } from '../environment/sqlite-enrollment-store.ts';
+import { SqliteEnvironmentReadinessStore } from '../environment/sqlite-readiness-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
@@ -59,6 +61,10 @@ export {
  *   (`collaboration/sqlite-store.ts`)
  * - authority domain: `operator_identity`, `browser_sessions`
  *   (`auth/sqlite-store.ts`)
+ * - enrollment domain: `environment_enrollments`
+ *   (`environment/sqlite-enrollment-store.ts`)
+ * - readiness domain: `environment_readiness`, `environment_probes`
+ *   (`environment/sqlite-readiness-store.ts`)
  */
 
 export interface SqliteStoreOptions {
@@ -88,6 +94,8 @@ export class SqliteStore {
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
   readonly operatorSessions: SqliteOperatorSessionStore;
+  readonly enrollments: SqliteEnrollmentStore;
+  readonly environmentReadiness: SqliteEnvironmentReadinessStore;
   readonly schemaVersion: number;
 
   constructor(options: SqliteStoreOptions) {
@@ -116,6 +124,8 @@ export class SqliteStore {
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });
+    this.enrollments = new SqliteEnrollmentStore({ db: this.db });
+    this.environmentReadiness = new SqliteEnvironmentReadinessStore({ db: this.db });
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than
     // issuing `environment_leases` statements itself.

@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 4;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 5;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -393,6 +393,39 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
           ON agent_runs (replay_sequence)
+      `);
+    },
+  },
+  {
+    fromVersion: 4,
+    toVersion: 5,
+    name: 'environment_enrollment_and_readiness',
+    migrate: (db) => {
+      // Environment enrollment is a durable Human authority decision and the
+      // observed readiness facts are durable Worker observations. Enrollment
+      // documents carry only an opaque identity digest and neutral facts, so no
+      // private key, engine credential, hostname, address, or absolute path has
+      // a column here. Probe results are append-only rows, as ADR-0009 requires.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_enrollments (
+          id TEXT PRIMARY KEY,
+          environment_instance_id TEXT NOT NULL,
+          document TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS environment_enrollments_instance_idx
+          ON environment_enrollments (environment_instance_id);
+        CREATE TABLE IF NOT EXISTS environment_readiness (
+          environment_instance_id TEXT PRIMARY KEY,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS environment_probes (
+          environment_instance_id TEXT NOT NULL,
+          at INTEGER NOT NULL,
+          sequence INTEGER NOT NULL,
+          document TEXT NOT NULL,
+          PRIMARY KEY (environment_instance_id, sequence)
+        );
       `);
     },
   },

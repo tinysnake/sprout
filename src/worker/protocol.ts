@@ -39,6 +39,42 @@ export const WORKER_NOTIFICATIONS = {
 } as const;
 
 /**
+ * The Worker protocol version this build speaks.
+ *
+ * Reported on `worker/info` so the core can derive compatibility without
+ * guessing. It is a Sprout protocol fact, not an engine fact (ADR-0003).
+ */
+export const WORKER_PROTOCOL_VERSION = '2';
+
+/**
+ * One engine's neutral readiness fact, as the Environment Worker sees it.
+ *
+ * These are the sanitized, portable facts ADR-0009 and the enrollment research
+ * require: installation, authentication readiness, and available models. No
+ * token, cookie, auth file, account identifier, or raw stderr has a field here.
+ */
+export interface WorkerEngineReadinessFact {
+  readonly engine: string;
+  /** Whether the engine's executable was located on this Environment host. */
+  readonly installed: boolean;
+  readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown';
+  readonly modelAvailability: 'available' | 'none' | 'unknown';
+  readonly models: readonly string[];
+}
+
+/**
+ * The Worker's neutral readiness projection.
+ *
+ * Additive to `worker/info`; the method and its required fields are unchanged.
+ * A Worker that does not implement this simply omits it, and the core records
+ * `unknown` rather than inventing a value.
+ */
+export interface WorkerReadinessFacts {
+  readonly protocolVersion: string;
+  readonly engines: readonly WorkerEngineReadinessFact[];
+}
+
+/**
  * JSON-RPC error codes private to the worker protocol.
  *
  * `resumeRefused` is the neutral classification of an engine's rejected resume,
@@ -71,6 +107,8 @@ export interface WorkerInfo {
   /** The environment instance this worker serves. */
   readonly environmentInstanceId: string;
   readonly engines: readonly WorkerEngineDescription[];
+  /** Neutral protocol and engine readiness, when this Worker can report it. */
+  readonly readiness?: WorkerReadinessFacts;
 }
 
 export interface StartSessionParams {

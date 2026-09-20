@@ -15,6 +15,8 @@
     "prototype:task-held-lease": "node scripts/prototype-task-held-lease.ts",
     "prototype": "vite --port 41000 --host",
     "probe:collaboration": "node scripts/probe-collaboration.ts",
+    "probe:environment-enrollment": "node scripts/probe-environment-enrollment.ts",
+    "probe:environment-contract": "node scripts/probe-environment-contract.ts",
     "web:build": "vite build",
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",

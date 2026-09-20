@@ -1,6 +1,7 @@
 import { parseWorkerConfiguration } from '../host-config.ts';
 import { createEnvironmentWorkerEngines, hostEngineFacts } from './engine-selection.ts';
 import { EnvironmentWorker } from './server.ts';
+import { WORKER_PROTOCOL_VERSION, type WorkerReadinessFacts } from './protocol.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
 
 /**
@@ -44,6 +45,27 @@ if (engines.size === 0) {
 const log = (line: string) => process.stderr.write(`[sprout-worker] ${line}\n`);
 
 /**
+ * The neutral readiness facts this Worker can honestly report (ADR-0009, #87).
+ *
+ * A selected adapter means its CLI was located on this host, so `installed` is
+ * true. Login and model availability are engine-owned host state the Worker
+ * cannot verify without an invasive probe, so they stay `unknown` rather than
+ * being assumed; the Web shows them independently of installation.
+ */
+function workerReadiness(): WorkerReadinessFacts {
+  return {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engines: [...engines.keys()].map((engine) => ({
+      engine,
+      installed: true,
+      readiness: 'unknown',
+      modelAvailability: 'unknown',
+      models: [],
+    })),
+  };
+}
+
+/**
  * One `EnvironmentWorker` per connection.
  *
  * Engine processes are shared at the process level through `engines`, so a
@@ -60,6 +82,7 @@ if (transportMode === 'stdio') {
     output: process.stdout,
     onLog: log,
     workspaceRoot,
+    readiness: workerReadiness,
   });
   process.stdin.on('error', () => undefined);
   process.stdin.on('close', () => {
@@ -79,6 +102,7 @@ if (transportMode === 'stdio') {
         output: socket,
         onLog: log,
         workspaceRoot,
+        readiness: workerReadiness,
       });
       socket.on('error', () => undefined);
       socket.on('close', () => {

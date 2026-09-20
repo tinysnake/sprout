@@ -1,6 +1,7 @@
 import type { EngineAdapter } from '../engine/port.ts';
 import type { WorkerConnection } from './carrier.ts';
 import type { WorkerContextClient } from './client.ts';
+import type { WorkerInfo } from './protocol.ts';
 
 /**
  * Keeps an environment's worker alive across its death.
@@ -171,6 +172,20 @@ export class EnvironmentWorkerRegistry {
       throw new Error(`environment instance mismatch: Task resolved ${instanceId} but its worker serves ${connection.info.environmentInstanceId}`);
     }
     return connection.contexts;
+  }
+
+  /**
+   * The neutral facts the connected Worker reported on `worker/info`, or
+   * `undefined` when no Worker is currently live. A dead channel must never
+   * fabricate a readiness fact, so this observes rather than asks.
+   */
+  async info(instanceId: string): Promise<WorkerInfo | undefined> {
+    if (this.#closed) throw new Error('environment worker registry is closed');
+    const supervisor = this.#supervisors.get(instanceId);
+    if (supervisor === undefined) return undefined;
+    const connection = await supervisor.connection();
+    if (connection.info.environmentInstanceId !== instanceId) return undefined;
+    return connection.info;
   }
 
   /** How many workers were started across all instances, so restarts stay observable. */

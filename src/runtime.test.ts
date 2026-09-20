@@ -40,11 +40,14 @@ import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
+import type { WorkerInfo } from './worker/protocol.ts';
 import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
 import { InMemoryTaskStore } from './task/store.ts';
 import { InMemoryOperatorSessionStore } from './auth/store.ts';
+import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
+import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
@@ -121,6 +124,8 @@ function inMemoryStores(): MemoryStores {
     collaboration: new InMemoryCollaborationStore(),
     tasks: new InMemoryTaskStore(),
     operatorSessions: new InMemoryOperatorSessionStore(),
+    enrollments: new InMemoryEnrollmentStore(),
+    environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     runsStore: runs,
     close: () => {
       closes += 1;
@@ -544,6 +549,8 @@ test('runtime construction failure closes environment and worker resources witho
     collaboration: new InMemoryCollaborationStore(),
     tasks: new InMemoryTaskStore(),
           operatorSessions: new InMemoryOperatorSessionStore(),
+    enrollments: new InMemoryEnrollmentStore(),
+    environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     close() {
       storesClosed++;
     },
@@ -568,7 +575,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 5; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 6; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -594,4 +601,139 @@ test('a schema refusal after environment acquisition closes the worker before pr
     (error: unknown) => error instanceof SchemaTooNewError,
   );
   assert.equal(environmentClosed, 1, 'the acquired worker is closed before a schema refusal escapes');
+});
+
+test('the composed runtime exposes durable enrollment and readiness through its router and SQLite store (#87)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-enrollment-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, 'sprout.db');
+
+  const environment = scriptedEnvironment({
+    adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+  });
+  // A real SQLite store, so this proves the enrollment domain is mounted on the
+  // same durable handle as every other M2 domain rather than a test double.
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({ databasePath }),
+    projectRoot: '/synthetic/project-root',
+    environment,
+  });
+  try {
+    const requested = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID,
+      displayName: 'Composed Environment',
+      publicKey: 'composed-public-key',
+      platform: 'macos',
+      protocolVersion: '2.1',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    assert.equal(requested.enrollment.environmentInstanceId, INSTANCE_ID);
+
+    await runtime.enrollments.approve(requested.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true },
+    });
+    const now = Date.now();
+    await runtime.enrollments.observeReadiness(requested.enrollment.id, {
+      connection: { state: 'online', lastConfirmedAt: now },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
+        { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
+      ],
+    });
+    await runtime.enrollments.recordProbe(requested.enrollment.id, {
+      at: now,
+      latencyMs: 5,
+      protocolOk: true,
+      enginesOk: true,
+      summary: 'ready',
+    });
+
+    const assembled = await runtime.enrollments.readiness(requested.enrollment.id);
+    assert.equal(assembled.summary.level, 'green');
+    assert.ok(assembled.summary.reason.length > 0);
+
+    // The same composition serves the router over HTTP.
+    const { port } = await runtime.api.listen(0);
+    const listing = await fetch(`http://127.0.0.1:${port}/api/environments/enrollments`);
+    assert.equal(listing.status, 401, 'the enrollment route stays behind the #84 auth boundary');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('the runtime records the live Worker\'s declared readiness onto an approved enrollment without inventing facts (#87)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-worker-readiness-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, 'sprout.db');
+
+  // The Worker reports what it verified: installed engines with honestly
+  // unknown login and model state, exactly what `worker/info` now declares.
+  const workerInfo: WorkerInfo = {
+    pid: 4242,
+    environmentInstanceId: INSTANCE_ID,
+    engines: [],
+    readiness: {
+      protocolVersion: '2.1',
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] },
+      ],
+    },
+  };
+  let infoReads = 0;
+  const environment = {
+    ...scriptedEnvironment({
+      adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+    }),
+    async info() {
+      infoReads += 1;
+      return workerInfo;
+    },
+  };
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({ databasePath }),
+    projectRoot: '/synthetic/project-root',
+    environment,
+  });
+  try {
+    const requested = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID,
+      displayName: 'Composed Environment',
+      publicKey: 'composed-public-key',
+      platform: 'macos',
+      protocolVersion: '2.1',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    const enrollmentId = requested.enrollment.id;
+
+    // A pending enrollment is not observed: authority comes first.
+    await runtime.observeWorkerReadiness(enrollmentId);
+    assert.equal(infoReads, 0, 'no Worker info is read before approval');
+
+    await runtime.enrollments.approve(enrollmentId, { capabilityPermissions: { 'agent-run': true } });
+    await runtime.observeWorkerReadiness(enrollmentId);
+    assert.equal(infoReads, 1);
+
+    const assembled = await runtime.enrollments.readiness(enrollmentId);
+    assert.equal(assembled.readiness.connection.state, 'online', 'a live Worker is an online connection fact');
+    assert.equal(assembled.readiness.compatibility.state, 'compatible');
+    const engine = assembled.readiness.engines[0];
+    assert.equal(engine?.engine, 'scripted');
+    assert.equal(engine?.installed, true, 'the Worker declared the engine installed');
+    // The engine stayed honest: login and model availability were not verified,
+    // so they remain unknown rather than being assumed ready.
+    assert.equal(engine?.readiness, 'unknown');
+    assert.equal(engine?.models.state, 'unknown');
+    assert.equal(assembled.summary.level, 'red', 'an unknown required engine blocks work honestly');
+
+    // A revoked enrollment stops being observed; the last approved observation
+    // is never overwritten by an unapproved Worker.
+    await runtime.enrollments.revoke(enrollmentId, 'rotated');
+    await runtime.observeWorkerReadiness(enrollmentId);
+    assert.equal(infoReads, 1, 'no Worker info is read after revocation');
+  } finally {
+    await runtime.close();
+  }
 });

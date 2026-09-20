@@ -24,6 +24,8 @@
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
+import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
+import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
 /**
  * The client-facing shape of a run.
@@ -309,5 +311,140 @@ export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
           },
         }
       : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one Environment enrollment (#87).
+ *
+ * Only portable facts: the opaque Worker identity digest, platform, declared
+ * protocol version, and neutral engine facts. No private key, engine credential,
+ * hostname, address, topology, or absolute path has a field in this projection.
+ */
+export interface EnrollmentView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly displayName: string;
+  readonly status: string;
+  readonly platform: string;
+  readonly identityDigest: string;
+  readonly protocolVersion?: string;
+  readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly decisions: readonly EnrollmentDecisionView[];
+}
+
+export interface EnrollmentDecisionView {
+  readonly kind: string;
+  readonly actor: string;
+  readonly at: number;
+  readonly reason: string;
+}
+
+export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentView {
+  return {
+    id: enrollment.id,
+    environmentInstanceId: enrollment.environmentInstanceId,
+    displayName: enrollment.displayName,
+    status: enrollment.status,
+    platform: enrollment.worker.platform,
+    identityDigest: enrollment.worker.identityDigest,
+    ...(enrollment.worker.protocolVersion !== undefined
+      ? { protocolVersion: enrollment.worker.protocolVersion }
+      : {}),
+    capabilityPermissions: enrollment.capabilityPermissions,
+    createdAt: enrollment.createdAt,
+    updatedAt: enrollment.updatedAt,
+    decisions: enrollment.decisions.map((decision) => ({
+      kind: decision.kind,
+      actor: decision.actor,
+      at: decision.at,
+      reason: decision.reason,
+    })),
+  };
+}
+
+/** The client-facing shape of one Environment's independent readiness facts. */
+export interface EnvironmentReadinessView {
+  readonly environmentInstanceId: string;
+  readonly summary: { readonly level: string; readonly reason: string };
+  readonly enrollmentStatus: string;
+  readonly connection: {
+    readonly state: string;
+    readonly lastConfirmedAt?: number;
+  };
+  readonly compatibility: {
+    readonly state: string;
+    readonly workerProtocolVersion?: string;
+    readonly detail?: string;
+  };
+  readonly capabilities: readonly { readonly name: string; readonly permission: string; readonly required: boolean }[];
+  readonly engines: readonly {
+    readonly engine: string;
+    readonly installed: boolean;
+    readonly readiness: string;
+    readonly required: boolean;
+    readonly models: { readonly state: string; readonly models: readonly string[] };
+  }[];
+  readonly probe?: {
+    readonly at: number;
+    readonly latencyMs: number;
+    readonly protocolOk: boolean;
+    readonly enginesOk: boolean;
+    readonly summary: string;
+  };
+  readonly workSafety: { readonly state: string };
+}
+
+export function toEnvironmentReadinessView(input: {
+  readonly environmentInstanceId: string;
+  readonly readiness: EnvironmentReadiness;
+  readonly summary: EnvironmentReadinessSummary;
+}): EnvironmentReadinessView {
+  const { readiness, summary } = input;
+  return {
+    environmentInstanceId: input.environmentInstanceId,
+    summary: { level: summary.level, reason: summary.reason },
+    enrollmentStatus: readiness.enrollmentStatus,
+    connection: {
+      state: readiness.connection.state,
+      ...(readiness.connection.lastConfirmedAt !== undefined
+        ? { lastConfirmedAt: readiness.connection.lastConfirmedAt }
+        : {}),
+    },
+    compatibility: {
+      state: readiness.compatibility.state,
+      ...(readiness.compatibility.workerProtocolVersion !== undefined
+        ? { workerProtocolVersion: readiness.compatibility.workerProtocolVersion }
+        : {}),
+      ...(readiness.compatibility.detail !== undefined
+        ? { detail: readiness.compatibility.detail }
+        : {}),
+    },
+    capabilities: readiness.capabilities.map((capability) => ({
+      name: capability.name,
+      permission: capability.permission,
+      required: capability.required,
+    })),
+    engines: readiness.engines.map((engine) => ({
+      engine: engine.engine,
+      installed: engine.installed,
+      readiness: engine.readiness,
+      required: engine.required,
+      models: { state: engine.models.state, models: engine.models.models },
+    })),
+    ...(readiness.probe !== undefined
+      ? {
+          probe: {
+            at: readiness.probe.at,
+            latencyMs: readiness.probe.latencyMs,
+            protocolOk: readiness.probe.protocolOk,
+            enginesOk: readiness.probe.enginesOk,
+            summary: readiness.probe.summary,
+          },
+        }
+      : {}),
+    workSafety: { state: readiness.workSafety.state },
   };
 }
