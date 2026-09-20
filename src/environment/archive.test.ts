@@ -103,6 +103,55 @@ test('restore is refused for a record that is not archived', async () => {
   );
 });
 
+test('a revoked enrollment cannot be archived, so restore can never resurrect it', async () => {
+  const { revokeEnrollment } = await import('./enrollment.ts');
+  const revoked = revokeEnrollment(approvedEnrollment(), at + 2, 'worker host left the fleet');
+  const archive = service(revoked);
+  await assert.rejects(
+    archive.archive('enroll-1'),
+    (error: unknown) => error instanceof ArchiveError && error.code === 'revoked-enrollment',
+  );
+});
+
+test('a restored revoked record stays revoked, keeps its digest, and still refuses approval and reconnection', async () => {
+  const { revokeEnrollment, approveEnrollment, reconcileWorkerConnection } = await import('./enrollment.ts');
+  const revoked = revokeEnrollment(approvedEnrollment(), at + 2, 'worker host left the fleet');
+  // Sticky-revocation restore: the record is archived from before the revocation
+  // guard existed, or by any writer; restore must still not resurrect it.
+  const archived: EnvironmentEnrollment = {
+    ...revoked,
+    status: 'archived',
+    decisions: [
+      ...revoked.decisions,
+      { kind: 'archived', actor: 'operator', at: at + 3, reason: 'host retired' },
+    ],
+  };
+  const archive = service(archived);
+  const restored = await archive.restore('enroll-1');
+  assert.equal(restored.status, 'revoked', 'revocation is sticky through restore');
+  assert.equal(restored.worker.identityDigest, revoked.worker.identityDigest, 'the revoked digest is unchanged');
+  assert.equal(restored.requiresFreshIdentity, false);
+  assert.deepEqual(restored.invalidatedIdentityDigests, []);
+
+  // The restored record still enforces every #87 invariant: approval is refused
+  // and a reconnection with the old key is refused as revoked.
+  assert.throws(
+    () => approveEnrollment(restored, { capabilityPermissions: { 'agent-run': true }, at: at + 5 }),
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'revoked-enrollment',
+  );
+  const reconnect = reconcileWorkerConnection(restored, revoked.worker.identityDigest, at + 6);
+  assert.equal(reconnect.outcome, 'revoked-refused');
+});
+
+test('repeated archive/restore cycles preserve the pre-archive status exactly', async () => {
+  const archive = service(approvedEnrollment());
+  await archive.archive('enroll-1');
+  await archive.restore('enroll-1');
+  await archive.archive('enroll-1');
+  const restored = await archive.restore('enroll-1');
+  assert.equal(restored.status, 'approved', 'archive/restore markers are skipped when deriving the status');
+});
+
 test('an unknown enrollment is a sanitized 404-class refusal', async () => {
   const archive = service(approvedEnrollment());
   await assert.rejects(

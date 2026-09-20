@@ -51,6 +51,7 @@ export type ArchiveErrorCode =
   | 'unknown-enrollment'
   | 'not-archived'
   | 'already-archived'
+  | 'revoked-enrollment'
   | 'active-work-depends-on-environment'
   | 'recovery-depends-on-environment';
 
@@ -103,6 +104,16 @@ export class EnvironmentArchiveService {
     if (enrollment.status === 'archived') {
       throw new ArchiveError('already-archived', 'This Environment is already archived.');
     }
+    // Revocation is sticky through the archive vocabulary (ADR-0008 + #87): a
+    // revoked Worker identity cannot be parked in `archived` and later restored
+    // into an approvable state. The only path back to work is #87's fresh reset,
+    // which invalidates the old identity digest before a new key can claim it.
+    if (enrollment.status === 'revoked') {
+      throw new ArchiveError(
+        'revoked-enrollment',
+        'A revoked Worker identity cannot be archived; reset the enrollment first if this Environment should be re-enrolled.',
+      );
+    }
     await this.#requireNoDependentWork(enrollment.environmentInstanceId);
     const at = this.#clock();
     const archived: EnvironmentEnrollment = {
@@ -127,8 +138,14 @@ export class EnvironmentArchiveService {
    * Restore one archived Environment (ADR-0008).
    *
    * A restored instance may reuse its still-valid enrollment: an approved
-   * binding stays approved, a pending request stays pending. Only an archived
-   * record can be restored, so restore can never resurrect a revoked identity.
+   * binding stays approved, a pending request stays pending. Revocation is
+   * sticky: a record whose last authority decision was a revocation restores as
+   * `revoked`, never as an approvable status, so restore can never resurrect a
+   * revoked identity — the #87 fresh reset (which invalidates the old digest)
+   * remains the only path back to work. Only an archived record can be
+   * restored, and the status is derived from the last real authority decision
+   * (archive and restore markers are skipped), so repeated archive/restore
+   * cycles preserve the pre-archive status exactly.
    */
   async restore(enrollmentId: string, reason = ''): Promise<EnvironmentEnrollment> {
     const enrollment = await this.#require(enrollmentId);
@@ -136,11 +153,19 @@ export class EnvironmentArchiveService {
       throw new ArchiveError('not-archived', 'Only an archived Environment can be restored.');
     }
     const at = this.#clock();
-    const previous = enrollment.decisions.filter((decision) => decision.kind !== 'archived');
+    const previous = enrollment.decisions.filter(
+      (decision) => decision.kind !== 'archived' && decision.kind !== 'restored',
+    );
     const restoreDecision = previous[previous.length - 1];
+    const restoredStatus: EnvironmentEnrollment['status'] =
+      restoreDecision?.kind === 'approved'
+        ? 'approved'
+        : restoreDecision?.kind === 'revoked'
+          ? 'revoked'
+          : 'pending';
     const restored: EnvironmentEnrollment = {
       ...enrollment,
-      status: restoreDecision?.kind === 'approved' ? 'approved' : 'pending',
+      status: restoredStatus,
       updatedAt: at,
       decisions: [
         ...enrollment.decisions,

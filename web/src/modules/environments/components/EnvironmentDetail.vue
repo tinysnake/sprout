@@ -15,10 +15,12 @@ import ReconcilingBox from './ReconcilingBox.vue';
 import RecoveryAlertBox from './RecoveryAlertBox.vue';
 import ForcedReleaseAuditBox from './ForcedReleaseAuditBox.vue';
 
-defineProps<{
+const props = defineProps<{
   env: EnvironmentInstance;
   /** True while the connection is unsettled: every control action is refused. */
   disabled?: boolean;
+  /** True only when the typed authority reaches a real Worker evidence port. */
+  canReconcile?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -116,6 +118,7 @@ const emit = defineEmits<{
       v-if="env.workSafety === 'reconciling'"
       :env="env"
       :disabled="disabled"
+      :can-reconcile="props.canReconcile === true"
       @reconcile="emit('reconcile', $event)"
     />
     <RecoveryAlertBox

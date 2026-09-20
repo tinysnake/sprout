@@ -205,6 +205,17 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
 export class ProductionEnvironmentService implements EnvironmentService {
   readonly #adapter: EnvironmentEnrollmentBrowserAdapter;
 
+  /**
+   * Production never reconciles evidence on the operator's behalf.
+   *
+   * Retained settlement evidence is a Worker fact (ADR-0009): it exists only
+   * when the reconnected Worker itself synchronized what it retained. No Worker
+   * evidence port exists on the wire yet, so this bridge declares the capability
+   * absent and its `reconcileEvidence` is a typed refusal — never a placeholder
+   * payload posted as if the Worker had synchronized.
+   */
+  readonly supportsEvidenceReconciliation = false;
+
   constructor(adapter: EnvironmentEnrollmentBrowserAdapter) {
     this.#adapter = adapter;
   }
@@ -296,20 +307,16 @@ export class ProductionEnvironmentService implements EnvironmentService {
   }
 
   async reconcileEvidence(id: string): Promise<void> {
-    const { recovery } = await this.#adapter.environmentFacts(id);
-    const open = recovery.find(
-      (record) => record.phase === 'reconciling' || record.phase === 'recovery',
+    void id;
+    // The production bridge never fabricates Worker-synchronized evidence. The
+    // recovery service records an evidence decision with actor `worker`, so any
+    // operator-posted placeholder would both manufacture the ADR-0009 decision
+    // gate and lie in the audit trail. Until a real Worker-declared evidence
+    // port exists, this action is refused at the typed boundary and the page
+    // renders the reconciling box read-only (see `supportsEvidenceReconciliation`).
+    throw new Error(
+      'Evidence reconciliation requires the reconnected Worker to synchronize its retained facts; no Worker evidence port is wired yet.',
     );
-    if (open === undefined) return;
-    await this.#adapter.synchronizeEvidence(open.leaseId, {
-      evidence: {
-        retainedEventCount: 0,
-        turnSettlementObserved: false,
-        engineSessionStopped: false,
-        taskContextRecycled: false,
-      },
-      hadActiveRun: open.runId !== undefined,
-    });
   }
 
   async resumeRecovery(taskId: string): Promise<void> {

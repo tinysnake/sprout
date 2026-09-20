@@ -104,6 +104,79 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   return { routerBase: '/app/', environmentService: new module.FixtureEnvironmentService() };
 }
 
+/**
+ * A real `ProductionEnvironmentService` over a stub wire adapter serving one
+ * reachable reconciling record. No fixture adapter is involved; this proves
+ * what the production bridge itself renders for an open reconciling record.
+ */
+async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: string) => Promise<unknown> }) {
+  const apiModule = (await vite.ssrLoadModule('/src/adapters/environment-api.ts')) as typeof import('../adapters/environment-api.ts');
+  const adapterModule = (await vite.ssrLoadModule('/src/modules/environments/adapters/production-adapter.ts')) as typeof import('../modules/environments/adapters/production-adapter.ts');
+  const synchronizeCalls: unknown[] = [];
+  const wire = {
+    state: () => ({ status: 'online', connection: 'online', loading: false }),
+    subscribeState: () => () => undefined,
+    setCsrfToken: () => undefined,
+    async listEnrollments() {
+      return [reconcilingFacts.enrollment];
+    },
+    async environmentFacts() {
+      return reconcilingFacts;
+    },
+    async synchronizeEvidence(_leaseId: string, input: unknown) {
+      synchronizeCalls.push(input);
+      return reconcilingFacts.recovery[0];
+    },
+  } as unknown as import('../adapters/environment-api.ts').EnvironmentEnrollmentBrowserAdapter;
+  const reconcilingFacts: apiModule.EnvironmentFactsView = {
+    enrollment: {
+      id: 'enroll-reconciling',
+      environmentInstanceId: 'inst-1',
+      displayName: 'Production Reconciling Host',
+      status: 'approved',
+      platform: 'macos',
+      identityDigest: 'digest',
+      capabilityPermissions: { 'agent-run': true },
+      createdAt: 1,
+      updatedAt: 2,
+      decisions: [],
+    },
+    readiness: {
+      environmentInstanceId: 'inst-1',
+      summary: { level: 'yellow', reason: 'Worker reconnected; reconciling settlement evidence.' },
+      enrollmentStatus: 'approved',
+      connection: { state: 'online', lastConfirmedAt: 1000 },
+      compatibility: { state: 'compatible' },
+      capabilities: [],
+      engines: [],
+      workSafety: { state: 'reconciling' },
+    },
+    probes: [],
+    recovery: [
+      {
+        id: 'rec-1',
+        environmentInstanceId: 'inst-1',
+        leaseId: 'lease-9',
+        holderKind: 'task',
+        taskId: 'task-104',
+        cause: 'worker-channel-lost',
+        phase: 'reconciling',
+        startedAt: 10,
+        updatedAt: 20,
+        unresolvedFacts: ['The Worker channel is lost; no retained evidence has been synchronized.'],
+        evidenceSynchronized: false,
+        decisions: [],
+      },
+    ],
+    forceReleases: [],
+  };
+  return {
+    routerBase: '/app/' as const,
+    environmentService: new adapterModule.ProductionEnvironmentService(wire),
+    synchronizeCalls,
+  };
+}
+
 test('Production Web: mounts Shell and Manage / Environments, preserving structure and traffic-light reasons', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
@@ -598,6 +671,56 @@ test('Production Web: reachable reconciling state presents ReconcilingBox and re
     assert.ok(doc.querySelector('.btn-resume-recovery'), 'Resume action available');
     assert.ok(doc.querySelector('.btn-discard-recovery'), 'Discard action available');
     assert.ok(doc.querySelector('.force-release-btn'), 'Force release action available');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-EVIDENCE-002: production renders the reconciling box read-only with no fabricated evidence action', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    // A real ProductionEnvironmentService over a stub wire adapter: exactly the
+    // production authority, no fixture adapter involved.
+    const options = await productionReconcilingAppOptions(vite);
+    const { app, router } = createSproutApp(options);
+    await router.push('/manage/environments/enroll-reconciling');
+    await router.isReady();
+    app.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // The reconciling box renders with the honest not-synchronized state...
+    const reconcilingBox = doc.querySelector('.reconciling-box');
+    assert.ok(reconcilingBox, 'ReconcilingBox is rendered under the production authority');
+    assert.match(reconcilingBox.textContent ?? '', /RECONCILING/);
+    const notSynchronized = reconcilingBox.querySelector('.evidence-not-synchronized');
+    assert.ok(notSynchronized, 'the explicit not-synchronized state is rendered');
+    assert.match(notSynchronized.textContent ?? '', /Not synchronized yet/);
+    assert.match(
+      notSynchronized.textContent ?? '',
+      /only be declared by the reconnected Worker itself/,
+      'the read-only state names the Worker as the only evidence authority',
+    );
+
+    // ...and the reconcile action is absent: nothing can post Worker evidence.
+    assert.equal(
+      doc.querySelector('.btn-reconcile-evidence'),
+      null,
+      'no reconcile button exists under the production authority',
+    );
+    assert.doesNotMatch(reconcilingBox.textContent ?? '', /Reconcile & Synchronize Evidence/);
+
+    // Even a scripted click attempt through the page handler is refused by the
+    // typed bridge: no placeholder payload ever reaches the wire.
+    assert.deepEqual(options.synchronizeCalls, [], 'no synchronizeEvidence command was posted');
 
     app.unmount();
   } finally {

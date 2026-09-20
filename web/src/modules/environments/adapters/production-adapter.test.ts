@@ -209,3 +209,55 @@ test('archive and restore forward to the wire archive routes', async () => {
   // Archive and restore are direct authority commands: they need no prior read.
   assert.deepEqual(calls, ['archive', 'restore']);
 });
+
+test('M89-EVIDENCE-001: the production bridge never fabricates Worker-synchronized evidence', async () => {
+  const facts = enrollmentFacts({
+    readiness: {
+      ...enrollmentFacts().readiness,
+      workSafety: { state: 'reconciling' },
+    },
+    recovery: [
+      {
+        id: 'rec-1',
+        environmentInstanceId: 'inst-1',
+        leaseId: 'lease-9',
+        holderKind: 'task',
+        taskId: 'task-104',
+        cause: 'worker-channel-lost',
+        phase: 'reconciling',
+        startedAt: 10,
+        updatedAt: 20,
+        unresolvedFacts: ['The Worker channel is lost; no retained evidence has been synchronized.'],
+        evidenceSynchronized: false,
+        decisions: [],
+      },
+    ],
+  });
+  const calls: string[] = [];
+  const wire = adapter(facts, calls);
+  // Every path that could carry a fabricated payload is instrumented: if the
+  // bridge ever posts placeholder evidence, the spy records it.
+  (wire as { synchronizeEvidence: unknown }).synchronizeEvidence = async (
+    _leaseId: string,
+    payload: unknown,
+  ) => {
+    calls.push(`synchronizeEvidence:${JSON.stringify(payload)}`);
+    return facts.recovery[0]!;
+  };
+  const service = new ProductionEnvironmentService(wire);
+
+  // The capability is declared absent: production has no Worker evidence port.
+  assert.equal(service.supportsEvidenceReconciliation, false);
+
+  // The reconcile action is a typed refusal, and nothing reaches the wire.
+  await assert.rejects(
+    () => service.reconcileEvidence('enroll-1'),
+    /no Worker evidence port/i,
+  );
+  assert.deepEqual(calls, [], 'no synchronizeEvidence command was posted');
+
+  // The refused action cannot have moved the record or manufactured the gate.
+  const env = await service.getEnvironment('enroll-1');
+  assert.equal(env?.workSafety, 'reconciling', 'the record stays reconciling');
+  assert.equal(env?.leaseRecovery?.evidenceSynchronized, false, 'no evidence was fabricated');
+});

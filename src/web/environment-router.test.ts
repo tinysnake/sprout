@@ -49,6 +49,7 @@ interface EnrollmentRuntime {
   readonly cookie: string;
   readonly csrf: string;
   readonly enrollments: EnvironmentEnrollmentService;
+  readonly enrollmentsStore: InMemoryEnrollmentStore;
   readonly pool: EnvironmentPool;
   readonly recovery: EnvironmentRecoveryService;
   readonly archive: EnvironmentArchiveService;
@@ -120,7 +121,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   assert.equal(response.status, 201);
   const cookie = (response.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
   const { csrfToken } = (await response.json()) as { csrfToken: string };
-  return { api, base, cookie, csrf: csrfToken, enrollments, pool, recovery, archive };
+  return { api, base, cookie, csrf: csrfToken, enrollments, enrollmentsStore, pool, recovery, archive };
 }
 
 function command(
@@ -918,6 +919,132 @@ test('archive and restore are authorized durable decisions with their ADR-0008 g
       (await fetch(`${runtime.base}/api/environments/enrollments/enroll-1/restore`, { method: 'POST' })).status,
       401,
     );
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('M89-AUTHORITY-001: revoke → archive → restore → approve can never resurrect a revoked identity', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const identity = workerIdentityFixture();
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      publicKey: identity.publicKey,
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/revoke', runtime, {
+      reason: 'worker host left the fleet',
+    });
+
+    // Archive over a revoked enrollment is refused: revocation is sticky, so
+    // the record cannot be parked in `archived` to later restore an approvable
+    // status. No status transition or decision is written.
+    const archiveRefused = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/archive',
+      runtime,
+      { reason: 'host retired' },
+    );
+    assert.equal(archiveRefused.status, 409, 'a revoked enrollment refuses archive');
+    const refusedBody = (await archiveRefused.json()) as { readonly code?: string };
+    assert.equal(refusedBody.code, 'revoked-enrollment', 'the refusal names the authority rule');
+
+    // The refused archive changed nothing: the record is still revoked.
+    const stillRevoked = await fetch(`${runtime.base}/api/environments/enrollments/enroll-1`, {
+      headers: { cookie: runtime.cookie },
+    });
+    assert.equal(stillRevoked.status, 200);
+    const revokedView = (await stillRevoked.json()) as {
+      readonly enrollment: { readonly status: string };
+    };
+    assert.equal(revokedView.enrollment.status, 'revoked');
+
+    // Restore of a non-archived record stays refused: the archive refusal means
+    // there is no archived row a restore could resurrect an approvable status
+    // from. The revoke → archive → restore → approve chain ends here, closed.
+    const restoreRefused = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/restore',
+      runtime,
+      {},
+    );
+    assert.equal(restoreRefused.status, 409, 'restore is refused for a record that was never archived');
+    const restoreBody = (await restoreRefused.json()) as { readonly code?: string };
+    assert.equal(restoreBody.code, 'not-archived');
+
+    // Approval is still the #87 refusal: only a fresh reset can reopen the
+    // enrollment, invalidating the old digest first.
+    const approveRefused = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/approve',
+      runtime,
+      { capabilityPermissions: { 'agent-run': true } },
+    );
+    assert.equal(approveRefused.status, 409, 'a revoked enrollment refuses approval');
+    const approveBody = (await approveRefused.json()) as { readonly code?: string };
+    assert.equal(approveBody.code, 'revoked-enrollment');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('M89-AUTHORITY-002: a revoked record archived by any prior writer restores as revoked and stays barred', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const identity = workerIdentityFixture();
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      publicKey: identity.publicKey,
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/revoke', runtime, {
+      reason: 'worker host left the fleet',
+    });
+
+    // A legacy writer that parked a revoked record in `archived` (the defect
+    // this rework closes) must still not yield an approvable enrollment: the
+    // restore derives the status from the last real authority decision.
+    const stored = await runtime.enrollmentsStore.get('enroll-1');
+    assert.ok(stored);
+    await runtime.enrollmentsStore.save({ ...stored, status: 'archived' });
+    const restored = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/restore',
+      runtime,
+      {},
+    );
+    assert.equal(restored.status, 200);
+    const restoredBody = (await restored.json()) as {
+      readonly enrollment: { readonly status: string };
+    };
+    assert.equal(
+      restoredBody.enrollment.status,
+      'revoked',
+      'restore of a revoked record returns it to revoked, never pending or approved',
+    );
+
+    // The restored record still refuses approval: the #87 fresh reset (which
+    // invalidates the old identity digest) remains the only path back.
+    const approveRefused = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/approve',
+      runtime,
+      { capabilityPermissions: { 'agent-run': true } },
+    );
+    assert.equal(approveRefused.status, 409);
+    const approveBody = (await approveRefused.json()) as { readonly code?: string };
+    assert.equal(approveBody.code, 'revoked-enrollment');
   } finally {
     await runtime.api.close();
   }
