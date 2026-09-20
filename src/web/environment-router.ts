@@ -3,8 +3,8 @@ import {
   EnrollmentError,
   type EnrollmentEngineFact,
 } from '../environment/enrollment.ts';
-import { workerIdentityDigest } from '../environment/enrollment-identity.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import type {
   CompatibilityFact,
   ConnectionFact,
@@ -22,8 +22,9 @@ import { toEnrollmentView, toEnvironmentReadinessView } from './views.ts';
  * exactly one implementation and the transport keeps none.
  *
  * Privacy: no route accepts or returns a private key, engine credential,
- * hostname, address, topology, or absolute path. A Worker presents a public key
- * once; only its digest is retained, and the wire contract never echoes the key.
+ * hostname, address, topology, or absolute path. A Worker proves possession of
+ * its host-generated private key with a signed challenge; only its public key's
+ * digest is retained, and the wire contract never echoes the key or signature.
  */
 
 export interface EnvironmentRouterOptions {
@@ -103,7 +104,24 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         return json(context, 200, { enrollment: toEnrollmentView(enrollment) });
       }
 
-      // POST /api/environments/enrollments/:id/connect — Worker identity proof.
+      // POST /api/environments/enrollments/:id/challenge — issue a proof nonce.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'challenge'
+      ) {
+        try {
+          const challenge = await enrollments.issueChallenge(segments[3] ?? '');
+          return json(context, 200, { challenge });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/enrollments/:id/connect — verified Worker identity.
       if (
         method === 'POST' &&
         segments.length === 5 &&
@@ -113,11 +131,14 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         segments[4] === 'connect'
       ) {
         const body = await context.readBody();
-        // A connection proves possession by presenting the public key; the digest
-        // is derived here so the wire never carries a caller-chosen identity.
-        const publicKey = stringField(body, 'publicKey');
-        if (publicKey === undefined) {
-          return json(context, 400, { error: 'publicKey is required' });
+        // A connection must prove possession of the Worker's private key: a bare
+        // public key or digest is not proof and is refused. The proof is the
+        // signed response to a challenge issued for this enrollment.
+        const proof = parseWorkerProof(body['proof']);
+        if (proof === 'invalid') {
+          return json(context, 400, {
+            error: 'proof with challengeId, publicKey, and signature is required',
+          });
         }
         const connection = parseConnection(body['connection']);
         if (connection === 'invalid') {
@@ -134,7 +155,7 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         try {
           const outcome = await enrollments.connectWorker({
             enrollmentId: segments[3] ?? '',
-            identityDigest: workerIdentityDigest(publicKey),
+            proof,
             connection,
             compatibility,
             engines,
@@ -291,7 +312,9 @@ function json(context: ApiRequestContext, status: number, payload: unknown): tru
 
 function enrollmentFailure(context: ApiRequestContext, error: unknown): true {
   if (error instanceof EnrollmentError) {
-    const status = error.code === 'unknown-enrollment' ? 404 : 409;
+    let status = 409;
+    if (error.code === 'unknown-enrollment') status = 404;
+    if (error.code === 'invalid-proof') status = 401;
     return json(context, status, { error: error.message, code: error.code });
   }
   return json(context, 500, { error: 'environment enrollment could not be completed' });
@@ -421,6 +444,18 @@ function parseModelAvailability(
     return 'invalid';
   }
   return { state, models: (models as readonly string[] | undefined) ?? [] };
+}
+
+function parseWorkerProof(value: unknown): WorkerIdentityProof | 'invalid' {
+  if (typeof value !== 'object' || value === null) return 'invalid';
+  const record = value as Record<string, unknown>;
+  const challengeId = record['challengeId'];
+  const publicKey = record['publicKey'];
+  const signature = record['signature'];
+  if (typeof challengeId !== 'string' || challengeId === '') return 'invalid';
+  if (typeof publicKey !== 'string' || publicKey === '') return 'invalid';
+  if (typeof signature !== 'string' || signature === '') return 'invalid';
+  return { challengeId, publicKey, signature };
 }
 
 function parseProbe(value: Record<string, unknown>): ProbeResultFact | 'invalid' {

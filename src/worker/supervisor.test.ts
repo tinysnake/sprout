@@ -13,14 +13,19 @@ import { EnvironmentWorkerRegistry, WorkerSupervisor } from './supervisor.ts';
  * A stand-in for a worker connection whose liveness the test controls.
  */
 class FakeConnection implements WorkerConnection {
-  readonly info: { pid: number; environmentInstanceId: string; engines: [] };
+  readonly info: { pid: number; environmentInstanceId: string; engines: []; readiness: { protocolVersion: string; engines: [] } };
   readonly adapters: ReadonlyMap<string, EngineAdapter>;
   readonly contexts = new WorkerContextClient(new LineJsonRpcTransport({ input: new PassThrough(), output: new PassThrough() }));
   #alive = true;
   closes = 0;
 
   constructor(environmentInstanceId = 'mac-mini-1') {
-    this.info = { pid: 1, environmentInstanceId, engines: [] };
+    this.info = {
+      pid: 1,
+      environmentInstanceId,
+      engines: [],
+      readiness: { protocolVersion: '2', engines: [] },
+    };
     this.adapters = new Map<string, EngineAdapter>([['scripted', new FakeAdapter()]]);
   }
 
@@ -178,4 +183,61 @@ test('the registry refuses a worker whose own instance does not match the resolv
 
   await assert.rejects(registry.adapters('container-1'), /instance mismatch/i);
   assert.ok((await registry.adapters('mac-mini-1')).has('scripted'));
+});
+
+test('info observes only a live Worker and never starts a replacement for a dead channel', async () => {
+  // Regression for M77-WORKER-001: readiness observation used the supervisor's
+  // start-if-needed path, so reading readiness from a dead Environment revived it.
+  const connections: FakeConnection[] = [];
+  let connects = 0;
+  const registry = new EnvironmentWorkerRegistry({
+    connect: async (instanceId) => {
+      connects += 1;
+      const connection = new FakeConnection(instanceId);
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  // Never started: observation must not start one.
+  assert.equal(await registry.info('mac-mini-1'), undefined);
+  assert.equal(connects, 0, 'info must not start a Worker');
+
+  // A live Worker is observed.
+  await registry.adapters('mac-mini-1');
+  assert.equal(connects, 1);
+  const observed = await registry.info('mac-mini-1');
+  assert.equal(observed?.environmentInstanceId, 'mac-mini-1');
+  assert.equal(connects, 1, 'observing a live Worker does not start another');
+
+  // The channel dies: observation reports unavailable rather than replacing it.
+  connections[0]?.die();
+  assert.equal(await registry.info('mac-mini-1'), undefined, 'a dead channel is unavailable, not revived');
+  assert.equal(connects, 1, 'observation must not start a replacement Worker');
+
+  // A run still replaces the dead Worker; observation never needs to.
+  await registry.adapters('mac-mini-1');
+  assert.equal(connects, 2, 'a run may still replace the dead Worker');
+  await registry.close();
+});
+
+test('a supervisor exposes its live connection without starting one', async () => {
+  const connections: FakeConnection[] = [];
+  let connects = 0;
+  const supervisor = new WorkerSupervisor({
+    connect: async () => {
+      connects += 1;
+      const connection = new FakeConnection();
+      connections.push(connection);
+      return connection;
+    },
+  });
+
+  assert.equal(supervisor.liveConnection(), undefined);
+  assert.equal(connects, 0);
+  await supervisor.adapters();
+  assert.equal(supervisor.liveConnection()?.info.environmentInstanceId, 'mac-mini-1');
+  connections[0]?.die();
+  assert.equal(supervisor.liveConnection(), undefined, 'a dead connection is not reported as live');
+  assert.equal(connects, 1);
 });

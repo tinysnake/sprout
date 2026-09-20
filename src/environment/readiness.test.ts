@@ -9,6 +9,9 @@ import {
   workSafetyFromLeases,
   type EnvironmentReadiness,
 } from './readiness.ts';
+import { assembleEnvironmentReadiness } from './readiness-service.ts';
+import { createPendingEnrollment, approveEnrollment, type CreatePendingEnrollmentInput } from './enrollment.ts';
+import { workerIdentityDigest } from './enrollment-identity.ts';
 
 function ready(overrides: Partial<EnvironmentReadiness> = {}): EnvironmentReadiness {
   return {
@@ -188,4 +191,60 @@ test('a Worker readiness declaration maps to independent observed facts without 
   // An unrecognized value becomes `unknown` rather than being trusted.
   assert.equal(observed.engines[1]?.readiness, 'unknown');
   assert.equal(observed.engines[1]?.models.state, 'unknown');
+});
+
+function enrollmentWith(platform: string, capabilityRequests: readonly string[]) {
+  const input: CreatePendingEnrollmentInput = {
+    id: 'enroll-1',
+    environmentInstanceId: 'env-1',
+    displayName: 'Env',
+    identityDigest: workerIdentityDigest('public-key-a'),
+    platform,
+    capabilityRequests,
+    engineFacts: [],
+    at: 1_000,
+  };
+  return approveEnrollment(createPendingEnrollment(input), {
+    capabilityPermissions: Object.fromEntries(capabilityRequests.map((capability) => [capability, true])),
+    at: 2_000,
+  });
+}
+
+test('only explicitly required engines block work: an unrequired unavailable engine is Yellow', () => {
+  const enrollment = enrollmentWith('macos', ['agent-run']);
+  const observed = {
+    connection: { state: 'online' as const, lastConfirmedAt: 3_000 },
+    compatibility: { state: 'compatible' as const, workerProtocolVersion: '2' },
+    engines: [
+      { engine: 'codex', installed: true, readiness: 'ready' as const, required: false, models: { state: 'available' as const, models: ['gpt-5-codex'] } },
+    ],
+  };
+
+  // Empty configuration: Pi is genuinely absent but nobody requires it, so the
+  // Environment is Yellow (attention), never a fabricated Red dual-engine block.
+  const noRequirements = assembleEnvironmentReadiness({
+    enrollment,
+    observed,
+    leases: [],
+    requiredEngines: [],
+    probe: { at: 3_000, latencyMs: 1, protocolOk: true, enginesOk: true, summary: 'ok' },
+    supportedProtocol: { minMajor: 2, maxMajor: 2 },
+    now: 3_100,
+  });
+  assert.equal(noRequirements.readiness.engines.every((engine) => engine.required === false), true);
+  assert.notEqual(noRequirements.summary.level, 'red', noRequirements.summary.reason);
+
+  // An explicit requirement makes the absence a Red block.
+  const requiresPi = assembleEnvironmentReadiness({
+    enrollment,
+    observed,
+    leases: [],
+    requiredEngines: ['pi'],
+    probe: { at: 3_000, latencyMs: 1, protocolOk: true, enginesOk: true, summary: 'ok' },
+    supportedProtocol: { minMajor: 2, maxMajor: 2 },
+    now: 3_100,
+  });
+  assert.equal(requiresPi.readiness.engines.find((engine) => engine.engine === 'pi')?.required, true);
+  assert.equal(requiresPi.summary.level, 'red');
+  assert.match(requiresPi.summary.reason, /pi/i);
 });

@@ -29,6 +29,8 @@ import { InMemoryOperatorSessionStore } from '../src/auth/store.ts';
 import { EnvironmentEnrollmentService } from '../src/environment/enrollment-service.ts';
 import { SqliteEnrollmentStore } from '../src/environment/sqlite-enrollment-store.ts';
 import { SqliteEnvironmentReadinessStore } from '../src/environment/sqlite-readiness-store.ts';
+import { workerIdentityFixture } from '../src/environment/worker-identity-fixture.ts';
+import type { WorkerIdentityProof } from '../src/environment/worker-proof.ts';
 import { createRunApi } from '../src/web/api.ts';
 import { createEnvironmentRouter } from '../src/web/environment-router.ts';
 
@@ -45,6 +47,7 @@ const definition: EnvironmentDefinition = {
   capabilities: [{ name: 'agent-run', requiresLease: true }],
 };
 const instance: EnvironmentInstance = { id: 'probe-instance', definitionId: 'macos-workstation' };
+const worker = workerIdentityFixture();
 
 const directory = mkdtempSync(join(tmpdir(), 'sprout-enrollment-contract-'));
 try {
@@ -112,7 +115,7 @@ try {
     body: JSON.stringify({
       environmentInstanceId: instance.id,
       displayName: 'Probe Environment',
-      publicKey: 'probe-public-key',
+      publicKey: worker.publicKey,
       platform: 'macos',
       protocolVersion: '2.1',
       capabilityRequests: ['agent-run'],
@@ -122,7 +125,20 @@ try {
   check('requesting an enrollment returns 201', requested.status === 201, `status ${requested.status}`);
   const requestedBody = (await requested.json()) as { readonly bootstrap?: { readonly instructions?: readonly string[] } };
   check('the response carries host bootstrap guidance', (requestedBody.bootstrap?.instructions?.length ?? 0) > 0);
-  check('the response does not echo the public key', JSON.stringify(requestedBody).includes('probe-public-key') === false);
+  check('the response does not echo the public key', JSON.stringify(requestedBody).includes(worker.publicKey) === false);
+
+  // A bare public key is not proof of possession: the connect must be refused.
+  const bareConnect = await fetch(`${base}/api/environments/enrollments/enroll-probe/connect`, {
+    method: 'POST',
+    headers: session,
+    body: JSON.stringify({
+      publicKey: worker.publicKey,
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    }),
+  });
+  check('a bare public key is refused without a proof', bareConnect.status === 400, `status ${bareConnect.status}`);
 
   const approved = await fetch(`${base}/api/environments/enrollments/enroll-probe/approve`, {
     method: 'POST',
@@ -131,11 +147,22 @@ try {
   });
   check('Human approval returns 200', approved.status === 200, `status ${approved.status}`);
 
-  await fetch(`${base}/api/environments/enrollments/enroll-probe/connect`, {
+  // Answer a real challenge, as a Worker on the host would.
+  const challengeResponse = await fetch(`${base}/api/environments/enrollments/enroll-probe/challenge`, {
+    method: 'POST',
+    headers: session,
+    body: JSON.stringify({}),
+  });
+  const { challenge } = (await challengeResponse.json()) as {
+    readonly challenge: { readonly id: string; readonly enrollmentId: string; readonly nonce: string };
+  };
+  const proof: WorkerIdentityProof = worker.sign(challenge);
+
+  const connected = await fetch(`${base}/api/environments/enrollments/enroll-probe/connect`, {
     method: 'POST',
     headers: session,
     body: JSON.stringify({
-      publicKey: 'probe-public-key',
+      proof,
       connection: { state: 'online', lastConfirmedAt: 1_000 },
       compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
       engines: [
@@ -144,6 +171,8 @@ try {
       ],
     }),
   });
+  check('a signed challenge response connects', connected.status === 200, `status ${connected.status}`);
+  check('the proof signature is never echoed', (await connected.clone().text()).includes(proof.signature) === false);
 
   const readinessResponse = await fetch(`${base}/api/environments/enrollments/enroll-probe/readiness`, {
     headers: { cookie },
@@ -173,7 +202,7 @@ try {
   check('the preserved M1 run route still answers', runs.status === 200, `status ${runs.status}`);
 
   const serialized = JSON.stringify(body);
-  check('the readiness payload carries no public key', serialized.includes('probe-public-key') === false);
+  check('the readiness payload carries no public key', serialized.includes(worker.publicKey) === false);
   check('the readiness payload carries no home path', /\/Users\/|\/home\/|[A-Za-z]:\\/.test(serialized) === false);
   check('the readiness payload carries no private address', /\b(10|192\.168)\.\d+\.\d+\.\d+\b/.test(serialized) === false);
 

@@ -425,6 +425,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
       leases: () => pool.leases(),
+      // The one engine this build's configured Agents actually run on is the one
+      // engine its configured use requires. Nothing here names a second engine,
+      // so an Environment that hosts only this engine is complete rather than a
+      // fabricated dual-engine failure (ADR-0008).
+      requiredEngines: [engineId],
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
     const api = createRunApi({

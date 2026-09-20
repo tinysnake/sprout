@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type { EnvironmentEnrollment } from './enrollment.ts';
+import { normalizeEnrollment } from './enrollment.ts';
 import type { EnrollmentStore } from './enrollment-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
@@ -62,14 +63,14 @@ export class SqliteEnrollmentStore implements EnrollmentStore {
     const row = this.#db
       .prepare('SELECT document FROM environment_enrollments WHERE id = ?')
       .get(enrollmentId) as { readonly document: string } | undefined;
-    return row ? (JSON.parse(row.document) as EnvironmentEnrollment) : undefined;
+    return row ? normalizeEnrollment(JSON.parse(row.document) as EnvironmentEnrollment) : undefined;
   }
 
   async list(): Promise<readonly EnvironmentEnrollment[]> {
     const rows = this.#db
       .prepare('SELECT document FROM environment_enrollments ORDER BY id')
       .all() as unknown as readonly { readonly document: string }[];
-    return rows.map((row) => JSON.parse(row.document) as EnvironmentEnrollment);
+    return rows.map((row) => normalizeEnrollment(JSON.parse(row.document) as EnvironmentEnrollment));
   }
 
   close(): void {

@@ -83,14 +83,6 @@ test('same-key connection is an idempotent reconnect and never a second identity
   assert.equal(outcome.enrollment.id, approved.id, 'the same Environment identity is reused');
 });
 
-test('same-key connection while pending stays pending and still requires approval', () => {
-  const enrollment = pending();
-  const outcome = reconcileWorkerConnection(enrollment, enrollment.worker.identityDigest, 3_000);
-  assert.equal(outcome.outcome, 'duplicate-same-key');
-  assert.equal(outcome.requiresHumanApproval, true);
-  assert.equal(outcome.enrollment.status, 'pending');
-});
-
 test('a new key against an approved binding is refused and requires a reset', () => {
   const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
   const outcome = reconcileWorkerConnection(approved, workerIdentityDigest('public-key-b'), 3_000);
@@ -119,7 +111,7 @@ test('a revoked enrollment refuses reconnection and cannot be approved without a
   );
 });
 
-test('a fresh reset clears approval so only a new identity requires a fresh Human approval', () => {
+test('a fresh reset clears and invalidates the old identity so it cannot reconnect', () => {
   const approved = approveEnrollment(
     pending(),
     { capabilityPermissions: { 'agent-run': true }, at: 2_000 },
@@ -127,18 +119,59 @@ test('a fresh reset clears approval so only a new identity requires a fresh Huma
   const reset = resetEnrollment(approved, 3_000, '');
   assert.equal(reset.status, 'pending');
   assert.equal(reset.everApproved, false);
+  assert.equal(reset.worker.identityDigest, '', 'the claimed identity is cleared until a fresh key claims it');
+  assert.equal(reset.requiresFreshIdentity, true);
+  assert.ok(
+    reset.invalidatedIdentityDigests.includes(approved.worker.identityDigest),
+    'the old digest is retained only as an invalidated value',
+  );
   assert.deepEqual(reset.capabilityPermissions, {
     'agent-run': false,
     'read-only-investigation': false,
   });
-  // The old identity can still be recognized, but it is no longer approved, so
-  // the reset Worker needs a new Human approval before work.
-  const reconnect = reconcileWorkerConnection(reset, reset.worker.identityDigest, 4_000);
+  // The old identity can no longer reconnect, even though the status is pending.
+  const reconnect = reconcileWorkerConnection(reset, approved.worker.identityDigest, 4_000);
+  assert.equal(reconnect.outcome, 'stale-identity-refused');
   assert.equal(reconnect.requiresHumanApproval, true);
+  assert.equal(reconnect.enrollment.worker.identityDigest, '', 'the stale attempt cannot re-claim the identity');
   // The decision history is preserved.
   assert.deepEqual(
     reset.decisions.map((decision) => decision.kind),
     ['requested', 'approved', 'reset'],
+  );
+});
+
+test('a fresh reset cannot be approved until a newly generated identity claims it', () => {
+  const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
+  const reset = resetEnrollment(approved, 3_000, '');
+  assert.throws(
+    () => approveEnrollment(reset, { capabilityPermissions: {}, at: 4_000 }),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'fresh-identity-required',
+  );
+
+  const fresh = reconcileWorkerConnection(reset, workerIdentityDigest('public-key-fresh'), 4_000);
+  assert.equal(fresh.outcome, 'identity-claimed');
+  assert.equal(fresh.requiresHumanApproval, true);
+  assert.equal(fresh.enrollment.requiresFreshIdentity, false);
+  assert.equal(fresh.enrollment.worker.identityDigest, workerIdentityDigest('public-key-fresh'));
+
+  const approvedAgain = approveEnrollment(fresh.enrollment, { capabilityPermissions: {}, at: 5_000 });
+  assert.equal(approvedAgain.status, 'approved');
+  assert.equal(approvedAgain.worker.identityDigest, workerIdentityDigest('public-key-fresh'));
+});
+
+test('a revoked enrollment that is reset can only be reclaimed by a fresh identity', () => {
+  const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
+  const revoked = revokeEnrollment(approved, 3_000, '');
+  const reset = resetEnrollment(revoked, 4_000, '');
+  assert.equal(reset.status, 'pending');
+  assert.equal(
+    reconcileWorkerConnection(reset, approved.worker.identityDigest, 5_000).outcome,
+    'stale-identity-refused',
+  );
+  assert.equal(
+    reconcileWorkerConnection(reset, workerIdentityDigest('public-key-rotated'), 5_000).outcome,
+    'identity-claimed',
   );
 });
 
@@ -155,6 +188,33 @@ test('capability permission only changes on an approved enrollment and only for 
     () => setCapabilityPermission(approved, 'not-declared', true, 3_000),
     (error: unknown) => error instanceof EnrollmentError && error.code === 'unknown-enrollment',
   );
+});
+
+test('revoke and reset reasons pass through the privacy boundary before they are retained', () => {
+  const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
+  const revoked = revokeEnrollment(
+    approved,
+    3_000,
+    'retired /Users/example/secret/workspace after key sk-live-abcdefghijklmnopqrst leaked',
+  );
+  const revokeReason = revoked.decisions.at(-1)!.reason;
+  assert.equal(/\/Users\//.test(revokeReason), false, 'no absolute path is retained');
+  assert.equal(/sk-live-/.test(revokeReason), false, 'no credential-like token is retained');
+  assert.match(revokeReason, /retired/i, 'the decisive operator reason survives');
+
+  const reset = resetEnrollment(revoked, 4_000, 'rotate key at C:\\Users\\example\\secret');
+  const resetReason = reset.decisions.at(-1)!.reason;
+  assert.equal(/C:\\/.test(resetReason), false, 'no Windows absolute path is retained');
+  assert.match(resetReason, /rotate key/i, 'the decisive operator reason survives');
+});
+
+test('an empty or all-sensitive reason falls back to the product-owned decisive reason', () => {
+  const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
+  const revoked = revokeEnrollment(approved, 3_000, '   /Users/example  ');
+  assert.match(revoked.decisions.at(-1)!.reason, /revoked/i);
+  const reset = resetEnrollment(revoked, 4_000, '192.168.1.10:5174');
+  assert.equal(/192\.168/.test(reset.decisions.at(-1)!.reason), false);
+  assert.match(reset.decisions.at(-1)!.reason, /reset/i);
 });
 
 test('the recorded enrollment carries no private key, credential, hostname, or absolute path', () => {

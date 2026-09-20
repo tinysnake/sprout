@@ -634,12 +634,13 @@ test('the composed runtime exposes durable enrollment and readiness through its 
       capabilityPermissions: { 'agent-run': true },
     });
     const now = Date.now();
+    // Only the engine this build's configured Agents actually run on is required,
+    // so a single ready engine is a complete Environment.
     await runtime.enrollments.observeReadiness(requested.enrollment.id, {
       connection: { state: 'online', lastConfirmedAt: now },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
-        { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
       ],
     });
     await runtime.enrollments.recordProbe(requested.enrollment.id, {
@@ -653,6 +654,17 @@ test('the composed runtime exposes durable enrollment and readiness through its 
     const assembled = await runtime.enrollments.readiness(requested.enrollment.id);
     assert.equal(assembled.summary.level, 'green');
     assert.ok(assembled.summary.reason.length > 0);
+    // The configured engine is the one required engine; no second engine is
+    // fabricated as required by an empty configuration.
+    assert.equal(
+      assembled.readiness.engines.find((engine) => engine.engine === 'scripted')?.required,
+      true,
+    );
+    assert.equal(
+      assembled.readiness.engines.some((engine) => engine.engine === 'pi'),
+      false,
+      'no unconfigured engine is invented',
+    );
 
     // The same composition serves the router over HTTP.
     const { port } = await runtime.api.listen(0);

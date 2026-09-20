@@ -70,6 +70,19 @@ export class WorkerSupervisor {
     return this.#ensure();
   }
 
+  /**
+   * The currently live connection, or `undefined`.
+   *
+   * Observation must never have the side effect of starting a worker: reading
+   * readiness from a dead environment would otherwise revive it, turning an
+   * inspection into work. This returns only a connection that already exists and
+   * is alive, so a caller can report `offline`/`unknown` honestly instead of
+   * fabricating a fresh Worker to observe.
+   */
+  liveConnection(): WorkerConnection | undefined {
+    return this.#connection !== undefined && this.#connection.alive ? this.#connection : undefined;
+  }
+
   async #ensure(): Promise<WorkerConnection> {
     if (this.#closed) throw new Error('environment worker supervisor is closed');
 
@@ -176,14 +189,20 @@ export class EnvironmentWorkerRegistry {
 
   /**
    * The neutral facts the connected Worker reported on `worker/info`, or
-   * `undefined` when no Worker is currently live. A dead channel must never
-   * fabricate a readiness fact, so this observes rather than asks.
+   * `undefined` when no Worker is currently live.
+   *
+   * A dead channel must never fabricate a readiness fact, and observation must
+   * not start a replacement Worker either: `supervisor.connection()` would revive
+   * an environment just because someone asked for readiness. This reads only an
+   * already-live connection, so a dead or never-started channel reports
+   * `undefined` (unavailable/unknown) rather than spawning a Worker to observe.
    */
   async info(instanceId: string): Promise<WorkerInfo | undefined> {
     if (this.#closed) throw new Error('environment worker registry is closed');
     const supervisor = this.#supervisors.get(instanceId);
     if (supervisor === undefined) return undefined;
-    const connection = await supervisor.connection();
+    const connection = supervisor.liveConnection();
+    if (connection === undefined) return undefined;
     if (connection.info.environmentInstanceId !== instanceId) return undefined;
     return connection.info;
   }

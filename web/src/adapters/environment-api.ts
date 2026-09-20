@@ -72,6 +72,20 @@ export interface ProbeResultView {
   readonly summary: string;
 }
 
+export interface WorkerIdentityProofView {
+  readonly challengeId: string;
+  readonly publicKey: string;
+  readonly signature: string;
+}
+
+export interface WorkerIdentityChallengeView {
+  readonly id: string;
+  readonly enrollmentId: string;
+  readonly nonce: string;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+}
+
 export interface EnvironmentEnrollmentBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
@@ -85,8 +99,15 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly protocolVersion?: string;
     readonly capabilityRequests?: readonly string[];
   }): Promise<{ readonly enrollment: EnrollmentView; readonly bootstrap: { readonly instructions: readonly string[] } }>;
+  /**
+   * Request a proof challenge for one enrollment.
+   *
+   * A Worker signs `challenge.nonce` with its host-generated private key and
+   * returns the signed proof to `connectWorker`; a bare public key is not proof.
+   */
+  requestChallenge(id: string): Promise<WorkerIdentityChallengeView>;
   connectWorker(id: string, input: {
-    readonly publicKey: string;
+    readonly proof: WorkerIdentityProofView;
     readonly connection: { readonly state: string; readonly lastConfirmedAt?: number };
     readonly compatibility: { readonly state: string; readonly workerProtocolVersion?: string };
     readonly engines: readonly {
@@ -124,6 +145,13 @@ export function createEnvironmentEnrollmentBrowserAdapter(
     },
     async requestEnrollment(input) {
       return transport.request('/api/environments/enrollments', jsonCommand(input));
+    },
+    async requestChallenge(id) {
+      const response = await transport.request<{ readonly challenge: WorkerIdentityChallengeView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/challenge`,
+        jsonCommand({}),
+      );
+      return response.challenge;
     },
     async connectWorker(id, input) {
       return transport.request(

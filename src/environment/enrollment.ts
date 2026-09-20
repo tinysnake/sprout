@@ -13,6 +13,14 @@
  * field to be stored in.
  */
 
+import {
+  sanitizeOperatorText,
+  sanitizeIdentifier,
+  sanitizeProtocolVersion,
+  DEFAULT_RESET_REASON,
+  DEFAULT_REVOKE_REASON,
+} from './privacy.ts';
+
 export type EnrollmentStatus = 'pending' | 'approved' | 'revoked';
 
 export type EnrollmentDecisionKind =
@@ -21,6 +29,7 @@ export type EnrollmentDecisionKind =
   | 'revoked'
   | 'reset'
   | 'duplicate-same-key'
+  | 'identity-claimed'
   | 'duplicate-new-key-refused';
 
 /** One durable authority decision, retained in order for the whole lifecycle. */
@@ -63,6 +72,17 @@ export interface EnvironmentEnrollment {
   /** `true` once a Human has approved this identity at least once. */
   readonly everApproved: boolean;
   readonly worker: EnrollmentWorkerFacts;
+  /**
+   * Digests invalidated by a fresh reset. An old Worker key in this list can
+   * never reconnect and can never be approved again (ADR-0008: an unenrolled
+   * Environment requires fresh Human approval with a fresh identity).
+   */
+  readonly invalidatedIdentityDigests: readonly string[];
+  /**
+   * `true` after a fresh reset until a newly generated Worker key claims this
+   * pending request. Approval is refused while no current identity is claimed.
+   */
+  readonly requiresFreshIdentity: boolean;
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -73,6 +93,8 @@ export type EnrollmentOutcome =
   | 'requested'
   | 'reconnected'
   | 'duplicate-same-key'
+  | 'identity-claimed'
+  | 'stale-identity-refused'
   | 'duplicate-new-key-refused'
   | 'revoked-refused'
   | 'approved'
@@ -93,6 +115,8 @@ export type EnrollmentErrorCode =
   | 'duplicate-identity'
   | 'not-pending'
   | 'not-approved'
+  | 'fresh-identity-required'
+  | 'invalid-proof'
   | 'unsupported-platform';
 
 /** A typed enrollment refusal whose message is safe to show an operator. */
@@ -135,21 +159,40 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
       `Environment platform "${input.platform}" is not supported for enrollment.`,
     );
   }
+  const protocolVersion = sanitizeProtocolVersion(input.protocolVersion);
   return {
     id: input.id,
     environmentInstanceId: input.environmentInstanceId,
-    displayName: input.displayName,
+    // The display name is a Human label, but it still lives in the durable
+    // Environment health record, so it passes the same privacy boundary: a path
+    // or credential typed into a label is redacted rather than persisted.
+    displayName: sanitizeOperatorText(input.displayName, { fallback: 'Environment', maxLength: 120 }),
     status: 'pending',
     everApproved: false,
     worker: {
       identityDigest: input.identityDigest,
       platform: input.platform,
-      ...(input.protocolVersion !== undefined ? { protocolVersion: input.protocolVersion } : {}),
-      capabilityRequests: [...input.capabilityRequests],
-      engineFacts: input.engineFacts.map((engine) => ({ ...engine, models: [...engine.models] })),
+      ...(protocolVersion !== undefined ? { protocolVersion } : {}),
+      // Capability, engine, and model names are structured identifiers, not free
+      // text: a path or token typed into one is dropped rather than preserved in
+      // the durable record or the readiness reason.
+      capabilityRequests: input.capabilityRequests.map((capability) =>
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+      ),
+      engineFacts: input.engineFacts.map((engine) => ({
+        installed: engine.installed,
+        authenticated: engine.authenticated,
+        models: engine.models.map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+      })),
     },
+    invalidatedIdentityDigests: [],
+    requiresFreshIdentity: false,
     capabilityPermissions: Object.fromEntries(
-      input.capabilityRequests.map((capability) => [capability, false]),
+      input.capabilityRequests.map((capability) => [
+        sanitizeIdentifier(capability, { fallback: 'unknown-capability' }),
+        false,
+      ]),
     ),
     createdAt: input.at,
     updatedAt: input.at,
@@ -172,7 +215,10 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
  * - the same Worker key is an idempotent reconnect, never a second Environment;
  * - a new key while an approved binding is active is refused and requires an
  *   explicit Human reset and fresh approval;
- * - a revoked enrollment stays revoked and bars reconnection.
+ * - a revoked enrollment stays revoked and bars reconnection;
+ * - a key invalidated by a fresh reset can never reconnect or be approved again;
+ * - after a fresh reset, a newly generated key claims the pending request and
+ *   still needs a fresh Human approval before work.
  */
 export function reconcileWorkerConnection(
   enrollment: EnvironmentEnrollment,
@@ -192,7 +238,45 @@ export function reconcileWorkerConnection(
     };
   }
 
-  if (identityDigest === enrollment.worker.identityDigest) {
+  // A key invalidated by a fresh reset is permanently barred. This is checked
+  // before anything else so an old key cannot reclaim the pending request, even
+  // though the reset made the enrollment pending again.
+  if (enrollment.invalidatedIdentityDigests.includes(identityDigest)) {
+    return {
+      outcome: 'stale-identity-refused',
+      enrollment: recordDecision(enrollment, {
+        kind: 'duplicate-new-key-refused',
+        actor: 'worker',
+        at,
+        reason: 'This Worker identity was invalidated by a fresh reset and cannot reconnect; generate a new key.',
+      }),
+      requiresHumanApproval: true,
+    };
+  }
+
+  // A fresh reset cleared the current identity. The first new key claims the
+  // pending request; it is recorded so the Human approves a known identity.
+  if (enrollment.requiresFreshIdentity) {
+    return {
+      outcome: 'identity-claimed',
+      enrollment: recordDecision(
+        {
+          ...enrollment,
+          worker: { ...enrollment.worker, identityDigest },
+          requiresFreshIdentity: false,
+        },
+        {
+          kind: 'identity-claimed',
+          actor: 'worker',
+          at,
+          reason: 'A newly generated Worker identity claimed the reset enrollment; fresh Human approval is required.',
+        },
+      ),
+      requiresHumanApproval: true,
+    };
+  }
+
+  if (identityDigest === enrollment.worker.identityDigest && identityDigest !== '') {
     return {
       outcome: enrollment.status === 'approved' ? 'reconnected' : 'duplicate-same-key',
       enrollment: recordDecision(enrollment, {
@@ -243,6 +327,14 @@ export function approveEnrollment(
   if (enrollment.status !== 'pending') {
     throw new EnrollmentError('not-pending', 'Only a pending enrollment can be approved.');
   }
+  // A fresh reset clears the claimed identity; the Human approves a *fresh*
+  // Worker identity, never the one the reset invalidated.
+  if (enrollment.requiresFreshIdentity) {
+    throw new EnrollmentError(
+      'fresh-identity-required',
+      'This enrollment was reset; a newly generated Worker identity must claim it before approval.',
+    );
+  }
   const permissions: Record<string, boolean> = { ...enrollment.capabilityPermissions };
   for (const [capability, allowed] of Object.entries(input.capabilityPermissions)) {
     if (capability in permissions) permissions[capability] = allowed === true;
@@ -268,7 +360,7 @@ export function revokeEnrollment(enrollment: EnvironmentEnrollment, at: number, 
       kind: 'revoked',
       actor: 'operator',
       at,
-      reason: reason.trim() === '' ? 'Human revoked the Worker identity and reconnection authority.' : reason,
+      reason: sanitizeOperatorText(reason, { fallback: DEFAULT_REVOKE_REASON }),
     }),
     status: 'revoked',
     updatedAt: at,
@@ -279,19 +371,32 @@ export function revokeEnrollment(enrollment: EnvironmentEnrollment, at: number, 
  * Fresh reset: invalidate the old identity so only a newly generated Worker key
  * can enroll (ADR-0008: an unenrolled Environment requires fresh Human approval).
  */
+/**
+ * Fresh reset: invalidate the old identity so only a newly generated Worker key
+ * can enroll (ADR-0008: an unenrolled Environment requires fresh Human approval).
+ *
+ * The previous digest is moved to `invalidatedIdentityDigests`, the current
+ * identity is cleared, and `requiresFreshIdentity` is set, so the old key can
+ * neither reconnect nor be approved and a fresh key must claim the request.
+ */
 export function resetEnrollment(enrollment: EnvironmentEnrollment, at: number, reason: string): EnvironmentEnrollment {
+  const previousDigest = enrollment.worker.identityDigest;
+  const invalidated =
+    previousDigest !== '' && !enrollment.invalidatedIdentityDigests.includes(previousDigest)
+      ? [...enrollment.invalidatedIdentityDigests, previousDigest]
+      : [...enrollment.invalidatedIdentityDigests];
   return {
     ...recordDecision(enrollment, {
       kind: 'reset',
       actor: 'operator',
       at,
-      reason:
-        reason.trim() === ''
-          ? 'Human reset the enrollment; the old Worker identity can no longer reconnect.'
-          : reason,
+      reason: sanitizeOperatorText(reason, { fallback: DEFAULT_RESET_REASON }),
     }),
     status: 'pending',
     everApproved: false,
+    worker: { ...enrollment.worker, identityDigest: '' },
+    invalidatedIdentityDigests: invalidated,
+    requiresFreshIdentity: true,
     capabilityPermissions: Object.fromEntries(
       Object.keys(enrollment.capabilityPermissions).map((capability) => [capability, false]),
     ),
@@ -321,4 +426,22 @@ export function setCapabilityPermission(
 
 function recordDecision(enrollment: EnvironmentEnrollment, decision: EnrollmentDecision): EnvironmentEnrollment {
   return { ...enrollment, decisions: [...enrollment.decisions, decision] };
+}
+
+/**
+ * Read a durable enrollment document additively.
+ *
+ * Older documents written before the identity-proof rework lack the
+ * `invalidatedIdentityDigests` and `requiresFreshIdentity` fields. Defaulting
+ * them here keeps an upgrade additive instead of turning a valid record into
+ * `undefined`-shaped breakage; the stored document is not rewritten on read.
+ */
+export function normalizeEnrollment(enrollment: EnvironmentEnrollment): EnvironmentEnrollment {
+  return {
+    ...enrollment,
+    invalidatedIdentityDigests: Array.isArray(enrollment.invalidatedIdentityDigests)
+      ? [...enrollment.invalidatedIdentityDigests]
+      : [],
+    requiresFreshIdentity: enrollment.requiresFreshIdentity === true,
+  };
 }

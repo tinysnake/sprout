@@ -17,6 +17,7 @@
     "probe:collaboration": "node scripts/probe-collaboration.ts",
     "probe:environment-enrollment": "node scripts/probe-environment-enrollment.ts",
     "probe:environment-contract": "node scripts/probe-environment-contract.ts",
+    "probe:environment-falsification": "node scripts/probe-environment-falsification.ts",
     "web:build": "vite build",
     "web:dev": "vite",
     "smoke:container": "node scripts/live-container.ts",

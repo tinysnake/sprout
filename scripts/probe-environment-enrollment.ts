@@ -4,10 +4,10 @@
  * `node scripts/probe-environment-enrollment.ts`
  *
  * This is deliberately *outside* the test suite and the Module under test: it
- * drives the real SQLite adapters and the real HTTP router over a real temporary
- * database, then inspects the durable rows and the API payloads it can observe.
- * Its purpose is to try to falsify the ticket's privacy and contract claims
- * rather than to restate them.
+ * drives the real SQLite adapters and the real enrollment service over a real
+ * temporary database, then inspects the durable rows and the observed payloads.
+ * Its purpose is to try to falsify the ticket's privacy, identity-proof, reset,
+ * and readiness claims rather than to restate them.
  *
  * It prints a sanitized PASS/FAIL transcript. No credential, host identity,
  * address, or absolute path is printed; the temporary database is removed.
@@ -21,7 +21,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { EnvironmentEnrollmentService } from '../src/environment/enrollment-service.ts';
 import { SqliteEnrollmentStore } from '../src/environment/sqlite-enrollment-store.ts';
 import { SqliteEnvironmentReadinessStore } from '../src/environment/sqlite-readiness-store.ts';
-import { workerIdentityDigest } from '../src/environment/enrollment-identity.ts';
+import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
+import { generateWorkerIdentity } from '../src/environment/worker-proof.ts';
 
 const SENTINEL_PRIVATE_KEY = 'BEGIN OPENSSH PRIVATE KEY sentinel-private-material';
 const SENTINEL_ENGINE_CREDENTIAL = 'sk-sentinel000000000000000000enginecredential';
@@ -48,26 +49,87 @@ try {
     idFactory: () => 'enroll-probe',
   });
 
+  const worker = workerIdentityFixture();
+
   // 1. A pending enrollment created from a public key retains only its digest.
   await service.requestEnrollment({
     environmentInstanceId: 'probe-instance',
     displayName: 'Probe Environment',
-    publicKey: 'probe-public-key-material',
+    publicKey: worker.publicKey,
     platform: 'macos',
     capabilityRequests: ['agent-run'],
     engineFacts: [{ engine: 'codex', installed: true, authenticated: false, models: [] }],
   });
   const created = await service.get('enroll-probe');
-  check('public key is digested, not stored', created?.worker.identityDigest === workerIdentityDigest('probe-public-key-material'));
-  check('raw public key is absent from the record', JSON.stringify(created).includes('probe-public-key-material') === false);
+  check('public key is digested, not stored', created?.worker.identityDigest === worker.digest);
+  check('raw public key is absent from the record', JSON.stringify(created).includes(worker.publicKey) === false);
 
-  // 2. Approval grants the capability and records the decision.
+  // 2. A bare digest is not a proof: a connect without a real challenge response
+  //    must be refused before any identity is reconciled.
+  let bareRefused = false;
+  try {
+    await service.connectWorker({
+      enrollmentId: 'enroll-probe',
+      // Deliberately bypass the typed proof with a forged object.
+      proof: { challengeId: 'forged', publicKey: worker.publicKey, signature: 'AAAA' } as never,
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+  } catch (error) {
+    bareRefused = (error as { code?: string }).code === 'invalid-proof';
+  }
+  check('a fabricated challenge response is refused as an invalid proof', bareRefused);
+
+  // 3. A valid but mismatched signature is refused.
+  const challenge = await service.issueChallenge('enroll-probe');
+  const other = generateWorkerIdentity();
+  const forged = proveChallenge(other.privateKey, worker.publicKey, challenge);
+  let forgedRefused = false;
+  try {
+    await service.connectWorker({
+      enrollmentId: 'enroll-probe',
+      proof: forged,
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+  } catch (error) {
+    forgedRefused = (error as { code?: string }).code === 'invalid-proof';
+  }
+  check('a signature that does not match the presented public key is refused', forgedRefused);
+
+  // 4. Replay is refused: a valid proof is single-use.
+  const replayChallenge = await service.issueChallenge('enroll-probe');
+  const goodProof = proveChallenge(worker.privateKey, worker.publicKey, replayChallenge);
+  await service.connectWorker({
+    enrollmentId: 'enroll-probe',
+    proof: goodProof,
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    engines: [],
+  });
+  let replayed = false;
+  try {
+    await service.connectWorker({
+      enrollmentId: 'enroll-probe',
+      proof: goodProof,
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+  } catch (error) {
+    replayed = (error as { code?: string }).code === 'invalid-proof';
+  }
+  check('a captured proof cannot be replayed', replayed);
+
+  // 5. Approval grants the capability and records the decision.
   await service.approve('enroll-probe', { capabilityPermissions: { 'agent-run': true } });
   const approved = await service.get('enroll-probe');
   check('approval is durable', approved?.status === 'approved');
   check('approval grants exactly the requested capability', approved?.capabilityPermissions['agent-run'] === true);
 
-  // 3. Facts stay independent: an engine problem does not change enrollment.
+  // 6. Facts stay independent: an engine problem does not change enrollment.
   await service.observeReadiness('enroll-probe', {
     connection: { state: 'online', lastConfirmedAt: 2_000 },
     compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
@@ -85,11 +147,13 @@ try {
   check('the summary is Yellow, not a replacement for the facts', assembled.summary.level === 'yellow');
   check('the summary carries a decisive textual reason', /login/i.test(assembled.summary.reason), assembled.summary.reason);
 
-  // 4. Duplicate identity with a new key is refused without overwriting identity.
+  // 7. Duplicate identity with a different verified key is refused without
+  //    overwriting identity.
   const before = assembled.enrollment.worker.identityDigest;
+  const rogue = workerIdentityFixture();
   await service.connectWorker({
     enrollmentId: 'enroll-probe',
-    identityDigest: workerIdentityDigest('a-different-key'),
+    proof: await rogue.prove(service, 'enroll-probe'),
     connection: { state: 'online' },
     compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
     engines: [],
@@ -99,27 +163,54 @@ try {
   check('the refused duplicate is recorded as a durable decision', afterDuplicate?.decisions.some((d) => d.kind === 'duplicate-new-key-refused') === true);
   check('the enrollment stays approved after a refused duplicate', afterDuplicate?.status === 'approved');
 
-  // 5. Revocation is durable and refuses reconnection.
-  await service.revoke('enroll-probe', 'probe revocation');
+  // 8. Revocation is durable and refuses reconnection.
+  await service.revoke('enroll-probe', `retired ${SENTINEL_ABSOLUTE_PATH} and ${SENTINEL_ENGINE_CREDENTIAL}`);
   const revoked = await service.get('enroll-probe');
   check('revocation is durable', revoked?.status === 'revoked');
   const reconnect = await service.connectWorker({
     enrollmentId: 'enroll-probe',
-    identityDigest: before!,
+    proof: await worker.prove(service, 'enroll-probe'),
     connection: { state: 'online' },
     compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
     engines: [],
   });
   check('a revoked Worker cannot reconnect', reconnect.requiresHumanApproval === true);
 
-  // 6. Fresh reset requires a new approval before work.
-  await service.reset('enroll-probe', 'probe reset');
+  // 9. Fresh reset invalidates the old identity: the old key can neither
+  //    reconnect nor be approved, and a fresh key gets a fresh approval.
+  await service.reset('enroll-probe', `rotate ${SENTINEL_ADDRESS}`);
   const reset = await service.get('enroll-probe');
   check('reset clears approval', reset?.status === 'pending' && reset?.everApproved === false);
   check('reset clears granted permissions', reset?.capabilityPermissions['agent-run'] === false);
-  check('reset preserves the decision history', (reset?.decisions.length ?? 0) >= 5);
+  check('reset clears the current identity', reset?.worker.identityDigest === '');
+  check('reset records the old identity as invalidated', reset?.invalidatedIdentityDigests.includes(worker.digest) === true);
+  const staleReconnect = await service.connectWorker({
+    enrollmentId: 'enroll-probe',
+    proof: await worker.prove(service, 'enroll-probe'),
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    engines: [],
+  });
+  check('the old key cannot reconnect after a reset', staleReconnect.outcome === 'stale-identity-refused');
+  let oldApprovalRefused = false;
+  try {
+    await service.approve('enroll-probe', { capabilityPermissions: { 'agent-run': true } });
+  } catch (error) {
+    oldApprovalRefused = (error as { code?: string }).code === 'fresh-identity-required';
+  }
+  check('the old identity cannot be approved after a reset', oldApprovalRefused);
+  const freshWorker = workerIdentityFixture();
+  const claimed = await service.connectWorker({
+    enrollmentId: 'enroll-probe',
+    proof: await freshWorker.prove(service, 'enroll-probe'),
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    engines: [],
+  });
+  check('a newly generated key claims the reset enrollment', claimed.outcome === 'identity-claimed');
+  check('the claimed identity is the fresh one', claimed.enrollment.worker.identityDigest === freshWorker.digest);
 
-  // 7. The durable rows and every observed payload carry no private material.
+  // 10. The durable rows and every observed payload carry no private material.
   const raw = new DatabaseSync(dbPath);
   const rows = raw.prepare('SELECT * FROM environment_enrollments').all() as unknown as readonly Record<string, unknown>[];
   const probes = ['SELECT * FROM environment_readiness', 'SELECT * FROM environment_probes']
@@ -136,21 +227,40 @@ try {
     ['macOS home path', '/Users/'],
     ['Linux home path', '/home/'],
     ['Windows home path', 'C:\\Users\\'],
+    ['the Worker public key', worker.publicKey],
+    ['the Worker private key', worker.privateKey],
   ];
   for (const [label, needle] of forbidden) {
     check(`durable state excludes ${label}`, durableText.includes(needle) === false);
   }
-  check('durable state contains no raw public key', durableText.includes('probe-public-key-material') === false);
+  check('durable state keeps the decisive revoke reason', durableText.includes('retired') === true);
+  check('durable state keeps the decisive reset reason', durableText.includes('rotate') === true);
 
-  // 8. Reopen the store: outcomes survive a restart, so nothing is recomputed.
+  // 11. Marked free text is sanitized before it is retained.
+  await service.recordProbe('enroll-probe', {
+    at: 3_000,
+    latencyMs: 5,
+    protocolOk: true,
+    enginesOk: true,
+    summary: `probe touched ${SENTINEL_ABSOLUTE_PATH} with ${SENTINEL_ENGINE_CREDENTIAL}`,
+  });
+  const probesList = await service.listProbes('enroll-probe');
+  const summary = probesList.at(-1)!.summary;
+  check('a probe summary drops an absolute path', summary.includes(SENTINEL_ABSOLUTE_PATH) === false, summary);
+  check('a probe summary drops a credential', summary.includes(SENTINEL_ENGINE_CREDENTIAL) === false, summary);
+  check('a probe summary keeps its decisive text', summary.includes('probe touched') === true, summary);
+
+  // 12. Reopen the store: outcomes survive a restart, so nothing is recomputed.
+  const latest = await service.get('enroll-probe');
   const reopenedEnrollments = new SqliteEnrollmentStore({ filename: dbPath });
   const reopened = await reopenedEnrollments.get('enroll-probe');
   check('the reset outcome survives a store reopen', reopened?.status === 'pending');
-  check('decision history survives a store reopen', (reopened?.decisions.length ?? 0) === (reset?.decisions.length ?? -1));
+  check('decision history survives a store reopen', (reopened?.decisions.length ?? 0) === (latest?.decisions.length ?? -1));
+  check('the invalidated identity survives a store reopen', reopened?.invalidatedIdentityDigests.includes(worker.digest) === true);
 
   process.stdout.write(
     failures === 0
-      ? '\nPROBE RESULT: PASS — enrollment facts are durable, independent, and privacy-safe.\n'
+      ? '\nPROBE RESULT: PASS — enrollment identity proof, reset invalidation, and privacy are durable and independent.\n'
       : `\nPROBE RESULT: FAIL — ${failures} check(s) failed.\n`,
   );
   process.exitCode = failures === 0 ? 0 : 1;

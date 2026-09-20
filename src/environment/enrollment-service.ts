@@ -1,4 +1,5 @@
 import {
+  normalizeEnrollment,
   approveEnrollment,
   createPendingEnrollment,
   reconcileWorkerConnection,
@@ -12,6 +13,7 @@ import {
 } from './enrollment.ts';
 import { createEnrollmentId, workerIdentityDigest } from './enrollment-identity.ts';
 import type { EnrollmentStore } from './enrollment-store.ts';
+import { WorkerProofAuthority, WorkerProofError, type WorkerIdentityChallenge, type WorkerIdentityProof } from './worker-proof.ts';
 import {
   assembleEnvironmentReadiness,
   type AssembledReadiness,
@@ -25,6 +27,7 @@ import type {
   ProbeResultFact,
   ProtocolVersionRange,
 } from './readiness.ts';
+import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProtocolVersion } from './privacy.ts';
 import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-store.ts';
 
 /**
@@ -42,16 +45,56 @@ import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-s
 
 export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 2 };
 
+function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
+  const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
+  return {
+    ...observed,
+    compatibility: {
+      state: observed.compatibility.state,
+      ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
+      ...(observed.compatibility.detail !== undefined
+        ? { detail: sanitizeOperatorText(observed.compatibility.detail, { fallback: DEFAULT_COMPATIBILITY_DETAIL }) }
+        : {}),
+    },
+    engines: observed.engines.map((engine) => ({
+      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine' }),
+      installed: engine.installed,
+      readiness: engine.readiness,
+      required: engine.required,
+      models: {
+        state: engine.models.state,
+        models: engine.models.models.map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model' })),
+      },
+    })),
+  };
+}
+
+function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
+  return {
+    ...probe,
+    summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
+  };
+}
+
 export interface EnvironmentEnrollmentServiceOptions {
   readonly enrollments: EnrollmentStore;
   readonly readiness: EnvironmentReadinessStore;
   /** The leases that decide work safety. Optional: an Environment with no work. */
   readonly leases?: () => Promise<readonly LeaseSafetyFact[]> | readonly LeaseSafetyFact[];
-  /** Engines the Environment's configured use requires. */
+  /**
+   * Engines the Environment's configured use requires.
+   *
+   * There is deliberately no default pair: ADR-0008 says M2 requires Codex and Pi
+   * across the product, not both on every Environment instance. A caller that
+   * genuinely requires an engine must name it here; an empty configuration
+   * requires nothing and must not fabricate a dual-engine requirement.
+   */
   readonly requiredEngines?: readonly string[];
   readonly supportedProtocol?: ProtocolVersionRange;
   readonly clock?: () => number;
   readonly idFactory?: () => string;
+  /** Mints and verifies Worker identity challenges. */
+  readonly proofAuthority?: WorkerProofAuthority;
 }
 
 /** A new pending enrollment request plus the host bootstrap guidance it unlocks. */
@@ -75,23 +118,27 @@ export class EnvironmentEnrollmentService {
   readonly #supportedProtocol: ProtocolVersionRange;
   readonly #clock: () => number;
   readonly #idFactory: (() => string) | undefined;
+  readonly #proofAuthority: WorkerProofAuthority;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
     this.#readiness = options.readiness;
     this.#leases = options.leases;
-    this.#requiredEngines = options.requiredEngines ?? ['codex', 'pi'];
+    this.#requiredEngines = options.requiredEngines ?? [];
     this.#supportedProtocol = options.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL;
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory;
+    this.#proofAuthority =
+      options.proofAuthority ?? new WorkerProofAuthority({ clock: this.#clock });
   }
 
   async list(): Promise<readonly EnvironmentEnrollment[]> {
-    return this.#enrollments.list();
+    return (await this.#enrollments.list()).map(normalizeEnrollment);
   }
 
   async get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined> {
-    return this.#enrollments.get(enrollmentId);
+    const enrollment = await this.#enrollments.get(enrollmentId);
+    return enrollment === undefined ? undefined : normalizeEnrollment(enrollment);
   }
 
   /** Create a short-lived pending enrollment and its host bootstrap guidance. */
@@ -123,31 +170,70 @@ export class EnvironmentEnrollmentService {
   }
 
   /**
+   * Issue a fresh, single-use, enrollment-bound proof challenge.
+   *
+   * The Worker signs the nonce with its host-generated private key and returns
+   * the public key plus signature to `connectWorker`. Only a verified signature
+   * can reconcile an identity, so a bare public key or digest is refused.
+   */
+  async issueChallenge(enrollmentId: string): Promise<WorkerIdentityChallenge> {
+    const enrollment = await this.#requireEnrollment(enrollmentId);
+    // A revoked enrollment is still challenged, deliberately: the subsequent
+    // connect is recorded as a durable `revoked-refused` authority decision
+    // rather than disappearing as an untraceable pre-flight error. The challenge
+    // itself grants nothing, so this does not weaken revocation.
+    return this.#proofAuthority.issue(enrollment.id);
+  }
+
+  /**
    * Reconcile a Worker connection attempt against the durable identity.
    *
-   * The recorded identity observation and the returned outcome are both durable,
-   * so a duplicate or revoked attempt is explained identically after a restart.
+   * The proof must contain a live challenge response signed by the Worker's
+   * private key; the public key digest is derived only after the signature
+   * verifies. The recorded identity observation and the returned outcome are both
+   * durable, so a duplicate or revoked attempt is explained identically after a
+   * restart.
    */
   async connectWorker(input: {
     readonly enrollmentId: string;
-    readonly identityDigest: string;
+    /** The signed challenge response proving possession of the Worker's key. */
+    readonly proof: WorkerIdentityProof;
     readonly connection: ConnectionFact;
     readonly compatibility: CompatibilityFact;
     readonly engines: readonly EngineReadinessFact[];
   }): Promise<EnrollmentConnectionOutcome> {
     const enrollment = await this.#requireEnrollment(input.enrollmentId);
     const at = this.#clock();
-    const outcome = reconcileWorkerConnection(enrollment, input.identityDigest, at);
+    // The proof is verified before any identity is derived: an unverified public
+    // key cannot be reconciled as `reconnected`, so a stolen digest/key alone is
+    // never sufficient to connect.
+    let verifiedPublicKey: string;
+    try {
+      verifiedPublicKey = this.#proofAuthority.verify({
+        enrollmentId: enrollment.id,
+        proof: input.proof,
+      }).publicKey;
+    } catch (error) {
+      if (error instanceof WorkerProofError) {
+        throw new EnrollmentError('invalid-proof', `The Worker identity proof is not valid: ${error.message}`);
+      }
+      throw error;
+    }
+    const identityDigest = workerIdentityDigest(verifiedPublicKey);
+    const outcome = reconcileWorkerConnection(enrollment, identityDigest, at);
     // Only an accepted connection can produce readiness: a refused attempt (a
-    // revoked binding, or a new key against a decided one) is recorded as an
-    // authority decision alone, so unapproved connections never overwrite the
-    // observed facts of the enrolled Worker.
-    if (outcome.outcome !== 'duplicate-new-key-refused' && outcome.outcome !== 'revoked-refused') {
-      await this.#readiness.saveReadiness(enrollment.environmentInstanceId, {
-        connection: input.connection,
-        compatibility: input.compatibility,
-        engines: input.engines,
-      });
+    // revoked binding, an invalidated identity, or a new key against a decided
+    // one) is recorded as an authority decision alone, so unapproved connections
+    // never overwrite the observed facts of the enrolled Worker.
+    if (outcome.outcome !== 'duplicate-new-key-refused' && outcome.outcome !== 'revoked-refused' && outcome.outcome !== 'stale-identity-refused') {
+      await this.#readiness.saveReadiness(
+        enrollment.environmentInstanceId,
+        sanitizeObservedReadiness({
+          connection: input.connection,
+          compatibility: input.compatibility,
+          engines: input.engines,
+        }),
+      );
     }
     await this.#enrollments.save(outcome.enrollment);
     return outcome;
@@ -156,19 +242,23 @@ export class EnvironmentEnrollmentService {
   /** Record a fresh readiness observation without changing enrollment authority. */
   async observeReadiness(enrollmentId: string, observed: ObservedReadiness): Promise<void> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    await this.#readiness.saveReadiness(enrollment.environmentInstanceId, observed);
+    await this.#readiness.saveReadiness(
+      enrollment.environmentInstanceId,
+      sanitizeObservedReadiness(observed),
+    );
   }
 
   /** Append one readiness-probe result; prior probes are preserved. */
   async recordProbe(enrollmentId: string, probe: ProbeResultFact): Promise<ProbeResultFact> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    await this.#readiness.appendProbe(enrollment.environmentInstanceId, probe);
-    return probe;
+    const sanitized = sanitizeProbe(probe);
+    await this.#readiness.appendProbe(enrollment.environmentInstanceId, sanitized);
+    return sanitized;
   }
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    return this.#readiness.listProbes(enrollment.environmentInstanceId);
+    return (await this.#readiness.listProbes(enrollment.environmentInstanceId)).map(sanitizeProbe);
   }
 
   async approve(
@@ -236,17 +326,25 @@ export class EnvironmentEnrollmentService {
       at: this.#clock(),
       supported: this.#supportedProtocol,
     });
-    await this.#readiness.saveReadiness(enrollment.environmentInstanceId, observed);
+    await this.#readiness.saveReadiness(
+      enrollment.environmentInstanceId,
+      sanitizeObservedReadiness(observed),
+    );
   }
 
   /** Assemble the independent facts plus the deterministic summary. */
   async readiness(enrollmentId: string): Promise<AssembledReadiness & { readonly enrollment: EnvironmentEnrollment }> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const [observed, probes, leases] = await Promise.all([
+    const [rawObserved, rawProbes, leases] = await Promise.all([
       this.#readiness.getReadiness(enrollment.environmentInstanceId),
       this.#readiness.listProbes(enrollment.environmentInstanceId),
       this.#currentLeases(),
     ]);
+    // Sanitize on the way out as well as on the way in: a document written by an
+    // earlier build (or by an adapter that bypassed this service) must not leak
+    // free text through the readiness projection either.
+    const observed = rawObserved === undefined ? undefined : sanitizeObservedReadiness(rawObserved);
+    const probes = rawProbes.map(sanitizeProbe);
     const latestProbe = probes.length > 0 ? probes[probes.length - 1] : undefined;
     const assembled = assembleEnvironmentReadiness({
       enrollment,
@@ -270,6 +368,6 @@ export class EnvironmentEnrollmentService {
     if (enrollment === undefined) {
       throw new EnrollmentError('unknown-enrollment', `Unknown enrollment: ${enrollmentId}`);
     }
-    return enrollment;
+    return normalizeEnrollment(enrollment);
   }
 }

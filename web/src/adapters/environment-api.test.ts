@@ -72,8 +72,13 @@ test('the adapter never retains a command for replay after a failure', async () 
   await assert.rejects(() => adapter.listEnrollments(), (error: unknown) => error instanceof BrowserRequestError);
 });
 
-test('connectWorkers and readiness use the worker-proof and readiness routes', async () => {
+test('connectWorker requests a challenge and submits a signed proof', async () => {
   const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/challenge')) {
+      return {
+        challenge: { id: 'challenge-1', enrollmentId: 'e1', nonce: 'nonce-1', issuedAt: 1, expiresAt: 2 },
+      };
+    }
     if (path.endsWith('/connect')) {
       return { outcome: 'reconnected', requiresHumanApproval: false, enrollment: { id: 'e1' } };
     }
@@ -81,8 +86,10 @@ test('connectWorkers and readiness use the worker-proof and readiness routes', a
   });
   const adapter = createEnvironmentEnrollmentBrowserAdapter(transport);
 
+  const challenge = await adapter.requestChallenge('e1');
+  assert.equal(challenge.nonce, 'nonce-1');
   const connected = await adapter.connectWorker('e1', {
-    publicKey: 'public-key-a',
+    proof: { challengeId: challenge.id, publicKey: 'public-key-a', signature: 'signed-nonce-1' },
     connection: { state: 'online' },
     compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
     engines: [{ engine: 'codex', installed: true, readiness: 'ready', models: { state: 'available', models: [] } }],
@@ -93,10 +100,15 @@ test('connectWorkers and readiness use the worker-proof and readiness routes', a
   assert.deepEqual(
     calls.map((call) => `${call.init?.method ?? 'GET'} ${call.path}`),
     [
+      'POST /api/environments/enrollments/e1/challenge',
       'POST /api/environments/enrollments/e1/connect',
       'GET /api/environments/enrollments/e1/readiness',
     ],
   );
+  // The signed proof is carried on the connect command.
+  const connectBody = calls[1]?.init?.body;
+  assert.equal(typeof connectBody, 'string');
+  assert.equal((connectBody as string).includes('signed-nonce-1'), true);
 });
 
 test('no adapter request path carries credentials, hostnames, or absolute paths', async () => {

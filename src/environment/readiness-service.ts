@@ -27,6 +27,16 @@ import {
  * - capability permission is projected from the approved enrollment permissions.
  */
 
+/**
+ * The engines the Environment's configured use requires.
+ *
+ * ADR-0008 requires Codex and Pi *across the product*, not both on every
+ * Environment instance, so there is deliberately no default pair. The required
+ * set comes only from an explicit caller/configuration declaration: an empty
+ * configuration requires nothing and must never fabricate a dual-engine
+ * requirement. An engine the Worker declared but nobody requires stays an
+ * honestly non-required fact (Yellow at most), never a fabricated Red.
+ */
 export interface ReadinessEnginesDeclaration {
   /** Engines the Environment's configured use requires. */
   readonly required: readonly string[];
@@ -59,7 +69,6 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
   const compatibility: CompatibilityFact =
     input.observed?.compatibility ?? { state: 'unknown' };
   const requiredEngines = new Set(input.requiredEngines);
-
   const capabilities: readonly CapabilityReadinessFact[] = Object.entries(
     input.enrollment.capabilityPermissions,
   ).map(([name, allowed]) => ({
