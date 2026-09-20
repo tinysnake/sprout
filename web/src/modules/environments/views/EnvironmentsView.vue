@@ -99,8 +99,8 @@ const isMobileDetailRoute = computed(() => !!route.params.id);
 
 function handleSelectEnvironment(id: string) {
   selectedId.value = id;
-  // Push route so mobile view drills down and URL is addressable
-  router.push(`/manage/environments/${id}`);
+  // Push route so phone drills down and the record is URL-addressable.
+  router.push({ name: 'environment-detail', params: { id } });
 }
 
 async function handleApprove(id: string) {
@@ -175,7 +175,9 @@ async function handleUnenroll(id: string) {
       v-if="isMobileDetailRoute && selectedEnv"
       :title="selectedEnv.displayName"
       :traffic-light="selectedEnv.trafficLight"
-      back-to="/manage/environments"
+      :back-to="{ name: 'environments' }"
+      back-control-id="btn-back-to-envs"
+      back-label="Back to Environments"
     />
 
     <!-- Standard Header & Filter Bar (always shown on desktop, shown on mobile when not drilled down) -->

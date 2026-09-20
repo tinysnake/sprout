@@ -1,20 +1,33 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+/**
+ * The Deep-link return control.
+ *
+ * A Feed card navigates to an authoritative domain surface and records where the
+ * operator came from, including that page's own filters, so returning restores
+ * the context they were operating in rather than a default page. It is a real
+ * button with a dismiss control, and it announces itself once.
+ */
+import { computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
+import { useAnnouncer } from '../primitives/announcer.js';
 import Icon from '../primitives/Icon.vue';
 
 const appStore = useAppStore();
 const router = useRouter();
+const announcer = useAnnouncer();
 
 const context = computed(() => appStore.returnContext);
 
+watch(context, (value) => {
+  if (value) announcer.announce(`${value.title} is available.`);
+});
+
 function handleReturn() {
-  if (context.value) {
-    const to = context.value.to;
-    appStore.clearReturnContext();
-    router.push(to);
-  }
+  if (!context.value) return;
+  const to = context.value.to;
+  appStore.clearReturnContext();
+  router.push(to);
 }
 </script>
 
@@ -26,7 +39,8 @@ function handleReturn() {
     <button
       id="btn-pop-return"
       type="button"
-      class="flex items-center gap-1.5 hover:underline cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+      class="flex items-center gap-1.5 hover:underline cursor-pointer min-h-[32px] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+      :title="context.title"
       @click="handleReturn"
     >
       <Icon name="chevron-left" :size="14" />
@@ -34,8 +48,8 @@ function handleReturn() {
     </button>
     <button
       type="button"
-      class="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-      aria-label="Dismiss return banner"
+      class="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+      aria-label="Dismiss return link"
       @click="appStore.clearReturnContext()"
     >
       <Icon name="close" :size="12" />
