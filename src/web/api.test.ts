@@ -11,6 +11,9 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
 import { createRunApi, summarizeRunHistory, type RunView } from './api.ts';
+import { OperatorSessionService } from '../auth/service.ts';
+import { InMemoryOperatorSessionStore } from '../auth/store.ts';
+import { randomBytes } from 'node:crypto';
 
 const definition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -99,6 +102,91 @@ async function waitForTerminal(base: string, id: string): Promise<Record<string,
   }
   throw new Error('run did not settle');
 }
+
+function privateInput(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+async function protectedApi() {
+  const context = build();
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  const credential = privateInput();
+  await auth.initializeOrRecover(credential);
+  const api = createRunApi({
+    orchestrator: context.orchestrator,
+    agents: new AgentRegistry([
+      { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+    ]),
+    auth,
+  });
+  const { port } = await api.listen(0);
+  return { api, auth, credential, base: `http://127.0.0.1:${port}` };
+}
+
+async function signIn(base: string, credential: string): Promise<{ readonly cookie: string; readonly csrf: string }> {
+  const response = await fetch(`${base}/api/auth/session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  });
+  assert.equal(response.status, 201);
+  const setCookie = response.headers.get('set-cookie') ?? '';
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Max-Age=\d+/);
+  assert.match(setCookie, /Expires=/);
+  assert.equal(setCookie.includes(credential), false);
+  const { csrfToken } = (await response.json()) as { csrfToken: string };
+  return { cookie: setCookie.split(';', 1)[0]!, csrf: csrfToken };
+}
+
+test('protected API requires a browser session and request-forgery proof for Human commands', async () => {
+  const protectedRuntime = await protectedApi();
+  try {
+    assert.equal((await fetch(`${protectedRuntime.base}/api/runs`)).status, 401);
+    assert.equal((await fetch(`${protectedRuntime.base}/api/runs`, { method: 'POST' })).status, 401);
+
+    const browser = await signIn(protectedRuntime.base, protectedRuntime.credential);
+    assert.equal((await fetch(`${protectedRuntime.base}/api/runs`, { headers: { cookie: browser.cookie } })).status, 200);
+    assert.equal(
+      (await fetch(`${protectedRuntime.base}/api/runs`, {
+        method: 'POST', headers: { cookie: browser.cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId: 'agent-scout', prompt: 'bounded request' }),
+      })).status,
+      403,
+    );
+    const submitted = await fetch(`${protectedRuntime.base}/api/runs`, {
+      method: 'POST',
+      headers: { cookie: browser.cookie, 'x-sprout-csrf': browser.csrf, 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'bounded request' }),
+    });
+    assert.equal(submitted.status, 202);
+  } finally {
+    await protectedRuntime.api.close();
+  }
+});
+
+test('protected API lists and revokes sessions without exposing bearer values', async () => {
+  const protectedRuntime = await protectedApi();
+  try {
+    const first = await signIn(protectedRuntime.base, protectedRuntime.credential);
+    const second = await signIn(protectedRuntime.base, protectedRuntime.credential);
+    const list = await fetch(`${protectedRuntime.base}/api/auth/sessions`, { headers: { cookie: first.cookie } });
+    assert.equal(list.status, 200);
+    const sessions = (await list.json()) as { sessions: { id: string; current: boolean }[] };
+    assert.equal(sessions.sessions.length, 2);
+    assert.equal(JSON.stringify(sessions).includes('sprout_session'), false);
+
+    const revoked = await fetch(`${protectedRuntime.base}/api/auth/sessions/revoke-others`, {
+      method: 'POST', headers: { cookie: first.cookie, 'x-sprout-csrf': first.csrf },
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal(((await revoked.json()) as { revoked: number }).revoked, 1);
+    assert.equal((await fetch(`${protectedRuntime.base}/api/runs`, { headers: { cookie: second.cookie } })).status, 401);
+  } finally {
+    await protectedRuntime.api.close();
+  }
+});
 
 test('a user can submit a request from the Web client and inspect the result', async () => {
   await withServer(async (base) => {
@@ -417,7 +505,7 @@ test('the API lists leases and allows releasing a lease', async () => {
  * only the engine faked. They prove the project channel is reachable from the
  * core's existing HTTP seam, and that the routes hold no wake logic of their own.
  */
-function buildWithCollaboration(options: { body?: string } = {}) {
+function buildWithCollaboration(options: { body?: string } = {}, auth?: OperatorSessionService) {
   const adapter = new ScriptedEngineAdapter({
     turns: [
       {
@@ -452,9 +540,43 @@ function buildWithCollaboration(options: { body?: string } = {}) {
     store: new InMemoryCollaborationStore(),
     runs: orchestrator,
   });
-  const api = createRunApi({ orchestrator, agents: registry, collaboration, projects });
+  const api = createRunApi({
+    orchestrator,
+    agents: registry,
+    collaboration,
+    projects,
+    ...(auth !== undefined ? { auth } : {}),
+  });
   return { api, orchestrator, collaboration };
 }
+
+test('an Agent or Worker request cannot manufacture Human message authority', async () => {
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  const credential = privateInput();
+  await auth.initializeOrRecover(credential);
+  const context = buildWithCollaboration({}, auth);
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const browser = await signIn(base, credential);
+    const request = (authorKind: string) => fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { cookie: browser.cookie, 'x-sprout-csrf': browser.csrf, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'project-sprout', channel: 'direct', authorId: 'forged', authorKind,
+        body: 'request', recipients: ['agent-scout'], deliveryKey: `forged-${authorKind}`,
+      }),
+    });
+    assert.equal((await request('agent')).status, 403);
+    assert.equal((await request('worker')).status, 403);
+
+    const accepted = await request('human');
+    assert.equal(accepted.status, 202);
+    assert.equal(((await accepted.json()) as { message: { authorId: string; authorKind: string } }).message.authorId, 'operator');
+  } finally {
+    await context.api.close();
+  }
+});
 
 test('a message delivered over the API wakes its recipient and a reply is projected', async () => {
   const context = buildWithCollaboration();

@@ -19,6 +19,8 @@ import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
 import { SqliteStore } from './store/db.ts';
+import type { OperatorSessionStore } from './auth/store.ts';
+import { OperatorSessionService } from './auth/service.ts';
 import type { RunStore } from './run/store.ts';
 import {
   TaskEnvironmentLifecycle,
@@ -29,6 +31,7 @@ import type { TaskStore } from './task/store.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import {
   createEnvironmentWorkerFactory,
+  localWorkerEnvironment,
   selectEnvironmentWorker,
   type EnvironmentWorkerConfiguration,
   type WorkerLogSource,
@@ -83,6 +86,8 @@ export interface RuntimeStores {
   readonly sessionKeys: SessionKeyStore;
   readonly collaboration: CollaborationStore;
   readonly tasks: TaskStore;
+  /** The durable one-Operator identity and browser-session boundary. */
+  readonly operatorSessions: OperatorSessionStore;
   close(): void;
 }
 
@@ -265,7 +270,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     createEnvironmentWorkerPort(environmentWorkerConfiguration, {
       workerEntryPath: options.workerEntryPath ?? join(projectRoot, 'src', 'worker', 'main.ts'),
       nodeExecutable: options.nodeExecutable ?? process.execPath,
-      hostEnvironment: options.hostEnvironment ?? process.env,
+      // Never hand the core environment to a Worker: it can contain the
+      // operator credential, browser/session secrets, or unrelated authority.
+      hostEnvironment: localWorkerEnvironment(options.hostEnvironment ?? process.env),
       logWorkerLine:
         options.logWorkerLine ??
         ((source, line) => process.stderr.write(`[${source}-worker] ${line}\n`)),
@@ -288,6 +295,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
+    const operatorSessions = new OperatorSessionService({ store: stores.operatorSessions });
+    // Host-local initialization and recovery happen before the HTTP surface is
+    // constructed. A missing credential leaves the surface fail-closed rather
+    // than creating a default Human authority.
+    await operatorSessions.initializeOrRecover(configuration.operatorCredential);
 
     const agents = new AgentRegistry(runtimeConfiguration.agents ?? defaultAgents(engineId));
     const pool = new EnvironmentPool({
@@ -388,6 +400,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       projects,
       // Durable multi-run Tasks (#28): create, list, inspect, and advance.
       tasks,
+      auth: operatorSessions,
       staticRoot,
       readFile: options.readFile ?? defaultReadFile,
     });

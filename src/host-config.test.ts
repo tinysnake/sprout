@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -9,6 +10,7 @@ import { parseHostConfiguration, parseWorkerConfiguration, workerEnvironment, ty
  * test records a real machine path, hostname, or private network address.
  */
 const projectRoot = '/synthetic/sprout';
+const generatedHostOnlyInput = randomBytes(32).toString('base64url');
 
 function parseWith(environment: HostEnvironment = {}): HostConfiguration {
   return parseHostConfiguration(environment, { projectRoot });
@@ -163,6 +165,15 @@ const settings: readonly Setting[] = [
     parsed: 60_000,
   },
   {
+    variable: 'SPROUT_OPERATOR_CREDENTIAL',
+    read: (c) => c.operatorCredential,
+    missing: undefined,
+    // Test-generated input only exercises the typed host boundary; it never
+    // reaches diagnostics, records, or the browser.
+    present: { SPROUT_OPERATOR_CREDENTIAL: generatedHostOnlyInput },
+    parsed: generatedHostOnlyInput,
+  },
+  {
     variable: 'SPROUT_DOCKER_PROXY',
     read: (c) => c.containerProxy,
     missing: {},
@@ -203,6 +214,7 @@ test('an empty host environment takes exactly the documented defaults', () => {
     windowsWorkDirectory: 'C:/sprout-work',
     projectId: 'sprout',
     leaseTtlMs: 900_000,
+    operatorCredential: undefined,
   });
 });
 

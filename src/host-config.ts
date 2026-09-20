@@ -61,6 +61,12 @@ export interface HostConfiguration {
   readonly projectId: string;
   /** Environment lease time to live, in milliseconds. */
   readonly leaseTtlMs: number;
+  /**
+   * Host-only initialization/recovery input for the one Operator identity.
+   * It is deliberately absent by default and is never part of runtime JSON,
+   * portable records, diagnostics, or the browser URL.
+   */
+  readonly operatorCredential: string | undefined;
 }
 
 /**
@@ -144,6 +150,7 @@ export function parseHostConfiguration(
     windowsWorkDirectory: environment['SPROUT_WINDOWS_WORKDIR'] ?? 'C:/sprout-work',
     projectId: environment['SPROUT_PROJECT'] ?? 'sprout',
     leaseTtlMs: numberValue(environment['SPROUT_LEASE_TTL_MS'], 900_000),
+    operatorCredential: environment['SPROUT_OPERATOR_CREDENTIAL'],
   };
 }
 
