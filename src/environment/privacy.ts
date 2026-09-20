@@ -19,6 +19,97 @@
  * contract can import it.
  */
 
+/**
+ * Keywords that name a credential.
+ *
+ * A caller may write the key with an underscore, a hyphen, or a space
+ * (`api_key`, `api-key`, `api key`), and both `credential` and `credentials`
+ * are valid. Keeping the keyword in one place means every separator rule below
+ * matches the same set of names. The keyword is matched case-insensitively
+ * through an inline `(?i:…)` group so the value shapes stay case-sensitive.
+ */
+const CREDENTIAL_KEYWORD =
+  String.raw`password|passwd|pwd|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credentials?`;
+
+/** The credential keyword, case-insensitive, with no value shape attached. */
+const KEY = String.raw`(?i:${CREDENTIAL_KEYWORD})`;
+
+/**
+ * Model families whose versioned ids are real model ids rather than hostnames.
+ *
+ * A bare machine hostname and a versioned model id can share a surface
+ * (`buildbox-7` versus `gpt-4`), so every host-shaped rule needs this positive
+ * allowlist to accept the real id without accepting a host. The same source is
+ * used by free text and by the structured identifier categories.
+ */
+const MODEL_FAMILY_SOURCE =
+  String.raw`gpt|chatgpt|o[1-9]|claude|gemini|gemma|palm|codex|pi|deepseek|glm|qwen|llama|mistral|mixtral|grok|sonnet|opus|haiku|command|phi|falcon|yi|kimi|moonshot|antigravity|workbuddy|nova|titan|jamba|dbrx|hermes|wizard|vicuna|zephyr`;
+
+/** The compiled model-family allowlist, anchored at the start of a token. */
+const MODEL_FAMILIES = new RegExp(String.raw`^(?:${MODEL_FAMILY_SOURCE})(?:$|[._-])`, 'i');
+
+/**
+ * Words that introduce a machine host name.
+ *
+ * A host name is often an unhyphenated `word+digits` token (`host9`, `node12`,
+ * `box3`). That surface collides with ordinary technical vocabulary (`utf8`,
+ * `sha256`, `base64`, `win32`), so free text only treats the token as a host when
+ * it starts with one of these machine words; the structured identifier
+ * categories reject every `word+digits` token through their positive shape.
+ */
+const MACHINE_PREFIX =
+  String.raw`host|hostname|node|box|server|machine|worker|srv|vm|mac|macmini|pc|rpi|raspberry|mini|laptop|desktop|workstation|env|instance`;
+
+/**
+ * Ordinary words that may legitimately follow a credential keyword in a decisive
+ * reason.
+ *
+ * A bare-space credential assignment is removed only when the next token is
+ * **not** one of these words: `token bucket exhausted` and `password rotation
+ * required` are decisive operator text, while `client_secret abcdef` is a leaked
+ * value. The list holds English function words plus the vocabulary the product's
+ * own readiness reasons use, so it is a positive, reviewable exception rather
+ * than a blanket "keep every lowercase word".
+ */
+const DECISIVE_CONTINUATIONS = [
+  // Function words that introduce a phrase rather than a value.
+  'a', 'after', 'again', 'against', 'all', 'already', 'also', 'an', 'and', 'any', 'are', 'as', 'at',
+  'be', 'because', 'been', 'before', 'being', 'but', 'by', 'can', 'could', 'did', 'do', 'does', 'during',
+  'for', 'from', 'had', 'has', 'have', 'if', 'in', 'into', 'is', 'it', 'its', 'may', 'must', 'never',
+  'no', 'not', 'of', 'on', 'only', 'or', 'our', 'over', 'should', 'since', 'so', 'still', 'than', 'that',
+  'the', 'their', 'then', 'there', 'these', 'this', 'those', 'to', 'too', 'under', 'until', 'was', 'were',
+  'when', 'while', 'will', 'with', 'without', 'would',
+  // Decisive nouns and states the readiness reasons use.
+  'age', 'bucket', 'change', 'changed', 'check', 'checks', 'denied', 'error', 'errors', 'expired', 'expiry',
+  'failure', 'failures', 'field', 'fields', 'file', 'files', 'history', 'invalid', 'length', 'login', 'logout',
+  'manager', 'missing', 'mode', 'name', 'names', 'offline', 'online', 'pending', 'policy', 'probe', 'probes',
+  'prompt', 'prompts', 'ready', 'refresh', 'required', 'reset', 'retired', 'rotation', 'rotated', 'scanner',
+  'scanning', 'session', 'sessions', 'state', 'status', 'storage', 'store', 'strength', 'type', 'unknown',
+  'unavailable', 'value', 'values', 'vault',
+].join('|');
+
+/**
+ * A **credential-shaped** value token.
+ *
+ * Used for the bare-space form, where the keyword and the value run together
+ * with no punctuation to signal an assignment (`password hunter2`). A value
+ * qualifies when it is quoted, carries a non-lowercase character (a digit, an
+ * uppercase letter, or a symbol), or is not one of the decisive continuations
+ * above — so `client_secret abcdef` loses its value while `token bucket
+ * exhausted` and `password rotation required` stay decisive.
+ */
+const CREDENTIAL_VALUE =
+  String.raw`(?:"[^"]*"|'[^']*'|(?=[^\s,;]*[^a-z\s,;])[^\s,;]+|(?!(?i:${DECISIVE_CONTINUATIONS})\b)[^\s,;]+)`;
+
+/**
+ * Any single value token.
+ *
+ * Used where the separator itself signals an assignment — `=`, `:`, or a copula
+ * (`is`/`was`/`are`/`were`) — because `api_key is ABCDEF` is unambiguously a
+ * value even when the token is a short lowercase word.
+ */
+const CREDENTIAL_VALUE_ASSIGNED = String.raw`(?:"[^"]*"|'[^']*'|[^\s,;]+)`;
+
 /** Categories this boundary removes before text can be persisted or returned. */
 const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: string }[] = [
   // Private key material first: its body must never be partially exposed. A
@@ -29,31 +120,51 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   },
   { pattern: /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
   { pattern: /-----BEGIN [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
+  // Absolute host paths run before the credential rules: a path whose basename
+  // happens to be a credential word (`/secret`) is a host path, and removing it
+  // first stops the bare-space rule from treating the following prose as its
+  // value. The POSIX rule is general on purpose: any `/`-rooted path is a host
+  // path, so `/srv/...`, `/data/...`, and a bare `/secret` are removed rather
+  // than only the enumerated system roots.
+  {
+    pattern: /(^|[\s"'(=`])((?:\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*))/g,
+    replacement: '$1<redacted-path>',
+  },
+  { pattern: /\b[A-Za-z]:\\[^\s"')`\]]*/g, replacement: '<redacted-path>' },
+  { pattern: /\\\\[^\s"')`\]]+/g, replacement: '<redacted-path>' },
   // A named credential assignment is removed as a **whole** key/value pair, not
   // punctuation-stripped: the keyword names the secret and the value must not
-  // survive in any form. The separator may be `=` or `:` (optionally spaced) and
-  // the keyword itself may contain a space (`api key`, `private key`);
-  // `passphrase`/`passcode` are phrases, so their value may span a few words or
-  // follow a copula. A bare-space separator is kept deliberately narrow in the
-  // last rule (a quoted value or a long unbroken run) so an ordinary sentence
-  // like "token bucket exhausted" or "password rotation required" survives.
+  // survive in any form. The separator may be `=`, `:`, a copula (`is`/`was`),
+  // or a bare space, and the keyword itself may contain a space (`api key`,
+  // `private key`). `passphrase`/`passcode` name a phrase, so their value may
+  // span a few words. For every other key the bare-space/copula value must be
+  // credential-shaped, so `token bucket exhausted` and `password rotation
+  // required` stay decisive instead of being eaten.
   //
-  // These run before the standalone `private key` keyword rule so
-  // `private_key=secret` is removed entirely rather than leaving the value.
+  // These run before the standalone `private key` keyword rule so the value of a
+  // `private key <value>` assignment cannot survive after the keyword is
+  // replaced. An earlier rework replaced only the keyword and left the value,
+  // which the review reproduced (`private key AAAAbbbb`).
   {
-    pattern: /\b(?:passphrase|passcode)\b\s*(?::|=|is|was|are|were)\s*(?:"[^"]*"|'[^']*'|[^\s,;]+(?:\s+[^\s,;]+){0,3})/gi,
+    pattern: new RegExp(
+      String.raw`\b(?i:passphrase|passcode)\b\s*(?::|=|(?i:is|was|are|were))?\s*${CREDENTIAL_VALUE}(?:\s+[^\s,;]+){0,3}`,
+      'g',
+    ),
     replacement: '<redacted-credential>',
   },
   {
-    pattern: /\b(?:password|passwd|pwd|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+    pattern: new RegExp(String.raw`\b${KEY}\b\s*[:=]\s*${CREDENTIAL_VALUE_ASSIGNED}`, 'g'),
     replacement: '<redacted-credential>',
   },
   {
-    pattern: /\b(?:password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s+(?:is|was|are|were)\s+(?:"[^"]*"|'[^']*'|\S{12,})/gi,
+    pattern: new RegExp(
+      String.raw`\b${KEY}\b\s+(?i:is|was|are|were)\s+${CREDENTIAL_VALUE_ASSIGNED}`,
+      'g',
+    ),
     replacement: '<redacted-credential>',
   },
   {
-    pattern: /\b(?:password|passwd|pwd|passphrase|passcode|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credential(?:s)?)\b\s+(?:"[^"]*"|'[^']*'|\S{12,})/gi,
+    pattern: new RegExp(String.raw`\b${KEY}\b\s+${CREDENTIAL_VALUE}`, 'g'),
     replacement: '<redacted-credential>',
   },
   { pattern: /\bprivate[ _-]?key\b/gi, replacement: '<redacted-private-key>' },
@@ -71,15 +182,6 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: '<redacted-credential>' },
   { pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, replacement: '<redacted-token>' },
   { pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{12,}/g, replacement: 'Bearer <redacted-credential>' },
-  // Absolute host paths. The POSIX rule is general on purpose: any `/`-rooted
-  // path is a host path, so `/srv/...`, `/data/...`, and a bare `/secret` are
-  // removed rather than only the enumerated system roots.
-  {
-    pattern: /(^|[\s"'(=`])((?:\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*))/g,
-    replacement: '$1<redacted-path>',
-  },
-  { pattern: /\b[A-Za-z]:\\[^\s"')`\]]*/g, replacement: '<redacted-path>' },
-  { pattern: /\\\\[^\s"')`\]]+/g, replacement: '<redacted-path>' },
   // Network identity: URLs, user@host, IPv4/IPv6, private host suffixes.
   { pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s"')`\]]+/gi, replacement: '<redacted-url>' },
   { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\b/g, replacement: '<redacted-identity>' },
@@ -93,11 +195,28 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   // one to stay decisive. The boundaries stop a model identifier like
   // `gpt-5.6-terra` (whose internal `6.terra` is not a host) from matching.
   { pattern: /(?<![\w.-])(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}(?![\w.-])/g, replacement: '<redacted-host>' },
-  // A machine-style bare hostname, which carries a multi-digit numeric suffix
-  // (`buildbox-07`, `node-01`). Two or more digits are required so a versioned
-  // model id (`gpt-4`) is not mistaken for a host, while the boundaries keep a
-  // dotted model id (`gpt-5.1-codex`) and an ordinary hyphenated token intact.
-  { pattern: /(?<![\w.-])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{2,}(?![\w.-])/g, replacement: '<redacted-host>' },
+  // A machine-style bare hostname: a hyphenated word with a numeric suffix
+  // (`buildbox-7`, `node-01`) or a machine word directly followed by digits
+  // (`host9`, `node12`). The rule covers a one-digit suffix too, because a host
+  // name is not less sensitive for being short; a leading negative lookahead
+  // keeps a real versioned model id (`gpt-4`, `o3-mini`, `claude-3-5-sonnet`)
+  // intact instead of eating the vendor/version token. The machine-word prefix on
+  // the unhyphenated form keeps ordinary technical vocabulary (`utf8`, `sha256`,
+  // `base64`, `win32`) decisive.
+  {
+    pattern: new RegExp(
+      String.raw`(?<![\w.-])(?!(?i:${MODEL_FAMILY_SOURCE})(?:$|[._-]))[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{1,4}(?![\w.-])`,
+      'g',
+    ),
+    replacement: '<redacted-host>',
+  },
+  {
+    pattern: new RegExp(
+      String.raw`(?<![\w.-])(?i:${MACHINE_PREFIX})\d{1,4}(?![\w.-])`,
+      'g',
+    ),
+    replacement: '<redacted-host>',
+  },
   { pattern: /\blocalhost\b/gi, replacement: '<redacted-host>' },
   // Raw diagnostics: stack frames, node internals, and bare stderr markers.
   { pattern: /^\s+at\s+.*(?::\d+:\d+\)?)\s*$/gm, replacement: '' },
@@ -157,6 +276,15 @@ export const DEFAULT_COMPATIBILITY_DETAIL = 'The Worker protocol compatibility d
 export const DEFAULT_PROBE_SUMMARY = 'Test summary withheld.';
 
 /**
+ * The fallback for the readiness summary reason.
+ *
+ * The summary is normally product-owned text, but the compatibility detail can
+ * feed it and a legacy/raw projection can hold anything, so the wire reason
+ * passes the same boundary as every other free-text field.
+ */
+export const DEFAULT_READINESS_SUMMARY = 'The readiness summary reason was withheld as sensitive.';
+
+/**
  * The fallback for a durable enrollment decision whose kind has no specific
  * product-owned text (a legacy row, or a sanitized-to-nothing reason).
  */
@@ -214,6 +342,32 @@ export function sanitizeIdentifier(value: string, options: SanitizeIdentifierOpt
   return cleaned;
 }
 
+/**
+ * Whether a value is shaped like a bare machine hostname: a word with a short
+ * numeric suffix (`buildbox-7`, `node-12`, `host9`). The shape is not decisive
+ * on its own — `gpt-4` has it too — so it is combined with the family allowlist.
+ */
+function looksLikeMachineHost(value: string): boolean {
+  return (
+    /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{1,4}$/.test(value) ||
+    /^[A-Za-z]+\d{1,4}$/.test(value)
+  );
+}
+
+/** A versioned model id: host-shaped, but from a known model family. */
+function isVersionedModel(value: string): boolean {
+  return looksLikeMachineHost(value) && MODEL_FAMILIES.test(value);
+}
+
+/** A lowercase word enum: `codex`, `pi`, `agent-run`, but not `host9`. */
+const WORD_ENUM = /^[a-z]+(?:[._-][a-z][a-z0-9]*)*$/;
+
+/** A model id: a word enum or an allowlisted versioned model. */
+function isModelShaped(value: string): boolean {
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) return false;
+  return !looksLikeMachineHost(value) || isVersionedModel(value);
+}
+
 /** Whether a cleaned identifier matches the positive shape for its category. */
 function matchesIdentifierShape(value: string, kind: IdentifierKind): boolean {
   switch (kind) {
@@ -222,17 +376,17 @@ function matchesIdentifierShape(value: string, kind: IdentifierKind): boolean {
       return /^[A-Fa-f0-9]{16,200}$/.test(value);
     case 'engine':
     case 'capability':
-      // A lowercase word enum: `codex`, `pi`, `agent-run`. No digits-only segment,
-      // so `buildbox-07` and `host-12` are not accepted as an engine/capability.
-      return /^[a-z][a-z0-9]*(?:[._-][a-z][a-z0-9]*)*$/.test(value);
+      // A lowercase word enum. Each segment starts with a letter, so `host9`,
+      // `buildbox-7`, and `node-12` are not accepted as an engine/capability.
+      return WORD_ENUM.test(value);
     case 'model':
-      // A model id may carry version digits (`gpt-5.1-codex`, `claude-3-5-sonnet`).
-      // The structural redaction has already rejected a hostname, address, or
-      // credential in this field, so no extra shape narrowing is needed here.
-      return /^[A-Za-z][A-Za-z0-9._-]*$/.test(value);
+      return isModelShaped(value);
     case 'generic':
     default:
-      return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+      // A generic identifier is a word enum or a real model id. A one-digit
+      // machine hostname (`buildbox-7`, `host9`) is neither, so it cannot pass
+      // merely because it uses identifier characters.
+      return WORD_ENUM.test(value) || isModelShaped(value);
   }
 }
 

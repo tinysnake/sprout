@@ -32,6 +32,7 @@ import {
   DEFAULT_COMPATIBILITY_DETAIL,
   DEFAULT_DECISION_REASON,
   DEFAULT_PROBE_SUMMARY,
+  DEFAULT_READINESS_SUMMARY,
 } from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
@@ -422,11 +423,16 @@ export function toEnvironmentReadinessView(input: {
   // legacy hostname, path, address, credential, or protocol string. Engine and
   // capability names are structured enums; models keep their vendor characters;
   // free text passes the operator boundary; an invalid protocol version is
-  // dropped rather than echoed.
+  // dropped rather than echoed. The summary reason is free text too — it can be
+  // the compatibility detail, and a legacy document can hold anything — so it
+  // passes the same boundary instead of being copied verbatim.
   const protocolVersion = sanitizeProtocolVersion(readiness.compatibility.workerProtocolVersion);
   return {
     environmentInstanceId: input.environmentInstanceId,
-    summary: { level: summary.level, reason: summary.reason },
+    summary: {
+      level: summary.level,
+      reason: sanitizeOperatorText(summary.reason, { fallback: DEFAULT_READINESS_SUMMARY }),
+    },
     enrollmentStatus: readiness.enrollmentStatus,
     connection: {
       state: readiness.connection.state,

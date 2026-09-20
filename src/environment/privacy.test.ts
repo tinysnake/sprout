@@ -244,6 +244,66 @@ test('a structured identifier is category-aware, so a bypass by punctuation stri
   assert.equal(sanitizeIdentifier('legacy-digest', { fallback: '', kind: 'digest' }), '', 'a non-hex digest is refused');
 });
 
+test('a short bare-space or copula credential still loses its value', () => {
+  // M77-PRIV-001 rework 4: the bare-space and copula rules previously required a
+  // quoted value or one at least twelve characters long, so `password was abc`
+  // and `private key AAAA` left the secret in place. A separator (`=`, `:`, a
+  // copula) is an assignment whatever follows, and a bare space is an assignment
+  // unless the next word is ordinary decisive prose.
+  for (const [text, value] of [
+    ['password hunter2', 'hunter2'],
+    ['password was abc', 'abc'],
+    ['token is xyz', 'xyz'],
+    ['secret was qrs', 'qrs'],
+    ['api_key is abcdef', 'abcdef'],
+    ['api key was abcdef', 'abcdef'],
+    ['private key AAAA', 'AAAA'],
+    ['private key was AAAA', 'AAAA'],
+    ['private_key=A1B2', 'A1B2'],
+    ['client_secret abcdef', 'abcdef'],
+    ['client secret was abcdef', 'abcdef'],
+    ['passphrase abcdef', 'abcdef'],
+    ['pwd was abc', 'abc'],
+    ['auth_token was abc', 'abc'],
+    ['credentials is abc', 'abc'],
+    ['signing_key was abc', 'abc'],
+    ['encryption_key is abc', 'abc'],
+    ['access_key was abc', 'abc'],
+    ['secret_key is abc', 'abc'],
+  ] as const) {
+    const redacted = redactSensitiveText(text);
+    assert.equal(redacted.includes(value), false, `${text} leaked its value`);
+  }
+  // The decisive sentences the review named must survive intact.
+  for (const reason of ['token bucket exhausted', 'password rotation required']) {
+    assert.equal(redactSensitiveText(reason), reason);
+  }
+});
+
+test('a one-digit machine host is removed while a versioned model id survives', () => {
+  // M77-PRIV-001 rework 4: a one-digit-suffix host (`buildbox-7`, `host9`) passed
+  // the model/generic shape, while the `gpt-4` positive control forbids simply
+  // rejecting every version-shaped token. The host rules now use one model-family
+  // allowlist, so the real ids stay and the hosts do not.
+  for (const host of ['buildbox-7', 'node-1', 'host9', 'worker-7', 'mac-mini-1']) {
+    for (const kind of ['engine', 'model', 'capability', 'digest', 'generic'] as const) {
+      assert.equal(
+        sanitizeIdentifier(host, { fallback: 'safe-placeholder', kind }).includes(host),
+        false,
+        `${host} must not survive as a ${kind} identifier`,
+      );
+    }
+  }
+  for (const model of ['gpt-4', 'gpt-5.1-codex', 'claude-3-5-sonnet', 'gemini-1.5-flash', 'o3-mini']) {
+    assert.equal(sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }), model);
+    assert.equal(redactSensitiveText(`engine ${model} ready`), `engine ${model} ready`);
+  }
+  assert.equal(sanitizeIdentifier('codex', { fallback: 'x', kind: 'engine' }), 'codex');
+  assert.equal(sanitizeIdentifier('pi', { fallback: 'x', kind: 'engine' }), 'pi');
+  assert.equal(sanitizeIdentifier('agent-run', { fallback: 'x', kind: 'capability' }), 'agent-run');
+  assert.equal(redactSensitiveText('connect to buildbox-7 refused'), 'connect to <redacted-host> refused');
+});
+
 test('a protocol version is a bounded token or nothing', () => {
   assert.equal(sanitizeProtocolVersion('2'), '2');
   assert.equal(sanitizeProtocolVersion('v2.1'), 'v2.1');

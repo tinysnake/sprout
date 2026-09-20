@@ -669,6 +669,126 @@ try {
     check('M77-PRIV-001', 'a legacy readiness detail drops a credential', legacyReadinessWire.includes('hunter2'));
     check('M77-PRIV-001', 'a legacy readiness protocol version is refused, not echoed', legacyReadinessWire.includes('/srv/leak'));
     check('M77-PRIV-001', 'a legacy readiness probe summary is sanitized', legacyReadinessWire.includes('hunter2'));
+
+    // -----------------------------------------------------------------------
+    // M77-PRIV-001 rework 4. The previous rework left three narrow variants:
+    // a short bare-space/copula credential value, a one-digit machine host in
+    // the model/generic category, and the raw readiness `summary.reason` copied
+    // verbatim. Each is probed here, and the mutation-strength check above still
+    // applies to every credential variant.
+    // -----------------------------------------------------------------------
+    const { redactSensitiveText } = await import('../src/environment/privacy.ts');
+
+    // Attack A: a short value after a bare space or copula. The value is shorter
+    // than the old twelve-character guard, so it used to survive.
+    const shortCredentialVariants = [
+      ['password hunter2', 'hunter2'],
+      ['password was abc', 'abc'],
+      ['token is xyz', 'xyz'],
+      ['secret was qrs', 'qrs'],
+      ['api_key is abcdef', 'abcdef'],
+      ['api key was abcdef', 'abcdef'],
+      ['private key AAAA', 'AAAA'],
+      ['private key was AAAA', 'AAAA'],
+      ['client_secret abcdef', 'abcdef'],
+      ['client secret was abcdef', 'abcdef'],
+      ['passphrase abcdef', 'abcdef'],
+      ['pwd was abc', 'abc'],
+      ['auth_token was abc', 'abc'],
+      ['credentials is abc', 'abc'],
+      ['signing_key was abc', 'abc'],
+      ['encryption_key is abc', 'abc'],
+      ['access_key was abc', 'abc'],
+      ['secret_key is abc', 'abc'],
+    ] as const;
+    for (const [text, value] of shortCredentialVariants) {
+      const redacted = redactSensitiveText(text);
+      const mutated = redacted.replace(/[^A-Za-z0-9]/g, '');
+      check(
+        'M77-PRIV-001',
+        `a short bare-space/copula credential value is removed (${text})`,
+        redacted.includes(value) || mutated.includes(value),
+      );
+    }
+    for (const decisive of ['token bucket exhausted', 'password rotation required', 'host retired after water damage']) {
+      check(
+        'M77-PRIV-001',
+        `a decisive sentence survives the short-value rule (${decisive})`,
+        redactSensitiveText(decisive) !== decisive,
+      );
+    }
+
+    // Attack B: a one-digit machine host in a structured identifier. `gpt-4`
+    // must keep working, so the boundary is an explicit model-family allowlist
+    // rather than a blanket rejection of every version-shaped token. The free-text
+    // rule also keeps ordinary technical vocabulary (`utf8`, `sha256`) decisive.
+    for (const host of ['buildbox-7', 'node-1', 'host9', 'worker-7', 'mac-mini-1']) {
+      for (const kind of categories) {
+        check(
+          'M77-PRIV-001',
+          `a one-digit machine host never survives as a ${kind} identifier (${host})`,
+          sanitizeIdentifier(host, { fallback: 'safe-placeholder', kind }).includes(host),
+        );
+      }
+      check(
+        'M77-PRIV-001',
+        `a one-digit machine host is removed from free text (${host})`,
+        redactSensitiveText(`connect to ${host} refused`).includes(host),
+      );
+    }
+    for (const model of ['gpt-4', 'gpt-5.1-codex', 'claude-3-5-sonnet', 'gemini-1.5-flash', 'o3-mini']) {
+      check(
+        'M77-PRIV-001',
+        `a real versioned model id still passes the boundary (${model})`,
+        sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }) !== model ||
+          redactSensitiveText(`engine ${model} ready`) !== `engine ${model} ready`,
+      );
+    }
+    for (const vocabulary of ['utf8 encoding', 'sha256 digest', 'base64 payload', 'win32 platform']) {
+      check(
+        'M77-PRIV-001',
+        `ordinary technical vocabulary is not mistaken for a host (${vocabulary})`,
+        redactSensitiveText(vocabulary) !== vocabulary,
+      );
+    }
+
+    // Attack C: a raw legacy readiness summary reason. The projection used to
+    // copy it verbatim, so a path, hostname, or credential could reach the wire
+    // through the field that claims to be the decisive reason.
+    const rawSummaryWire = JSON.stringify(
+      toEnvironmentReadinessView({
+        environmentInstanceId: 'env-falsify',
+        readiness: {
+          enrollmentStatus: 'approved',
+          connection: { state: 'online' },
+          compatibility: { state: 'compatible' },
+          capabilities: [],
+          engines: [],
+          workSafety: { state: 'clear' },
+        },
+        summary: { level: 'red', reason: `blocked at ${genericPath} on ${ordinaryHost} using ${namedSecret}` },
+      }),
+    );
+    check('M77-PRIV-001', 'a raw legacy summary reason drops a path', rawSummaryWire.includes(genericPath));
+    check('M77-PRIV-001', 'a raw legacy summary reason drops a hostname', rawSummaryWire.includes(ordinaryHost));
+    check('M77-PRIV-001', 'a raw legacy summary reason drops a credential', rawSummaryWire.includes('hunter2'));
+    check('M77-PRIV-001', 'a raw legacy summary reason keeps its decisive text', !rawSummaryWire.includes('blocked'));
+    check(
+      'M77-PRIV-001',
+      'an ordinary decisive summary reason is preserved',
+      toEnvironmentReadinessView({
+        environmentInstanceId: 'env-falsify',
+        readiness: {
+          enrollmentStatus: 'approved',
+          connection: { state: 'offline' },
+          compatibility: { state: 'compatible' },
+          capabilities: [],
+          engines: [],
+          workSafety: { state: 'clear' },
+        },
+        summary: { level: 'red', reason: 'The Worker is offline.' },
+      }).summary.reason !== 'The Worker is offline.',
+    );
   }
 
   process.stdout.write(

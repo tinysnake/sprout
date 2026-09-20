@@ -19,6 +19,7 @@ import type { Project } from '../project/model.ts';
 import type { Task, TaskRunLink } from '../task/model.ts';
 import {
   summarizeRunHistory,
+  toEnvironmentReadinessView,
   toMessageView,
   toProjectView,
   toRunView,
@@ -29,6 +30,7 @@ import {
   toWakeView,
   type RunView,
 } from './views.ts';
+import type { EnvironmentReadiness } from '../environment/readiness.ts';
 
 function run(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -271,4 +273,39 @@ test('a task-with-runs view keeps run links ordered and hides an unsettled summa
     toTaskRunLinkView(link(2, false)),
     { runId: 'run-2', agentId: 'agent-scout', sequence: 2, linkedAt: 2 },
   );
+});
+
+test('the readiness wire view sanitizes the summary reason as free text', () => {
+  // M77-PRIV-001 rework 4: the projection copied `summary.reason` verbatim, so a
+  // legacy/raw readiness document could return a path, hostname, or named
+  // credential through the field that claims to be the decisive reason. The
+  // reason is free text — the compatibility detail can feed it — so it passes the
+  // same boundary as every other free-text field while a decisive phrase stays.
+  const base: EnvironmentReadiness = {
+    enrollmentStatus: 'approved',
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible' },
+    capabilities: [],
+    engines: [],
+    workSafety: { state: 'clear' },
+  };
+  const reason = (value: string): string =>
+    toEnvironmentReadinessView({
+      environmentInstanceId: 'env-1',
+      readiness: base,
+      summary: { level: 'red', reason: value },
+    }).summary.reason;
+
+  const leaked = reason('blocked at /srv/leak on buildbox-7 using password=hunter2');
+  assert.equal(/\/srv\/leak/.test(leaked), false, 'the legacy path is removed');
+  assert.equal(/buildbox-7/.test(leaked), false, 'the legacy hostname is removed');
+  assert.equal(/hunter2/.test(leaked), false, 'the legacy credential is removed');
+  assert.match(leaked, /blocked/, 'the decisive word survives');
+
+  // An ordinary product reason is untouched, and a wholly-sensitive one falls
+  // back to the product-owned summary text rather than an empty string.
+  assert.equal(reason('The Worker is offline.'), 'The Worker is offline.');
+  assert.equal(reason('Lease recovery is required.'), 'Lease recovery is required.');
+  assert.equal(reason('/srv/sprout/worker').length > 0, true);
+  assert.equal(/\/srv\/sprout/.test(reason('/srv/sprout/worker')), false);
 });
