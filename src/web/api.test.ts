@@ -104,6 +104,34 @@ async function waitForTerminal(base: string, id: string): Promise<Record<string,
   throw new Error('run did not settle');
 }
 
+interface SseRunEvent {
+  readonly cursor: string;
+  readonly run: { readonly id: string; readonly status: string };
+}
+
+function sseRunEvents(text: string): readonly SseRunEvent[] {
+  return [...text.matchAll(/^id: ([^\n]+)\nevent: run\ndata: (.+)$/gm)].map((match) => ({
+    cursor: match[1]!,
+    run: JSON.parse(match[2]!) as { readonly id: string; readonly status: string },
+  }));
+}
+
+async function readSseUntil(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ready: (text: string) => boolean,
+): Promise<string> {
+  let text = '';
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !ready(text)) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    text += decoder.decode(chunk.value);
+  }
+  assert.ok(ready(text), 'SSE stream did not deliver the expected event before its deadline');
+  return text;
+}
+
 function privateInput(): string {
   return randomBytes(32).toString('base64url');
 }
@@ -574,6 +602,129 @@ test('an SSE durable cursor remains a replay boundary after an API restart', asy
     assert.equal(replayed.includes(firstId), false, 'the consumed durable snapshot is not replayed after restart');
   } finally {
     await secondApi?.close();
+    await firstApi.close().catch(() => undefined);
+  }
+});
+
+test('an older durable cursor replays every newer snapshot once after a multi-run restart', async () => {
+  const store = new InMemoryRunStore();
+  const registry = new AgentRegistry([
+    { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
+  ]);
+  let now = 1_000;
+  const first = new RunOrchestrator({
+    engines: new Map([['scripted', new ScriptedEngineAdapter({
+      turns: [
+        { events: [{ type: 'message', text: 'older', final: true }], result: { status: 'completed', text: 'older' } },
+        { events: [{ type: 'message', text: 'newer', final: true }], result: { status: 'completed', text: 'newer' } },
+      ],
+    })]]),
+    agents: registry,
+    projects,
+    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    store,
+    clock: { now: () => now },
+  });
+  const firstApi = createRunApi({ orchestrator: first, agents: registry });
+  let restartedApi: ReturnType<typeof createRunApi> | undefined;
+  try {
+    const { port: firstPort } = await firstApi.listen(0);
+    const olderSubmitted = await fetch(`http://127.0.0.1:${firstPort}/api/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentId: 'agent-scout', prompt: 'older' }),
+    });
+    const { id: olderId } = await olderSubmitted.json() as { id: string };
+    await first.waitFor(olderId);
+    now = 2_000;
+    const newerSubmitted = await fetch(`http://127.0.0.1:${firstPort}/api/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentId: 'agent-scout', prompt: 'newer' }),
+    });
+    const { id: newerId } = await newerSubmitted.json() as { id: string };
+    await first.waitFor(newerId);
+
+    const initial = await fetch(`http://127.0.0.1:${firstPort}/api/events`);
+    const initialReader = initial.body?.getReader();
+    assert.ok(initialReader);
+    const initialText = await readSseUntil(initialReader, (text) =>
+      sseRunEvents(text).some((event) => event.run.id === newerId && event.run.status === 'completed'),
+    );
+    const olderCursor = sseRunEvents(initialText).find(
+      (event) => event.run.id === olderId && event.run.status === 'completed',
+    )?.cursor;
+    assert.match(olderCursor ?? '', /^v1:[a-f0-9]{64}$/);
+    const newerCursor = sseRunEvents(initialText).find(
+      (event) => event.run.id === newerId && event.run.status === 'completed',
+    )?.cursor;
+    assert.match(newerCursor ?? '', /^v1:[a-f0-9]{64}$/);
+    await initialReader.cancel();
+    await firstApi.close();
+
+    now = 3_000;
+    const restarted = new RunOrchestrator({
+      engines: new Map([['scripted', new ScriptedEngineAdapter({
+        turns: [{ events: [{ type: 'message', text: 'future', final: true }], result: { status: 'completed', text: 'future' } }],
+      })]]),
+      agents: registry,
+      projects,
+      pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+      store,
+      clock: { now: () => now },
+    });
+    restartedApi = createRunApi({ orchestrator: restarted, agents: registry });
+    const { port: restartedPort } = await restartedApi.listen(0);
+    const resumed = await fetch(`http://127.0.0.1:${restartedPort}/api/events`, {
+      headers: { 'last-event-id': olderCursor! },
+    });
+    const resumedReader = resumed.body?.getReader();
+    assert.ok(resumedReader);
+    const afterNewest = await fetch(`http://127.0.0.1:${restartedPort}/api/events`, {
+      headers: { 'last-event-id': newerCursor! },
+    });
+    const afterNewestReader = afterNewest.body?.getReader();
+    assert.ok(afterNewestReader);
+    const futureSubmitted = await fetch(`http://127.0.0.1:${restartedPort}/api/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentId: 'agent-scout', prompt: 'future' }),
+    });
+    const { id: futureId } = await futureSubmitted.json() as { id: string };
+    const resumedText = await readSseUntil(resumedReader, (text) =>
+      sseRunEvents(text).some((event) => event.run.id === futureId && event.run.status === 'completed'),
+    );
+    await resumedReader.cancel();
+    const afterNewestText = await readSseUntil(afterNewestReader, (text) =>
+      sseRunEvents(text).some((event) => event.run.id === futureId && event.run.status === 'completed'),
+    );
+    await afterNewestReader.cancel();
+
+    const events = sseRunEvents(resumedText);
+    assert.equal(events.filter((event) => event.run.id === olderId).length, 0, 'the consumed older snapshot is not replayed');
+    assert.equal(
+      events.filter((event) => event.run.id === newerId && event.run.status === 'completed').length,
+      1,
+      'the newer durable snapshot is replayed exactly once',
+    );
+    const futureEvents = events.filter((event) => event.run.id === futureId);
+    assert.deepEqual(
+      futureEvents.map((event) => event.run.status),
+      ['running', 'running', 'completed'],
+      'each future snapshot is delivered once after the replay boundary',
+    );
+    assert.equal(
+      new Set(futureEvents.map((event) => event.cursor)).size,
+      futureEvents.length,
+      'no future durable cursor is delivered twice',
+    );
+    const newestCursorEvents = sseRunEvents(afterNewestText);
+    assert.equal(
+      newestCursorEvents.some((event) => event.run.id === olderId || event.run.id === newerId),
+      false,
+      'the newest cursor does not replay either already-consumed durable snapshot',
+    );
+    assert.equal(
+      newestCursorEvents.filter((event) => event.run.id === futureId).length,
+      futureEvents.length,
+      'the newest cursor still receives every future snapshot exactly once',
+    );
+  } finally {
+    await restartedApi?.close();
     await firstApi.close().catch(() => undefined);
   }
 });

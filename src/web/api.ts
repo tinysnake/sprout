@@ -670,7 +670,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
     // Hydrate before interpreting the cursor. The cursor identifies a durable
     // projection, not this API process, so it remains meaningful after a
     // restart and can retain its replay boundary.
-    for (const run of await listRuns()) eventLog.publish(toRunView(run));
+    // `RunOrchestrator.list()` deliberately serves the UI newest-first. SSE
+    // cursors instead mark a forward-only durable replay order, so rebuilding
+    // the log must use the inverse, oldest-first order.  Do not depend on Map
+    // insertion order here: equal timestamps get a stable id tie-breaker.
+    for (const run of (await listRuns()).toSorted(compareDurableRunOrder)) eventLog.publish(toRunView(run));
     const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
     const send = (record: SseRecord) => {
       if (response.writableEnded) return;
@@ -803,6 +807,11 @@ class SseEventLog {
 
 function durableEventCursor(fingerprint: string): string {
   return `v1:${createHash('sha256').update(fingerprint).digest('hex')}`;
+}
+
+/** Stable forward order for replay; the run-list HTTP projection remains newest-first. */
+function compareDurableRunOrder(left: AgentRun, right: AgentRun): number {
+  return left.createdAt - right.createdAt || left.id.localeCompare(right.id);
 }
 
 function parseEventCursor(value: string | undefined): string | undefined {
