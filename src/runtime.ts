@@ -13,6 +13,10 @@ import type { EnvironmentDefinition, EnvironmentInstance } from './environment/m
 import { EnvironmentPool, type LeaseStore } from './environment/pool.ts';
 import type { EnrollmentStore } from './environment/enrollment-store.ts';
 import type { EnvironmentReadinessStore } from './environment/readiness-store.ts';
+import type { RecoveryStore } from './environment/recovery-store.ts';
+import {
+  EnvironmentRecoveryService,
+} from './environment/recovery-service.ts';
 import {
   EnvironmentEnrollmentService,
   type EnvironmentEnrollmentServiceOptions,
@@ -100,6 +104,8 @@ export interface RuntimeStores {
   readonly enrollments: EnrollmentStore;
   /** The durable observed Environment readiness facts (#87). */
   readonly environmentReadiness: EnvironmentReadinessStore;
+  /** The durable Environment recovery records and Force Release outcomes (#88). */
+  readonly recovery: RecoveryStore;
   close(): void;
 }
 
@@ -174,6 +180,8 @@ export interface SproutRuntime {
   readonly stores: RuntimeStores;
   /** The Environment enrollment and readiness capability (#87). */
   readonly enrollments: EnvironmentEnrollmentService;
+  /** The Environment reconciliation and recovery capability (#88). */
+  readonly recovery: EnvironmentRecoveryService;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -323,6 +331,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
+    const durableStores: RuntimeStores = stores;
     const operatorSessions = new OperatorSessionService({ store: stores.operatorSessions });
     // Host-local initialization and recovery happen before the HTTP surface is
     // constructed. A missing credential leaves the surface fail-closed rather
@@ -357,6 +366,17 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     let tasks: TaskService;
     let taskLifecycle: TaskEnvironmentLifecycle;
 
+    /**
+     * The Environment reconciliation and recovery capability (#88).
+     *
+     * Declared before the Task lifecycle so the lifecycle can report every entry
+     * into recovery through this one domain Module, and the recovery service can
+     * perform ordinary Task resume/discard and emergency Force Release through the
+     * Task service's holder actions once that service exists. Both directions are
+     * lazy closures, so neither Module imports the other.
+     */
+    let recovery: EnvironmentRecoveryService;
+
     const orchestrator = new RunOrchestrator({
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
@@ -390,8 +410,40 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           (await environment.contexts(input.environmentInstanceId)).recycle(input),
       },
       leaseTtlMs,
+      // Every Task entry into recovery opens the durable recovery record that
+      // protects its lease (#88). The callback only records; the lifecycle keeps
+      // ownership of the Task state it just made durable.
+      onRecovery: async ({ leaseId, hadActiveRun }) => {
+        await recovery.open({
+          leaseId,
+          cause: 'worker-channel-lost',
+          hadActiveRun,
+        });
+      },
+      // ADR-0009 makes Force Release a narrow, explicit exception to ADR-0005's
+      // release rule. The pool deliberately refuses a Task-held lease, so the
+      // override needs this capability the Environment domain explicitly grants.
+      forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     });
     tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
+
+    recovery = new EnvironmentRecoveryService({
+      store: stores.recovery,
+      leases: pool,
+      // The holder decisions reuse the existing lifecycle ordering rather than
+      // re-implementing Task context cleanup or lease release here.
+      holders: {
+        resumeTask: async (taskId) => {
+          await taskLifecycle.recover(taskId, 'resume');
+        },
+        discardTask: async (taskId) => {
+          await taskLifecycle.recover(taskId, 'discard');
+        },
+        forceReleaseTask: (input) => taskLifecycle.forceRelease(input.taskId, input),
+      },
+      taskRuns: async (taskId) =>
+        (await durableStores.tasks.listRuns(taskId)).map((link) => link.runId),
+    });
 
     /**
      * The collaboration coordinator: durable Messages, the M1 wake contract, and
@@ -425,6 +477,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
       leases: () => pool.leases(),
+      // Recovery records are authoritative over the lease projection, so the
+      // summary can distinguish `reconciling` from `recovery` and a reconnect
+      // alone is never reported as safe-to-reassign (#88, ADR-0009).
+      recoveryRecords: () => recovery.listForEnvironment(instanceId),
       // The one engine this build's configured Agents actually run on is the one
       // engine its configured use requires. Nothing here names a second engine,
       // so an Environment that hosts only this engine is complete rather than a
@@ -446,8 +502,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       staticRoot,
       readFile: options.readFile ?? defaultReadFile,
       // The Environment enrollment/readiness domain is composed through the #85
-      // additive seam, so no central dispatcher grows for it.
-      routers: [createEnvironmentRouter({ enrollments })],
+      // additive seam, so no central dispatcher grows for it. The recovery routes
+      // (#88) are composed through the same seam and delegate every safety rule
+      // to the recovery service.
+      routers: [createEnvironmentRouter({ enrollments, recovery })],
     });
 
     /** The last reconciliation result, so `startupReport` reports what ran. */
@@ -467,13 +525,17 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       instance,
       stores: activeStores,
       enrollments,
+      recovery,
       engines,
 
-      /** Reconcile runs, then Task lifecycle, then collaboration; runs first so no
-       * reply can ever be fabricated for an orphaned run. */
+      /** Reconcile runs, then Task lifecycle, then recovery records, then
+       * collaboration; runs first so no reply can ever be fabricated for an
+       * orphaned run. A process restart is never proof that interrupted work is
+       * safe, so a leftover protected lease keeps a `recovery` record (#88). */
       async reconcile(): Promise<SproutReconciliation> {
         const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
         await tasks.reconcileEnvironmentLifecycle();
+        await recovery.reconcileAfterRestart();
         const reconciled = await collaboration.reconcile();
         const result: SproutReconciliation = {
           recoveredRuns,

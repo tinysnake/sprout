@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 5;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 6;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -426,6 +426,39 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           document TEXT NOT NULL,
           PRIMARY KEY (environment_instance_id, sequence)
         );
+      `);
+    },
+  },
+  {
+    fromVersion: 5,
+    toVersion: 6,
+    name: 'environment_recovery_and_force_release',
+    migrate: (db) => {
+      // Recovery records protect a lease whose work became uncertain, and Force
+      // Release outcomes are permanent operational events (ADR-0009). Both store
+      // neutral evidence facts and sanitized operator text in a JSON document,
+      // so no credential, hostname, address, or absolute path has a column here.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_recovery (
+          id TEXT PRIMARY KEY,
+          environment_instance_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          document TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS environment_recovery_lease_idx
+          ON environment_recovery (lease_id);
+        CREATE INDEX IF NOT EXISTS environment_recovery_instance_idx
+          ON environment_recovery (environment_instance_id);
+        CREATE TABLE IF NOT EXISTS environment_force_releases (
+          id TEXT PRIMARY KEY,
+          environment_instance_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          at INTEGER NOT NULL,
+          document TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS environment_force_releases_instance_idx
+          ON environment_force_releases (environment_instance_id, at);
       `);
     },
   },

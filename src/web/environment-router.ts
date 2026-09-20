@@ -4,6 +4,9 @@ import {
   type EnrollmentEngineFact,
 } from '../environment/enrollment.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import type { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
+import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
+import type { RetainedEvidence } from '../environment/recovery.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import type {
   CompatibilityFact,
@@ -11,7 +14,7 @@ import type {
   EngineReadinessFact,
   ProbeResultFact,
 } from '../environment/readiness.ts';
-import { toEnrollmentView, toEnvironmentReadinessView } from './views.ts';
+import { toEnrollmentView, toEnvironmentReadinessView, toEnvironmentRecoveryView, toForceReleaseView } from './views.ts';
 
 /**
  * The Environment enrollment and readiness router (#87).
@@ -29,10 +32,19 @@ import { toEnrollmentView, toEnvironmentReadinessView } from './views.ts';
 
 export interface EnvironmentRouterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
+  /**
+   * The Environment reconciliation and recovery capability (#88).
+   *
+   * Optional so the #87 enrollment/readiness contract remains usable on its own;
+   * when present the recovery, ordinary-decision, and Force Release routes are
+   * enabled and every one of them delegates to this service, so the safety rules
+   * have exactly one implementation.
+   */
+  readonly recovery?: EnvironmentRecoveryService;
 }
 
 export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiRouter {
-  const { enrollments } = options;
+  const { enrollments, recovery } = options;
 
   return {
     name: 'environment-enrollment',
@@ -299,6 +311,191 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
+      // GET /api/environments/enrollments/:id/recovery — the open recovery record
+      // plus the permanent Force Release history for this Environment (#88).
+      if (
+        method === 'GET' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'recovery' &&
+        recovery
+      ) {
+        try {
+          const enrollment = await enrollments.get(segments[3] ?? '');
+          if (enrollment === undefined) return json(context, 404, { error: 'unknown enrollment' });
+          const records = await recovery.listForEnvironment(enrollment.environmentInstanceId);
+          return json(context, 200, {
+            recovery: records.map(toEnvironmentRecoveryView),
+            forceReleases: (await recovery.forceReleaseHistory(enrollment.environmentInstanceId)).map(
+              toForceReleaseView,
+            ),
+          });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/reconnect — a verified same-identity
+      // reconnect. Moves the record to `reconciling`; it never resolves it.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'reconnect' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        const connection = parseConnection(body['connection']);
+        if (connection === 'invalid') return json(context, 400, { error: 'connection must be a connection fact' });
+        const compatibility = parseCompatibility(body['compatibility']);
+        if (compatibility === 'invalid') {
+          return json(context, 400, { error: 'compatibility must be a compatibility fact' });
+        }
+        const evidence = parseRetainedEvidence(body['evidence']);
+        if (evidence === 'invalid') {
+          return json(context, 400, { error: 'evidence must be a retained-evidence fact' });
+        }
+        try {
+          const record = await recovery.observeReconnect(segments[3] ?? '', {
+            enrollmentId: stringField(body, 'enrollmentId') ?? '',
+            environmentInstanceId: stringField(body, 'environmentInstanceId') ?? '',
+            identityVerified: body['identityVerified'] === true,
+            protocolCompatible: body['protocolCompatible'] === true,
+            permissionsAllowed: body['permissionsAllowed'] === true,
+            hadActiveRun: body['hadActiveRun'] === true,
+            ...(evidence !== undefined ? { evidence } : {}),
+          });
+          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/evidence — synchronize retained
+      // evidence. The only path that can resolve or reach `recovery`; no replay.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'evidence' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        const evidence = parseRetainedEvidence(body['evidence']);
+        if (evidence === 'invalid' || evidence === undefined) {
+          return json(context, 400, { error: 'evidence must be a retained-evidence fact' });
+        }
+        try {
+          const record = await recovery.synchronizeEvidence(segments[3] ?? '', {
+            evidence,
+            hadActiveRun: body['hadActiveRun'] === true,
+          });
+          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/resume — ordinary Resume.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'resume' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        try {
+          const reason = stringField(body, 'reason');
+          const record = await recovery.resume(segments[3] ?? '', {
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/discard — ordinary safe Task end.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'discard' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        try {
+          const reason = stringField(body, 'reason');
+          const record = await recovery.discard(segments[3] ?? '', {
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/release — ordinary one-round release.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'release' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        try {
+          const reason = stringField(body, 'reason');
+          const record = await recovery.release(segments[3] ?? '', {
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/recovery/:leaseId/force-release — Human-only override.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'recovery' &&
+        segments[4] === 'force-release' &&
+        recovery
+      ) {
+        const body = await context.readBody();
+        const reason = stringField(body, 'reason');
+        const typedConfirmation = stringField(body, 'typedConfirmation');
+        if (reason === undefined || typedConfirmation === undefined) {
+          return json(context, 400, { error: 'reason and typedConfirmation are required' });
+        }
+        try {
+          const outcome = await recovery.forceRelease(segments[3] ?? '', {
+            acknowledgedRisks: body['acknowledgedRisks'] === true,
+            typedConfirmation,
+            reason,
+          });
+          return json(context, 201, { forceRelease: toForceReleaseView(outcome) });
+        } catch (error) {
+          return recoveryFailure(context, error);
+        }
+      }
+
       return false;
     },
   };
@@ -318,6 +515,41 @@ function enrollmentFailure(context: ApiRequestContext, error: unknown): true {
     return json(context, status, { error: error.message, code: error.code });
   }
   return json(context, 500, { error: 'environment enrollment could not be completed' });
+}
+
+function recoveryFailure(context: ApiRequestContext, error: unknown): true {
+  if (error instanceof EnvironmentRecoveryError) {
+    const status = error.code === 'unknown-recovery' || error.code === 'unknown-lease' ? 404 : 409;
+    return json(context, status, { error: error.message, code: error.code });
+  }
+  if (error instanceof EnrollmentError) return enrollmentFailure(context, error);
+  return json(context, 500, { error: 'environment recovery could not be completed' });
+}
+
+/**
+ * Parse retained evidence.
+ *
+ * Every field is a positive boolean or a bounded count; an omitted field is
+ * honest "not proven" rather than an assumed true, which is exactly what keeps an
+ * unresolved fact unresolved.
+ */
+function parseRetainedEvidence(value: unknown): RetainedEvidence | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) return 'invalid';
+  const record = value as Record<string, unknown>;
+  const retainedEventCount = record['retainedEventCount'];
+  if (typeof retainedEventCount !== 'number' || !Number.isFinite(retainedEventCount) || retainedEventCount < 0) {
+    return 'invalid';
+  }
+  for (const key of ['turnSettlementObserved', 'engineSessionStopped', 'taskContextRecycled'] as const) {
+    if (typeof record[key] !== 'boolean') return 'invalid';
+  }
+  return {
+    retainedEventCount: Math.floor(retainedEventCount),
+    turnSettlementObserved: record['turnSettlementObserved'] === true,
+    engineSessionStopped: record['engineSessionStopped'] === true,
+    taskContextRecycled: record['taskContextRecycled'] === true,
+  };
 }
 
 function stringField(body: Record<string, unknown>, key: string): string | undefined {

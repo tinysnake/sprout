@@ -25,14 +25,17 @@ import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
+import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
 import {
   sanitizeIdentifier,
   sanitizeOperatorText,
   sanitizeProtocolVersion,
   DEFAULT_COMPATIBILITY_DETAIL,
   DEFAULT_DECISION_REASON,
+  DEFAULT_FORCE_RELEASE_REASON,
   DEFAULT_PROBE_SUMMARY,
   DEFAULT_READINESS_SUMMARY,
+  DEFAULT_RECOVERY_REASON,
 } from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
 
@@ -476,5 +479,128 @@ export function toEnvironmentReadinessView(input: {
         }
       : {}),
     workSafety: { state: readiness.workSafety.state },
+  };
+}
+
+/**
+ * The client-facing shape of one Environment recovery record (#88).
+ *
+ * Only neutral evidence facts, the derived unresolved facts, and sanitized
+ * decision reasons: no private key, engine credential, hostname, address,
+ * topology, or absolute path has a field in this projection. The unresolved facts
+ * are product-owned text, so the Force Release manifest cannot drift from the
+ * state it explains.
+ */
+export interface EnvironmentRecoveryView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly leaseId: string;
+  readonly holderKind: string;
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly cause: string;
+  readonly phase: string;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly reconnectObservedAt?: number;
+  readonly evidence?: {
+    readonly retainedEventCount: number;
+    readonly turnSettlementObserved: boolean;
+    readonly engineSessionStopped: boolean;
+    readonly taskContextRecycled: boolean;
+  };
+  readonly unresolvedFacts: readonly string[];
+  /** Whether the ordinary decision requires synchronized evidence first. */
+  readonly evidenceSynchronized: boolean;
+  readonly decisions: readonly {
+    readonly kind: string;
+    readonly actor: string;
+    readonly at: number;
+    readonly reason: string;
+  }[];
+}
+
+export function toEnvironmentRecoveryView(record: EnvironmentRecoveryRecord): EnvironmentRecoveryView {
+  return {
+    id: record.id,
+    environmentInstanceId: record.environmentInstanceId,
+    leaseId: record.leaseId,
+    holderKind: record.holderKind,
+    ...(record.taskId !== undefined ? { taskId: record.taskId } : {}),
+    ...(record.runId !== undefined ? { runId: record.runId } : {}),
+    cause: record.cause,
+    phase: record.phase,
+    startedAt: record.startedAt,
+    updatedAt: record.updatedAt,
+    ...(record.reconnectObservedAt !== undefined
+      ? { reconnectObservedAt: record.reconnectObservedAt }
+      : {}),
+    ...(record.evidence !== undefined
+      ? {
+          evidence: {
+            retainedEventCount: record.evidence.retainedEventCount,
+            turnSettlementObserved: record.evidence.turnSettlementObserved,
+            engineSessionStopped: record.evidence.engineSessionStopped,
+            taskContextRecycled: record.evidence.taskContextRecycled,
+          },
+        }
+      : {}),
+    unresolvedFacts: record.unresolvedFacts.map((fact) =>
+      sanitizeOperatorText(fact, { fallback: DEFAULT_RECOVERY_REASON }),
+    ),
+    evidenceSynchronized: record.evidence !== undefined,
+    decisions: record.decisions.map((decision) => ({
+      kind: decision.kind,
+      actor: decision.actor,
+      at: decision.at,
+      reason: sanitizeOperatorText(decision.reason, { fallback: DEFAULT_RECOVERY_REASON }),
+    })),
+  };
+}
+
+/**
+ * The client-facing shape of one permanent Force Release outcome (#88).
+ *
+ * ADR-0009 makes the override durable history, so the actor, time, reason,
+ * unresolved facts, affected Environment, lease, Task, and runs are all exposed
+ * for inspection; the unrecycled-context and workspace-preservation facts are
+ * explicit rather than implied. The reason is free text and passes the operator
+ * privacy boundary here as the last wire boundary.
+ */
+export interface ForceReleaseView {
+  readonly id: string;
+  readonly environmentInstanceId: string;
+  readonly leaseId: string;
+  readonly holderKind: string;
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly actor: string;
+  readonly at: number;
+  readonly reason: string;
+  readonly risksAcknowledged: boolean;
+  readonly unresolvedFacts: readonly string[];
+  readonly affectedRunIds: readonly string[];
+  readonly projectWorkspacePreserved: boolean;
+  readonly unrecycledTaskContext: boolean;
+}
+
+export function toForceReleaseView(record: ForceReleaseRecord): ForceReleaseView {
+  return {
+    id: record.id,
+    environmentInstanceId: record.environmentInstanceId,
+    leaseId: record.leaseId,
+    holderKind: record.holderKind,
+    ...(record.taskId !== undefined ? { taskId: record.taskId } : {}),
+    ...(record.runId !== undefined ? { runId: record.runId } : {}),
+    actor: record.actor,
+    at: record.at,
+    reason: sanitizeOperatorText(record.reason, { fallback: DEFAULT_FORCE_RELEASE_REASON }),
+    risksAcknowledged: record.risksAcknowledged === true,
+    unresolvedFacts: record.unresolvedFacts.map((fact) =>
+      sanitizeOperatorText(fact, { fallback: DEFAULT_RECOVERY_REASON }),
+    ),
+    affectedRunIds: [...record.affectedRunIds],
+    projectWorkspacePreserved: true,
+    unrecycledTaskContext: record.unrecycledTaskContext === true,
   };
 }

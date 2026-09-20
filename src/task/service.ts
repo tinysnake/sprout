@@ -225,6 +225,26 @@ export class TaskService {
   }
 
   /**
+   * Emergency Task end for a Human Force Release (#88, ADR-0009).
+   *
+   * Delegates to the Task environment lifecycle, which owns the terminal Task
+   * state and lease release. Returns the affected run ids so the permanent
+   * override outcome can name every run it abandoned.
+   */
+  forceRelease(
+    taskId: string,
+    input: {
+      readonly actor: string;
+      readonly reason: string;
+      readonly unresolvedFacts: readonly string[];
+      readonly at: number;
+    },
+  ): Promise<readonly string[]> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    return this.#lifecycle.forceRelease(taskId, input);
+  }
+
+  /**
    * Render the prompt for a Task run.
    *
    * This is the `TaskContextProvider` the orchestrator calls. It reads the Task

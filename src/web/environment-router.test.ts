@@ -14,6 +14,9 @@ import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
+import { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
+import { InMemoryRecoveryStore } from '../environment/recovery-store.ts';
+import { FORCE_RELEASE_CONFIRMATION } from '../environment/recovery.ts';
 import { workerIdentityFixture } from '../environment/worker-identity-fixture.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import { createRunApi } from './api.ts';
@@ -45,6 +48,8 @@ interface EnrollmentRuntime {
   readonly cookie: string;
   readonly csrf: string;
   readonly enrollments: EnvironmentEnrollmentService;
+  readonly pool: EnvironmentPool;
+  readonly recovery: EnvironmentRecoveryService;
 }
 
 async function enrollmentApi(options: { readonly requiredEngines?: readonly string[] } = {}): Promise<EnrollmentRuntime> {
@@ -80,13 +85,21 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
     clock: () => 10_000,
     idFactory: () => 'enroll-1',
   });
+  const recoveryStore = new InMemoryRecoveryStore();
+  let recoveryRecordIndex = 0;
+  const recovery = new EnvironmentRecoveryService({
+    store: recoveryStore,
+    leases: pool,
+    clock: () => 10_000,
+    idFactory: () => `rec-${++recoveryRecordIndex}`,
+  });
   const api = createRunApi({
     orchestrator,
     agents: new AgentRegistry([
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
     auth,
-    routers: [createEnvironmentRouter({ enrollments })],
+    routers: [createEnvironmentRouter({ enrollments, recovery })],
   });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
@@ -98,7 +111,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   assert.equal(response.status, 201);
   const cookie = (response.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
   const { csrfToken } = (await response.json()) as { csrfToken: string };
-  return { api, base, cookie, csrf: csrfToken, enrollments };
+  return { api, base, cookie, csrf: csrfToken, enrollments, pool, recovery };
 }
 
 function command(
@@ -589,6 +602,247 @@ test('an explicitly required engine is Red when unavailable, and only that one',
     );
     assert.equal(body.readiness.summary.level, 'red');
     assert.match(body.readiness.summary.reason, /pi/i);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+/** A helper that drives an approved enrollment and one protected Task lease over HTTP. */
+export async function recoveryApi(options: { readonly requiredEngines?: readonly string[] } = {}): Promise<
+  EnrollmentRuntime & { readonly leaseId: string }
+> {
+  const runtime = await enrollmentApi(options);
+  const identity = workerIdentityFixture();
+  await command(runtime.base, '/api/environments/enrollments', runtime, {
+    environmentInstanceId: 'mac-mini-1',
+    displayName: 'Local Mac',
+    publicKey: identity.publicKey,
+    platform: 'macos',
+    capabilityRequests: ['agent-run'],
+    engines: [],
+  });
+  await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+    capabilityPermissions: { 'agent-run': true },
+  });
+  const acquired = runtime.pool.reserveTaskLease({
+    instanceId: 'mac-mini-1',
+    capability: 'agent-run',
+    holderId: 'task-1',
+    taskId: 'task-1',
+    ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  const lease = acquired.ok ? acquired.lease : undefined;
+  assert.ok(lease);
+  // The reservation is a candidate until adopted; adoption is what a real Task
+  // begin transaction performs, and it makes the lease visible to the pool.
+  runtime.pool.adoptLease(lease);
+  await runtime.recovery.open({ leaseId: lease.id, cause: 'worker-channel-lost', hadActiveRun: true });
+  return { ...runtime, leaseId: lease.id };
+}
+
+test('a reconnect route re-authenticates the checks and only reaches reconciling over HTTP', async () => {
+  const runtime = await recoveryApi();
+  try {
+    // An unverified identity is refused before the record moves at all.
+    const unverified = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/reconnect`,
+      runtime,
+      {
+        enrollmentId: 'enroll-1',
+        environmentInstanceId: 'mac-mini-1',
+        identityVerified: false,
+        protocolCompatible: true,
+        permissionsAllowed: true,
+        hadActiveRun: true,
+      },
+    );
+    assert.equal(unverified.status, 409);
+    assert.equal(((await unverified.json()) as { code: string }).code, 'identity-not-verified');
+
+    const reconnect = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/reconnect`,
+      runtime,
+      {
+        enrollmentId: 'enroll-1',
+        environmentInstanceId: 'mac-mini-1',
+        identityVerified: true,
+        protocolCompatible: true,
+        permissionsAllowed: true,
+        hadActiveRun: true,
+      },
+    );
+    assert.equal(reconnect.status, 200);
+    const body = (await reconnect.json()) as { recovery: { phase: string; unresolvedFacts: readonly string[] } };
+    assert.equal(body.recovery.phase, 'reconciling');
+    assert.ok(body.recovery.unresolvedFacts.length > 0, 'a reconnect alone resolves nothing');
+
+    // An ordinary decision before synchronized evidence is refused with 409.
+    const early = await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/discard`, runtime, {});
+    assert.equal(early.status, 409);
+    assert.equal(((await early.json()) as { code: string }).code, 'evidence-not-synchronized');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('an incompatible protocol or denied permission keeps the Environment in recovery over HTTP', async () => {
+  const runtime = await recoveryApi();
+  try {
+    const incompatible = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/reconnect`,
+      runtime,
+      {
+        enrollmentId: 'enroll-1',
+        environmentInstanceId: 'mac-mini-1',
+        identityVerified: true,
+        protocolCompatible: false,
+        permissionsAllowed: true,
+        hadActiveRun: true,
+      },
+    );
+    assert.equal(incompatible.status, 409);
+    assert.equal(((await incompatible.json()) as { code: string }).code, 'protocol-incompatible');
+
+    const denied = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/reconnect`,
+      runtime,
+      {
+        enrollmentId: 'enroll-1',
+        environmentInstanceId: 'mac-mini-1',
+        identityVerified: true,
+        protocolCompatible: true,
+        permissionsAllowed: false,
+        hadActiveRun: true,
+      },
+    );
+    assert.equal(denied.status, 409);
+    assert.equal(((await denied.json()) as { code: string }).code, 'permissions-denied');
+    assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'recovering');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('the recovery read route returns records and Force Release history, and validates Force Release without mutating', async () => {
+  const runtime = await recoveryApi();
+  try {
+    const listing = await read(
+      runtime.base,
+      `/api/environments/enrollments/enroll-1/recovery`,
+      runtime,
+    );
+    assert.equal(listing.status, 200);
+    const listed = (await listing.json()) as {
+      recovery: readonly { phase: string; leaseId: string }[];
+      forceReleases: readonly unknown[];
+    };
+    assert.equal(listed.recovery.length, 1);
+    assert.equal(listed.recovery[0]?.phase, 'recovery');
+    assert.equal(listed.forceReleases.length, 0);
+
+    // A Force Release with the wrong typed confirmation is refused and leaves
+    // the record and the lease exactly as they were.
+    const mismatched = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/force-release`,
+      runtime,
+      { acknowledgedRisks: true, typedConfirmation: 'release it', reason: 'emergency drill' },
+    );
+    assert.equal(mismatched.status, 409);
+    assert.equal(((await mismatched.json()) as { code: string }).code, 'typed-confirmation-mismatch');
+    assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'recovering');
+    const stillListed = (await (
+      await read(runtime.base, '/api/environments/enrollments/enroll-1/recovery', runtime)
+    ).json()) as { forceReleases: readonly unknown[] };
+    assert.equal(stillListed.forceReleases.length, 0);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('Force Release over HTTP requires the full manifest and records the permanent outcome', async () => {
+  const runtime = await recoveryApi();
+  try {
+    await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/reconnect`, runtime, {
+      enrollmentId: 'enroll-1',
+      environmentInstanceId: 'mac-mini-1',
+      identityVerified: true,
+      protocolCompatible: true,
+      permissionsAllowed: true,
+      hadActiveRun: true,
+    });
+    await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/evidence`, runtime, {
+      hadActiveRun: true,
+      evidence: {
+        retainedEventCount: 2,
+        turnSettlementObserved: true,
+        engineSessionStopped: false,
+        taskContextRecycled: false,
+      },
+    });
+
+    const mismatched = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/force-release`,
+      runtime,
+      { acknowledgedRisks: true, typedConfirmation: 'please', reason: 'stuck' },
+    );
+    assert.equal(mismatched.status, 409);
+    assert.equal(((await mismatched.json()) as { code: string }).code, 'typed-confirmation-mismatch');
+
+    const forced = await command(
+      runtime.base,
+      `/api/environments/recovery/${runtime.leaseId}/force-release`,
+      runtime,
+      {
+        acknowledgedRisks: true,
+        typedConfirmation: FORCE_RELEASE_CONFIRMATION,
+        reason: 'The Worker host cannot be reached to finish cleanup',
+      },
+    );
+    assert.equal(forced.status, 201);
+    const outcome = (await forced.json()) as {
+      forceRelease: { leaseId: string; unresolvedFacts: readonly string[]; projectWorkspacePreserved: boolean };
+    };
+    assert.equal(outcome.forceRelease.leaseId, runtime.leaseId);
+    assert.equal(outcome.forceRelease.projectWorkspacePreserved, true);
+    assert.ok(outcome.forceRelease.unresolvedFacts.length > 0);
+    assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'released');
+
+    // The exceptional outcome stays in durable history after resolution.
+    const listing = await read(runtime.base, '/api/environments/enrollments/enroll-1/recovery', runtime);
+    const listed = (await listing.json()) as { forceReleases: readonly { leaseId: string }[] };
+    assert.equal(listed.forceReleases.length, 1);
+    assert.equal(listed.forceReleases[0]?.leaseId, runtime.leaseId);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('recovery routes require an authenticated session like every other route', async () => {
+  const runtime = await recoveryApi();
+  try {
+    assert.equal(
+      (await fetch(`${runtime.base}/api/environments/enrollments/enroll-1/recovery`)).status,
+      401,
+    );
+    assert.equal(
+      (
+        await fetch(`${runtime.base}/api/environments/recovery/${runtime.leaseId}/force-release`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      ).status,
+      401,
+    );
+    // The record and the lease remain untouched.
+    assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'recovering');
   } finally {
     await runtime.api.close();
   }

@@ -29,6 +29,7 @@ import type {
 } from './readiness.ts';
 import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProtocolVersion } from './privacy.ts';
 import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-store.ts';
+import type { EnvironmentRecoveryPhase } from './recovery.ts';
 
 /**
  * The caller-facing Environment enrollment and readiness capability (#87).
@@ -84,6 +85,17 @@ export interface EnvironmentEnrollmentServiceOptions {
   /** The leases that decide work safety. Optional: an Environment with no work. */
   readonly leases?: () => Promise<readonly LeaseSafetyFact[]> | readonly LeaseSafetyFact[];
   /**
+   * The open recovery records that decide work safety (#88).
+   *
+   * When supplied, these are authoritative over the lease projection, so
+   * `reconciling` and `recovery` stay distinct in the readiness summary. A
+   * reconnect alone never proves the Environment is safe to reassign, and this
+   * is the seam that keeps that fact visible to the Web summary.
+   */
+  readonly recoveryRecords?: () =>
+    | Promise<readonly { readonly environmentInstanceId: string; readonly phase: EnvironmentRecoveryPhase }[]>
+    | readonly { readonly environmentInstanceId: string; readonly phase: EnvironmentRecoveryPhase }[];
+  /**
    * Engines the Environment's configured use requires.
    *
    * There is deliberately no default pair: ADR-0008 says M2 requires Codex and Pi
@@ -116,6 +128,11 @@ export class EnvironmentEnrollmentService {
   readonly #enrollments: EnrollmentStore;
   readonly #readiness: EnvironmentReadinessStore;
   readonly #leases: (() => Promise<readonly LeaseSafetyFact[]> | readonly LeaseSafetyFact[]) | undefined;
+  readonly #recoveryRecords:
+    | (() =>
+        | Promise<readonly { readonly environmentInstanceId: string; readonly phase: EnvironmentRecoveryPhase }[]>
+        | readonly { readonly environmentInstanceId: string; readonly phase: EnvironmentRecoveryPhase }[])
+    | undefined;
   readonly #requiredEngines: readonly string[];
   readonly #supportedProtocol: ProtocolVersionRange;
   readonly #clock: () => number;
@@ -126,6 +143,7 @@ export class EnvironmentEnrollmentService {
     this.#enrollments = options.enrollments;
     this.#readiness = options.readiness;
     this.#leases = options.leases;
+    this.#recoveryRecords = options.recoveryRecords;
     this.#requiredEngines = options.requiredEngines ?? [];
     this.#supportedProtocol = options.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL;
     this.#clock = options.clock ?? Date.now;
@@ -337,10 +355,11 @@ export class EnvironmentEnrollmentService {
   /** Assemble the independent facts plus the deterministic summary. */
   async readiness(enrollmentId: string): Promise<AssembledReadiness & { readonly enrollment: EnvironmentEnrollment }> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const [rawObserved, rawProbes, leases] = await Promise.all([
+    const [rawObserved, rawProbes, leases, recoveryRecords] = await Promise.all([
       this.#readiness.getReadiness(enrollment.environmentInstanceId),
       this.#readiness.listProbes(enrollment.environmentInstanceId),
       this.#currentLeases(),
+      this.#currentRecoveryRecords(),
     ]);
     // Sanitize on the way out as well as on the way in: a document written by an
     // earlier build (or by an adapter that bypassed this service) must not leak
@@ -352,6 +371,7 @@ export class EnvironmentEnrollmentService {
       enrollment,
       observed,
       leases,
+      ...(recoveryRecords !== undefined ? { recoveryRecords } : {}),
       requiredEngines: this.#requiredEngines,
       ...(latestProbe !== undefined ? { probe: latestProbe } : {}),
       supportedProtocol: this.#supportedProtocol,
@@ -363,6 +383,14 @@ export class EnvironmentEnrollmentService {
   async #currentLeases(): Promise<readonly LeaseSafetyFact[]> {
     if (this.#leases === undefined) return [];
     return this.#leases();
+  }
+
+  async #currentRecoveryRecords(): Promise<
+    readonly { readonly environmentInstanceId: string; readonly phase: EnvironmentRecoveryPhase }[] | undefined
+  > {
+    if (this.#recoveryRecords === undefined) return undefined;
+    const records = await this.#recoveryRecords();
+    return records.filter((record) => record.phase !== 'resolved');
   }
 
   async #requireEnrollment(enrollmentId: string): Promise<EnvironmentEnrollment> {

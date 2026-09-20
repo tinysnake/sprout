@@ -187,6 +187,20 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 2 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  environment_recovery: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'phase', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
+  environment_force_releases: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
 };
 
 function withStore(run: (store: SqliteStore) => Promise<void> | void): Promise<void> {
@@ -246,6 +260,9 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
         { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
         { name: 'environment_enrollments_instance_idx', tbl: 'environment_enrollments' },
+        { name: 'environment_recovery_lease_idx', tbl: 'environment_recovery' },
+        { name: 'environment_recovery_instance_idx', tbl: 'environment_recovery' },
+        { name: 'environment_force_releases_instance_idx', tbl: 'environment_force_releases' },
         { name: 'task_run_links_by_task', tbl: 'task_run_links' },
       ],
     );
@@ -287,9 +304,11 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'collaboration_wake_requests',
         'collaboration_wake_requests',
         'environment_enrollments',
+        'environment_force_releases',
         'environment_leases',
         'environment_probes',
         'environment_readiness',
+        'environment_recovery',
         'projects',
         'task_run_links',
         'tasks',

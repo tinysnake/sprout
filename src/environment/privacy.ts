@@ -291,6 +291,21 @@ export const DEFAULT_READINESS_SUMMARY = 'The readiness summary reason was withh
 export const DEFAULT_DECISION_REASON =
   'The enrollment decision was recorded; its detail was withheld as sensitive.';
 
+/** The fallback for an ordinary recovery decision reason (#88). */
+export const DEFAULT_RECOVERY_REASON =
+  'The recovery decision was recorded; its detail was withheld as sensitive.';
+
+/**
+ * The fallback for a Human Force Release reason (#88).
+ *
+ * A Force Release reason is mandatory free text and the most likely place for a
+ * human to paste a host path or a password while explaining an emergency, so it
+ * passes the same boundary as every other durable operator string and falls back
+ * to product-owned text rather than persisting a redacted fragment.
+ */
+export const DEFAULT_FORCE_RELEASE_REASON =
+  'The Force Release reason was withheld as sensitive; the override remains recorded.';
+
 /**
  * The category a structured identifier belongs to.
  *
