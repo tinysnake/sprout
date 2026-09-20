@@ -111,7 +111,7 @@ const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: stri
   { path: '/project/chat/wg-frontend', destination: 'project', tab: 'chat', expect: /wg-frontend/ },
   { path: '/manage/environments', destination: 'manage', tab: 'environments', expect: /Environments & Host Infrastructure/ },
   { path: '/manage/environments/env-ready', destination: 'manage', tab: 'environments', expect: /6 Independent Health Dimensions/ },
-  { path: '/manage/agents', destination: 'manage', tab: 'agents', expect: /Agents & Worker Personas/ },
+  { path: '/manage/agents', destination: 'manage', tab: 'agents', expect: /Agents & Work Option Preferences/ },
   { path: '/manage/usage', destination: 'manage', tab: 'usage', expect: /Usage & Cost Telemetry/ },
   { path: '/manage/settings', destination: 'manage', tab: 'settings', expect: /General & Operator Settings/ },
 ];

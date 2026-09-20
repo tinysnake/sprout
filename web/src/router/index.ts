@@ -14,9 +14,9 @@
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 import EnvironmentsView from '../modules/environments/views/EnvironmentsView.vue';
+import AgentsView from '../modules/agents/views/AgentsView.vue';
 import FeedView from '../views/FeedView.vue';
 import ProjectView from '../views/ProjectView.vue';
-import AgentsView from '../views/AgentsView.vue';
 import UsageView from '../views/UsageView.vue';
 import SettingsView from '../views/SettingsView.vue';
 

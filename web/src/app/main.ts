@@ -5,7 +5,11 @@ import { createAppRouter } from '../router/index.js';
 import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.js';
 import { createEnvironmentEnrollmentBrowserAdapter } from '../adapters/environment-api.js';
 import { ProductionEnvironmentService } from '../modules/environments/adapters/production-adapter.js';
+import { AGENT_SERVICE, type AgentManagementService } from '../modules/agents/types.js';
+import { createAgentBrowserAdapter } from '../adapters/agent-api.js';
+import { ProductionAgentService } from '../modules/agents/adapters/production-adapter.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
+import type { RunView } from '../../../src/web/views.ts';
 import type { ShellConnectionSource } from '../shell/connection.js';
 import { SHELL_CONNECTION_SOURCE } from '../shell/use-shell-connection.js';
 import { ANNOUNCER_KEY, ANNOUNCER_MESSAGE_KEY, createAnnouncerChannel } from '../primitives/announcer.js';
@@ -22,6 +26,15 @@ export interface SproutAppOptions {
    * production route can never expose fixture-backed behaviour.
    */
   environmentService?: EnvironmentService;
+  /**
+   * The typed Agent authority for `/manage/agents` (#91).
+   *
+   * Production wiring supplies a real adapter here. Deterministic DOM tests
+   * inject a fixture adapter explicitly. When it is omitted the route renders an
+   * explicit unavailable state rather than defaulting to fixture facts, so a
+   * production route can never expose fixture-backed behaviour.
+   */
+  agentService?: AgentManagementService;
   /**
    * A page-owned connection source.
    *
@@ -51,6 +64,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   if (options.environmentService) {
     app.provide(ENVIRONMENT_SERVICE, options.environmentService);
   }
+  if (options.agentService) {
+    app.provide(AGENT_SERVICE, options.agentService);
+  }
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);
   }
@@ -71,8 +87,20 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
     const environmentService = new ProductionEnvironmentService(
       createEnvironmentEnrollmentBrowserAdapter(transport),
     );
+    // The typed Agent authority (#91): the durable identities and the
+    // Environment-facts compatibility projection arrive through the #90 wire
+    // adapter over the same shared transport; the run history read supplies
+    // the attribution foldable. No fixture is involved.
+    const agentService = new ProductionAgentService(
+      createAgentBrowserAdapter(transport),
+      () =>
+        transport
+          .request<{ readonly runs: readonly RunView[] }>('/api/runs')
+          .then((body) => body.runs),
+    );
     const { app, router } = createSproutApp({
       environmentService,
+      agentService,
       connectionSource: transport,
     });
     router.isReady().then(() => {
