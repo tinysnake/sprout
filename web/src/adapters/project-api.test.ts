@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createProjectBrowserAdapter, type ProjectAuthorityView } from './project-api.ts';
+import {
+  createProjectAccessBrowserAdapter,
+  createProjectBrowserAdapter,
+  type ProjectAuthorityView,
+  type ProjectEnvironmentAccessView,
+} from './project-api.ts';
 import { type BrowserTransport } from '../transport/browser-transport.ts';
 
 /**
@@ -158,4 +163,79 @@ test('membership, archive, and restore commands hit their dedicated routes', asy
     ],
   );
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { reason: 'moving on' });
+});
+
+const access: ProjectEnvironmentAccessView = {
+  projectId: 'project-sprout',
+  environmentInstanceId: 'mac-mini-1',
+  status: 'active',
+  startedAt: 1_000,
+  updatedAt: 2_000,
+  current: {
+    bindingId: 'binding-2',
+    workspaceId: 'a'.repeat(40),
+    kind: 'relative',
+    path: 'repos/second',
+    boundAt: 2_000,
+  },
+  history: [
+    {
+      bindingId: 'binding-1',
+      workspaceId: 'a'.repeat(40),
+      kind: 'relative',
+      path: 'repos/first',
+      boundAt: 1_000,
+      unboundAt: 2_000,
+      unboundReason: 'moved',
+    },
+    {
+      bindingId: 'binding-2',
+      workspaceId: 'a'.repeat(40),
+      kind: 'relative',
+      path: 'repos/second',
+      boundAt: 2_000,
+    },
+  ],
+};
+
+test('the access adapter reads and commands the additive access routes', async () => {
+  const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/access') && path.startsWith('/api/projects/')) {
+      // A list route returns an array; a grant returns one record.
+      return path === '/api/projects/project-sprout/access'
+        ? { access: [access] }
+        : { access };
+    }
+    return { access };
+  });
+  const adapter = createProjectAccessBrowserAdapter(transport);
+  assert.deepEqual(await adapter.listProjectAccess('project-sprout'), [access]);
+  await adapter.grantProjectAccess('project-sprout', {
+    environmentInstanceId: 'mac-mini-1',
+    workspace: { kind: 'default' },
+  });
+  await adapter.changeProjectWorkspace('project-sprout', 'mac-mini-1', {
+    workspace: { kind: 'relative', path: 'repos/third' },
+    reason: 'maintained',
+  });
+  await adapter.endProjectAccess('project-sprout', 'mac-mini-1', { reason: 'retired' });
+
+  assert.deepEqual(
+    calls.map((call) => call.path),
+    [
+      '/api/projects/project-sprout/access',
+      '/api/projects/project-sprout/access',
+      '/api/projects/project-sprout/access/mac-mini-1/workspace',
+      '/api/projects/project-sprout/access/mac-mini-1/end',
+    ],
+  );
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+    environmentInstanceId: 'mac-mini-1',
+    workspace: { kind: 'default' },
+  });
+  const changed = JSON.parse(String(calls[2]?.init?.body)) as { workspace: { kind: string; path: string } };
+  assert.equal(changed.workspace.path, 'repos/third');
+  // The typed view exposes the Worker-relative location, never an absolute path.
+  const serialized = JSON.stringify(access);
+  assert.ok(!serialized.includes('/Users/'));
 });

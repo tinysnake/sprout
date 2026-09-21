@@ -184,3 +184,98 @@ export function createProjectBrowserAdapter(transport: BrowserTransport): Projec
     },
   };
 }
+
+/**
+ * The typed browser port for Project Environment access and Project workspace
+ * bindings (#93, ADR-0008).
+ *
+ * The wire shapes mirror `src/web/views.ts`: a binding exposes the Worker's
+ * opaque workspace identity and, for a relative selection, the Worker-root-
+ * relative location — never an absolute host path.
+ */
+export interface WorkspaceBindingView {
+  readonly bindingId: string;
+  readonly workspaceId: string;
+  readonly kind: string;
+  readonly path?: string;
+  readonly boundAt: number;
+  readonly unboundAt?: number;
+  readonly unboundReason?: string;
+}
+
+export interface ProjectEnvironmentAccessView {
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly status: string;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly endedAt?: number;
+  readonly endedReason?: string;
+  readonly current?: WorkspaceBindingView;
+  readonly history: readonly WorkspaceBindingView[];
+}
+
+/** A portable workspace selection: the Worker default or a relative location. */
+export type WorkspaceSelectionInput =
+  | { readonly kind: 'default' }
+  | { readonly kind: 'relative'; readonly path: string };
+
+export interface ProjectAccessBrowserAdapter {
+  /** One Project's Environment access and workspace binding history. */
+  listProjectAccess(projectId: string): Promise<readonly ProjectEnvironmentAccessView[]>;
+  /** Grant access and record the current workspace; the Worker validates first. */
+  grantProjectAccess(
+    projectId: string,
+    input: {
+      readonly environmentInstanceId: string;
+      readonly workspace: WorkspaceSelectionInput;
+      readonly reason?: string;
+    },
+  ): Promise<ProjectEnvironmentAccessView>;
+  /** Change the current workspace; the previous binding is retained. */
+  changeProjectWorkspace(
+    projectId: string,
+    environmentInstanceId: string,
+    input: { readonly workspace: WorkspaceSelectionInput; readonly reason?: string },
+  ): Promise<ProjectEnvironmentAccessView>;
+  /** End access non-destructively. */
+  endProjectAccess(
+    projectId: string,
+    environmentInstanceId: string,
+    input?: { readonly reason?: string },
+  ): Promise<ProjectEnvironmentAccessView>;
+}
+
+export function createProjectAccessBrowserAdapter(
+  transport: BrowserTransport,
+): ProjectAccessBrowserAdapter {
+  return {
+    async listProjectAccess(projectId) {
+      const response = await transport.request<{
+        readonly access: readonly ProjectEnvironmentAccessView[];
+      }>(`/api/projects/${encodeURIComponent(projectId)}/access`);
+      return response.access;
+    },
+    async grantProjectAccess(projectId, input) {
+      const response = await transport.request<{ readonly access: ProjectEnvironmentAccessView }>(
+        `/api/projects/${encodeURIComponent(projectId)}/access`,
+        jsonCommand(input),
+      );
+      return response.access;
+    },
+    async changeProjectWorkspace(projectId, environmentInstanceId, input) {
+      const response = await transport.request<{ readonly access: ProjectEnvironmentAccessView }>(
+        `/api/projects/${encodeURIComponent(projectId)}/access/${encodeURIComponent(environmentInstanceId)}/workspace`,
+        jsonCommand(input),
+      );
+      return response.access;
+    },
+    async endProjectAccess(projectId, environmentInstanceId, input) {
+      const response = await transport.request<{ readonly access: ProjectEnvironmentAccessView }>(
+        `/api/projects/${encodeURIComponent(projectId)}/access/${encodeURIComponent(environmentInstanceId)}/end`,
+        jsonCommand(input ?? {}),
+      );
+      return response.access;
+    },
+  };
+}

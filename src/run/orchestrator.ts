@@ -391,7 +391,7 @@ export class RunOrchestrator {
         : registeredWorkspace !== undefined ? { projectWorkspaceId: resolution.projectId } : {}),
       ...(request.projectWorkspacePath !== undefined
         ? { projectWorkspacePath: request.projectWorkspacePath }
-        : registeredWorkspace !== undefined ? { projectWorkspacePath: registeredWorkspace.path } : {}),
+        : registeredWorkspace?.path !== undefined ? { projectWorkspacePath: registeredWorkspace.path } : {}),
       ...(request.taskBootstrapInstructions !== undefined ? { taskBootstrapInstructions: request.taskBootstrapInstructions } : {}),
     };
     const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));
@@ -687,9 +687,17 @@ export class RunOrchestrator {
       // fact-form hand-off. Both are deterministic functions of persisted facts.
       // Keep all setup inside the lease guard so a rejected assembly is persisted
       // as a terminal failure and cannot leave the acquired lease active.
+      // A bound Project workspace is the run's continuation slot. The workspace
+      // identity here must include the Worker-root-relative location: ADR-0004
+      // scopes a native session to its working directory, and ADR-0008 requires a
+      // workspace change to start a new native session slot rather than continue
+      // the session that belonged to the old directory. A Worker-managed default
+      // carries no location, so the Project identity alone is its slot.
       const workingDirectory = workspace.projectWorkspaceId === undefined
         ? resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent)
-        : `project-workspace:${workspace.projectWorkspaceId}`;
+        : workspace.projectWorkspacePath === undefined
+          ? `project-workspace:${workspace.projectWorkspaceId}`
+          : `project-workspace:${workspace.projectWorkspaceId}:${workspace.projectWorkspacePath}`;
       const assembled = await this.#assembleInput(initial, agent, running.id);
       // Do not persist and notify an unchanged observable run state. Replay
       // cursors use durable write positions as forward boundaries, so a no-op

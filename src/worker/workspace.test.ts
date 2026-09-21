@@ -236,3 +236,93 @@ function lifecycle(store: SqliteStore, connection: Awaited<ReturnType<typeof wor
   });
   return { pool, lifecycle };
 }
+
+/**
+ * Worker-owned Project workspace validation (#93).
+ *
+ * The Worker is the filesystem authority: it turns a portable selection into a
+ * real workspace and returns an opaque identity plus, for a relative selection,
+ * the relative location. The absolute location never crosses the boundary.
+ */
+test('the Worker validates a default and a relative Project workspace selection without exposing the root', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-validate-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const connection = await worker(root);
+  t.after(() => connection.close());
+
+  const defaultWorkspace = await connection.contexts.validateWorkspace({
+    projectId: 'project-1',
+    environmentInstanceId: 'env-1',
+    kind: 'default',
+  });
+  assert.equal(defaultWorkspace.kind, 'default');
+  assert.match(defaultWorkspace.workspaceId, /^[a-f0-9]{24}$/);
+  assert.equal(defaultWorkspace.path, undefined);
+  // The default workspace exists below the Worker's own projects root.
+  assert.equal(existsSync(join(root, 'projects', hash('project-1'))), true);
+
+  const relative = await connection.contexts.validateWorkspace({
+    projectId: 'project-1',
+    environmentInstanceId: 'env-1',
+    kind: 'relative',
+    path: 'repos/sprout',
+  });
+  assert.equal(relative.kind, 'relative');
+  assert.equal(relative.path, 'repos/sprout');
+  assert.match(relative.workspaceId, /^[a-f0-9]{24}$/);
+  // The relative location was created and resolves below the physical root.
+  assert.equal(existsSync(join(root, 'repos', 'sprout')), true);
+  // The result never carries the absolute root.
+  assert.ok(!JSON.stringify(relative).includes(root));
+});
+
+test('the Worker refuses to validate an escaping or absolute relative selection', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-validate-unsafe-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const connection = await worker(root);
+  t.after(() => connection.close());
+
+  await assert.rejects(
+    connection.contexts.validateWorkspace({
+      projectId: 'project-1',
+      environmentInstanceId: 'env-1',
+      kind: 'relative',
+      path: '../outside',
+    }),
+    /relative/,
+  );
+  await assert.rejects(
+    connection.contexts.validateWorkspace({
+      projectId: 'project-1',
+      environmentInstanceId: 'env-1',
+      kind: 'relative',
+      path: '/absolute/path',
+    }),
+    /relative/,
+  );
+  assert.equal(existsSync(join(root, '..', 'outside')), false);
+});
+
+test('a planted symlink cannot make workspace validation escape the Worker root', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-validate-symlink-'));
+  const outside = mkdtempSync(join(tmpdir(), 'sprout-worker-validate-outside-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  mkdirSync(join(root, 'repos'), { recursive: true });
+  symlinkSync(outside, join(root, 'repos', 'planted'), 'dir');
+  const connection = await worker(root);
+  t.after(() => connection.close());
+
+  await assert.rejects(
+    connection.contexts.validateWorkspace({
+      projectId: 'project-1',
+      environmentInstanceId: 'env-1',
+      kind: 'relative',
+      path: 'repos/planted',
+    }),
+    /outside Worker root/,
+  );
+  assert.equal(existsSync(join(outside, '.sprout')), false);
+});

@@ -1,8 +1,14 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import { ProjectAuthorityError } from '../project/authority-model.ts';
+import { ProjectAccessError, type WorkspaceSelection } from '../project/access.ts';
 import type { ProjectService } from '../project/authority-service.ts';
+import type { ProjectAccessService } from '../project/access-service.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
-import { toProjectAuthorityView, toProjectView } from './views.ts';
+import {
+  toProjectAuthorityView,
+  toProjectEnvironmentAccessView,
+  toProjectView,
+} from './views.ts';
 
 /**
  * The Project, template-snapshot, and membership authority router (#92).
@@ -25,6 +31,15 @@ import { toProjectAuthorityView, toProjectView } from './views.ts';
 
 export interface ProjectRouterOptions {
   readonly projects: ProjectService;
+  /**
+   * The Project Environment access and workspace capability (#93).
+   *
+   * Optional so the #92 authority contract stays usable on its own; when
+   * present the access, workspace change, and access-end routes are enabled and
+   * every one delegates to this service, so the validate-before-record rule and
+   * the binding safety guards have exactly one implementation.
+   */
+  readonly access?: ProjectAccessService;
   /**
    * The M1 composer registry, when the runtime composed one. Its configured
    * Projects are merged into `GET /api/projects` so the authority route never
@@ -67,6 +82,22 @@ function statusFilter(value: string | undefined): 'active' | 'archived' | undefi
 }
 
 function projectFailure(context: ApiRequestContext, error: unknown): boolean {
+  if (error instanceof ProjectAccessError) {
+    // A lifecycle conflict is 409, exactly like the Project authority contract:
+    // a duplicate access, an ended access, and active work are states of the
+    // resource, not bad requests. Unknown targets are 404 and malformed
+    // selections or workers that cannot validate are 400.
+    const status =
+      error.code === 'unknown-project' || error.code === 'unknown-environment-access'
+        ? 404
+        : error.code === 'duplicate-environment-access' ||
+            error.code === 'access-ended' ||
+            error.code === 'archived-project-is-read-only' ||
+            error.code === 'active-work-depends-on-binding'
+          ? 409
+          : 400;
+    return json(context, status, { error: error.message, code: error.code });
+  }
   if (error instanceof ProjectAuthorityError) {
     // Lifecycle conflicts are 409 under the existing Environment/Task router
     // contract: active work, archived read-only, duplicate membership, and
@@ -91,7 +122,7 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
 }
 
 export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
-  const { projects, legacyProjects } = options;
+  const { projects, access, legacyProjects } = options;
 
   /**
    * The merged composer-compatible listing: legacy configured Projects plus
@@ -313,9 +344,140 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         }
       }
 
+      // POST /api/projects/:id/access — grant access to an enrolled Environment
+      // and record its current Project workspace binding (ADR-0008, #93). One
+      // Human action; the Worker validates the selection before anything is
+      // durable.
+      if (
+        method === 'POST' &&
+        segments.length === 4 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access'
+      ) {
+        if (access === undefined) return json(context, 404, { error: 'unknown route' });
+        const body = await context.readBody();
+        const environmentInstanceId = stringField(body, 'environmentInstanceId');
+        if (environmentInstanceId === undefined) {
+          return json(context, 400, { error: 'environmentInstanceId is required' });
+        }
+        const selection = parseWorkspaceSelection(body);
+        if (selection === 'invalid') {
+          return json(context, 400, {
+            error: 'workspace must be {"kind":"default"} or {"kind":"relative","path":"..."}',
+          });
+        }
+        const reason = stringField(body, 'reason');
+        try {
+          const granted = await access.grant({
+            projectId: segments[2] ?? '',
+            environmentInstanceId,
+            selection,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 201, { access: toProjectEnvironmentAccessView(granted) });
+        } catch (error) {
+          return projectFailure(context, error);
+        }
+      }
+
+      // GET /api/projects/:id/access — list one Project's Environment access
+      // and workspace binding history.
+      if (
+        method === 'GET' &&
+        segments.length === 4 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access'
+      ) {
+        if (access === undefined) return json(context, 404, { error: 'unknown route' });
+        const listed = await access.listForProject(segments[2] ?? '');
+        return json(context, 200, { access: listed.map(toProjectEnvironmentAccessView) });
+      }
+
+      // POST /api/projects/:id/access/:environmentInstanceId/workspace — change
+      // the current Project workspace; the previous binding is retained.
+      if (
+        method === 'POST' &&
+        segments.length === 6 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access' &&
+        segments[5] === 'workspace'
+      ) {
+        if (access === undefined) return json(context, 404, { error: 'unknown route' });
+        const body = await context.readBody();
+        const selection = parseWorkspaceSelection(body);
+        if (selection === 'invalid') {
+          return json(context, 400, {
+            error: 'workspace must be {"kind":"default"} or {"kind":"relative","path":"..."}',
+          });
+        }
+        const reason = stringField(body, 'reason');
+        try {
+          const changed = await access.changeWorkspace({
+            projectId: segments[2] ?? '',
+            environmentInstanceId: segments[4] ?? '',
+            selection,
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { access: toProjectEnvironmentAccessView(changed) });
+        } catch (error) {
+          return projectFailure(context, error);
+        }
+      }
+
+      // POST /api/projects/:id/access/:environmentInstanceId/end — end access
+      // non-destructively (ADR-0008); history and bindings are retained.
+      if (
+        method === 'POST' &&
+        segments.length === 6 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access' &&
+        segments[5] === 'end'
+      ) {
+        if (access === undefined) return json(context, 404, { error: 'unknown route' });
+        const body = await context.readBody();
+        const reason = stringField(body, 'reason');
+        try {
+          const ended = await access.end({
+            projectId: segments[2] ?? '',
+            environmentInstanceId: segments[4] ?? '',
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { access: toProjectEnvironmentAccessView(ended) });
+        } catch (error) {
+          return projectFailure(context, error);
+        }
+      }
+
       return false;
     },
   };
+}
+
+/**
+ * Parse the portable workspace selection a Human supplied.
+ *
+ * The default carries no location; a relative selection must carry a string
+ * path. Deeper validation (normalization, containment) stays in the access
+ * domain's one rule set.
+ */
+function parseWorkspaceSelection(
+  body: Record<string, unknown>,
+): WorkspaceSelection | 'invalid' {
+  const workspace = body['workspace'];
+  if (typeof workspace !== 'object' || workspace === null) return 'invalid';
+  const record = workspace as Record<string, unknown>;
+  const kind = record['kind'];
+  if (kind === 'default') return { kind: 'default' };
+  if (kind === 'relative') {
+    const path = record['path'];
+    if (typeof path !== 'string') return 'invalid';
+    return { kind: 'relative', path };
+  }
+  return 'invalid';
 }
 
 function parseAgentMemberships(

@@ -213,6 +213,12 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
+  project_environment_access: [
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
 };
 
 function withStore(run: (store: SqliteStore) => Promise<void> | void): Promise<void> {
@@ -323,6 +329,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'environment_readiness',
         'environment_recovery',
         'project_authorities',
+        'project_environment_access',
         'projects',
         'task_run_links',
         'tasks',

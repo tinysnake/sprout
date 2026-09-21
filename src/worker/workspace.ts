@@ -6,6 +6,8 @@ import type {
   PrepareTaskContextResult,
   RecycleTaskContextParams,
   TaskContextMaterialization,
+  ValidateWorkspaceParams,
+  ValidateWorkspaceResult,
 } from './protocol.ts';
 
 /**
@@ -94,6 +96,32 @@ export class WorkerWorkspace {
   async projectWorkingDirectory(projectId: string, workspacePath?: string): Promise<string> {
     const root = await this.#rootPath();
     return this.#workspace(root, projectId, false, workspacePath);
+  }
+
+  /**
+   * Validate or prepare one Project workspace selection (#93).
+   *
+   * The Worker owns the filesystem boundary, so it is the only place that turns
+   * a portable selection into a real path or creates the Worker-managed default.
+   * The absolute location stays here: the result carries an opaque identity — the
+   * same stable hash the default Project layout already uses — and, for a
+   * relative selection, the relative location it was given.
+   */
+  async validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    const root = await this.#rootPath();
+    if (input.kind === 'relative') {
+      if (input.path === undefined) {
+        throw new Error('a relative Project workspace selection requires a location');
+      }
+      // Create-if-missing through the same containment and symlink checks every
+      // other workspace operation uses, so a selection can never escape the
+      // Worker root or write through a planted symlink.
+      await this.#workspace(root, input.projectId, true, input.path);
+      return { workspaceId: token(`${input.projectId}\u0000relative\u0000${input.path}`), kind: 'relative', path: input.path };
+    }
+    // The Worker-managed default: create and resolve the Project's own directory.
+    await this.#workspace(root, input.projectId, true);
+    return { workspaceId: token(`${input.projectId}\u0000default`), kind: 'default' };
   }
 
   async #rootPath(): Promise<string> {

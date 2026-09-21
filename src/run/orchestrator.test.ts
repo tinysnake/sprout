@@ -702,7 +702,12 @@ test('a registered Project workspace is passed to the Worker as its relative rep
 
   assert.equal(adapter.requests[0]?.projectWorkspaceId, 'project-sprout');
   assert.equal(adapter.requests[0]?.projectWorkspacePath, 'minesweeper');
-  assert.equal(adapter.requests[0]?.workingDirectory, 'project-workspace:project-sprout');
+  // The continuation slot names the workspace location, so a later change to a
+  // different workspace starts a new native session slot (ADR-0004/ADR-0008).
+  assert.equal(
+    adapter.requests[0]?.workingDirectory,
+    'project-workspace:project-sprout:minesweeper',
+  );
 });
 
 test('a run records the environment instance it used, observably through the store', async () => {

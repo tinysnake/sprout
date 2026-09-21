@@ -22,6 +22,8 @@ import {
   type TaskContextMaterialization,
   type TurnEventParams,
   type TurnSettledParams,
+  type ValidateWorkspaceParams,
+  type ValidateWorkspaceResult,
   type WorkerInfo,
 } from './protocol.ts';
 
@@ -182,6 +184,10 @@ export class WorkerContextClient {
 
   recycle(input: RecycleTaskContextParams): Promise<void> {
     return this.#transport.request(WORKER_METHODS.recycleTaskContext, input);
+  }
+
+  validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    return this.#transport.request(WORKER_METHODS.validateWorkspace, input);
   }
 }
 

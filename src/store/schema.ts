@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 9;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -503,6 +503,29 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           id TEXT PRIMARY KEY,
           document TEXT NOT NULL,
           updated_at INTEGER NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    fromVersion: 8,
+    toVersion: 9,
+    name: 'project_environment_access_and_workspaces',
+    migrate: (db) => {
+      // A Project Environment access relationship is one JSON document keyed by
+      // the (Project, Environment instance) pair, holding the granted workspace
+      // bindings as append-only history (#93, ADR-0008). The document holds only
+      // the Worker's opaque workspace identity and, for a relative selection, a
+      // Worker-root-relative location — never an absolute host path. Ending
+      // access is a status and a superseded binding is a recorded fact inside
+      // the document; there is no delete.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_environment_access (
+          project_id TEXT NOT NULL,
+          environment_instance_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (project_id, environment_instance_id)
         );
       `);
     },

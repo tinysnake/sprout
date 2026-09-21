@@ -1,7 +1,7 @@
 import type { EngineAdapter } from '../engine/port.ts';
 import type { WorkerConnection } from './carrier.ts';
 import type { WorkerContextClient } from './client.ts';
-import type { WorkerInfo } from './protocol.ts';
+import type { ValidateWorkspaceParams, ValidateWorkspaceResult, WorkerInfo } from './protocol.ts';
 
 /**
  * Keeps an environment's worker alive across its death.
@@ -185,6 +185,27 @@ export class EnvironmentWorkerRegistry {
       throw new Error(`environment instance mismatch: Task resolved ${instanceId} but its worker serves ${connection.info.environmentInstanceId}`);
     }
     return connection.contexts;
+  }
+
+  /**
+   * Ask the Worker serving one instance to validate or prepare a Project
+   * workspace selection (#93). Starting a Worker here is intended: a grant or a
+   * workspace change is explicit Human work, so it may revive a lazy Worker the
+   * same way a run does.
+   */
+  async validateWorkspace(
+    instanceId: string,
+    input: ValidateWorkspaceParams,
+  ): Promise<ValidateWorkspaceResult> {
+    if (this.#closed) throw new Error('environment worker registry is closed');
+    const supervisor = this.#supervisor(instanceId);
+    const connection = await supervisor.connection();
+    if (connection.info.environmentInstanceId !== instanceId) {
+      await supervisor.close();
+      this.#supervisors.delete(instanceId);
+      throw new Error(`environment instance mismatch: workspace validation resolved ${instanceId} but its worker serves ${connection.info.environmentInstanceId}`);
+    }
+    return connection.contexts.validateWorkspace(input);
   }
 
   /**
