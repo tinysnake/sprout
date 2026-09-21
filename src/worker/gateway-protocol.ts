@@ -96,12 +96,27 @@ export interface WorkerGatewayPending {
   readonly type: 'worker/pending';
   readonly enrollmentId: string;
   readonly outcome: string;
+  /**
+   * The environment instance the proven identity belongs to, when known.
+   *
+   * The Worker CLI persists it so a later `start` and its LaunchAgent can be
+   * installed before a Human approves, without inventing a host identity (#117).
+   */
+  readonly environmentInstanceId?: string;
 }
 
 /** The core refused the connection before any Worker command was accepted. */
 export interface WorkerGatewayRefused {
   readonly type: 'worker/refused';
   readonly reason: string;
+  /**
+   * A neutral, machine-readable refusal category (#117).
+   *
+   * The Worker CLI uses it to distinguish an `incompatible` protocol from a
+   * `revoked` identity so `status` can report the right state instead of a bare
+   * `stopped`. It carries no host or credential detail.
+   */
+  readonly code?: 'refused' | 'incompatible' | 'revoked';
 }
 
 export type WorkerGatewayServerFrame =

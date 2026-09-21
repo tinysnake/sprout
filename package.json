@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "sprout": "bin/sprout"
+  },
   "description": "Local multi-agent collaboration and environment-scheduling platform",
   "engines": {
     "node": ">=23"

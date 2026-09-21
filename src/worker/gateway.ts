@@ -158,7 +158,7 @@ export class WorkerGateway {
   async handle(stream: Duplex, facts: WorkerTransportFacts): Promise<WorkerGatewayOutcome> {
     const decision = decideWorkerTransport(facts);
     if (!decision.allowed) {
-      safeWrite(stream, { type: 'worker/refused', reason: decision.reason });
+      safeWrite(stream, { type: 'worker/refused', reason: decision.reason, code: 'refused' });
       stream.destroy();
       return { accepted: false, reason: decision.reason };
     }
@@ -227,7 +227,7 @@ export class WorkerGateway {
         engines: [],
       });
       const reason = compatibility.detail ?? 'the Worker protocol is incompatible with this Sprout build';
-      safeWrite(stream, { type: 'worker/refused', reason });
+      safeWrite(stream, { type: 'worker/refused', reason, code: 'incompatible' });
       reader.dispose();
       stream.end();
       return { accepted: false, reason };
@@ -251,8 +251,8 @@ export class WorkerGateway {
     if (outcome.outcome !== 'reconnected') {
       const pending = awaitingApproval(outcome.requiresHumanApproval, outcome.outcome);
       safeWrite(stream, pending
-        ? { type: 'worker/pending', enrollmentId, outcome: outcome.outcome }
-        : { type: 'worker/refused', reason: 'the Worker identity is not approved for work' });
+        ? { type: 'worker/pending', enrollmentId, outcome: outcome.outcome, environmentInstanceId: outcome.enrollment.environmentInstanceId }
+        : { type: 'worker/refused', reason: 'the Worker identity is not approved for work', code: 'revoked' });
       reader.dispose();
       stream.end();
       return {

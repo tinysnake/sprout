@@ -51,6 +51,30 @@ For client development with hot reload, run `npm start` in one terminal and
 Environment overrides: `SPROUT_PORT`, `SPROUT_DATABASE`, `SPROUT_WORKDIR`,
 `SPROUT_ENV_INSTANCE`, `SPROUT_LEASE_TTL_MS`, `SPROUT_CODEX_BIN`.
 
+## Enroll a macOS Environment host
+
+The `sprout` executable (`bin/sprout`) owns the macOS Environment
+Worker's bootstrap and signed-in-user lifecycle (ADR-0012):
+
+```bash
+# 1. In Sprout Web, create a pending enrollment and copy its one-use secret.
+# 2. On the macOS host, claim it. The secret is read from stdin, never argv.
+sprout worker enroll 127.0.0.1:5174 <enrollment-id>
+# 3. After a Human approves the identity in Web:
+sprout worker start            # foreground; establishes the E1 outbound connection
+sprout worker install-service  # per-user LaunchAgent: start at sign-in, restart on crash
+sprout worker status           # not-enrolled / stopped / connecting / connected / …
+sprout worker reset --yes      # remove host-local identity and configuration
+sprout worker uninstall-service
+```
+
+The Worker key pair is generated on the host and its private key is stored
+owner-only under `~/.sprout/worker` (override the root with `SPROUT_WORKER_HOME`);
+it is never sent to Sprout, printed, or written to the log. Engine logins stay
+host-local. Exit statuses are documented in `src/worker/cli/worker-cli.ts`:
+`0` success, `1` local/other failure, `2` usage, `3` not enrolled, `4` refused,
+`5` awaiting Human approval, `6` service failure, `7` already running.
+
 ## O7 game workspace
 
 The O7 Minesweeper collaboration configuration is in
