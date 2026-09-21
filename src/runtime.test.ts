@@ -81,6 +81,7 @@ function hostConfiguration(overrides: Partial<HostConfiguration> = {}): HostConf
       project: project(),
     },
     environmentKind: 'local',
+    environmentSource: 'configured',
     containerName: 'synthetic-container',
     windowsTarget: undefined,
     windowsReadyFile: 'C:/synthetic/ready.json',
@@ -1391,6 +1392,42 @@ test('the composed runtime exposes the outbound Worker gateway and its epoch reg
     );
     assert.equal(claimed.status, 200);
     assert.equal(claimed.headers.get('set-cookie'), null, 'the machine route sets no Human cookie');
+  } finally {
+    await runtime.close();
+  }
+});
+
+/**
+ * The enrollment source is the production execution seam (ADR-0012, #115 review
+ * finding 5).
+ *
+ * Under `SPROUT_ENV_SOURCE=enrollment` the runtime does not construct or dial the
+ * M1 configured carrier at all: production execution enters through the accepted
+ * enrollment-backed port. The configured source stays available for tests and the
+ * container carrier, and the two are mutually exclusive so a deployment cannot
+ * silently retain a second production path.
+ */
+test('the enrollment environment source composes without a configured carrier', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-enrollment-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+    }),
+    projectRoot: '/synthetic/project-root',
+    stores: inMemoryStores(),
+  });
+  try {
+    assert.equal(runtime.environmentSource, 'enrollment');
+    assert.equal(runtime.engines.size, 0, 'no configured Worker is started or dialed');
+    assert.notEqual(runtime.enrollmentEnvironment, undefined);
+    // A run cannot resolve a Worker before one is accepted: the seam fails closed
+    // rather than dialing the Sprout host.
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', prompt: 'go' });
+    const run = await runtime.orchestrator.waitFor(submitted.id);
+    assert.equal(run.status, 'failed');
+    assert.match(run.failure ?? '', /no accepted enrollment-backed Worker connection/);
   } finally {
     await runtime.close();
   }

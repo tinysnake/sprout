@@ -108,6 +108,32 @@ function stubConnection(environmentInstanceId: string): WorkerConnection {
   };
 }
 
+test('the enrollment-backed outbound target crosses the Worker allowlist without core authority', () => {
+  // #115 review finding 5: the core-started Worker must be able to see the
+  // enrollment target so it can dial out, while the operator credential, browser
+  // session material, and the private key file contents never cross.
+  const forwarded = localWorkerEnvironment({
+    PATH: '/usr/bin',
+    SPROUT_ENROLLMENT_ID: 'enroll-1',
+    SPROUT_CORE_HOST: '127.0.0.1',
+    SPROUT_CORE_PORT: '5174',
+    SPROUT_ENROLLMENT_CLAIM: 'claim-secret-probe',
+    SPROUT_WORKER_KEY: '/synthetic/worker-key.pem',
+    SPROUT_OPERATOR_CREDENTIAL: 'operator-credential-probe',
+    SPROUT_SESSION_SECRET: 'session-secret-probe',
+    UNRELATED_HOST_FACT: 'not-for-worker',
+  });
+  assert.equal(forwarded['SPROUT_ENROLLMENT_ID'], 'enroll-1');
+  assert.equal(forwarded['SPROUT_CORE_HOST'], '127.0.0.1');
+  assert.equal(forwarded['SPROUT_CORE_PORT'], '5174');
+  assert.equal(forwarded['SPROUT_ENROLLMENT_CLAIM'], 'claim-secret-probe');
+  // Only the key *path* crosses; the private key itself stays host-local.
+  assert.equal(forwarded['SPROUT_WORKER_KEY'], '/synthetic/worker-key.pem');
+  for (const name of ['SPROUT_OPERATOR_CREDENTIAL', 'SPROUT_SESSION_SECRET', 'UNRELATED_HOST_FACT']) {
+    assert.equal(forwarded[name], undefined, `${name} must not reach the Worker`);
+  }
+});
+
 test('a local environment reaches its worker as a separate network endpoint', async () => {
   const carriers = recorder();
   const factory = createEnvironmentWorkerFactory(baseConfiguration(), {

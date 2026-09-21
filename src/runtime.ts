@@ -26,7 +26,7 @@ import {
   EnvironmentEnrollmentService,
   type EnvironmentEnrollmentServiceOptions,
 } from './environment/enrollment-service.ts';
-import type { HostConfiguration } from './host-config.ts';
+import type { EnvironmentSource, HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { BridgedProjectRegistry } from './project/bridged-registry.ts';
@@ -233,6 +233,11 @@ export interface SproutRuntime {
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
   /**
+   * How this Sprout instance reaches its production Worker (#115, ADR-0012).
+   * `configured` is the M1 carrier path; `enrollment` is the outbound path.
+   */
+  readonly environmentSource: EnvironmentSource;
+  /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
    */
@@ -240,7 +245,8 @@ export interface SproutRuntime {
   readonly workerEpochs: WorkerConnectionRegistry;
   /**
    * The runtime environment port over accepted enrollment-backed connections.
-   * E1 exposes it; E2 makes it the dynamic execution catalog.
+   * E1 exposes it; E2 makes it the dynamic execution catalog. Under
+   * `SPROUT_ENV_SOURCE=enrollment` it is the production run seam.
    */
   readonly enrollmentEnvironment: EnrollmentWorkerPort;
   /** The engines the configured environment hosts, validated at construction. */
@@ -329,6 +335,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     engineId,
     runtimeConfiguration,
     environmentKind,
+    environmentSource,
     containerName,
     windowsTarget,
     windowsReadyFile,
@@ -364,25 +371,48 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
 
   const environment =
     options.environment ??
-    createEnvironmentWorkerPort(environmentWorkerConfiguration, {
-      workerEntryPath: options.workerEntryPath ?? join(projectRoot, 'src', 'worker', 'main.ts'),
-      nodeExecutable: options.nodeExecutable ?? process.execPath,
-      // Never hand the core environment to a Worker: it can contain the
-      // operator credential, browser/session secrets, or unrelated authority.
-      hostEnvironment: localWorkerEnvironment(options.hostEnvironment ?? process.env),
-      logWorkerLine:
-        options.logWorkerLine ??
-        ((source, line) => process.stderr.write(`[${source}-worker] ${line}\n`)),
-      onWorkerLog: options.onWorkerLog ?? ((line) => process.stderr.write(`[env-worker] ${line}\n`)),
-    });
+    (environmentSource === 'enrollment'
+      ? undefined
+      : createEnvironmentWorkerPort(environmentWorkerConfiguration, {
+          workerEntryPath: options.workerEntryPath ?? join(projectRoot, 'src', 'worker', 'main.ts'),
+          nodeExecutable: options.nodeExecutable ?? process.execPath,
+          // Never hand the core environment to a Worker: it can contain the
+          // operator credential, browser/session secrets, or unrelated authority.
+          hostEnvironment: localWorkerEnvironment(options.hostEnvironment ?? process.env),
+          logWorkerLine:
+            options.logWorkerLine ??
+            ((source, line) => process.stderr.write(`[${source}-worker] ${line}\n`)),
+          onWorkerLog: options.onWorkerLog ?? ((line) => process.stderr.write(`[env-worker] ${line}\n`)),
+        }));
+
+  /**
+   * The production execution seam (ADR-0012).
+   *
+   * Under `enrollment`, the run seam is the accepted enrollment-backed port —
+   * which is only available after the gateway and stores are constructed. This
+   * delegate carries the orchestrator, Task lifecycle, and Project-access wiring
+   * across that ordering while never dialing or starting a Worker. A caller
+   * supplied `options.environment` (tests, the container carrier) keeps the M1
+   * configured path.
+   */
+  const switchableEnvironment =
+    options.environment === undefined && environmentSource === 'enrollment'
+      ? new EnrollmentEnvironmentDelegate()
+      : undefined;
+  const runtimeEnvironment: RuntimeEnvironment = options.environment ?? switchableEnvironment ?? environment!;
 
   let stores: RuntimeStores | undefined;
   try {
     // Fail fast on a misconfigured engine rather than discovering it per run. The
     // port is closed before the error propagates so a refused build leaves nothing
-    // running; durable state has not been opened yet.
-    const engines = await environment.adapters(instanceId);
-    if (!engines.has(engineId)) {
+    // running; durable state has not been opened yet. Under the enrollment source
+    // (ADR-0012) no Worker is connected at construction, so there is no engine to
+    // validate: the accepted connection carries its engines when it arrives.
+    const engines =
+      environment === undefined
+        ? new Map<string, EngineAdapter>()
+        : await environment.adapters(instanceId);
+    if (environment !== undefined && !engines.has(engineId)) {
       throw new MissingEnvironmentEngineError({
         engineId,
         hostedEngineIds: [...engines.keys()],
@@ -614,8 +644,8 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       projects: projectService,
       worker: {
         validate: (input) =>
-          environment.validateWorkspace !== undefined
-            ? environment.validateWorkspace(input.environmentInstanceId, {
+          runtimeEnvironment.validateWorkspace !== undefined
+            ? runtimeEnvironment.validateWorkspace(input.environmentInstanceId, {
                 projectId: input.projectId,
                 environmentInstanceId: input.environmentInstanceId,
                 kind: input.selection.kind,
@@ -664,7 +694,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
-      engines: (requestedInstanceId) => environment.adapters(requestedInstanceId),
+      engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       agents,
       // Observed engine facts (#87) per instance, so run admission can take the
       // Agent's first compatible work option before any engine accepts the
@@ -730,9 +760,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       runs: orchestrator,
       worker: {
         prepare: async (input) =>
-          (await environment.contexts(input.environmentInstanceId)).prepare(input),
+          (await runtimeEnvironment.contexts(input.environmentInstanceId)).prepare(input),
         recycle: async (input) =>
-          (await environment.contexts(input.environmentInstanceId)).recycle(input),
+          (await runtimeEnvironment.contexts(input.environmentInstanceId)).recycle(input),
       },
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
@@ -831,6 +861,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
     });
+    switchableEnvironment?.setTarget(enrollmentEnvironment);
     const api = createRunApi({
       orchestrator,
       agents,
@@ -922,6 +953,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       workerGateway,
       workerEpochs: workerGateway.epochs,
       enrollmentEnvironment,
+      environmentSource,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then
@@ -946,10 +978,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
        * enrollment; the mapping stays honest by recording only what the Worker
        * actually declared on `worker/info`. */
       async observeWorkerReadiness(enrollmentId: string): Promise<void> {
-        if (environment.info === undefined) return;
+        if (runtimeEnvironment.info === undefined) return;
         const enrollment = await enrollments.get(enrollmentId);
         if (enrollment === undefined || enrollment.status !== 'approved') return;
-        const info = await environment.info(enrollment.environmentInstanceId);
+        const info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
         if (info === undefined || info.readiness === undefined) return;
         await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
       },
@@ -980,7 +1012,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // The environment port owns its worker channels. A *container* is not
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.
-        await environment.close();
+        if (environment !== undefined) await environment.close();
         activeStores.close();
       },
     };
@@ -993,7 +1025,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       }
     }
     try {
-      await environment.close();
+      if (environment !== undefined) await environment.close();
     } catch {
       // ignore environment close error
     }
@@ -1054,6 +1086,58 @@ function renderStartupReport(input: {
   }
 
   return report;
+}
+
+/**
+ * The environment port used under `SPROUT_ENV_SOURCE=enrollment` (ADR-0012).
+ *
+ * The runtime's run, Task, and Project-access wiring is built before the
+ * enrollment gateway and its accepted-connection port exist. This delegate
+ * carries those closures across that ordering and forwards to the
+ * enrollment-backed port once it is constructed, so a run resolves the accepted
+ * outbound Worker and the runtime never dials or starts a Worker.
+ */
+class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
+  #target: RuntimeEnvironment | undefined;
+
+  setTarget(environment: RuntimeEnvironment): void {
+    this.#target = environment;
+  }
+
+  async adapters(environmentInstanceId: string): Promise<ReadonlyMap<string, EngineAdapter>> {
+    return this.#require().adapters(environmentInstanceId);
+  }
+
+  async contexts(environmentInstanceId: string): Promise<TaskContextWorker> {
+    return this.#require().contexts(environmentInstanceId);
+  }
+
+  validateWorkspace(
+    environmentInstanceId: string,
+    input: ValidateWorkspaceParams,
+  ): Promise<ValidateWorkspaceResult> {
+    const target = this.#require();
+    if (target.validateWorkspace === undefined) {
+      return Promise.reject(new Error('the enrollment environment cannot validate Project workspaces'));
+    }
+    return target.validateWorkspace(environmentInstanceId, input);
+  }
+
+  info(environmentInstanceId: string): Promise<WorkerInfo | undefined> {
+    const target = this.#require();
+    return target.info === undefined ? Promise.resolve(undefined) : target.info(environmentInstanceId);
+  }
+
+  async close(): Promise<void> {
+    await this.#target?.close();
+  }
+
+  #require(): RuntimeEnvironment {
+    if (this.#target === undefined) {
+      throw new Error('the enrollment-backed environment is not constructed yet');
+    }
+    return this.#target;
+  }
 }
 
 /**

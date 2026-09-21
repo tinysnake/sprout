@@ -263,11 +263,15 @@ export class EnvironmentEnrollmentService {
     if (!verifyClaimSecret(claimSecret, claim.secretDigest)) {
       throw new EnrollmentError('invalid-claim', 'The one-use enrollment claim is not valid.');
     }
-    // Consumption is durable and one-way: the digest stays so a replay is
-    // refused as `invalid-claim`, while the raw secret is never recoverable.
-    const claimed: EnvironmentEnrollment = { ...enrollment, claim: { ...claim, consumedAt: at }, updatedAt: at };
-    await this.#enrollments.save(claimed);
-    return normalizeEnrollment(claimed);
+    // Consumption is exactly-once and durable: the store compare-and-sets the
+    // stored claim, so two concurrent claimants with the same valid secret can
+    // never both succeed. The loser observes an already-consumed claim and is
+    // refused deterministically rather than reporting a second success (#115).
+    const consumed = await this.#enrollments.consumeClaim(enrollmentId, claim.secretDigest, at);
+    if (consumed === undefined) {
+      throw new EnrollmentError('invalid-claim', 'The one-use enrollment claim is not valid.');
+    }
+    return normalizeEnrollment(consumed);
   }
 
   /**

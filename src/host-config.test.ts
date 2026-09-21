@@ -102,6 +102,13 @@ const settings: readonly Setting[] = [
     parsed: 'container',
   },
   {
+    variable: 'SPROUT_ENV_SOURCE',
+    read: (c) => c.environmentSource,
+    missing: 'configured',
+    present: { SPROUT_ENV_SOURCE: 'enrollment' },
+    parsed: 'enrollment',
+  },
+  {
     variable: 'SPROUT_CONTAINER_NAME',
     read: (c) => c.containerName,
     missing: 'local-macos',
@@ -204,6 +211,7 @@ test('an empty host environment takes exactly the documented defaults', () => {
     engineId: 'codex',
     runtimeConfiguration: {},
     environmentKind: 'local',
+    environmentSource: 'configured',
     containerName: 'local-macos',
     windowsTarget: undefined,
     windowsReadyFile: 'C:/sprout-daemon/worker-ready.json',
@@ -271,8 +279,7 @@ test('an empty numeric host setting keeps the runtime conversion it had before',
   assert.equal(parseWith({ SPROUT_PORT: '' }).port, 0);
 });
 
-test('an invalid runtime JSON channel keeps its existing startup error', () => {
-  assert.throws(
+test('an invalid runtime JSON channel keeps its existing startup error', () => {  assert.throws(
     () => parseWith({ SPROUT_RUNTIME_CONFIG: '{not json' }),
     /SPROUT_RUNTIME_CONFIG must be valid JSON/,
   );
@@ -293,6 +300,18 @@ test('runtime configuration errors do not echo the rejected document', () => {
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal(error.message, 'SPROUT_RUNTIME_CONFIG project memberships must be an array');
+      assert.equal(error.message.includes('a-private-value'), false);
+      return true;
+    },
+  );
+});
+
+test('an unrecognized Worker execution source is refused without echoing the value', () => {
+  assert.throws(
+    () => parseWith({ SPROUT_ENV_SOURCE: 'a-private-value' }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'SPROUT_ENV_SOURCE must be "configured" or "enrollment"');
       assert.equal(error.message.includes('a-private-value'), false);
       return true;
     },

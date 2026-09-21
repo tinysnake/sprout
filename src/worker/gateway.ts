@@ -70,6 +70,12 @@ export interface WorkerGatewayAcceptance {
    * `WorkerClient` adapters from this, exactly as it does for any carrier.
    */
   readonly transport: JsonRpcTransport;
+  /**
+   * Subscribe to this accepted channel ending. The listener fires once when the
+   * transport closes, so a cached handle can invalidate its adapters and facts
+   * instead of reporting a dead channel as live (#115).
+   */
+  onChannelClosed(listener: () => void): () => void;
   /** End this connection and fail anything in flight. */
   close(): void;
 }
@@ -92,6 +98,15 @@ export class WorkerGateway {
   readonly #live = new Map<string, { connectionId: string; transport: JsonRpcTransport }>();
   /** Live accepted connections keyed by environment instance id (#115). */
   readonly #byInstance = new Map<string, WorkerGatewayAcceptance>();
+  /**
+   * Accepted connections that have not finished the `worker/ready` barrier.
+   *
+   * They are tracked so runtime shutdown can tear them down, and their later
+   * `worker/ready` is handled by re-checking epoch authority after the barrier:
+   * an older in-flight connection must never register itself once a newer epoch
+   * has been accepted (the readiness-barrier race).
+   */
+  readonly #inFlight = new Map<string, { readonly enrollmentId: string; readonly stream: Duplex }>();
   readonly #acceptListeners = new Set<(acceptance: WorkerGatewayAcceptance) => void>();
 
   constructor(options: WorkerGatewayOptions) {
@@ -117,6 +132,20 @@ export class WorkerGateway {
   /** The live accepted connection for one environment instance, if any. */
   liveFor(environmentInstanceId: string): WorkerGatewayAcceptance | undefined {
     return this.#byInstance.get(environmentInstanceId);
+  }
+
+  /**
+   * Supersede every registered connection for one enrollment with a newer epoch.
+   *
+   * Only the registered live transport is closed here. A connection still
+   * waiting on the readiness barrier is deliberately left to re-check authority
+   * after that barrier: it must never be able to register itself once a newer
+   * epoch exists, and destroying its stream from here would race the arrival of
+   * its `worker/ready` frame.
+   */
+  #supersedePrior(enrollmentId: string): void {
+    const previous = this.#live.get(enrollmentId);
+    if (previous !== undefined) previous.transport.close();
   }
 
   /**
@@ -234,10 +263,12 @@ export class WorkerGateway {
       };
     }
 
-    // Accept: a newer epoch supersedes and tears down any prior connection.
+    // Accept: a newer epoch supersedes and tears down any prior registered
+    // connection. A connection still waiting on the readiness barrier re-checks
+    // authority after that barrier instead (see below).
     const epoch = this.#epochs.accept(enrollmentId);
-    const previous = this.#live.get(enrollmentId);
-    if (previous !== undefined) previous.transport.close();
+    this.#supersedePrior(enrollmentId);
+    this.#inFlight.set(epoch.connectionId, { enrollmentId, stream });
     safeWrite(stream, {
       type: 'worker/accepted',
       enrollmentId,
@@ -249,11 +280,28 @@ export class WorkerGateway {
     // channel. The Worker confirms it has stopped reading handshake frames, so a
     // `worker/info` request can never arrive in the same chunk as `accepted` and
     // be consumed as a handshake frame.
-    const ready = await reader.next();
+    let ready: WorkerGatewayClientFrame | undefined;
+    try {
+      ready = await reader.next();
+    } finally {
+      // The connection is no longer in flight once the barrier resolves or the
+      // stream ends, so a failed barrier cannot leak the tracked stream.
+      this.#inFlight.delete(epoch.connectionId);
+    }
     if (ready === undefined || ready.type !== 'worker/ready') {
       throw new Error('the Worker did not confirm readiness after acceptance');
     }
+    // Readiness-barrier race: a newer epoch may have been accepted while this
+    // older connection waited. Re-check authority after the barrier, so a
+    // delayed older connection can never register itself as live or routable.
+    if (!this.#epochs.isCurrent(enrollmentId, epoch.connectionId)) {
+      reader.dispose();
+      safeWrite(stream, { type: 'worker/refused', reason: 'a newer Worker connection epoch superseded this connection' });
+      stream.destroy();
+      return { accepted: false, reason: 'a newer Worker connection epoch superseded this connection' };
+    }
     reader.dispose();
+    const channelClosedListeners = new Set<() => void>();
     const transport = new LineJsonRpcTransport({
       input: stream,
       output: stream,
@@ -266,6 +314,8 @@ export class WorkerGateway {
         if (live?.epoch.connectionId === epoch.connectionId) {
           this.#byInstance.delete(outcome.enrollment.environmentInstanceId);
         }
+        for (const listener of channelClosedListeners) listener();
+        channelClosedListeners.clear();
       },
     });
     this.#live.set(enrollmentId, { connectionId: epoch.connectionId, transport });
@@ -274,6 +324,10 @@ export class WorkerGateway {
       enrollment: outcome.enrollment,
       epoch,
       transport,
+      onChannelClosed: (listener) => {
+        channelClosedListeners.add(listener);
+        return () => channelClosedListeners.delete(listener);
+      },
       close: () => {
         transport.close();
         stream.destroy();
@@ -291,6 +345,8 @@ export class WorkerGateway {
   /** Invalidate every live connection, used on runtime shutdown. */
   close(): void {
     for (const { transport } of this.#live.values()) transport.close();
+    for (const inFlight of this.#inFlight.values()) inFlight.stream.destroy();
+    this.#inFlight.clear();
     this.#live.clear();
     this.#byInstance.clear();
     this.#acceptListeners.clear();

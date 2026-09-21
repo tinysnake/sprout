@@ -31,6 +31,8 @@ import type {
 interface CachedConnection {
   readonly connectionId: string;
   readonly connection: WorkerConnection;
+  /** The concrete clients, so a dead channel can mark each adapter dead. */
+  readonly clients: readonly WorkerClient[];
 }
 
 export interface EnrollmentWorkerPortOptions {
@@ -57,9 +59,35 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
       const instanceId = acceptance.enrollment.environmentInstanceId;
       // A newer epoch supersedes the old handle immediately; the old connection's
       // transport was already closed by the gateway.
-      this.#identified.delete(instanceId);
+      this.#invalidate(instanceId);
       this.#accepted.set(instanceId, acceptance);
+      // Channel loss must invalidate the cached handle, not just the gateway's
+      // live epoch: otherwise a cached `worker/info` or adapter would keep
+      // reporting a dead socket as live (#115).
+      acceptance.onChannelClosed(() => {
+        this.#invalidate(instanceId, acceptance.epoch.connectionId);
+      });
     });
+  }
+
+  /**
+   * Drop the cached connection for one instance and mark its adapters dead.
+   *
+   * When `connectionId` is given, only that accepted connection is invalidated,
+   * so a close callback from a superseded channel cannot evict the newer one.
+   */
+  #invalidate(instanceId: string, connectionId?: string): void {
+    const existing = this.#identified.get(instanceId);
+    if (existing !== undefined && (connectionId === undefined || existing.connectionId === connectionId)) {
+      for (const client of existing.clients) {
+        client.notifyChannelClosed('the accepted Worker channel closed');
+      }
+      this.#identified.delete(instanceId);
+    }
+    const accepted = this.#accepted.get(instanceId);
+    if (connectionId === undefined || accepted?.epoch.connectionId === connectionId) {
+      this.#accepted.delete(instanceId);
+    }
   }
 
   /**
@@ -82,6 +110,16 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
     try {
       const connected = await WorkerClient.connect(acceptance.transport);
+      // The identify request awaited, during which a newer epoch may have been
+      // accepted and identified. Re-check before caching so a delayed older
+      // connection can never overwrite the newer routable handle (#115).
+      if (this.#gateway.liveFor(instanceId)?.epoch.connectionId !== acceptance.epoch.connectionId) {
+        for (const client of connected.adapters.values()) {
+          client.notifyChannelClosed('a newer Worker connection epoch superseded this connection');
+        }
+        acceptance.close();
+        return undefined;
+      }
       const connection: WorkerConnection = {
         info: connected.info,
         adapters: connected.adapters,
@@ -94,7 +132,11 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
         },
         close: async () => acceptance.close(),
       };
-      this.#identified.set(instanceId, { connectionId: acceptance.epoch.connectionId, connection });
+      this.#identified.set(instanceId, {
+        connectionId: acceptance.epoch.connectionId,
+        connection,
+        clients: [...connected.adapters.values()],
+      });
       this.#onLog?.(
         `enrollment worker identified: ${instanceId} epoch ${acceptance.epoch.epoch}`,
       );

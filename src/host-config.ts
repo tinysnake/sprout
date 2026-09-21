@@ -29,6 +29,17 @@ export interface HostConfiguration {
   readonly runtimeConfiguration: RuntimeConfiguration;
   /** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
   readonly environmentKind: string;
+  /**
+   * How this Sprout instance reaches its production Worker (#115, ADR-0012).
+   *
+   * `configured` is the M1 carrier path (a core-started local endpoint, a
+   * container exec channel, or an SSH-tunnelled daemon) used for tests and the
+   * container carrier. `enrollment` is the production outbound path: the host
+   * Worker initiates and the Sprout instance never dials it. The two are
+   * mutually exclusive, so a deployment cannot silently run both. Defaults to
+   * `configured` when the host names none.
+   */
+  readonly environmentSource: EnvironmentSource;
   /** For a container environment: the instance's container name. */
   readonly containerName: string;
   /** For a Windows environment: the SSH target of the host running the daemon. */
@@ -68,6 +79,9 @@ export interface HostConfiguration {
    */
   readonly operatorCredential: string | undefined;
 }
+
+/** Which Worker execution seam a Sprout instance uses (#115, ADR-0012). */
+export type EnvironmentSource = 'configured' | 'enrollment';
 
 /**
  * The typed configuration of one environment worker (ADR-0003).
@@ -168,6 +182,7 @@ export function parseHostConfiguration(
     engineId: environment['SPROUT_ENGINE'] ?? 'codex',
     runtimeConfiguration: parseRuntimeConfiguration(environment['SPROUT_RUNTIME_CONFIG']),
     environmentKind: environment['SPROUT_ENV_KIND'] ?? 'local',
+    environmentSource: parseEnvironmentSource(environment['SPROUT_ENV_SOURCE']),
     containerName: environment['SPROUT_CONTAINER_NAME'] ?? environmentInstanceId,
     windowsTarget: environment['SPROUT_WINDOWS_TARGET'],
     windowsReadyFile: environment['SPROUT_WINDOWS_READY_FILE'] ?? 'C:/sprout-daemon/worker-ready.json',
@@ -253,6 +268,21 @@ export function workerEnvironment(environmentInstanceId: string): Readonly<Recor
  */
 function numberValue(value: string | undefined, fallback: number): number {
   return value === undefined ? fallback : Number(value);
+}
+
+/**
+ * Parse the production Worker execution source (#115, ADR-0012).
+ *
+ * The default preserves the M1 configured path. An unrecognized value is a
+ * startup refusal rather than a silent fallback, because falling back would
+ * quietly retain the configured production path ADR-0012 says must not run
+ * alongside the enrollment path. The rejected value is never echoed, so a
+ * mis-set variable cannot leak into a startup log.
+ */
+function parseEnvironmentSource(value: string | undefined): EnvironmentSource {
+  if (value === undefined || value === 'configured') return 'configured';
+  if (value === 'enrollment') return 'enrollment';
+  throw new Error('SPROUT_ENV_SOURCE must be "configured" or "enrollment"');
 }
 
 /**

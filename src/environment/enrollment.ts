@@ -146,6 +146,8 @@ export type EnrollmentErrorCode =
   | 'not-pending'
   | 'not-approved'
   | 'fresh-identity-required'
+  /** The enrollment has no proven Worker identity to approve yet (#115). */
+  | 'identity-not-claimed'
   | 'invalid-proof'
   | 'unsupported-platform'
   /** The enrollment has no live one-use claim (missing, consumed, or expired). */
@@ -389,11 +391,23 @@ export function approveEnrollment(
     throw new EnrollmentError('not-pending', 'Only a pending enrollment can be approved.');
   }
   // A fresh reset clears the claimed identity; the Human approves a *fresh*
-  // Worker identity, never the one the reset invalidated.
+  // Worker identity, never the one the reset invalidated. This is checked before
+  // the empty-identity refusal so a reset reports its own specific reason.
   if (enrollment.requiresFreshIdentity) {
     throw new EnrollmentError(
       'fresh-identity-required',
       'This enrollment was reset; a newly generated Worker identity must claim it before approval.',
+    );
+  }
+  // Approval binds the Human decision to a *proven* Worker identity. A
+  // Web-created pending enrollment starts identity-free (#115): the one-use
+  // claim and the signed challenge bind an identity, and only then can a Human
+  // approve it. Approving an empty identity would create an approved record no
+  // Worker key can ever satisfy, permanently bricking the enrollment.
+  if (enrollment.worker.identityDigest === '') {
+    throw new EnrollmentError(
+      'identity-not-claimed',
+      'This enrollment has no proven Worker identity yet; the host must claim it and prove key possession before approval.',
     );
   }
   const permissions: Record<string, boolean> = { ...enrollment.capabilityPermissions };

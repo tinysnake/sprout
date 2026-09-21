@@ -75,6 +75,29 @@ test('only a pending enrollment can be approved', () => {
   );
 });
 
+/**
+ * An identity-free pending enrollment can never be Human-approved (#115 review
+ * finding 2). A Web-created enrollment has no digest until a claimed host proves
+ * key possession; approving it would create an approved record no key can ever
+ * satisfy and permanently brick the enrollment. The state machine refuses the
+ * approval and leaves the record pending and approvable after the real proof.
+ */
+test('approval is refused while no Worker identity is claimed', () => {
+  const identityFree = pending({ identityDigest: '' });
+  assert.equal(identityFree.worker.identityDigest, '');
+  assert.throws(
+    () => approveEnrollment(identityFree, { capabilityPermissions: { 'agent-run': true }, at: 2_000 }),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'identity-not-claimed',
+  );
+  // The refusal does not consume or mutate the pending record: once an identity
+  // is proven, approval succeeds normally.
+  const claimed = reconcileWorkerConnection(identityFree, workerIdentityDigest('public-key-a'), 3_000);
+  assert.equal(claimed.outcome, 'identity-claimed');
+  const approved = approveEnrollment(claimed.enrollment, { capabilityPermissions: { 'agent-run': true }, at: 4_000 });
+  assert.equal(approved.status, 'approved');
+  assert.equal(approved.worker.identityDigest, workerIdentityDigest('public-key-a'));
+});
+
 test('same-key connection is an idempotent reconnect and never a second identity', () => {
   const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
   const outcome = reconcileWorkerConnection(approved, approved.worker.identityDigest, 3_000);

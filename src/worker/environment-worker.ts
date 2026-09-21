@@ -213,6 +213,12 @@ const LOCAL_WORKER_ENVIRONMENT_KEYS = new Set([
   'SPROUT_WORKER_HOST', 'SPROUT_WORKER_PORT', 'SPROUT_WORKSPACE_ROOT',
   'SPROUT_PI_SESSION_DIR', 'SPROUT_READY_FILE', 'SPROUT_ENV_PLATFORM',
   'SPROUT_CODEX_BIN', 'SPROUT_PI_BIN', 'SPROUT_AGY_BIN', 'SPROUT_OPENCODE_BIN',
+  // The enrollment-backed outbound target (#115, ADR-0012). The claim secret is
+  // read from the environment (never argv), and the private key stays host-local
+  // at `SPROUT_WORKER_KEY`; the core only forwards these values to the Worker it
+  // starts, it never reads the key file itself.
+  'SPROUT_ENROLLMENT_ID', 'SPROUT_CORE_HOST', 'SPROUT_CORE_PORT',
+  'SPROUT_ENROLLMENT_CLAIM', 'SPROUT_WORKER_KEY',
 ]);
 
 export function localWorkerEnvironment(hostEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

@@ -171,3 +171,33 @@ test('a pre-provisioned public key needs no claim and retains only its digest', 
   assert.equal(result.enrollment.worker.identityDigest, worker.digest);
   assert.equal(JSON.stringify(result.enrollment).includes(worker.publicKey), false);
 });
+
+/**
+ * Exactly-once claim consumption under concurrency (#115 review finding 1).
+ *
+ * Two claimants present the same valid one-use secret at the same instant. The
+ * store compare-and-set must let exactly one succeed; the other must be refused
+ * durably as `invalid-claim`, never as a second success. This is the race that
+ * made the one-use guarantee replayable before the rework.
+ */
+test('concurrent claims with the same valid secret yield exactly one success', async () => {
+  const { enrollments } = service();
+  const { enrollment, secret } = await requestIdentityFree(enrollments);
+  const results = await Promise.allSettled([
+    enrollments.claimEnrollment(enrollment.id, secret),
+    enrollments.claimEnrollment(enrollment.id, secret),
+    enrollments.claimEnrollment(enrollment.id, secret),
+  ]);
+  const fulfilled = results.filter((result) => result.status === 'fulfilled');
+  const rejected = results.filter((result) => result.status === 'rejected');
+  assert.equal(fulfilled.length, 1, 'exactly one concurrent claimant may succeed');
+  assert.equal(rejected.length, 2);
+  for (const rejection of rejected) {
+    assert.ok(rejection.status === 'rejected');
+    const error = rejection.reason as { code?: string };
+    assert.equal(error.code, 'invalid-claim');
+  }
+  // The durable record shows exactly one consumption.
+  const stored = await enrollments.get(enrollment.id);
+  assert.notEqual(stored?.claim?.consumedAt, undefined);
+});

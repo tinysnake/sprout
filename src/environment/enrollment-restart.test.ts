@@ -692,3 +692,39 @@ test('a claimed-but-unapproved identity survives reopen without approving itself
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('concurrent claims over one SQLite store persist exactly one consumption', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const store = stores(path);
+    const enrollments = service(store);
+    const requested = await enrollments.requestEnrollment({
+      environmentInstanceId: 'local-macos',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    const secret = requested.claim?.secret ?? '';
+    const results = await Promise.allSettled([
+      enrollments.claimEnrollment('enroll-1', secret),
+      enrollments.claimEnrollment('enroll-1', secret),
+    ]);
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+    store.close();
+
+    // Reopen: the durable record proves exactly one consumption survived.
+    const reopened = stores(path);
+    const stored = await reopened.enrollments.get('enroll-1');
+    assert.notEqual(stored?.claim?.consumedAt, undefined);
+    // A replay after reopen is refused from the durable fact, not process memory.
+    await assert.rejects(
+      () => service(reopened).claimEnrollment('enroll-1', secret),
+      (error: unknown) => (error as { code?: string }).code === 'invalid-claim',
+    );
+    reopened.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
