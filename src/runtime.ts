@@ -30,6 +30,8 @@ import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import type { ProjectStore } from './project/store.ts';
+import type { ProjectAuthorityStore } from './project/authority-store.ts';
+import { ProjectService, type ProjectWorkSafetyPort } from './project/authority-service.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
@@ -42,11 +44,13 @@ import {
   type TaskContextWorker,
 } from './task/environment-lifecycle.ts';
 import { TaskService } from './task/service.ts';
+import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
+import { createProjectRouter } from './web/project-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
@@ -116,6 +120,8 @@ export interface RuntimeStores {
   readonly recovery: RecoveryStore;
   /** The durable portable Agent identities (#90). */
   readonly agentIdentities: AgentStore;
+  /** The durable Project, template, and membership authority records (#92). */
+  readonly projectAuthorities: ProjectAuthorityStore;
   close(): void;
 }
 
@@ -194,6 +200,8 @@ export interface SproutRuntime {
   readonly recovery: EnvironmentRecoveryService;
   /** The portable Agent identity capability (#90). */
   readonly agentService: AgentService;
+  /** The Project, template, and membership authority capability (#92). */
+  readonly projectService: ProjectService;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -344,6 +352,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
     const durableStores: RuntimeStores = stores;
+    // A narrowed, non-optional alias: after this point a failed store open has
+    // already thrown, so the graph below never sees `undefined`.
+    const openedStores = stores;
     const operatorSessions = new OperatorSessionService({ store: stores.operatorSessions });
     // Host-local initialization and recovery happen before the HTTP surface is
     // constructed. A missing credential leaves the surface fail-closed rather
@@ -355,6 +366,41 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // definitions stay the M1 seed registry; the Agent service composes over
     // the same durable handle every other M2 domain uses.
     const agentService = new AgentService({ store: stores.agentIdentities });
+    // The durable Project, template-snapshot, and membership authority (#92).
+    // It composes over the same durable handle every other M2 domain uses, and
+    // its active-work safety facts are read-only projections of the same run
+    // and Task state the orchestrator and Task service own.
+    const projectWorkSafety: ProjectWorkSafetyPort = {
+      hasActiveRun: async (projectId) => {
+        const runs = await orchestrator.list();
+        return runs.some(
+          (run) => run.projectId === projectId && (run.status === 'queued' || run.status === 'running'),
+        );
+      },
+      hasUnfinishedTask: async (projectId) => {
+        const projectTasks = await openedStores.tasks.list({ projectId });
+        return projectTasks.some((task) => !isTerminalTaskStatus(task.status));
+      },
+      memberHasActiveRun: async (projectId, memberId) => {
+        const runs = await orchestrator.list();
+        return runs.some(
+          (run) =>
+            run.projectId === projectId &&
+            run.agentId === memberId &&
+            (run.status === 'queued' || run.status === 'running'),
+        );
+      },
+      memberHasUnfinishedTask: async (projectId, memberId) => {
+        const projectTasks = await openedStores.tasks.list({ projectId });
+        return projectTasks.some(
+          (task) => !isTerminalTaskStatus(task.status) && task.assignedAgentId === memberId,
+        );
+      },
+    };
+    const projectService = new ProjectService({
+      store: stores.projectAuthorities,
+      workSafety: projectWorkSafety,
+    });
     const pool = new EnvironmentPool({
       definitions: [definition],
       instances: [instance],
@@ -546,6 +592,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // to the recovery service.
       routers: [
         createEnvironmentRouter({ enrollments, recovery, archive }),
+        // Durable Project, template-snapshot, and membership authority (#92),
+        // composed through the same #85 additive seam. Only the authenticated
+        // Human reaches these routes, so create/edit/membership/archive are
+        // Human authority by construction (ADR-0008).
+        createProjectRouter({ projects: projectService }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -600,6 +651,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       enrollments,
       recovery,
       agentService,
+      projectService,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then

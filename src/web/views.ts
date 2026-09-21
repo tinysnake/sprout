@@ -39,6 +39,13 @@ import {
   DEFAULT_RECOVERY_REASON,
 } from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
+import type { ProjectAuthority } from '../project/authority-model.ts';
+
+/** Bound and redact one free-text Project field for the wire. */
+function sanitizeProjectText(value: string): string {
+  const text = sanitizeOperatorText(value, { fallback: '', maxLength: 4_000 });
+  return text === '' ? '' : text;
+}
 
 /**
  * The client-facing shape of a run.
@@ -710,5 +717,139 @@ export function toRunWorkOptionAttribution(run: AgentRun): RunWorkOptionAttribut
     ...(run.workOption.workModel !== '' ? { workModel: run.workOption.workModel } : {}),
     ...(run.workOption.effort !== '' ? { effort: run.workOption.effort } : {}),
     configurationVersion: run.configurationVersion ?? 1,
+  };
+}
+
+/**
+ * The client-facing shape of one durable Project authority record (#92).
+ *
+ * Portable state only: stable identity, display name, status, template
+ * attribution, the append-only content versions (goal, rules, wake policy,
+ * routing interval, memberships with responsibilities and collaboration
+ * instructions), and the archive/restore facts. No credential, provider or
+ * account identity, hostname, address, absolute path, or raw command can
+ * appear here — the wire projection re-applies the privacy boundary on read so
+ * a legacy or hand-written durable document cannot leak.
+ */
+export interface ProjectMembershipView {
+  readonly memberId: string;
+  readonly memberKind: string;
+  readonly responsibilities: readonly string[];
+  readonly collaborationInstructions: string;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly endedReason?: string;
+}
+
+export interface ProjectContentVersionView {
+  readonly version: number;
+  readonly at: number;
+  readonly reason: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+  readonly wakePolicy: string;
+  readonly routingIntervalMs: number;
+  readonly memberships: readonly ProjectMembershipView[];
+}
+
+export interface ProjectAuthorityView {
+  /** Preserved composer field: the stable identity the client addresses. */
+  readonly id: string;
+  /** Preserved composer field, kept in sync with the current goal. */
+  readonly goal: string;
+  /** Preserved composer field: current Agent member ids for @mentions. */
+  readonly memberIds: readonly string[];
+  readonly displayName: string;
+  readonly status: string;
+  readonly template: {
+    readonly templateId: string;
+    readonly templateVersion: number;
+    readonly templateName: string;
+    readonly collaborationGuidance: string;
+    readonly completionGuidance: string;
+  };
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly ProjectContentVersionView[];
+  };
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly archivedAt?: number;
+  readonly archivedReason?: string;
+  readonly restoredAt?: number;
+}
+
+export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthorityView {
+  const current = project.content.versions[project.content.versions.length - 1];
+  const displayName = sanitizeOperatorText(project.displayName, { fallback: 'Project', maxLength: 120 });
+  return {
+    id: sanitizeIdentifier(project.id, { fallback: 'unknown-project', kind: 'generic' }),
+    // The M1 composer renders `goal` and `memberIds`; the M2 authority record
+    // carries them inside its versioned content. The preserved fields project
+    // the current version so the existing client keeps working unchanged.
+    goal: current === undefined ? '' : sanitizeProjectText(current.goal),
+    memberIds: current === undefined
+      ? []
+      : current.memberships
+          .filter((membership) => membership.memberKind === 'agent' && membership.endedAt === undefined)
+          .map((membership) => sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' })),
+    displayName,
+    status: project.status === 'archived' ? 'archived' : 'active',
+    template: {
+      templateId: sanitizeIdentifier(project.template.templateId, {
+        fallback: 'unknown-template',
+        kind: 'generic',
+      }),
+      templateVersion: project.template.templateVersion,
+      templateName: sanitizeOperatorText(project.template.templateName, {
+        fallback: 'Project template',
+        maxLength: 120,
+      }),
+      collaborationGuidance: sanitizeProjectText(project.template.collaborationGuidance),
+      completionGuidance: sanitizeProjectText(project.template.completionGuidance),
+    },
+    content: {
+      currentVersion: project.content.currentVersion,
+      versions: project.content.versions.map((version) => ({
+        version: version.version,
+        at: version.at,
+        reason: sanitizeOperatorText(version.reason, {
+          fallback: 'The Project content was recorded; its detail was withheld as sensitive.',
+          maxLength: 320,
+        }),
+        goal: sanitizeProjectText(version.goal),
+        rules: version.rules.map((rule) => sanitizeProjectText(rule)),
+        wakePolicy: version.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
+        routingIntervalMs: version.routingIntervalMs,
+        memberships: version.memberships.map((membership) => ({
+          memberId: sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' }),
+          memberKind: membership.memberKind === 'human' ? 'human' : 'agent',
+          responsibilities: membership.responsibilities.map((entry) => sanitizeProjectText(entry)),
+          collaborationInstructions: sanitizeProjectText(membership.collaborationInstructions),
+          startedAt: membership.startedAt,
+          ...(membership.endedAt !== undefined ? { endedAt: membership.endedAt } : {}),
+          ...(membership.endedReason !== undefined
+            ? {
+                endedReason: sanitizeOperatorText(membership.endedReason, {
+                  fallback: 'The membership end reason was withheld as sensitive.',
+                  maxLength: 320,
+                }),
+              }
+            : {}),
+        })),
+      })),
+    },
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    ...(project.archivedAt !== undefined ? { archivedAt: project.archivedAt } : {}),
+    ...(project.archivedReason !== undefined
+      ? {
+          archivedReason: sanitizeOperatorText(project.archivedReason, {
+            fallback: 'The archive reason was withheld as sensitive.',
+            maxLength: 320,
+          }),
+        }
+      : {}),
+    ...(project.restoredAt !== undefined ? { restoredAt: project.restoredAt } : {}),
   };
 }

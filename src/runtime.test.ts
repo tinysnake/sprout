@@ -50,6 +50,7 @@ import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
 import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
+import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
   createSproutRuntime,
@@ -130,6 +131,7 @@ function inMemoryStores(): MemoryStores {
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     recovery: new InMemoryRecoveryStore(),
     agentIdentities: new InMemoryAgentStore(),
+    projectAuthorities: new InMemoryProjectAuthorityStore(),
     runsStore: runs,
     close: () => {
       closes += 1;
@@ -552,11 +554,12 @@ test('runtime construction failure closes environment and worker resources witho
     sessionKeys: new InMemorySessionKeyStore(),
     collaboration: new InMemoryCollaborationStore(),
     tasks: new InMemoryTaskStore(),
-          operatorSessions: new InMemoryOperatorSessionStore(),
+    operatorSessions: new InMemoryOperatorSessionStore(),
     enrollments: new InMemoryEnrollmentStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
     recovery: new InMemoryRecoveryStore(),
     agentIdentities: new InMemoryAgentStore(),
+    projectAuthorities: new InMemoryProjectAuthorityStore(),
     close() {
       storesClosed++;
     },
@@ -581,7 +584,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 8; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 9; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -821,4 +824,72 @@ test('the Agent service composes over the shared durable store and archives safe
   assert.equal(restored.status, 'active');
 
   await runtime.close();
+});
+
+test('the Project authority service composes over the shared durable store with active-work safety (#92)', async () => {
+  const { runtime, stores } = await build({ listen: false });
+
+  // Create a durable Project: only a name is required, the Human membership
+  // and template snapshot are implicit, and missing resources do not
+  // invalidate identity.
+  const project = await runtime.projectService.create({
+    id: 'project-graph',
+    displayName: 'Composed Project',
+    goal: 'Prove the graph',
+    agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
+  });
+  assert.equal(project.status, 'active');
+  assert.equal(project.template.templateVersion, 1);
+  assert.equal((await stores.projectAuthorities.get('project-graph'))?.displayName, 'Composed Project');
+
+  // Membership ending and archive go through the same composed safety port
+  // the runs and Tasks own, so a quiet member can end but the composed record
+  // keeps every version.
+  const ended = await runtime.projectService.endMembership('project-graph', 'agent-scout', {
+    reason: 'test end',
+  });
+  assert.ok(ended.content.versions.at(-1)?.memberships.find((m) => m.memberId === 'agent-scout')?.endedAt);
+  const archived = await runtime.projectService.archive('project-graph', { reason: 'test archive' });
+  assert.equal(archived.status, 'archived');
+  await assert.rejects(
+    () => runtime.projectService.updateContent('project-graph', { goal: 'x' }),
+    (error: unknown) =>
+      error instanceof Error && error.message.includes('read-only'),
+  );
+  const restored = await runtime.projectService.restore('project-graph');
+  assert.equal(restored.status, 'active');
+
+  await runtime.close();
+});
+
+test('the composed Project router serves the authority contract after the auth boundary (#92)', async () => {
+  const credential = 'composed-runtime-test-credential';
+  const { runtime } = await build({ configuration: { operatorCredential: credential }, listen: false });
+  const { port } = await runtime.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    // Sign in as the Operator: the one Human authority.
+    const signIn = await fetch(`${base}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = (await signIn.json()) as { csrfToken: string };
+
+    const created = await fetch(`${base}/api/projects`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json', 'x-sprout-csrf': csrfToken },
+      body: JSON.stringify({ id: 'project-http', displayName: 'Over HTTP' }),
+    });
+    assert.equal(created.status, 201);
+    const listed = (await (
+      await fetch(`${base}/api/projects/authorities`, { headers: { cookie } })
+    ).json()) as { projects: { id: string; memberIds: string[] }[] };
+    assert.ok(listed.projects.some((entry) => entry.id === 'project-http'));
+  } finally {
+    await runtime.api.close();
+    await runtime.close();
+  }
 });

@@ -37,13 +37,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 }
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 7);
+  assert.equal(CURRENT_SCHEMA_VERSION, 8);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 7);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 8);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 7,
-    current: 7,
+    max: 8,
+    current: 8,
   });
 });
 
@@ -107,8 +107,8 @@ test('non-empty store receives pre-migration safety copy before forward migratio
 
     // Open through SqliteStore, triggering the supported v0 -> current migration chain.
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 7);
-    assert.equal(getSchemaVersion(store.db), 7);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
+    assert.equal(getSchemaVersion(store.db), CURRENT_SCHEMA_VERSION);
 
     // Pre-migration safety copy must exist
     assert.equal(existsSync(safetyPath), true, 'safety copy must be created for non-empty migration');
@@ -176,7 +176,7 @@ test('v3 run history receives a transactional durable replay order before servin
     legacy.close();
 
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 7);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
     const replayRows = store.db.prepare(
       'SELECT id, replay_sequence FROM agent_runs ORDER BY replay_sequence ASC',
     ).all() as unknown as readonly { id: string; replay_sequence: number }[];
@@ -215,7 +215,7 @@ test('v4 store receives the Environment enrollment and readiness tables transact
     legacy.close();
 
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 7);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
 
     const tables = store.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -270,7 +270,7 @@ test('safety copy creation failure blocks forward migration and leaves database 
     assert.ok(thrownError instanceof MigrationSafetyCopyError, 'must throw MigrationSafetyCopyError');
     assert.equal(thrownError.name, 'MigrationSafetyCopyError');
     assert.equal(thrownError.fromVersion, 0);
-    assert.equal(thrownError.toVersion, 7);
+    assert.equal(thrownError.toVersion, CURRENT_SCHEMA_VERSION);
     assert.ok(thrownError.guidance.includes('refused to migrate'));
     assert.ok(thrownError.guidance.includes('disk space'));
 
@@ -413,7 +413,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Create a database newer than the current maximum.
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 8;
+      PRAGMA user_version = 9;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);
@@ -428,7 +428,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
 
     assert.ok(thrownError instanceof SchemaTooNewError, 'must throw SchemaTooNewError');
     assert.equal(thrownError.name, 'SchemaTooNewError');
-    assert.equal(thrownError.version, 8);
+    assert.equal(thrownError.version, 9);
     assert.deepEqual(thrownError.supportedRange, SUPPORTED_SCHEMA_RANGE);
     assert.ok(thrownError.message.includes('newer than supported range'));
     assert.ok(thrownError.guidance.includes('upgrade Sprout'));
@@ -436,11 +436,11 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Standalone domain stores also refuse the newer version
     assert.throws(
       () => new SqliteRunStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 8,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 9,
     );
     assert.throws(
       () => new SqliteTaskStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 8,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 9,
     );
   });
 });
@@ -529,7 +529,7 @@ test('existing safety copy is replaced by the newest pre-migration safety copy',
 
     // Migrate from v0 to the current schema.
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 7);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
     store.close();
 
     // Safety copy was replaced with a valid SQLite database
@@ -716,7 +716,7 @@ test('directly constructed domain adapters enforce schema coordination and safet
     // 2. Direct SqliteLeaseStore on a future schema throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 8; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 9; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

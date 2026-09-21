@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 7;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -477,6 +477,29 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       // no delete.
       db.exec(`
         CREATE TABLE IF NOT EXISTS agents (
+          id TEXT PRIMARY KEY,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    fromVersion: 7,
+    toVersion: 8,
+    name: 'project_authority_and_memberships',
+    migrate: (db) => {
+      // A durable Project is one JSON document keyed by its stable id (like an
+      // Agent identity), holding its template snapshot attribution, the
+      // append-only content versions (goal, rules, wake policy, routing
+      // interval, memberships with responsibilities and collaboration
+      // instructions), and its archive/restore status (#92, ADR-0008). All
+      // fields are sanitized at the write boundary, so no credential,
+      // provider or account identity, hostname, address, or absolute path has
+      // a column here. Archiving and ending a membership are statuses and
+      // recorded facts inside the document; there is no delete.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_authorities (
           id TEXT PRIMARY KEY,
           document TEXT NOT NULL,
           updated_at INTEGER NOT NULL
