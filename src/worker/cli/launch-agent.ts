@@ -24,12 +24,13 @@
  * embedded, because Sprout has no package-update contract here.
  */
 
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { execFileSync } from 'node:child_process';
 
 import {
+  WORKER_SERVICE_LABEL_PREFIX,
   workerServiceLabel,
   writePrivateFile,
   type CommandRunner,
@@ -164,16 +165,15 @@ export function installLaunchAgent(
   // Boot out a previously loaded job so the new plist is what launchd reads.
   try {
     run('launchctl', ['bootout', service]);
-  } catch {
-    // Not loaded yet (or already gone) is the desired pre-state.
-  }
-  try {
-    run('launchctl', ['bootstrap', domain, options.plistPath]);
   } catch (error) {
-    // A second `bootstrap` for an already-loaded job is a benign race; anything
-    // else is a real failure the operator must see.
-    if (!isAlreadyBootstrapped(error)) throw error;
+    // A launchctl diagnostic is not proof of absence.  In particular, do not
+    // treat an errno or a translated message as one: query the domain below.
+    if (!serviceIsAbsent(run, options.uid, options.label)) throw error;
   }
+  if (!serviceIsAbsent(run, options.uid, options.label)) {
+    throw new Error(`launchctl bootout for ${service} did not unload the service`);
+  }
+  run('launchctl', ['bootstrap', domain, options.plistPath]);
   return { label: options.label, plistPath: options.plistPath, installed: true };
 }
 
@@ -214,14 +214,18 @@ export function uninstallLaunchAgent(options: {
   try {
     run('launchctl', ['bootout', service]);
   } catch (error) {
-    if (isNotLoaded(error)) {
-      // An already-unloaded job still needs its plist removed below.
-    } else {
+    if (!serviceIsAbsent(run, options.uid, options.label)) {
       throw new LaunchAgentUninstallError(
         'bootout-failed',
         `launchctl bootout for ${service} failed; the service is left in place (${messageOf(error)})`,
       );
     }
+  }
+  if (!serviceIsAbsent(run, options.uid, options.label)) {
+    throw new LaunchAgentUninstallError(
+      'bootout-failed',
+      `launchctl bootout for ${service} did not prove that the service is unloaded`,
+    );
   }
   const existed = existsSync(options.plistPath);
   if (existed) {
@@ -237,10 +241,39 @@ export function uninstallLaunchAgent(options: {
   return { removed: existed };
 }
 
-function isNotLoaded(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /not (loaded|bootstrapped)|could not find|no such process|bootstrap failed/i.test(message)
-    || /3: |5: /.test(message);
+/**
+ * Explicit absence proof for a job in a usable launchd domain.
+ *
+ * `bootout` errors have platform- and locale-specific wording, so they are
+ * never classified.  A successful domain query whose service listing lacks the
+ * exact label is the only absence proof accepted by destructive callers.
+ */
+export function serviceIsAbsent(run: CommandRunner, uid: number, label: string): boolean {
+  const listing = run('launchctl', ['print', launchAgentDomain(uid)]);
+  return !new RegExp(`(?:^|[^A-Za-z0-9_.-])${escapeRegExp(label)}(?:$|[^A-Za-z0-9_.-])`, 'm').test(listing);
+}
+
+/** Return every managed label launchd currently reports for this user. */
+export function loadedWorkerServiceLabels(run: CommandRunner, uid: number): readonly string[] {
+  const listing = run('launchctl', ['print', launchAgentDomain(uid)]);
+  const matches = listing.match(new RegExp(`${escapeRegExp(WORKER_SERVICE_LABEL_PREFIX)}\\.[0-9a-f]{16}`, 'g')) ?? [];
+  return [...new Set(matches)];
+}
+
+/** Return labels recoverable from owner-owned plist metadata without trusting config. */
+export function storedWorkerServiceLabels(directory: string): readonly string[] {
+  try {
+    return readdirSync(directory)
+      .map((entry) => entry.match(new RegExp(`^(${escapeRegExp(WORKER_SERVICE_LABEL_PREFIX)}\\.[0-9a-f]{16})\\.plist$`))?.[1])
+      .filter((label): label is string => label !== undefined);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function messageOf(error: unknown): string {
@@ -277,11 +310,6 @@ export function inspectLaunchAgent(options: {
   } catch {
     return undefined;
   }
-}
-
-function isAlreadyBootstrapped(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /already (bootstrapped|loaded)|service already loaded|Bootstrap failed: 5/i.test(message);
 }
 
 function defaultRun(command: string, args: readonly string[]): string {

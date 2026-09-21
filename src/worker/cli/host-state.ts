@@ -24,6 +24,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -192,6 +193,11 @@ export function isRestrictive(filePath: string): boolean {
   return (mode & 0o077) === 0;
 }
 
+/** Whether a private identity file has exactly the mode we create (0600). */
+export function hasExactPrivateFileMode(filePath: string): boolean {
+  return (statSync(filePath).mode & 0o777) === PRIVATE_FILE_MODE;
+}
+
 export { writePrivateFile };
 
 /** Remove a file if it exists, ignoring an already-absent one. */
@@ -222,10 +228,10 @@ export function readIdentityKey(paths: WorkerHostPaths): string {
   if (!existsSync(paths.identityPath)) {
     throw new WorkerHostStateError('invalid', 'the host-local Worker identity key is missing');
   }
-  if (!isRestrictive(paths.identityPath)) {
+  if (!hasExactPrivateFileMode(paths.identityPath)) {
     throw new WorkerHostStateError(
       'invalid',
-      'the host-local Worker identity key is readable by other users; run reset and enroll again',
+      'the host-local Worker identity key does not have the required owner-only permissions; run reset and enroll again',
     );
   }
   return readFileSync(paths.identityPath, 'utf8');
@@ -286,8 +292,10 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
     host === '' ||
     typeof port !== 'number' ||
     !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
     typeof identityFileName !== 'string' ||
-    identityFileName === ''
+    identityFileName !== WORKER_IDENTITY_FILE
   ) {
     throw new WorkerHostStateError('invalid', 'the host-local Worker configuration is incomplete');
   }
@@ -637,10 +645,42 @@ export function activeWorkerLockHolder(
  * or configuration is still on disk.
  */
 export function removeHostState(paths: WorkerHostPaths): void {
-  removeFileRequired(paths.identityPath);
-  removeFileRequired(paths.configPath);
-  removeFileRequired(paths.runtimePath);
-  removeFileRequired(workerLockPath(paths));
+  const files = [paths.identityPath, paths.configPath, paths.runtimePath, workerLockPath(paths)];
+  // Validate all entries before the first unlink. This catches corrupted state
+  // such as a directory at a record path without leaving earlier records gone.
+  const snapshot = files.flatMap((filePath) => {
+    try {
+      const stat = lstatSync(filePath);
+      if (!stat.isFile()) {
+        throw new WorkerHostStateError('invalid', 'the host-local Worker state contains an unsafe non-file entry');
+      }
+      return [{ filePath, content: readFileSync(filePath), mode: stat.mode & 0o777 }];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  });
+  const removed: typeof snapshot = [];
+  try {
+    for (const record of snapshot) {
+      removeFileRequired(record.filePath);
+      removed.push(record);
+    }
+  } catch (error) {
+    // Restore every successfully unlinked record before reporting failure. The
+    // files are private state owned by this command, so this is a bounded local
+    // transaction rather than a best-effort cleanup.
+    for (const record of removed) {
+      try {
+        writeFileSync(record.filePath, record.content, { mode: record.mode });
+        chmodSync(record.filePath, record.mode);
+      } catch {
+        // Preserve the original destructive error; a later recovery can still
+        // see a failed reset rather than a false success.
+      }
+    }
+    throw error;
+  }
   // The directory is removed only when it is empty, so an operator's unrelated
   // files under an overridden state root are never deleted by `reset`.
   try {

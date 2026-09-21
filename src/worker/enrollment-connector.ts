@@ -162,7 +162,7 @@ export async function connectWorkerEnrollment(
     socket.on('error', (error: Error) => reject(error));
   });  options.log?.(
     identity.generated
-      ? `generated a host-local Worker identity at ${options.target.identityKeyPath}`
+      ? 'generated a host-local Worker identity'
       : 'loaded the host-local Worker identity',
   );
 

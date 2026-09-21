@@ -67,8 +67,10 @@ import {
   installLaunchAgent,
   launchAgentPlistPath,
   inspectLaunchAgent,
+  loadedWorkerServiceLabels,
   renderLaunchAgent,
   restartLaunchAgent,
+  storedWorkerServiceLabels,
   uninstallLaunchAgent,
 } from './launch-agent.ts';
 
@@ -763,21 +765,33 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     // the reset when the service cannot be proven unloaded: a loaded
     // LaunchAgent would restart against a half-removed state.
     if (platform === 'darwin') {
+      const command = runCommand ?? realCommandRunner();
       let config: WorkerHostConfig | undefined;
       try {
         config = readConfig(paths);
       } catch {
-        // A missing or unreadable config simply means there is no known
-        // service label to stop; the removal below still has to succeed.
+        // Do not let damaged metadata hide a loaded service. Labels are also
+        // discovered from the LaunchAgent directory and launchd's domain.
         config = undefined;
       }
-      if (config !== undefined && existsSync(launchAgentPlistPath(paths, config.environmentInstanceId))) {
+      let labels: readonly string[];
+      try {
+        labels = [...new Set([
+          ...(config === undefined ? [] : [workerServiceLabel(config.environmentInstanceId)]),
+          ...storedWorkerServiceLabels(paths.launchAgentsDirectory),
+          ...loadedWorkerServiceLabels(command, uid),
+        ])];
+      } catch (error) {
+        err(`sprout worker reset: LaunchAgent state could not be inspected; host-local state was left untouched (${messageOf(error)})`);
+        return WORKER_EXIT.serviceFailure;
+      }
+      for (const label of labels) {
         try {
           uninstallLaunchAgent({
-            label: workerServiceLabel(config.environmentInstanceId),
-            plistPath: launchAgentPlistPath(paths, config.environmentInstanceId),
+            label,
+            plistPath: join(paths.launchAgentsDirectory, `${label}.plist`),
             uid,
-            ...(runCommand !== undefined ? { run: runCommand } : {}),
+            run: command,
           });
         } catch (error) {
           err(

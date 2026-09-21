@@ -726,6 +726,9 @@ test('reset fails closed when the LaunchAgent cannot be booted out', async () =>
         if (command === 'launchctl' && args[0] === 'bootout') {
           throw new Error('launchctl: bootout failed: 36: Operation not permitted');
         }
+        if (command === 'launchctl' && args[0] === 'print') {
+          return `service = ${workerServiceLabel('env-synthetic')}`;
+        }
         return '';
       },
     });
@@ -772,6 +775,9 @@ test('uninstall-service fails closed when bootout fails and keeps the plist', as
       run: (command, args) => {
         if (command === 'launchctl' && args[0] === 'bootout') {
           throw new Error('launchctl: bootout failed: 36: Operation not permitted');
+        }
+        if (command === 'launchctl' && args[0] === 'print') {
+          return `service = ${workerServiceLabel('env-synthetic')}`;
         }
         return '';
       },
