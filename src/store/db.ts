@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SqliteRunStore, SqliteSessionKeyStore } from '../run/sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
+import { SqliteProjectAuthorityStore } from '../project/sqlite-authority-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
@@ -57,6 +58,8 @@ export {
  * - run domain: `agent_runs`, `agent_session_keys` (`run/sqlite-store.ts`)
  * - environment domain: `environment_leases` (`environment/sqlite-store.ts`)
  * - project domain: `projects` (`project/sqlite-store.ts`)
+ * - project authority domain: `project_authorities`
+ *   (`project/sqlite-authority-store.ts`)
  * - Task domain: `tasks`, `task_run_links` (`task/sqlite-store.ts`)
  * - collaboration domain: `collaboration_messages`,
  *   `collaboration_wake_requests`, `collaboration_observations`
@@ -95,6 +98,7 @@ export class SqliteStore {
   readonly runs: SqliteRunStore;
   readonly leases: SqliteLeaseStore;
   readonly projects: SqliteProjectStore;
+  readonly projectAuthorities: SqliteProjectAuthorityStore;
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
@@ -129,6 +133,7 @@ export class SqliteStore {
     this.runs = new SqliteRunStore({ db: this.db });
     this.leases = new SqliteLeaseStore({ db: this.db });
     this.projects = new SqliteProjectStore({ db: this.db });
+    this.projectAuthorities = new SqliteProjectAuthorityStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });
