@@ -15,7 +15,14 @@ import {
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
+import {
+  EnvironmentCatalog,
+  projectCatalogEntry,
+  type EnvironmentCatalogEntry,
+  type EnvironmentCatalogInput,
+} from './environment/catalog.ts';
 import { EnvironmentPool, type LeaseStore } from './environment/pool.ts';
+import type { EnvironmentCatalogStore } from './environment/catalog-store.ts';
 import type { EnrollmentStore } from './environment/enrollment-store.ts';
 import type { EnvironmentReadinessStore } from './environment/readiness-store.ts';
 import type { RecoveryStore } from './environment/recovery-store.ts';
@@ -67,16 +74,14 @@ import { createProjectRouter } from './web/project-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
-  createEnvironmentWorkerFactory,
-  localWorkerEnvironment,
   selectEnvironmentWorker,
   type EnvironmentWorkerConfiguration,
-  type WorkerLogSource,
 } from './worker/environment-worker.ts';
-import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
 import { WorkerGateway } from './worker/gateway.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
-import type { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
+import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
+import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
+import { workSafetyFromRecovery } from './environment/recovery.ts';
 
 /**
  * The in-process composition of one Sprout runtime.
@@ -130,6 +135,8 @@ export interface RuntimeStores {
   readonly operatorSessions: OperatorSessionStore;
   /** The durable Environment enrollment authority decisions (#87). */
   readonly enrollments: EnrollmentStore;
+  /** The durable Environment catalog of enrolled instances (E2, #116). */
+  readonly environmentCatalog: EnvironmentCatalogStore;
   /** The durable observed Environment readiness facts (#87). */
   readonly environmentReadiness: EnvironmentReadinessStore;
   /** The durable Environment recovery records and Force Release outcomes (#88). */
@@ -146,10 +153,11 @@ export interface RuntimeStores {
 /**
  * The environment execution port the runtime crosses for one instance.
  *
- * `EnvironmentWorkerRegistry` satisfies this in production. A composition test
- * supplies scripted engine adapters and a stub Task-context client over the same
- * three methods, so "which engines run, and where" is a substitution rather than
- * a live process.
+ * In production `EnrollmentWorkerPort` satisfies this over the enrolled
+ * Environment catalog (E2, ADR-0012): lookups never dial or start a Worker. A
+ * composition test supplies scripted engine adapters and a stub Task-context
+ * client over the same three methods, so "which engines run, and where" is a
+ * substitution rather than a live process.
  */
 export interface RuntimeEnvironment {
   /** The engines one environment instance currently hosts. */
@@ -217,10 +225,17 @@ export interface SproutRuntime {
   readonly pool: EnvironmentPool;
   readonly agents: AgentRegistry;
   readonly projects: ProjectRegistry;
-  /** The environment definition selected for this build's configured kind. */
-  readonly definition: EnvironmentDefinition;
-  /** The one environment instance this build serves. */
-  readonly instance: EnvironmentInstance;
+  /**
+   * The dynamic, instance-keyed Environment catalog (E2, #116).
+   *
+   * Every enrolled Environment instance is an inspectable entry while it exists,
+   * and only an eligible entry admits automatic Project/run work.
+   */
+  readonly environmentCatalog: EnvironmentCatalog;
+  /** The environment definition of the configured M1 carrier, when composed. */
+  readonly definition: EnvironmentDefinition | undefined;
+  /** The configured M1 carrier instance, when composed; `undefined` under enrollment. */
+  readonly instance: EnvironmentInstance | undefined;
   readonly stores: RuntimeStores;
   /** The Environment enrollment and readiness capability (#87). */
   readonly enrollments: EnvironmentEnrollmentService;
@@ -233,8 +248,9 @@ export interface SproutRuntime {
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
   /**
-   * How this Sprout instance reaches its production Worker (#115, ADR-0012).
-   * `configured` is the M1 carrier path; `enrollment` is the outbound path.
+   * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
+   * `configured` is the M1 carrier path retained only for an injected
+   * test/development carrier; `enrollment` is the production catalog path.
    */
   readonly environmentSource: EnvironmentSource;
   /**
@@ -244,13 +260,20 @@ export interface SproutRuntime {
   readonly workerGateway: WorkerGateway;
   readonly workerEpochs: WorkerConnectionRegistry;
   /**
-   * The runtime environment port over accepted enrollment-backed connections.
-   * E1 exposes it; E2 makes it the dynamic execution catalog. Under
-   * `SPROUT_ENV_SOURCE=enrollment` it is the production run seam.
+   * The runtime environment port over accepted enrollment-backed connections
+   * (E1) and the accepted-connection registry the dynamic catalog projects from
+   * (E2). It is the production run seam and never dials a Worker.
    */
   readonly enrollmentEnvironment: EnrollmentWorkerPort;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
+  /**
+   * Re-project the durable catalog and publish its eligible membership to the
+   * pool (E2, #116). Exposed so a caller can refresh admission after a human
+   * approval, revocation, archive, readiness observation, or recovery change
+   * without restarting the process or editing runtime JSON.
+   */
+  refreshEnvironmentCatalog(): Promise<readonly EnvironmentCatalogEntry[]>;
   /**
    * Reconcile leftover durable state after a restart, in the one order that is
    * observable: runs first, then Task environment lifecycle, then collaboration.
@@ -302,16 +325,10 @@ export interface SproutRuntimeOptions {
    * collaborators that need no filesystem.
    */
   readonly stores?: RuntimeStores;
-  /** The local worker entry point; defaults below `projectRoot`. */
-  readonly workerEntryPath?: string;
-  readonly nodeExecutable?: string;
-  readonly hostEnvironment?: NodeJS.ProcessEnv;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
-  /** Attributed carrier log lines, so diagnostics keep their source prefix. */
-  readonly logWorkerLine?: (source: WorkerLogSource, line: string) => void;
-  /** Environment-worker supervisor log lines, one per start or failure. */
+  /** Environment-worker log lines, so accepted-connection diagnostics are visible. */
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
@@ -369,37 +386,29 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     windowsWorkDirectory: windowsRunWorkdir,
   };
 
-  const environment =
-    options.environment ??
-    (environmentSource === 'enrollment'
-      ? undefined
-      : createEnvironmentWorkerPort(environmentWorkerConfiguration, {
-          workerEntryPath: options.workerEntryPath ?? join(projectRoot, 'src', 'worker', 'main.ts'),
-          nodeExecutable: options.nodeExecutable ?? process.execPath,
-          // Never hand the core environment to a Worker: it can contain the
-          // operator credential, browser/session secrets, or unrelated authority.
-          hostEnvironment: localWorkerEnvironment(options.hostEnvironment ?? process.env),
-          logWorkerLine:
-            options.logWorkerLine ??
-            ((source, line) => process.stderr.write(`[${source}-worker] ${line}\n`)),
-          onWorkerLog: options.onWorkerLog ?? ((line) => process.stderr.write(`[env-worker] ${line}\n`)),
-        }));
+  /**
+   * The injected test/development carrier, when the caller supplied one.
+   *
+   * Production no longer composes a configured Worker carrier at all (E2,
+   * ADR-0012): enrolled Environment instances are the execution catalog, and an
+   * injected `options.environment` remains only so tests and the container
+   * development carrier can substitute the same port. The former
+   * `SPROUT_ENV_KIND`-driven configured production path is removed rather than
+   * retained as a fallback.
+   */
+  const environment = options.environment;
 
   /**
    * The production execution seam (ADR-0012).
    *
-   * Under `enrollment`, the run seam is the accepted enrollment-backed port —
-   * which is only available after the gateway and stores are constructed. This
-   * delegate carries the orchestrator, Task lifecycle, and Project-access wiring
-   * across that ordering while never dialing or starting a Worker. A caller
-   * supplied `options.environment` (tests, the container carrier) keeps the M1
-   * configured path.
+   * The run seam is the accepted enrollment-backed port, which is only available
+   * after the gateway and stores are constructed. This delegate carries the
+   * orchestrator, Task lifecycle, and Project-access wiring across that ordering
+   * while never dialing or starting a Worker.
    */
   const switchableEnvironment =
-    options.environment === undefined && environmentSource === 'enrollment'
-      ? new EnrollmentEnvironmentDelegate()
-      : undefined;
-  const runtimeEnvironment: RuntimeEnvironment = options.environment ?? switchableEnvironment ?? environment!;
+    options.environment === undefined ? new EnrollmentEnvironmentDelegate() : undefined;
+  const runtimeEnvironment: RuntimeEnvironment = options.environment ?? switchableEnvironment!;
 
   let stores: RuntimeStores | undefined;
   try {
@@ -419,7 +428,13 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       });
     }
 
-    const { definition, instance } = selectEnvironmentWorker(environmentWorkerConfiguration);
+    const { definition: configuredDefinition, instance: configuredInstance } =
+      selectEnvironmentWorker(environmentWorkerConfiguration);
+    // The configured definition/instance is only a fact of an injected
+    // test/development carrier. Under the enrollment catalog the definition and
+    // instance are projected per enrolled Environment instance and there is no
+    // single static one (E2, ADR-0012).
+    const configuredCarrierPresent = environment !== undefined;
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
     const durableStores: RuntimeStores = stores;
@@ -442,7 +457,16 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // the wake contract and orchestrator read, so one Project identity routes
     // on its Project channel from the moment it exists.
     const projects = new BridgedProjectRegistry([
-      runtimeConfiguration.project ?? defaultProject({ projectId, instanceId }),
+      runtimeConfiguration.project ??
+        defaultProject({
+          projectId,
+          // The default Project only names the configured test/development
+          // carrier instance. Under the enrollment catalog there is no static
+          // instance, so the default Project starts with no granted Environment
+          // and gains one through a Human access grant (#93), exactly as a
+          // catalog instance must.
+          instanceIds: configuredCarrierPresent ? [configuredInstance.id] : [],
+        }),
     ]);
     // The default Project above is host-derived configuration, like the
     // environment definitions. Additional Projects hydrate from the durable
@@ -626,9 +650,12 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         return false;
       },
     };
-    // Access names only a Human-approved Environment enrollment (#87): a bare
-    // instance id is never a granted authority, exactly like membership never
-    // names an invented Agent (F5, #92).
+    // Access names only an enrolled Environment instance that exists in the
+    // durable catalog (E2, #116). A bare instance id is never a granted
+    // authority, exactly like membership never names an invented Agent (F5,
+    // #92). Accessibility is independent of current eligibility: an offline or
+    // recovering instance can still be granted Project access, while only an
+    // eligible one admits automatic resolution.
     const projectEnvironmentAuthority: ProjectEnvironmentAuthorityPort = {
       environmentIsAccessible: async (environmentInstanceId) => {
         const enrollments = await openedStores.enrollments.list();
@@ -660,10 +687,34 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       bridge: projects,
     });
     const pool = new EnvironmentPool({
-      definitions: [definition],
-      instances: [instance],
+      definitions: configuredCarrierPresent ? [configuredDefinition] : [],
+      instances: configuredCarrierPresent ? [configuredInstance] : [],
       store: stores.leases,
+      // The catalog eligibility gate. Under the enrollment catalog this is the
+      // dynamic membership; an injected configured carrier keeps M1 behaviour
+      // with exactly its one static instance.
+      ...(configuredCarrierPresent
+        ? { eligibleInstanceIds: [configuredInstance.id] }
+        : { eligibleInstanceIds: [] }),
     });
+    // A durable authority, readiness, or recovery change schedules an
+    // asynchronous catalog re-projection (E2). The scheduled function is replaced
+    // once `refreshEnvironmentCatalog` exists below; the indirection lets the
+    // enrollment, archive, and recovery services observe changes without
+    // importing the catalog or making their durable write depend on it.
+    let scheduleCatalogRefresh: () => void = () => undefined;
+    const onEnrollmentMutation = (): void => scheduleCatalogRefresh();
+    /**
+     * The dynamic, instance-keyed Environment catalog (E2, #116).
+     *
+     * It is the single projection from durable enrollment authority plus observed
+     * readiness facts to the instances that may admit automatic Project/run work.
+     * Its eligible membership is pushed into the pool, so resolution, admission,
+     * and leases all agree about which instance is usable. The catalog itself
+     * starts empty and is filled by the refresh below, after the enrollment
+     * service and gateway exist.
+     */
+    const environmentCatalog = new EnvironmentCatalog();
 
     /**
      * The durable Task service (#28).
@@ -798,6 +849,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       },
       taskRuns: async (taskId) =>
         (await durableStores.tasks.listRuns(taskId)).map((link) => link.runId),
+      // A recovery change (open, reconnect, evidence, resolve, Force Release) is
+      // a work-safety fact for the catalog, so eligibility follows it.
+      onMutation: onEnrollmentMutation,
     });
 
     /**
@@ -825,6 +879,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     });
 
     const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
+    const openedStoresForCatalog = stores;
     // Environment enrollment and readiness (#87). It reads the durable enrollment
     // and observed-readiness stores and projects work safety from the same lease
     // registry the run and Task domains use, so the facts never diverge.
@@ -834,15 +889,94 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       leases: () => pool.leases(),
       // Recovery records are authoritative over the lease projection, so the
       // summary can distinguish `reconciling` from `recovery` and a reconnect
-      // alone is never reported as safe-to-reassign (#88, ADR-0009).
-      recoveryRecords: () => recovery.listForEnvironment(instanceId),
+      // alone is never reported as safe-to-reassign (#88, ADR-0009). The records
+      // are filtered to the enrollment's own instance when a summary is built,
+      // so many enrolled Environments can be summarised from one service (E2).
+      recoveryRecords: async () => (await recovery.list()).filter((record) => record.phase !== 'resolved'),
       // The one engine this build's configured Agents actually run on is the one
       // engine its configured use requires. Nothing here names a second engine,
       // so an Environment that hosts only this engine is complete rather than a
       // fabricated dual-engine failure (ADR-0008).
       requiredEngines: [engineId],
+      onMutation: onEnrollmentMutation,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
+    // The epoch registry is created before the catalog refresh below, so an
+    // already-accepted connection's epoch is visible in the first projection.
+    const workerEpochs = new WorkerConnectionRegistry();
+    // The catalog refresh and its pool publication are defined here, after the
+    // enrollment service and epoch registry exist, and re-invoked whenever an
+    // accepted connection appears or a channel is lost.
+    const refreshEnvironmentCatalog = async (): Promise<readonly EnvironmentCatalogEntry[]> => {
+      const all = await openedStoresForCatalog.enrollments.list();
+      const persisted = await openedStoresForCatalog.environmentCatalog.list();
+      const persistedInstances = new Map(persisted.map((record) => [record.instanceId, record]));
+      const now = Date.now();
+      const inputs: EnvironmentCatalogInput[] = [];
+      for (const enrollment of all) {
+        if (enrollment.environmentInstanceId === '') continue;
+        const observed = await openedStoresForCatalog.environmentReadiness.getReadiness(
+          enrollment.environmentInstanceId,
+        );
+        const openRecovery = (
+          await recovery.listForEnvironment(enrollment.environmentInstanceId)
+        ).filter((record) => record.phase !== 'resolved');
+        inputs.push({
+          enrollment,
+          observed,
+          workSafety: workSafetyOfInstance(
+            enrollment.environmentInstanceId,
+            pool.leases(),
+            openRecovery,
+          ),
+          currentEpoch: workerEpochs.current(enrollment.id)?.epoch,
+          requiredEngines: [engineId],
+          supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+          now,
+        });
+        const entry = projectCatalogEntry(inputs[inputs.length - 1]!);
+        const existing = persistedInstances.get(entry.instanceId);
+        if (existing === undefined || existing.enrollmentId !== entry.enrollmentId) {
+          // Persist the durable catalog record once per enrolled instance. The
+          // record is pure identity, so an offline, revoked, or archived
+          // instance survives SQLite reopen without a Worker ever connecting.
+          await openedStoresForCatalog.environmentCatalog.save({
+            instanceId: entry.instanceId,
+            enrollmentId: entry.enrollmentId,
+            definition: entry.definition,
+            instance: entry.instance,
+            updatedAt: now,
+          });
+        }
+      }
+      environmentCatalog.update(inputs);
+      publishCatalogMembership();
+      return environmentCatalog.entries();
+    };
+    const publishCatalogMembership = (): void => {
+      if (configuredCarrierPresent) {
+        // An injected test/development carrier keeps exactly its one static
+        // instance and immediate eligibility; the enrollment catalog is not its
+        // authority.
+        pool.synchronize({
+          definitions: [configuredDefinition],
+          instances: [configuredInstance],
+          eligibleInstanceIds: [configuredInstance.id],
+        });
+        return;
+      }
+      pool.synchronize({
+        definitions: environmentCatalog.entries().map((entry) => entry.definition),
+        instances: environmentCatalog.entries().map((entry) => entry.instance),
+        eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+      });
+    };
+    // Authority decisions now schedule a catalog re-projection, so approval,
+    // revocation, reset, permission change, archive, and restore take effect
+    // without a process restart or runtime JSON edit.
+    scheduleCatalogRefresh = () => {
+      void refreshEnvironmentCatalog().catch(() => undefined);
+    };
     // Non-destructive archive/restore (#89, ADR-0008). It reads the same lease
     // registry and open recovery records, so an Environment with dependent work
     // can never be archived, and its decisions are ordinary durable enrollment
@@ -851,17 +985,87 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       enrollments: stores.enrollments,
       leases: pool,
       recovery,
+      onMutation: onEnrollmentMutation,
     });
     // The enrollment-backed outbound Worker gateway (#115, ADR-0012). A host
     // Worker claims its pending enrollment and initiates one authenticated
     // WS/WSS connection carrying the existing neutral Worker JSON-RPC under a
-    // monotonic connection epoch.
-    const workerGateway = new WorkerGateway({ enrollments });
+    // monotonic connection epoch. The gateway owns exactly one registry shared
+    // with the runtime, so the catalog sees the same epoch the gateway accepted.
+    const workerGateway = new WorkerGateway({ enrollments, epochs: workerEpochs });
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
+    // A newly accepted connection is a *fact* on an already-existing enrollment,
+    // never a reason to create or dial a Worker; a lost channel makes that fact
+    // offline again. Neither path creates a catalog entry: only a durable
+    // enrollment does. Each re-projects the catalog and republishes eligibility.
+    workerGateway.onAccept((acceptance) => {
+      environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
+      publishCatalogMembership();
+      // The Worker's own `worker/info` readiness is observed over the accepted
+      // inbound channel (never by dialing one), so the catalog can reach
+      // eligibility once the required facts are established. This is deferred
+      // past the handshake barrier: `worker/listening` must reach the Worker
+      // before any JSON-RPC request is read from the same socket.
+      setImmediate(() => {
+        void observeAcceptedWorkerReadiness(acceptance.enrollment.id);
+      });
+    });
+    workerGateway.onConnectionClosed(() => {
+      void refreshEnvironmentCatalog();
+    });
+    /**
+     * Observe the accepted Worker's declared readiness and re-project the catalog.
+     *
+     * The facts come from the Worker's own `worker/info` over the already-accepted
+     * inbound channel; nothing here dials a Worker. A missing or unapproved
+     * enrollment, or a Worker that declares no readiness, leaves the catalog
+     * unchanged and the instance ineligible rather than inventing facts.
+     */
+    const observeAcceptedWorkerReadiness = async (enrollmentId: string): Promise<void> => {
+      if (runtimeEnvironment.info === undefined) return;
+      const enrollment = await enrollments.get(enrollmentId);
+      if (enrollment === undefined || enrollment.status !== 'approved') return;
+      let info: WorkerInfo | undefined;
+      try {
+        info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
+      } catch {
+        // A channel that cannot identify itself is already offline; the close
+        // listener re-projects, so no fact is fabricated here.
+        return;
+      }
+      if (info === undefined || info.readiness === undefined) return;
+      await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
+      await refreshEnvironmentCatalog();
+    };
+    await refreshEnvironmentCatalog();
+    /**
+     * The observed readiness of the first currently-eligible enrolled instance.
+     *
+     * Used only for the Agent-work compatibility projection. It never creates or
+     * dials a Worker: it reads the durable observed facts for an instance the
+     * catalog already admitted, and reports nothing when none is eligible.
+     */
+    const firstEligibleReadiness = async (): Promise<{
+      readonly instanceId: string | undefined;
+      readonly readiness: Awaited<
+        ReturnType<RuntimeStores['environmentReadiness']['getReadiness']>
+      >;
+    }> => {
+      const eligible = environmentCatalog
+        .entries()
+        .filter((entry) => entry.eligible)
+        .sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+      const first = eligible[0];
+      if (first === undefined) return { instanceId: undefined, readiness: undefined };
+      return {
+        instanceId: first.instanceId,
+        readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(first.instanceId),
+      };
+    };
     const api = createRunApi({
       orchestrator,
       agents,
@@ -901,14 +1105,21 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         createAgentRouter({
           agents: agentService,
           compatibility: async (agent: Agent) => {
-            const readiness = await durableStores.environmentReadiness.getReadiness(instance.id);
+            // The compatibility projection is per-eligible-instance under the
+            // dynamic catalog (E2). It reports the first eligible enrolled
+            // instance's observed engines, or an honest unavailable result when
+            // no instance is currently eligible. The injected configured carrier
+            // keeps its single-instance projection.
+            const target = configuredCarrierPresent
+              ? { instanceId: configuredInstance.id, readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(configuredInstance.id) }
+              : await firstEligibleReadiness();
             const projection = projectAgentCompatibility({
               workOptions: currentOptions(agent),
-              availableEngines: readiness?.engines ?? [],
+              availableEngines: target.readiness?.engines ?? [],
             });
             return {
               agentId: agent.id,
-              environmentInstanceId: instance.id,
+              ...(target.instanceId !== undefined ? { environmentInstanceId: target.instanceId } : {}),
               available: projection.available,
               ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
               ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
@@ -942,8 +1153,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       pool,
       agents,
       projects,
-      definition,
-      instance,
+      environmentCatalog,
+      definition: configuredCarrierPresent ? configuredDefinition : undefined,
+      instance: configuredCarrierPresent ? configuredInstance : undefined,
       stores: activeStores,
       enrollments,
       recovery,
@@ -951,10 +1163,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       projectService,
       projectAccess: projectAccessService,
       workerGateway,
-      workerEpochs: workerGateway.epochs,
+      workerEpochs,
       enrollmentEnvironment,
       environmentSource,
       engines,
+      refreshEnvironmentCatalog,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then
        * collaboration; runs first so no reply can ever be fabricated for an
@@ -964,6 +1177,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
         await tasks.reconcileEnvironmentLifecycle();
         await recovery.reconcileAfterRestart();
+        // Recovery may have moved a lease into (or out of) recovery, so the
+        // catalog's work-safety projection is re-derived before serving.
+        await refreshEnvironmentCatalog();
         const reconciled = await collaboration.reconcile();
         const result: SproutReconciliation = {
           recoveredRuns,
@@ -978,12 +1194,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
        * enrollment; the mapping stays honest by recording only what the Worker
        * actually declared on `worker/info`. */
       async observeWorkerReadiness(enrollmentId: string): Promise<void> {
-        if (runtimeEnvironment.info === undefined) return;
-        const enrollment = await enrollments.get(enrollmentId);
-        if (enrollment === undefined || enrollment.status !== 'approved') return;
-        const info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
-        if (info === undefined || info.readiness === undefined) return;
-        await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
+        await observeAcceptedWorkerReadiness(enrollmentId);
       },
 
       startupReport(boundPort: number): string {
@@ -992,13 +1203,14 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           agents,
           engines,
           instanceId,
-          definition,
+          definition: configuredCarrierPresent ? configuredDefinition : undefined,
           environmentKind,
           containerName,
           workingDirectory,
           databasePath,
           reconciled: lastReconciliation,
           leases: pool.leases(),
+          catalogEntries: environmentCatalog.entries(),
         });
       },
 
@@ -1046,20 +1258,30 @@ function renderStartupReport(input: {
   readonly agents: AgentRegistry;
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   readonly instanceId: string;
-  readonly definition: EnvironmentDefinition;
+  readonly definition: EnvironmentDefinition | undefined;
   readonly environmentKind: string;
   readonly containerName: string;
   readonly workingDirectory: string;
   readonly databasePath: string;
   readonly reconciled: SproutReconciliation | undefined;
   readonly leases: ReturnType<EnvironmentPool['leases']>;
+  readonly catalogEntries: readonly EnvironmentCatalogEntry[];
 }): string {
+  // Under the enrollment catalog there is no single configured instance. The
+  // startup report names the catalog instead, so an operator can still see that
+  // production started with zero Environments and which enrolled instances the
+  // dynamic catalog knows. An injected test/development carrier keeps the exact
+  // previous `environment:` line.
+  const environmentLine =
+    input.definition === undefined
+      ? `  environment: enrollment catalog (${describeCatalog(input.catalogEntries)})\n`
+      : `  environment: ${input.instanceId} (${input.definition.platform}` +
+        `${input.environmentKind === 'container' ? `, container ${input.containerName}` : `, cwd ${input.workingDirectory}`})\n`;
   let report =
     `Sprout listening on http://127.0.0.1:${input.boundPort}\n` +
     `  agent:      ${input.agents.list().map((agent) => agent.id).join(', ')}\n` +
-    `  engine:     ${[...input.engines.keys()].join(', ')} (via environment worker)\n` +
-    `  environment: ${input.instanceId} (${input.definition.platform}` +
-    `${input.environmentKind === 'container' ? `, container ${input.containerName}` : `, cwd ${input.workingDirectory}`})\n` +
+    `  engine:     ${[...input.engines.keys()].join(', ') || '(none)'} (via environment worker)\n` +
+    environmentLine +
     `  database:   ${input.databasePath}\n`;
 
   const reconciled = input.reconciled;
@@ -1086,6 +1308,36 @@ function renderStartupReport(input: {
   }
 
   return report;
+}
+
+/** The operator-visible catalog summary: instances and how many are eligible. */
+function describeCatalog(entries: readonly EnvironmentCatalogEntry[]): string {
+  if (entries.length === 0) return 'no enrolled instances';
+  const eligible = entries.filter((entry) => entry.eligible).length;
+  return `${entries.length} enrolled, ${eligible} eligible`;
+}
+
+/**
+ * Project the work-safety fact for one instance from the live lease registry and
+ * the open recovery records for that instance.
+ *
+ * The recovery records are authoritative over the lease projection (as in the
+ * enrollment service), so an instance whose evidence is still reconciling is not
+ * mistaken for one that is safe to reassign (ADR-0009).
+ */
+function workSafetyOfInstance(
+  instanceId: string,
+  leases: readonly { readonly instanceId: string; readonly state: string }[],
+  recoveryRecords: readonly { readonly environmentInstanceId: string; readonly phase: string }[],
+): ReturnType<typeof workSafetyFromRecovery> {
+  return workSafetyFromRecovery(
+    recoveryRecords.map((record) => ({
+      environmentInstanceId: record.environmentInstanceId,
+      phase: record.phase as 'reconciling' | 'recovery' | 'resolved',
+    })),
+    leases,
+    instanceId,
+  );
 }
 
 /**
@@ -1141,36 +1393,8 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
 }
 
 /**
- * Build the production environment port for this build's configured environment.
- *
- * Which carrier is used — a local endpoint, a container's exec channel, or an
- * SSH-tunnelled Windows daemon — is selected by the environment-worker Module,
- * not here. This function supplies only the host facts that selection needs, so
- * this Module stays the one place naming a concrete worker adapter.
+ * Read a static asset, treating a missing file as "not served here".
  */
-function createEnvironmentWorkerPort(
-  configuration: EnvironmentWorkerConfiguration,
-  dependencies: {
-    readonly workerEntryPath: string;
-    readonly nodeExecutable: string;
-    readonly hostEnvironment: NodeJS.ProcessEnv;
-    readonly logWorkerLine: (source: WorkerLogSource, line: string) => void;
-    readonly onWorkerLog: (line: string) => void;
-  },
-): RuntimeEnvironment {
-  const factory = createEnvironmentWorkerFactory(configuration, {
-    workerEntryPath: dependencies.workerEntryPath,
-    nodeExecutable: dependencies.nodeExecutable,
-    hostEnvironment: dependencies.hostEnvironment,
-    logWorkerLine: dependencies.logWorkerLine,
-  });
-  return new EnvironmentWorkerRegistry({
-    connect: (requested) => factory.connect(requested),
-    onLog: dependencies.onWorkerLog,
-  });
-}
-
-/** Read a static asset, treating a missing file as "not served here". */
 async function defaultReadFile(path: string): Promise<Buffer | undefined> {
   if (!existsSync(path)) return undefined;
   return readFile(path);
@@ -1202,12 +1426,15 @@ function defaultAgents(engineId: string): readonly AgentDefinition[] {
  * Its environment set is what a run's environment is resolved from, so adding an
  * instance here is what makes it usable — the agent no longer names a device.
  */
-function defaultProject(input: { readonly projectId: string; readonly instanceId: string }): Project {
+function defaultProject(input: {
+  readonly projectId: string;
+  readonly instanceIds: readonly string[];
+}): Project {
   return {
     id: input.projectId,
     goal: 'Build Sprout into a local multi-agent collaboration and environment scheduling platform.',
     rules: ['Report what you actually observed.', 'Do not claim work you did not verify.'],
-    availableEnvironmentInstanceIds: [input.instanceId],
+    availableEnvironmentInstanceIds: [...input.instanceIds],
     memberships: [
       {
         agentId: 'scout',

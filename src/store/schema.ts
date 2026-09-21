@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 11;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -546,6 +546,28 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       if (!columns.some((column) => column.name === 'workspace_binding')) {
         db.exec('ALTER TABLE agent_runs ADD COLUMN workspace_binding TEXT');
       }
+    },
+  },
+  {
+    fromVersion: 10,
+    toVersion: 11,
+    name: 'environment_catalog',
+    migrate: (db) => {
+      // The durable Environment catalog (E2, #116, ADR-0012): each enrolled
+      // Environment instance is one JSON document keyed by its instance id,
+      // holding the portable definition and instance record. The record is pure
+      // identity — no private key, credential, host address, or absolute path
+      // has a column here — and it survives SQLite reopen independently of
+      // current connectivity, so an offline, incompatible, archived, revoked, or
+      // recovering instance remains an inspectable catalog entry.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_catalog (
+          instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
     },
   },
 ];

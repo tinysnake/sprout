@@ -115,8 +115,17 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly claimSecretFactory?: () => string;
   /** How long a host claim stays usable. Defaults to 15 minutes. */
   readonly claimTtlMs?: number;
+  /**
+   * Invoked after a durable enrollment authority decision is written (E2, #116).
+   *
+   * The dynamic Environment catalog observes approval, revocation, reset, and
+   * permission changes through this hook, so a newly approved or revoked instance
+   * becomes eligible or ineligible without a process restart. The hook is an
+   * observation only: a failure in it must never roll back the durable decision,
+   * so callers must not throw from it.
+   */
+  readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
 }
-
 /** A new pending enrollment request plus the host bootstrap guidance it unlocks. */
 export interface PendingEnrollmentResult {
   readonly enrollment: EnvironmentEnrollment;
@@ -154,6 +163,7 @@ export class EnvironmentEnrollmentService {
   readonly #proofAuthority: WorkerProofAuthority;
   readonly #claimSecretFactory: () => string;
   readonly #claimTtlMs: number;
+  readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -168,6 +178,16 @@ export class EnvironmentEnrollmentService {
       options.proofAuthority ?? new WorkerProofAuthority({ clock: this.#clock });
     this.#claimSecretFactory = options.claimSecretFactory ?? createClaimSecret;
     this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
+    this.#onMutation = options.onMutation;
+  }
+
+  /** Announce a durable decision to the catalog observer, never throwing. */
+  #announce(enrollment: EnvironmentEnrollment): void {
+    try {
+      this.#onMutation?.(enrollment);
+    } catch {
+      // Observation must never turn a durable authority decision into a failure.
+    }
   }
 
   async list(): Promise<readonly EnvironmentEnrollment[]> {
@@ -219,6 +239,7 @@ export class EnvironmentEnrollmentService {
       id: (this.#idFactory ?? createEnrollmentId)(),
     });
     await this.#enrollments.save(enrollment);
+    this.#announce(enrollment);
     return {
       enrollment,
       claim:
@@ -386,6 +407,7 @@ export class EnvironmentEnrollmentService {
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
     });
     await this.#enrollments.save(approved);
+    this.#announce(approved);
     return { enrollment: approved };
   }
 
@@ -393,6 +415,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const revoked = revokeEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(revoked);
+    this.#announce(revoked);
     return revoked;
   }
 
@@ -400,6 +423,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const reset = resetEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(reset);
+    this.#announce(reset);
     return reset;
   }
 
@@ -411,6 +435,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const updated = setCapabilityPermission(enrollment, capability, allowed, this.#clock());
     await this.#enrollments.save(updated);
+    this.#announce(updated);
     return updated;
   }
 

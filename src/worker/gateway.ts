@@ -108,6 +108,14 @@ export class WorkerGateway {
    */
   readonly #inFlight = new Map<string, { readonly enrollmentId: string; readonly stream: Duplex }>();
   readonly #acceptListeners = new Set<(acceptance: WorkerGatewayAcceptance) => void>();
+  /**
+   * Channel-loss listeners, fired once whenever a live connection ends.
+   *
+   * The runtime subscribes so the Environment catalog re-projects with the
+   * instance's connection fact now offline (E2), instead of leaving an
+   * ineligible instance published as eligible until the next unrelated refresh.
+   */
+  readonly #closeListeners = new Set<() => void>();
 
   constructor(options: WorkerGatewayOptions) {
     this.#enrollments = options.enrollments;
@@ -127,6 +135,12 @@ export class WorkerGateway {
     // blind to it (a connection can arrive before the runtime subscribes).
     for (const acceptance of this.#byInstance.values()) listener(acceptance);
     return () => this.#acceptListeners.delete(listener);
+  }
+
+  /** Subscribe to the loss of any live accepted connection. */
+  onConnectionClosed(listener: () => void): () => void {
+    this.#closeListeners.add(listener);
+    return () => this.#closeListeners.delete(listener);
   }
 
   /** The live accepted connection for one environment instance, if any. */
@@ -316,6 +330,7 @@ export class WorkerGateway {
         }
         for (const listener of channelClosedListeners) listener();
         channelClosedListeners.clear();
+        for (const listener of this.#closeListeners) listener();
       },
     });
     this.#live.set(enrollmentId, { connectionId: epoch.connectionId, transport });
@@ -350,6 +365,7 @@ export class WorkerGateway {
     this.#live.clear();
     this.#byInstance.clear();
     this.#acceptListeners.clear();
+    this.#closeListeners.clear();
   }
 
   /**

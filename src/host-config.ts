@@ -30,14 +30,14 @@ export interface HostConfiguration {
   /** `local` (a machine Sprout runs on), `container`, or `windows` (remote daemon). */
   readonly environmentKind: string;
   /**
-   * How this Sprout instance reaches its production Worker (#115, ADR-0012).
+   * The Worker execution source this build names (#115, ADR-0012; E2, #116).
    *
-   * `configured` is the M1 carrier path (a core-started local endpoint, a
-   * container exec channel, or an SSH-tunnelled daemon) used for tests and the
-   * container carrier. `enrollment` is the production outbound path: the host
-   * Worker initiates and the Sprout instance never dials it. The two are
-   * mutually exclusive, so a deployment cannot silently run both. Defaults to
-   * `configured` when the host names none.
+   * `enrollment` is the production outbound path: enrolled Environment instances
+   * form the dynamic execution catalog, and the Sprout instance never dials a
+   * Worker. `configured` names the M1 carrier path, which E2 retains only for an
+   * injected test/development carrier (for example the container carrier);
+   * production no longer constructs a configured Worker from `SPROUT_ENV_KIND`.
+   * The value is parsed and reported; it is not a second production run path.
    */
   readonly environmentSource: EnvironmentSource;
   /** For a container environment: the instance's container name. */

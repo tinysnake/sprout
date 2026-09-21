@@ -654,3 +654,32 @@ test('the accepted WS channel carries requests, notifications, interrupts, close
   assert.equal((await interruptedTurn.completion).status, 'interrupted');
   await second.close();
 });
+
+/**
+ * E2 (#116): the enrollment-backed registry accepts authenticated inbound
+ * connections by instance id and never starts or dials a production Worker in
+ * response to an adapter, context, or readiness lookup.
+ */
+test('adapter, context, and readiness lookups never dial or start a production Worker', async () => {
+  const h = await harness();
+  try {
+    // No connection has ever been accepted. Every lookup fails closed or returns
+    // undefined rather than opening a Worker process or dialing a host.
+    assert.equal(await h.port_.info('mac-mini-1'), undefined);
+    await assert.rejects(
+      () => h.port_.adapters('mac-mini-1'),
+      /no accepted enrollment-backed Worker connection/,
+    );
+    await assert.rejects(
+      () => h.port_.contexts('mac-mini-1'),
+      /no accepted enrollment-backed Worker connection/,
+    );
+
+    // A lookup for an instance the catalog never enrolled is equally closed: the
+    // port holds no dialer and cannot invent a connection.
+    assert.equal(await h.port_.info('never-enrolled'), undefined);
+    await assert.rejects(() => h.port_.adapters('never-enrolled'));
+  } finally {
+    await h.close();
+  }
+});

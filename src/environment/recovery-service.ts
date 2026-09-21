@@ -133,6 +133,15 @@ export interface EnvironmentRecoveryServiceOptions {
   readonly idFactory?: () => string;
   /** The operator identity recorded on a Force Release outcome. */
   readonly operatorActor?: string;
+  /**
+   * Invoked after any recovery record change (E2, #116).
+   *
+   * The dynamic Environment catalog observes open recovery, reconnect, evidence
+   * synchronization, and resolution through this hook, so an instance's work
+   * safety and eligibility follow the recovery state without a restart. An
+   * observation only; it must never throw or be awaited as authority.
+   */
+  readonly onMutation?: () => void;
 }
 
 export interface OpenRecoveryInput {
@@ -155,6 +164,7 @@ export class EnvironmentRecoveryService {
   readonly #clock: () => number;
   readonly #idFactory: () => string;
   readonly #operatorActor: string;
+  readonly #onMutation: (() => void) | undefined;
 
   constructor(options: EnvironmentRecoveryServiceOptions) {
     this.#store = options.store;
@@ -164,6 +174,16 @@ export class EnvironmentRecoveryService {
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
     this.#operatorActor = options.operatorActor ?? 'operator';
+    this.#onMutation = options.onMutation;
+  }
+
+  /** Announce a durable recovery change to the catalog observer, never throwing. */
+  #announce(): void {
+    try {
+      this.#onMutation?.();
+    } catch {
+      // Observation must never turn a durable recovery decision into a failure.
+    }
   }
 
   /** Open (or reopen) the recovery record protecting one lease. */
@@ -178,6 +198,7 @@ export class EnvironmentRecoveryService {
     const record = this.#buildRecord(lease, input, at, existing);
     await this.#store.save(record);
     this.#leases.markRecovering(input.leaseId);
+    this.#announce();
     return record;
   }
 
@@ -289,6 +310,7 @@ export class EnvironmentRecoveryService {
       ],
     };
     await this.#store.save(next);
+    this.#announce();
     return next;
   }
 
@@ -337,6 +359,7 @@ export class EnvironmentRecoveryService {
       ],
     };
     await this.#store.save(next);
+    this.#announce();
     return next;
   }
 
@@ -492,6 +515,7 @@ export class EnvironmentRecoveryService {
       unrecycledTaskContext,
     };
     await this.#store.appendForceRelease(outcome);
+    this.#announce();
     await this.#resolve(record, 'force-released', { actor, reason }, `EMERGENCY FORCE RELEASE authorized: ${reason}`);
     return outcome;
   }
@@ -548,6 +572,7 @@ export class EnvironmentRecoveryService {
       ],
     };
     await this.#store.save(resolved);
+    this.#announce();
     return resolved;
   }
 

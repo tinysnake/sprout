@@ -1,10 +1,18 @@
 /**
- * The environment port over the enrollment-backed Worker gateway (#115).
+ * The enrollment-backed Environment worker registry (#115, E2 #116, ADR-0012).
  *
- * Accepted Worker connections arrive outbound from the host, so this Module
- * adapts each accepted connection to the same `RuntimeEnvironment` seam the M1
- * configured carriers satisfy: engines, Task contexts, workspace validation, and
- * neutral `worker/info` facts. Nothing above it learns how the Worker connected.
+ * Accepted Worker connections arrive outbound from the host, so this Module is
+ * the production, instance-keyed Worker registry: every accepted connection is
+ * keyed by its environment instance id and adapted to the same
+ * `RuntimeEnvironment` seam the M1 configured carriers satisfy — engines, Task
+ * contexts, workspace validation, and neutral `worker/info` facts. Nothing above
+ * it learns how the Worker connected.
+ *
+ * It never starts or dials a Worker: an adapter, context, or readiness lookup
+ * only reaches a channel the gateway already authenticated and accepted, and a
+ * lookup for an instance with no accepted connection fails closed. This is what
+ * makes an authenticated inbound connection the one production admission path
+ * (E2) rather than a remote start.
  *
  * Identification is **lazy**: the core asks for an instance's adapters or facts
  * only when it has work or an observation, and only then does it issue the
@@ -14,7 +22,7 @@
  *
  * A connection is keyed by its accepted epoch. A newer epoch for the same
  * instance replaces the cached handle, so a stale connection's sessions cannot be
- * reached through this port.
+ * reached through this registry.
  */
 
 import { WorkerClient, WorkerContextClient } from './client.ts';

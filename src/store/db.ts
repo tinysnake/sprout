@@ -9,6 +9,7 @@ import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
 import { SqliteAgentStore } from '../agent/sqlite-store.ts';
 import { SqliteEnrollmentStore } from '../environment/sqlite-enrollment-store.ts';
+import { SqliteEnvironmentCatalogStore } from '../environment/sqlite-catalog-store.ts';
 import { SqliteEnvironmentReadinessStore } from '../environment/sqlite-readiness-store.ts';
 import { SqliteRecoveryStore } from '../environment/sqlite-recovery-store.ts';
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
@@ -72,6 +73,8 @@ export {
  * - agent domain: `agents` (`agent/sqlite-store.ts`)
  * - enrollment domain: `environment_enrollments`
  *   (`environment/sqlite-enrollment-store.ts`)
+ * - catalog domain: `environment_catalog`
+ *   (`environment/sqlite-catalog-store.ts`)
  * - readiness domain: `environment_readiness`, `environment_probes`
  *   (`environment/sqlite-readiness-store.ts`)
  * - recovery domain: `environment_recovery`, `environment_force_releases`
@@ -110,6 +113,7 @@ export class SqliteStore {
   readonly agents: SqliteAgentStore;
   readonly agentIdentities: SqliteAgentStore;
   readonly enrollments: SqliteEnrollmentStore;
+  readonly environmentCatalog: SqliteEnvironmentCatalogStore;
   readonly environmentReadiness: SqliteEnvironmentReadinessStore;
   readonly recovery: SqliteRecoveryStore;
   readonly schemaVersion: number;
@@ -145,6 +149,7 @@ export class SqliteStore {
     this.agents = new SqliteAgentStore({ db: this.db });
     this.agentIdentities = this.agents;
     this.enrollments = new SqliteEnrollmentStore({ db: this.db });
+    this.environmentCatalog = new SqliteEnvironmentCatalogStore({ db: this.db });
     this.environmentReadiness = new SqliteEnvironmentReadinessStore({ db: this.db });
     this.recovery = new SqliteRecoveryStore({ db: this.db });
     // The Task adapter is given the environment domain's lease-binding port, so
