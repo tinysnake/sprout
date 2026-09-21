@@ -104,7 +104,10 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
     const legacy = (legacyProjects?.list() ?? [])
       .filter((project) => !authorityIds.has(project.id))
       .map(toProjectView);
-    return [...legacy, ...listed.map(toProjectAuthorityView)];
+    return [
+      ...legacy,
+      ...listed.filter((project) => project.status === 'active').map(toProjectAuthorityView),
+    ];
   }
 
   return {
@@ -151,18 +154,13 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         }
       }
 
-      // GET /api/projects — list durable Projects, optionally by status,
-      // merged with any configured legacy composer Projects so the authority
-      // route never shadows the preserved M1 route (F1, #85). Legacy entries
-      // carry no lifecycle status, so an explicit status filter is
-      // authority-only.
+      // GET /api/projects — preserve the #85 composer/routing list. Archived
+      // authority records never appear here, including through a status query;
+      // management clients use `/api/projects/authorities` for lifecycle
+      // history. Configured legacy Projects remain merged without shadowing.
       if (method === 'GET' && pathname === '/api/projects') {
         const status = statusFilter(context.searchParams.get('status') ?? undefined);
-        const listed = status === undefined
-          ? await composerCompatibleList()
-          : (await projects.list())
-              .filter((project) => project.status === status)
-              .map(toProjectAuthorityView);
+        const listed = status === 'archived' ? [] : await composerCompatibleList();
         return json(context, 200, { projects: listed });
       }
 

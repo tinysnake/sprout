@@ -3,6 +3,7 @@ import { ProjectRegistry } from './registry.ts';
 import type { ProjectAuthority } from './authority-model.ts';
 import { activeAgentMemberIds, currentProjectContent } from './authority-model.ts';
 import type { ProjectAuthorityStore } from './authority-store.ts';
+import type { ProjectAuthorityBridgePort } from './authority-service.ts';
 
 /**
  * The one Project identity seam between the M2 authority and the M1
@@ -13,10 +14,11 @@ import type { ProjectAuthorityStore } from './authority-store.ts';
  * Project lifecycle. This subclass makes the two one surface instead of two
  * authorities:
  *
- * - Authority Projects are projected into the M1 `Project` shape and mirrored
- *   into the registry on every durable change (`mirror`), so a Project created
- *   through the authority is immediately addressable on its Project channel —
- *   wake routing works from creation, atomically with the authority record.
+ * - Active authority Projects are projected into the M1 `Project` shape. The
+ *   projection is prepared before persistence and published afterwards, so a
+ *   Project created through the authority is immediately addressable on its
+ *   Project channel without a bridge failure leaving a durable partial record.
+ *   Archive removes that projection; restore prepares it again.
  * - Configured M1 projects (host-derived, like environment definitions) stay
  *   exactly as they were, so #85 route compatibility and every existing
  *   runtime test keep their semantics.
@@ -29,10 +31,7 @@ import type { ProjectAuthorityStore } from './authority-store.ts';
  * the authority store's append-only versions. No code path may re-derive an
  * authority record from this projection.
  */
-export class BridgedProjectRegistry extends ProjectRegistry {
-  /** Authority-projected ids, so configured legacy entries stay separable. */
-  readonly #authorityIds = new Set<string>();
-
+export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAuthorityBridgePort {
   constructor(projects: readonly Project[] = []) {
     super(projects);
   }
@@ -43,7 +42,9 @@ export class BridgedProjectRegistry extends ProjectRegistry {
    * The Human member is part of the authority record but not an M1
    * membership (the M1 membership vocabulary is Agent-only), so only the
    * active Agent memberships project. The current content version's goal,
-   * rules, and environment set become the collaboration view.
+   * and rules become the collaboration view. Environment access remains empty
+   * until a durable authority relationship exists; host composition is never
+   * treated as a grant.
    */
   static project(project: ProjectAuthority): Project {
     const content = currentProjectContent(project);
@@ -55,10 +56,8 @@ export class BridgedProjectRegistry extends ProjectRegistry {
         collaborationInstructions: membership.collaborationInstructions,
       };
     });
-    // The projected environment set is the M1 working projection: the runtime
-    // resolves the instances it configured for this build (the one composed
-    // instance), and the authority's durable Environment grants are later
-    // M2 scope. The projection never invents an instance id.
+    // Environment access is an authority relationship, not a host default.
+    // Until a durable grant exists, this Project is valid but cannot execute.
     return {
       id: project.id,
       goal: content.goal,
@@ -69,29 +68,38 @@ export class BridgedProjectRegistry extends ProjectRegistry {
   }
 
   /**
+   * Validate and fully prepare a projection without exposing it.
+   *
+   * ProjectService invokes this before persistence and invokes the returned
+   * infallible commit only after persistence succeeds. Archived Projects commit
+   * as removal, so legacy GET/routing/wake readers cannot retain stale access.
+   */
+  prepare(project: ProjectAuthority): () => void {
+    if (project.status === 'archived') {
+      return () => this.remove(project.id);
+    }
+    const projected = BridgedProjectRegistry.project(project);
+    return () => this.add(projected);
+  }
+
+  /**
    * Mirror one durable authority record into the registry.
    *
-   * Called on every authority change, so a created Project can route and wake
-   * immediately, and an ended membership or archived status is reflected in
-   * the collaboration view without any polling.
+   * Compatibility helper for direct hydration/tests. Runtime writes use the
+   * prepared bridge protocol through ProjectService.
    */
-  mirror(project: ProjectAuthority, availableEnvironmentInstanceIds: readonly string[]): void {
-    const projected: Project = {
-      ...BridgedProjectRegistry.project(project),
-      availableEnvironmentInstanceIds: [...availableEnvironmentInstanceIds],
-    };
-    this.#authorityIds.add(project.id);
-    this.add(projected);
+  mirror(project: ProjectAuthority, _availableEnvironmentInstanceIds: readonly string[] = []): void {
+    this.prepare(project)();
   }
 
   /** Hydrate every stored authority record at startup, after configured entries. */
   async loadAuthorities(
     store: ProjectAuthorityStore,
-    availableEnvironmentInstanceIds: readonly string[],
+    _availableEnvironmentInstanceIds: readonly string[] = [],
   ): Promise<readonly ProjectAuthority[]> {
     const stored = await store.list();
     for (const project of stored) {
-      this.mirror(project, availableEnvironmentInstanceIds);
+      this.mirror(project);
     }
     return stored;
   }

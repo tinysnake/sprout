@@ -383,10 +383,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // store, which is the same store the runs and leases use (ADR-0002);
     // in-memory entries win.
     await projects.load(stores.projects);
-    // Authority Projects mirror into the same registry so their Project
-    // channels are routable; the composed instance is the environment set the
-    // M1 working projection grants.
-    await projects.loadAuthorities(stores.projectAuthorities, [instanceId]);
+    // Authority Projects mirror into the same registry so active Project
+    // channels are routable. Host composition is not a durable Project
+    // Environment grant, so the bridge never injects this instance as access.
+    await projects.loadAuthorities(stores.projectAuthorities);
     // The durable Project, template-snapshot, and membership authority (#92).
     // It composes over the same durable handle every other M2 domain uses, and
     // its active-work safety facts are read-only projections of the same run
@@ -411,11 +411,34 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         for (const lease of leases) {
           if (lease.taskId !== undefined) {
             const task = await openedStores.tasks.get(lease.taskId);
+            // A live lease with no durable owner cannot be proven unrelated to
+            // this Project. Fail closed for every archive/restore attempt.
+            if (task === undefined) return true;
             if (task?.projectId === projectId) return true;
             continue;
           }
-          const run = lease.runId !== undefined ? await openedStores.runs.get(lease.runId) : undefined;
+          if (lease.runId === undefined) return true;
+          const run = await openedStores.runs.get(lease.runId);
+          if (run === undefined) return true;
           if (run?.projectId === projectId) return true;
+        }
+        // Recovery itself remains authoritative even if a damaged or partial
+        // state no longer has a visible live lease. Resolve the durable owner;
+        // an absent owner row is again unknown, never evidence of safety.
+        const recoveryRecords = (await openedStores.recovery.list()).filter(
+          (record) => record.phase !== 'resolved',
+        );
+        for (const record of recoveryRecords) {
+          if (record.taskId !== undefined) {
+            const task = await openedStores.tasks.get(record.taskId);
+            if (task === undefined) return true;
+            if (task.projectId === projectId) return true;
+            continue;
+          }
+          if (record.runId === undefined) return true;
+          const run = await openedStores.runs.get(record.runId);
+          if (run === undefined) return true;
+          if (run.projectId === projectId) return true;
         }
         return false;
       },
@@ -451,19 +474,20 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // seed registry stays authoritative for its definition-era Agents; the
     // durable authority covers every Agent created since #90.
     const projectAgentAuthority: ProjectAgentAuthorityPort = {
-      agentExists: async (agentId) =>
-        agents.get(agentId) !== undefined || (await agentService.get(agentId)) !== undefined,
+      agentIsActive: async (agentId) => {
+        const durable = await agentService.get(agentId);
+        // A durable lifecycle record wins over a same-id seed definition: an
+        // archived Agent must not become eligible through the legacy registry.
+        return durable !== undefined ? durable.status === 'active' : agents.get(agentId) !== undefined;
+      },
     };
     const projectService = new ProjectService({
       store: stores.projectAuthorities,
       workSafety: projectWorkSafety,
       agentAuthority: projectAgentAuthority,
-      // Every durable authority change mirrors into the M1 registry, so a
-      // created Project is addressable on its Project channel atomically, and
-      // an ended membership stops being woken (F1).
-      onChanged: (project) => {
-        projects.mirror(project, [instanceId]);
-      },
+      // The bridge prepares before persistence and publishes only afterwards;
+      // archive commits as removal from every M1 route and wake lookup.
+      bridge: projects,
     });
     const pool = new EnvironmentPool({
       definitions: [definition],

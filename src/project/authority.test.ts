@@ -29,6 +29,7 @@ import { GENERAL_COLLABORATION_TEMPLATE } from './template.ts';
 
 function service(options: Parameters<typeof ProjectService.prototype['create']>[0] extends never ? never : {
   readonly workSafety?: ConstructorParameters<typeof ProjectService>[0]['workSafety'];
+  readonly agentAuthority?: ConstructorParameters<typeof ProjectService>[0]['agentAuthority'];
   readonly clock?: () => number;
   readonly createId?: () => string;
 } = {}) {
@@ -36,6 +37,7 @@ function service(options: Parameters<typeof ProjectService.prototype['create']>[
     store: new InMemoryProjectAuthorityStore(),
     clock: options.clock ?? (() => 10_000),
     ...(options.workSafety !== undefined ? { workSafety: options.workSafety } : {}),
+    agentAuthority: options.agentAuthority ?? { agentIsActive: () => true },
   });
 }
 
@@ -186,6 +188,7 @@ test('membership edits append versions with actor time and reason facts', async 
   const ticking = new ProjectService({
     store: new InMemoryProjectAuthorityStore(),
     clock: () => clock++,
+    agentAuthority: { agentIsActive: () => true },
   });
   await ticking.create({ id: 'project-members', displayName: 'Members' });
 
@@ -243,6 +246,7 @@ test('ending a membership is refused while active work depends on the member', a
   const projects = new ProjectService({
     store: new InMemoryProjectAuthorityStore(),
     workSafety: blockers,
+    agentAuthority: { agentIsActive: () => true },
   });
   await projects.create({
     id: 'project-busy',
@@ -271,6 +275,7 @@ test('re-adding a previously ended membership starts a fresh relationship while 
   const projects = new ProjectService({
     store: new InMemoryProjectAuthorityStore(),
     clock: () => clock++,
+    agentAuthority: { agentIsActive: () => true },
   });
   await projects.create({ id: 'project-rejoin', displayName: 'Rejoin' });
   await projects.addMembership('project-rejoin', { agentId: 'agent-scout' });
@@ -303,6 +308,7 @@ test('archive is refused while active work depends on the Project and retains ev
   const projects = new ProjectService({
     store: new InMemoryProjectAuthorityStore(),
     workSafety: blockers,
+    agentAuthority: { agentIsActive: () => true },
   });
   await projects.create({
     id: 'project-active',
@@ -428,4 +434,52 @@ test('a Project authority record survives an in-memory store round-trip and a re
   assert.equal(stored.content.currentVersion, 1);
   assert.deepEqual(activeAgentMemberIds(stored), ['agent-scout']);
   assert.equal(stored.template.templateVersion, 1);
+});
+
+test('Agent membership is fail-closed without active global Agent authority while empty membership stays valid', async () => {
+  const withoutAuthority = new ProjectService({ store: new InMemoryProjectAuthorityStore() });
+  const empty = await withoutAuthority.create({ id: 'project-empty', displayName: 'Empty' });
+  assert.deepEqual(activeAgentMemberIds(empty), []);
+  await assert.rejects(
+    () => withoutAuthority.addMembership('project-empty', { agentId: 'agent-unchecked' }),
+    (error: unknown) => error instanceof ProjectAuthorityError && error.code === 'unknown-agent',
+  );
+
+  const statuses = new Map([
+    ['agent-active', true],
+    ['agent-archived', false],
+    ['agent-inactive', false],
+  ]);
+  const projects = service({
+    agentAuthority: { agentIsActive: (agentId) => statuses.get(agentId) ?? false },
+  });
+  await projects.create({
+    id: 'project-authorized',
+    displayName: 'Authorized',
+    agentMemberships: [{ agentId: 'agent-active' }],
+  });
+  for (const agentId of ['agent-archived', 'agent-inactive', 'agent-unknown']) {
+    await assert.rejects(
+      () => projects.addMembership('project-authorized', { agentId }),
+      (error: unknown) => error instanceof ProjectAuthorityError && error.code === 'unknown-agent',
+    );
+  }
+});
+
+test('a bridge prepare failure leaves no durable Project behind', async () => {
+  const store = new InMemoryProjectAuthorityStore();
+  const projects = new ProjectService({
+    store,
+    bridge: {
+      prepare() {
+        throw new Error('bridge unavailable');
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => projects.create({ id: 'project-uncommitted', displayName: 'Uncommitted' }),
+    /bridge unavailable/,
+  );
+  assert.equal(await store.get('project-uncommitted'), undefined);
 });

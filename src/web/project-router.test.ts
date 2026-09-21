@@ -72,7 +72,7 @@ async function projectApi(): Promise<ProjectRuntime> {
     // The composed global Agent authority (F5): a membership must name a real
     // portable Agent; an invented id is refused.
     agentAuthority: {
-      agentExists: (agentId) => ['agent-scout', 'agent-dup', 'agent-leaky'].includes(agentId),
+      agentIsActive: (agentId) => ['agent-scout', 'agent-dup', 'agent-leaky'].includes(agentId),
     },
   });
   const api = createRunApi({

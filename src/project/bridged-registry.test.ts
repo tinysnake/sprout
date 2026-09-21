@@ -36,7 +36,7 @@ test('an authority Project mirrors into the registry and stays editable in the a
   const mirrored = registry.get('project-live');
   assert.ok(mirrored);
   assert.equal(mirrored.goal, 'Bridge me');
-  assert.deepEqual(mirrored.availableEnvironmentInstanceIds, ['instance-1']);
+  assert.deepEqual(mirrored.availableEnvironmentInstanceIds, []);
   // The Human member never projects as an M1 Agent membership; there were no
   // Agent memberships, so none project.
   assert.deepEqual(mirrored.memberships, []);
@@ -81,4 +81,31 @@ test('loadAuthorities hydrates every stored record after the configured entries'
   assert.ok(registry.get('project-b'));
   // Hydration never shadows a configured entry with a different id.
   assert.equal(registry.get('composition-project')?.goal, legacy.goal);
+});
+
+test('archived authority Projects disappear from legacy lookup and restore without invented Environment access', async () => {
+  const registry = new BridgedProjectRegistry([legacy]);
+  const projects = new ProjectService({
+    store: new InMemoryProjectAuthorityStore(),
+    agentAuthority: { agentIsActive: () => true },
+    bridge: registry,
+  });
+
+  await projects.create({
+    id: 'project-lifecycle',
+    displayName: 'Lifecycle',
+    agentMemberships: [{ agentId: 'scout' }],
+  });
+  const active = registry.get('project-lifecycle');
+  assert.ok(active);
+  assert.deepEqual(active.availableEnvironmentInstanceIds, []);
+
+  await projects.archive('project-lifecycle');
+  assert.equal(registry.get('project-lifecycle'), undefined);
+  assert.equal(registry.list().some((project) => project.id === 'project-lifecycle'), false);
+  assert.equal(registry.forAgent('scout').some((project) => project.id === 'project-lifecycle'), false);
+
+  await projects.restore('project-lifecycle');
+  assert.ok(registry.get('project-lifecycle'));
+  assert.deepEqual(registry.get('project-lifecycle')?.availableEnvironmentInstanceIds, []);
 });

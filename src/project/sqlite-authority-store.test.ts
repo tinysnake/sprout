@@ -25,7 +25,11 @@ test('a Project authority record survives being written to disk and read back af
   try {
     const dbPath = join(dir, 'sprout.db');
     const writer = new SqliteStore({ filename: dbPath });
-    const projects = new ProjectService({ store: writer.projectAuthorities, clock: () => 1_000 });
+    const projects = new ProjectService({
+      store: writer.projectAuthorities,
+      clock: () => 1_000,
+      agentAuthority: { agentIsActive: () => true },
+    });
     const created = await projects.create({
       id: 'project-restart',
       displayName: 'Restart proof',

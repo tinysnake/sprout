@@ -871,6 +871,19 @@ test('the Project authority service composes over the shared durable store with 
   const restored = await runtime.projectService.restore('project-graph');
   assert.equal(restored.status, 'active');
 
+  // A durable archived lifecycle record wins over a same-id configured seed:
+  // legacy existence cannot make an inactive Agent eligible for membership.
+  await runtime.agentService.create({
+    id: 'scout',
+    displayName: 'Scout authority',
+    workOptions: [{ engine: 'scripted', workModel: 'test-model', effort: 'medium' }],
+  });
+  await runtime.agentService.archive('scout');
+  await assert.rejects(
+    () => runtime.projectService.addMembership('project-graph', { agentId: 'scout' }),
+    (error: unknown) => error instanceof Error && error.message.includes('active portable Agent'),
+  );
+
   await runtime.close();
 });
 
@@ -906,7 +919,7 @@ test('the composed Project router serves the authority contract after the auth b
   }
 });
 
-test('the authority bridge makes a new Project routable and keeps the configured Project visible (#92, F1)', async () => {
+test('the authority bridge keeps GET compatibility without inventing execution access and archive removes routing (#92, F1)', async () => {
   const credential = 'composed-runtime-test-credential';
   const { runtime } = await build({
     turns: [scriptedTurn('bridged reply')],
@@ -951,9 +964,9 @@ test('the authority bridge makes a new Project routable and keeps the configured
     assert.equal(sameId.length, 1, 'a shared id resolves to one Project, not two');
     assert.equal(sameId[0]?.goal, GENERAL_TEMPLATE.goalGuidance);
 
-    // The new authority Project's channel routes and wakes: a Message to it
-    // reaches the composed Agent through the bridged registry, atomically
-    // after creation.
+    // The new authority Project's channel routes exact mentions after creation,
+    // but no durable Environment access exists yet. The bridge must not invent
+    // the configured runtime Environment as an execution grant.
     const configuredAgent = runtime.agents.list().some((agent) => agent.id === 'scout');
     assert.ok(configuredAgent);
     const authorityProject = await runtime.projectService.create({
@@ -968,6 +981,11 @@ test('the authority bridge makes a new Project routable and keeps the configured
       () => runtime.projectService.addMembership('project-channel-live', { agentId: 'agent-ghost' }),
     );
     await runtime.projectService.addMembership('project-channel-live', { agentId: 'scout' });
+    assert.deepEqual(
+      runtime.projects.get('project-channel-live')?.availableEnvironmentInstanceIds,
+      [],
+      'an authority Project with no durable Environment grant is not executable',
+    );
     const delivered = await runtime.collaboration.deliver({
       projectId: authorityProject.id,
       channel: 'project',
@@ -978,8 +996,32 @@ test('the authority bridge makes a new Project routable and keeps the configured
     });
     assert.equal(delivered.admittedRunIds.length, 1, 'the new Project channel must wake its member');
     const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
-    assert.equal(run.status, 'completed', run.failure ?? 'run failed');
-    assert.equal(run.projectId, authorityProject.id);
+    assert.equal(run.status, 'failed');
+    assert.match(run.failure ?? '', /available environment/i);
+
+    await runtime.projectService.archive('project-channel-live');
+    assert.equal(runtime.projects.get('project-channel-live'), undefined);
+    const afterArchive = (await (
+      await fetch(`${base}/api/projects`, { headers: { cookie } })
+    ).json()) as { projects: { id: string }[] };
+    assert.equal(
+      afterArchive.projects.some((entry) => entry.id === 'project-channel-live'),
+      false,
+      'the preserved #85 GET route must not expose archived authority Projects',
+    );
+    const archivedStatusList = (await (
+      await fetch(`${base}/api/projects?status=archived`, { headers: { cookie } })
+    ).json()) as { projects: { id: string }[] };
+    assert.equal(archivedStatusList.projects.some((entry) => entry.id === 'project-channel-live'), false);
+    const archivedDelivery = await runtime.collaboration.deliver({
+      projectId: authorityProject.id,
+      channel: 'project',
+      author: { id: 'human', kind: 'human' },
+      body: '@scout must not wake after archive',
+      deliveryKey: 'bridge-delivery-archived',
+      awaitReply: true,
+    });
+    assert.deepEqual(archivedDelivery.admittedRunIds, []);
   } finally {
     await runtime.api.close();
     await runtime.close();
@@ -1026,6 +1068,47 @@ test('archive refuses while recovery still owns the Environment behind a recover
   await runtime.projectService.create({ id: PROJECT_ID, displayName: 'Lease gated' });
   await assert.rejects(
     () => runtime.projectService.archive(PROJECT_ID),
+    (error: unknown) => error instanceof Error && error.message.includes('Environment lease'),
+  );
+
+  await runtime.close();
+});
+
+test('archive and restore fail closed for live leases whose run or Task owner row is missing (#92, F3)', async () => {
+  const { runtime } = await build({ listen: false });
+  await runtime.projectService.create({ id: 'project-orphan-guard', displayName: 'Orphan guard' });
+
+  runtime.pool.adoptLease({
+    id: 'lease-missing-run',
+    instanceId: INSTANCE_ID,
+    capability: 'agent-run',
+    holderId: 'missing-run',
+    holderKind: 'run',
+    runId: 'missing-run',
+    acquiredAt: 1,
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    state: 'active',
+  });
+  await assert.rejects(
+    () => runtime.projectService.archive('project-orphan-guard'),
+    (error: unknown) => error instanceof Error && error.message.includes('Environment lease'),
+  );
+
+  runtime.pool.releaseLease('lease-missing-run');
+  await runtime.projectService.archive('project-orphan-guard');
+  runtime.pool.adoptLease({
+    id: 'lease-missing-task',
+    instanceId: INSTANCE_ID,
+    capability: 'agent-run',
+    holderId: 'missing-task',
+    holderKind: 'task',
+    taskId: 'missing-task',
+    acquiredAt: 2,
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    state: 'recovering',
+  });
+  await assert.rejects(
+    () => runtime.projectService.restore('project-orphan-guard'),
     (error: unknown) => error instanceof Error && error.message.includes('Environment lease'),
   );
 

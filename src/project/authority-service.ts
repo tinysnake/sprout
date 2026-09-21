@@ -78,19 +78,32 @@ export interface ProjectWorkSafetyPort {
  * valid; an invented membership must not.
  */
 export interface ProjectAgentAuthorityPort {
-  /** Whether this stable Agent identity exists in the global Agent authority. */
-  agentExists(agentId: string): Promise<boolean> | boolean;
+  /** Whether this stable Agent identity exists and is active globally. */
+  agentIsActive(agentId: string): Promise<boolean> | boolean;
+}
+
+/**
+ * A prepared authority-to-runtime projection.
+ *
+ * Preparation validates and allocates the complete projection without making
+ * it visible. The returned synchronous commit cannot fail: ProjectService
+ * persists only after preparation succeeds, then publishes the prepared view.
+ */
+export interface ProjectAuthorityBridgePort {
+  prepare(project: ProjectAuthority): (() => void) | Promise<() => void>;
 }
 
 export interface ProjectServiceOptions {
   readonly store: ProjectAuthorityStore;
   readonly workSafety?: ProjectWorkSafetyPort;
   /**
-   * The global Agent authority membership references (#90). Omitted only by
-   * narrow domain tests; the runtime always supplies it, so a ghost membership
-   * is refused wherever it can become durable.
+   * The global Agent authority membership references (#90). When omitted, an
+   * empty-membership Project remains valid but every Agent membership command
+   * fails closed.
    */
   readonly agentAuthority?: ProjectAgentAuthorityPort;
+  /** Runtime projection prepared before, and committed after, persistence. */
+  readonly bridge?: ProjectAuthorityBridgePort;
   /** The template source; production uses the built-in General template. */
   readonly template?: ProjectTemplate;
   readonly clock?: () => number;
@@ -99,9 +112,10 @@ export interface ProjectServiceOptions {
   /** Who created the Project: the local Human operator's member id. */
   readonly operatorMemberId?: string;
   /**
-   * Called after every durable change, so the runtime can keep the M1
-   * collaboration registry and Project channel routing in step with the
-   * authority (F1: one stable Project identity, routable from creation).
+   * @deprecated Compatibility hook for older callers. It now runs before
+   * persistence so a refusal cannot leave a partially created Project. New
+   * composition should use `bridge`, whose prepared commit also avoids making
+   * a projection visible when persistence fails.
    */
   readonly onChanged?: (project: ProjectAuthority) => void | Promise<void>;
 }
@@ -164,6 +178,7 @@ export class ProjectService {
   readonly #store: ProjectAuthorityStore;
   readonly #workSafety: ProjectWorkSafetyPort | undefined;
   readonly #agentAuthority: ProjectAgentAuthorityPort | undefined;
+  readonly #bridge: ProjectAuthorityBridgePort | undefined;
   readonly #template: ProjectTemplate;
   readonly #clock: () => number;
   readonly #createId: () => string;
@@ -174,6 +189,7 @@ export class ProjectService {
     this.#store = options.store;
     this.#workSafety = options.workSafety;
     this.#agentAuthority = options.agentAuthority;
+    this.#bridge = options.bridge;
     this.#template = options.template ?? GENERAL_COLLABORATION_TEMPLATE;
     this.#clock = options.clock ?? Date.now;
     this.#createId = options.createId ?? (() => `project-${Math.random().toString(36).slice(2, 10)}`);
@@ -265,8 +281,7 @@ export class ProjectService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.#store.save(project);
-    await this.#notify(project);
+    await this.#persist(project);
     return project;
   }
 
@@ -335,8 +350,7 @@ export class ProjectService {
       },
       updatedAt: now,
     };
-    await this.#store.save(next);
-    await this.#notify(next);
+    await this.#persist(next);
     return next;
   }
 
@@ -474,8 +488,7 @@ export class ProjectService {
       archivedAt: now,
       archivedReason,
     };
-    await this.#store.save(next);
-    await this.#notify(next);
+    await this.#persist(next);
     return next;
   }
 
@@ -526,8 +539,7 @@ export class ProjectService {
       updatedAt: now,
       restoredAt: now,
     };
-    await this.#store.save(next);
-    await this.#notify(next);
+    await this.#persist(next);
     return next;
   }
 
@@ -564,8 +576,7 @@ export class ProjectService {
       },
       updatedAt: at,
     };
-    await this.#store.save(next);
-    await this.#notify(next);
+    await this.#persist(next);
     return next;
   }
 
@@ -580,22 +591,28 @@ export class ProjectService {
   /**
    * Refuse a membership that names no real global Agent (F5, #90).
    *
-   * A Project with no Agent members remains valid; an invented member id does
-   * not. When no Agent authority is composed (narrow domain tests only), the
-   * shape check stays as the only boundary.
+   * A Project with no Agent members remains valid. Any requested membership
+   * fails closed unless the global authority proves that Agent is active;
+   * missing authority, unknown identities, and archived/inactive identities
+   * are therefore all refused at this domain boundary.
    */
   async #requireKnownAgent(agentId: string): Promise<void> {
-    if (this.#agentAuthority !== undefined && !(await this.#agentAuthority.agentExists(agentId))) {
+    if (this.#agentAuthority === undefined || !(await this.#agentAuthority.agentIsActive(agentId))) {
       throw new ProjectAuthorityError(
         'unknown-agent',
-        `no portable Agent authority exists for ${agentId}; create the Agent first`,
+        `no active portable Agent authority exists for ${agentId}; create or restore the Agent first`,
       );
     }
   }
 
-  /** Fire the change hook so the runtime keeps M1 routing in step (F1). */
-  async #notify(project: ProjectAuthority): Promise<void> {
+  /** Prepare the runtime bridge, persist, then publish the infallible commit. */
+  async #persist(project: ProjectAuthority): Promise<void> {
+    const commit = await this.#bridge?.prepare(project);
+    // Legacy hooks are treated as preparation, not post-persistence
+    // notification: a rejection must never leave a durable partial change.
     await this.#onChanged?.(project);
+    await this.#store.save(project);
+    commit?.();
   }
 
   /** An archived Project is read-only (ADR-0008). */
