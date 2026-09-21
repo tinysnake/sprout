@@ -1344,3 +1344,54 @@ test('a composed run records the durable workspace binding it was admitted under
 
   await runtime.close();
 });
+
+/**
+ * The composed runtime mounts the enrollment-backed outbound Worker gateway
+ * (#115, ADR-0012).
+ *
+ * The pending enrollment, its one-use claim, the machine claim route, and the
+ * epoch registry are all present on the one runtime object, so a host Worker can
+ * connect without the core ever dialing it.
+ */
+test('the composed runtime exposes the outbound Worker gateway and its epoch registry (#115)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-gateway-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const environment = scriptedEnvironment({
+    adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+  });
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({ databasePath: join(directory, 'sprout.db') }),
+    projectRoot: '/synthetic/project-root',
+    environment,
+  });
+  try {
+    assert.notEqual(runtime.workerGateway, undefined);
+    assert.equal(runtime.workerEpochs, runtime.workerGateway.epochs);
+    assert.notEqual(runtime.enrollmentEnvironment, undefined);
+
+    // A Web-created pending enrollment carries a one-use claim, and the machine
+    // claim route consumes it without a browser cookie.
+    const requested = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID,
+      displayName: 'Outbound Environment',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    const secret = requested.claim?.secret ?? '';
+    assert.notEqual(secret, '');
+    const { port } = await runtime.api.listen(0);
+    const claimed = await fetch(
+      `http://127.0.0.1:${port}/api/worker/enrollments/${encodeURIComponent(requested.enrollment.id)}/claim`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ claimSecret: secret }),
+      },
+    );
+    assert.equal(claimed.status, 200);
+    assert.equal(claimed.headers.get('set-cookie'), null, 'the machine route sets no Human cookie');
+  } finally {
+    await runtime.close();
+  }
+});

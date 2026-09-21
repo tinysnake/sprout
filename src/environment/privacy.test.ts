@@ -313,3 +313,47 @@ test('a protocol version is a bounded token or nothing', () => {
   assert.equal(sanitizeProtocolVersion('2.1 /Users/example/secret'), undefined);
   assert.equal(sanitizeProtocolVersion('sk-live-abcdefghijklmnop'), undefined);
 });
+
+/**
+ * The one-use enrollment claim's durable shape is privacy-safe (#115).
+ *
+ * The raw secret must never survive into a durable document, its digest must not
+ * be a reversible encoding of the secret, and a legacy/bypassing writer that
+ * stored key material in the digest field must not have it echoed on read.
+ */
+test('a claim document stores only a one-way digest, never the raw secret', async () => {
+  const { EnvironmentEnrollmentService } = await import('./enrollment-service.ts');
+  const { InMemoryEnrollmentStore } = await import('./enrollment-store.ts');
+  const { InMemoryEnvironmentReadinessStore } = await import('./readiness-store.ts');
+  const { normalizeEnrollment } = await import('./enrollment.ts');
+
+  const store = new InMemoryEnrollmentStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: store,
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    idFactory: () => 'enroll-1',
+    claimSecretFactory: () => 'super-secret-claim-value',
+  });
+  const result = await service.requestEnrollment({
+    environmentInstanceId: 'local-macos',
+    displayName: 'Local Mac',
+    platform: 'macos',
+    capabilityRequests: [],
+    engineFacts: [],
+  });
+  const serialized = JSON.stringify(result.enrollment);
+  assert.equal(serialized.includes('super-secret-claim-value'), false);
+  assert.match(result.enrollment.claim?.secretDigest ?? '', /^[a-f0-9]{64}$/);
+
+  // A legacy row that stored a private key body in the digest field is reduced
+  // to no claim at all rather than echoing the material.
+  const poisoned = normalizeEnrollment({
+    ...result.enrollment,
+    claim: {
+      secretDigest: '-----BEGIN PRIVATE KEY-----AAAA-----END PRIVATE KEY-----',
+      issuedAt: 0,
+      expiresAt: 1,
+    },
+  });
+  assert.equal(poisoned.claim, undefined);
+});

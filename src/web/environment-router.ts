@@ -65,20 +65,23 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
       const { method, pathname, segments } = context;
 
       // POST /api/environments/enrollments — request a pending enrollment.
+      //
+      // A Human browser creates this without a Worker public key, host address,
+      // or engine credential (#115). The response separates the public bootstrap
+      // input from the short-lived, one-use claim secret, which is returned
+      // exactly once and never echoed again.
       if (method === 'POST' && pathname === '/api/environments/enrollments') {
         const body = await context.readBody();
         const environmentInstanceId = stringField(body, 'environmentInstanceId');
         const displayName = stringField(body, 'displayName');
-        const publicKey = stringField(body, 'publicKey');
         const platform = stringField(body, 'platform');
         if (
           environmentInstanceId === undefined ||
           displayName === undefined ||
-          publicKey === undefined ||
           platform === undefined
         ) {
           return json(context, 400, {
-            error: 'environmentInstanceId, displayName, publicKey, and platform are required',
+            error: 'environmentInstanceId, displayName, and platform are required',
           });
         }
         const capabilityRequests = stringArray(body, 'capabilityRequests');
@@ -90,11 +93,15 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
           return json(context, 400, { error: 'engines must be an array of engine facts' });
         }
         const protocolVersion = stringField(body, 'protocolVersion');
+        // A legacy or probe caller may pass an already-known public key, but Web
+        // does not: the identity is bound only after a claim proves key
+        // possession.
+        const publicKey = stringField(body, 'publicKey');
         try {
           const result = await enrollments.requestEnrollment({
             environmentInstanceId,
             displayName,
-            publicKey,
+            ...(publicKey !== undefined ? { publicKey } : {}),
             platform,
             ...(protocolVersion !== undefined ? { protocolVersion } : {}),
             capabilityRequests,
@@ -103,6 +110,9 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
           return json(context, 201, {
             enrollment: toEnrollmentView(result.enrollment),
             bootstrap: result.bootstrap,
+            ...(result.claim !== undefined
+              ? { claim: { secret: result.claim.secret, expiresAt: result.claim.expiresAt } }
+              : {}),
           });
         } catch (error) {
           return enrollmentFailure(context, error);

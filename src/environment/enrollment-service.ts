@@ -9,9 +9,11 @@ import {
   EnrollmentError,
   type CreatePendingEnrollmentInput,
   type EnvironmentEnrollment,
+  type EnrollmentClaim,
   type EnrollmentConnectionOutcome,
 } from './enrollment.ts';
 import { createEnrollmentId, workerIdentityDigest } from './enrollment-identity.ts';
+import { createClaimSecret, claimSecretDigest, verifyClaimSecret, DEFAULT_CLAIM_TTL_MS } from './enrollment-claim.ts';
 import type { EnrollmentStore } from './enrollment-store.ts';
 import { WorkerProofAuthority, WorkerProofError, type WorkerIdentityChallenge, type WorkerIdentityProof } from './worker-proof.ts';
 import {
@@ -109,11 +111,23 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly idFactory?: () => string;
   /** Mints and verifies Worker identity challenges. */
   readonly proofAuthority?: WorkerProofAuthority;
+  /** Generates a one-use host claim secret. Injectable for deterministic tests. */
+  readonly claimSecretFactory?: () => string;
+  /** How long a host claim stays usable. Defaults to 15 minutes. */
+  readonly claimTtlMs?: number;
 }
 
 /** A new pending enrollment request plus the host bootstrap guidance it unlocks. */
 export interface PendingEnrollmentResult {
   readonly enrollment: EnvironmentEnrollment;
+  /**
+   * The Web-created one-use host claim (#115), when none was pre-supplied.
+   *
+   * The raw secret is returned exactly once, at creation, and is never retained,
+   * echoed, or carried in a list view. `undefined` for a pre-provisioned
+   * enrollment whose identity was already known.
+   */
+  readonly claim: { readonly secret: string; readonly expiresAt: number } | undefined;
   readonly bootstrap: {
     /** Host bootstrap steps; host-local actions are never performed by Web. */
     readonly instructions: readonly string[];
@@ -138,6 +152,8 @@ export class EnvironmentEnrollmentService {
   readonly #clock: () => number;
   readonly #idFactory: (() => string) | undefined;
   readonly #proofAuthority: WorkerProofAuthority;
+  readonly #claimSecretFactory: () => string;
+  readonly #claimTtlMs: number;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -150,6 +166,8 @@ export class EnvironmentEnrollmentService {
     this.#idFactory = options.idFactory;
     this.#proofAuthority =
       options.proofAuthority ?? new WorkerProofAuthority({ clock: this.#clock });
+    this.#claimSecretFactory = options.claimSecretFactory ?? createClaimSecret;
+    this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
   }
 
   async list(): Promise<readonly EnvironmentEnrollment[]> {
@@ -161,32 +179,95 @@ export class EnvironmentEnrollmentService {
     return enrollment === undefined ? undefined : normalizeEnrollment(enrollment);
   }
 
-  /** Create a short-lived pending enrollment and its host bootstrap guidance. */
+  /**
+   * Create a short-lived, identity-free pending enrollment and its host claim.
+   *
+   * Web supplies no Worker public key, host address, or engine credential: the
+   * response separates the public bootstrap guidance from the one-use secret,
+   * and the Worker identity is bound only after a claim proves key possession
+   * (#115, ADR-0012).
+   */
   async requestEnrollment(
-    input: Omit<CreatePendingEnrollmentInput, 'at' | 'id' | 'identityDigest'> & {
-      /** The Worker's host-generated public key; only its digest is retained. */
-      readonly publicKey: string;
+    input: Omit<CreatePendingEnrollmentInput, 'at' | 'id' | 'identityDigest' | 'claim'> & {
+      /**
+       * The Worker's host-generated public key, when a caller already knows it
+       * (a pre-provisioned host or an independent probe). A caller with no key —
+       * the production Web path (#115) — omits it and receives a one-use claim
+       * instead.
+       */
+      readonly publicKey?: string;
     },
   ): Promise<PendingEnrollmentResult> {
     const at = this.#clock();
     const { publicKey, ...rest } = input;
+    // A pre-known identity needs no claim: there is nothing to bind. Web, which
+    // never supplies a key, gets a one-use secret so the identity is bound only
+    // after the host claims it and proves key possession (ADR-0012).
+    const claimSecret = publicKey !== undefined ? undefined : this.#claimSecretFactory();
+    const claim: EnrollmentClaim | undefined = claimSecret === undefined
+      ? undefined
+      : {
+          secretDigest: claimSecretDigest(claimSecret),
+          issuedAt: at,
+          expiresAt: at + this.#claimTtlMs,
+        };
     const enrollment = createPendingEnrollment({
       ...rest,
-      identityDigest: workerIdentityDigest(publicKey),
+      ...(publicKey !== undefined ? { identityDigest: workerIdentityDigest(publicKey) } : {}),
+      ...(claim !== undefined ? { claim } : {}),
       at,
       id: (this.#idFactory ?? createEnrollmentId)(),
     });
     await this.#enrollments.save(enrollment);
     return {
       enrollment,
+      claim:
+        claimSecret === undefined || claim === undefined
+          ? undefined
+          : { secret: claimSecret, expiresAt: claim.expiresAt },
       bootstrap: {
         instructions: [
           'Install the Sprout Worker and the engines you intend to use in the signed-in user context.',
           'Generate the Worker key pair on the Environment host; the private key never leaves that host.',
-          'Register the Worker to start after sign-in, then start it once so it connects to Sprout.',
+          'Start the Worker with the one-use enrollment claim secret read from the environment, not the command line.',
+          'The Worker connects outbound to Sprout and proves key possession; a Human then approves the identity.',
         ],
       },
     };
+  }
+
+  /**
+   * Claim a pending enrollment with the one-use host secret (#115).
+   *
+   * The secret is consumed exactly once and expires cleanly. A successful claim
+   * does not bind an identity and cannot approve itself; it only admits this
+   * host to the challenge/connect proof step. The response never echoes the
+   * secret, and a revoked, consumed, expired, or unknown claim fails closed.
+   */
+  async claimEnrollment(
+    enrollmentId: string,
+    claimSecret: string,
+  ): Promise<EnvironmentEnrollment> {
+    const enrollment = await this.#requireEnrollment(enrollmentId);
+    const at = this.#clock();
+    if (enrollment.status === 'revoked') {
+      throw new EnrollmentError('revoked-enrollment', 'This enrollment is revoked and cannot be claimed.');
+    }
+    const claim = enrollment.claim;
+    if (claim === undefined || claim.consumedAt !== undefined) {
+      throw new EnrollmentError('invalid-claim', 'The enrollment has no live one-use claim.');
+    }
+    if (at >= claim.expiresAt) {
+      throw new EnrollmentError('invalid-claim', 'The one-use enrollment claim has expired.');
+    }
+    if (!verifyClaimSecret(claimSecret, claim.secretDigest)) {
+      throw new EnrollmentError('invalid-claim', 'The one-use enrollment claim is not valid.');
+    }
+    // Consumption is durable and one-way: the digest stays so a replay is
+    // refused as `invalid-claim`, while the raw secret is never recoverable.
+    const claimed: EnvironmentEnrollment = { ...enrollment, claim: { ...claim, consumedAt: at }, updatedAt: at };
+    await this.#enrollments.save(claimed);
+    return normalizeEnrollment(claimed);
   }
 
   /**
@@ -224,6 +305,15 @@ export class EnvironmentEnrollmentService {
   }): Promise<EnrollmentConnectionOutcome> {
     const enrollment = await this.#requireEnrollment(input.enrollmentId);
     const at = this.#clock();
+    // A claimed-but-unconsumed enrollment must not accept an identity proof: the
+    // one-use secret is the host's admission to the proof step, so proof alone
+    // cannot bind an identity to a Web-created pending enrollment (#115).
+    if (enrollment.claim !== undefined && enrollment.claim.consumedAt === undefined) {
+      throw new EnrollmentError(
+        'invalid-claim',
+        'The enrollment must be claimed with its one-use secret before its Worker identity can be proven.',
+      );
+    }
     // The proof is verified before any identity is derived: an unverified public
     // key cannot be reconciled as `reconnected`, so a stolen digest/key alone is
     // never sufficient to connect.

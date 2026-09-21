@@ -22,6 +22,7 @@ import { workerIdentityFixture } from '../environment/worker-identity-fixture.ts
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import { createRunApi } from './api.ts';
 import { createEnvironmentRouter } from './environment-router.ts';
+import { WorkerGateway } from '../worker/gateway.ts';
 
 /**
  * HTTP contract, privacy, and restart-independent behaviour for the Environment
@@ -105,6 +106,9 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   });
   const api = createRunApi({
     orchestrator,
+    // The machine-authenticated Worker gateway (#115) is composed alongside the
+    // Human browser boundary, so the claim route exists without a cookie.
+    workerGateway: new WorkerGateway({ enrollments }),
     agents: new AgentRegistry([
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
@@ -1045,6 +1049,83 @@ test('M89-AUTHORITY-002: a revoked record archived by any prior writer restores 
     assert.equal(approveRefused.status, 409);
     const approveBody = (await approveRefused.json()) as { readonly code?: string };
     assert.equal(approveBody.code, 'revoked-enrollment');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+/**
+ * Identity-free pending enrollment and one-use claim separation (#115, ADR-0012).
+ *
+ * Web authority creates the pending enrollment without a Worker public key, host
+ * address, or engine credential. The response separates the public bootstrap
+ * input from a short-lived one-use secret, which is returned exactly once and
+ * never echoed by a later read.
+ */
+test('Web creates an identity-free pending enrollment with a one-use claim', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const requested = await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      protocolVersion: '2.1',
+      capabilityRequests: ['agent-run'],
+      engines: [],
+    });
+    assert.equal(requested.status, 201);
+    const body = (await requested.json()) as {
+      readonly enrollment: { readonly status: string; readonly identityDigest: string };
+      readonly bootstrap: { readonly instructions: readonly string[] };
+      readonly claim: { readonly secret: string; readonly expiresAt: number };
+    };
+    assert.equal(body.enrollment.status, 'pending');
+    // No Worker key is bound by Web: the identity digest is empty until proof.
+    assert.equal(body.enrollment.identityDigest, '');
+    assert.ok(body.bootstrap.instructions.length > 0);
+    assert.ok(body.claim.secret.length > 0);
+    assert.equal(typeof body.claim.expiresAt, 'number');
+
+    // A later read never echoes the secret or its digest.
+    const readBack = await read(runtime.base, '/api/environments/enrollments/enroll-1', runtime);
+    assert.equal(readBack.status, 200);
+    const readBody = await readBack.text();
+    assert.equal(readBody.includes(body.claim.secret), false, 'the one-use secret is never echoed');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('a machine claim route is separate from the Human browser session', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const requested = await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engines: [],
+    });
+    const body = (await requested.json()) as { readonly claim: { readonly secret: string } };
+    // The Worker claims without any browser cookie or CSRF token.
+    const claimed = await fetch(
+      `${runtime.base}/api/worker/enrollments/enroll-1/claim`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ claimSecret: body.claim.secret }),
+      },
+    );
+    assert.equal(claimed.status, 200);
+    // A browser session cannot manufacture a Worker claim, and the machine route
+    // does not set or accept a Human cookie.
+    assert.equal(claimed.headers.get('set-cookie'), null);
+    const replay = await fetch(`${runtime.base}/api/worker/enrollments/enroll-1/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claimSecret: body.claim.secret }),
+    });
+    assert.equal(replay.status, 409);
   } finally {
     await runtime.api.close();
   }

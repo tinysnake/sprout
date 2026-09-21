@@ -615,3 +615,80 @@ test('M89-AUTHORITY-003: archive refusal and sticky-revocation restore survive a
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+/**
+ * A one-use host claim survives a store reopen (#115, ADR-0012).
+ *
+ * The raw secret is never persisted, so a reopen must still refuse it once
+ * consumed and must not resurrect it — the claim is a durable consumption, not
+ * an in-memory memo.
+ */
+test('a consumed one-use claim stays consumed across a store reopen', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const first = stores(path);
+    const enrollments = service(first);
+    const requested = await enrollments.requestEnrollment({
+      environmentInstanceId: 'local-macos',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    const secret = requested.claim?.secret ?? '';
+    assert.notEqual(secret, '');
+    await enrollments.claimEnrollment('enroll-1', secret);
+    first.close();
+
+    const second = stores(path);
+    const reopened = service(second);
+    // The raw secret is absent from the durable document.
+    const readBack = await reopened.get('enroll-1');
+    assert.equal(JSON.stringify(readBack).includes(secret), false);
+    // The one-use consumption survives, so a replay after restart is refused.
+    await assert.rejects(
+      () => reopened.claimEnrollment('enroll-1', secret),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'invalid-claim',
+    );
+    second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A claimed identity survives reopen and can still await Human approval (#115).
+ */
+test('a claimed-but-unapproved identity survives reopen without approving itself', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const first = stores(path);
+    const enrollments = service(first);
+    const requested = await enrollments.requestEnrollment({
+      environmentInstanceId: 'local-macos',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+    });
+    await enrollments.claimEnrollment('enroll-1', requested.claim?.secret ?? '');
+    first.close();
+
+    const second = stores(path);
+    const reopened = service(second);
+    const worker = workerIdentityFixture();
+    const outcome = await reopened.connectWorker({
+      enrollmentId: 'enroll-1',
+      proof: await worker.prove(reopened, 'enroll-1'),
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+    assert.equal(outcome.outcome, 'identity-claimed');
+    assert.equal(outcome.requiresHumanApproval, true);
+    assert.equal((await reopened.get('enroll-1'))?.status, 'pending');
+    second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

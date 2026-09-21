@@ -156,10 +156,19 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly environmentInstanceId: string;
     readonly displayName: string;
     readonly platform: string;
-    readonly publicKey: string;
+    /**
+     * A pre-known Worker public key, when a caller has one. Web creation (#115)
+     * omits it and receives a short-lived one-use claim instead.
+     */
+    readonly publicKey?: string;
     readonly protocolVersion?: string;
     readonly capabilityRequests?: readonly string[];
-  }): Promise<{ readonly enrollment: EnrollmentView; readonly bootstrap: { readonly instructions: readonly string[] } }>;
+  }): Promise<{
+    readonly enrollment: EnrollmentView;
+    readonly bootstrap: { readonly instructions: readonly string[] };
+    /** The one-use claim secret, present only on Web creation (#115). */
+    readonly claim?: { readonly secret: string; readonly expiresAt: number };
+  }>;
   /**
    * Request a proof challenge for one enrollment.
    *

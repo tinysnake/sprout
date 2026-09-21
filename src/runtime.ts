@@ -74,6 +74,9 @@ import {
   type WorkerLogSource,
 } from './worker/environment-worker.ts';
 import { EnvironmentWorkerRegistry } from './worker/supervisor.ts';
+import { WorkerGateway } from './worker/gateway.ts';
+import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
+import type { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 
 /**
  * The in-process composition of one Sprout runtime.
@@ -229,6 +232,17 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
+  /**
+   * The enrollment-backed outbound Worker gateway and its connection epochs
+   * (#115). Present so Web-created pending enrollments have a machine channel.
+   */
+  readonly workerGateway: WorkerGateway;
+  readonly workerEpochs: WorkerConnectionRegistry;
+  /**
+   * The runtime environment port over accepted enrollment-backed connections.
+   * E1 exposes it; E2 makes it the dynamic execution catalog.
+   */
+  readonly enrollmentEnvironment: EnrollmentWorkerPort;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -808,6 +822,15 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       leases: pool,
       recovery,
     });
+    // The enrollment-backed outbound Worker gateway (#115, ADR-0012). A host
+    // Worker claims its pending enrollment and initiates one authenticated
+    // WS/WSS connection carrying the existing neutral Worker JSON-RPC under a
+    // monotonic connection epoch.
+    const workerGateway = new WorkerGateway({ enrollments });
+    const enrollmentEnvironment = new EnrollmentWorkerPort({
+      gateway: workerGateway,
+      ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
+    });
     const api = createRunApi({
       orchestrator,
       agents,
@@ -821,6 +844,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       auth: operatorSessions,
       staticRoot,
       readFile: options.readFile ?? defaultReadFile,
+      // The machine-authenticated Worker boundary (#115). It is deliberately
+      // separate from the Human browser session and CSRF boundary: a Worker
+      // proves its host-local key and one-use claim, never a browser cookie.
+      workerGateway,
       // The Environment enrollment/readiness domain is composed through the #85
       // additive seam, so no central dispatcher grows for it. The recovery routes
       // (#88) are composed through the same seam and delegate every safety rule
@@ -892,6 +919,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       agentService,
       projectService,
       projectAccess: projectAccessService,
+      workerGateway,
+      workerEpochs: workerGateway.epochs,
+      enrollmentEnvironment,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then
@@ -944,6 +974,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // End every open event stream before anything else: `server.close` waits
         // for existing connections, and an SSE stream never ends by itself.
         await api.close();
+        // The enrollment-backed connections are owned by the gateway; the port
+        // stops reaching them before they are torn down.
+        await enrollmentEnvironment.close();
         // The environment port owns its worker channels. A *container* is not
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.

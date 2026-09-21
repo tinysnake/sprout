@@ -404,6 +404,9 @@ test('a worker with no host settings takes exactly the documented defaults', () 
     piSessionDirectory: undefined,
     readyFile: undefined,
     engineBinaries: {},
+    // No enrollment target unless the host names one; the M1 configured path is
+    // the default (ADR-0012's enrollment path is opt-in per host).
+    enrollment: undefined,
   });
 });
 

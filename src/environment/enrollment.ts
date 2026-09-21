@@ -47,11 +47,30 @@ export interface EnrollmentDecision {
 }
 
 /**
+ * A one-use, short-lived host claim for a pending enrollment (#115).
+ *
+ * A Human creates the pending enrollment in Web without a Worker public key;
+ * the host claims it with the raw secret, and only a proof of key possession
+ * binds an identity. Sprout retains only the one-way digest, so a leaked
+ * durable document cannot be replayed as a claim.
+ */
+export interface EnrollmentClaim {
+  /** The one-way digest of the one-use secret. The raw secret is never stored. */
+  readonly secretDigest: string;
+  readonly issuedAt: number;
+  /** The first instant the claim is no longer usable. */
+  readonly expiresAt: number;
+  /** Set when the secret is consumed; a consumed claim can never be reused. */
+  readonly consumedAt?: number;
+}
+
+/**
  * The portable Worker facts an enrollment presents.
  *
  * `identityDigest` is the one-way digest of the Worker's public key, computed on
  * the Environment host and used only for identity comparison. It is not a
  * secret and carries no key material that could authenticate as the Worker.
+ * It is empty until a claimed identity proves key possession.
  */
 export interface EnrollmentWorkerFacts {
   readonly identityDigest: string;
@@ -88,6 +107,13 @@ export interface EnvironmentEnrollment {
    * pending request. Approval is refused while no current identity is claimed.
    */
   readonly requiresFreshIdentity: boolean;
+  /**
+   * The one-use claim that lets a host claim this pending enrollment (#115).
+   * Present on a Web-created pending enrollment; cleared once claimed or
+   * superseded by a reset. `undefined` for a legacy record or a reset that
+   * requires a fresh identity.
+   */
+  readonly claim: EnrollmentClaim | undefined;
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -105,7 +131,6 @@ export type EnrollmentOutcome =
   | 'approved'
   | 'revoked'
   | 'reset';
-
 /** The result of recording a Worker's connection attempt against enrollment. */
 export interface EnrollmentConnectionOutcome {
   readonly outcome: EnrollmentOutcome;
@@ -122,7 +147,9 @@ export type EnrollmentErrorCode =
   | 'not-approved'
   | 'fresh-identity-required'
   | 'invalid-proof'
-  | 'unsupported-platform';
+  | 'unsupported-platform'
+  /** The enrollment has no live one-use claim (missing, consumed, or expired). */
+  | 'invalid-claim';
 
 /** A typed enrollment refusal whose message is safe to show an operator. */
 export class EnrollmentError extends Error {
@@ -140,12 +167,18 @@ const SUPPORTED_PLATFORMS = new Set(['macos', 'windows', 'container']);
 export interface CreatePendingEnrollmentInput {
   readonly environmentInstanceId: string;
   readonly displayName: string;
-  /** The one-way digest of the Worker's host-generated public key. */
-  readonly identityDigest: string;
+  /**
+   * The one-way digest of the Worker's host-generated public key, when a legacy
+   * caller already knows it. Web creation supplies none: the identity is bound
+   * only after a claim proves possession of the key (#115).
+   */
+  readonly identityDigest?: string;
   readonly platform: string;
   readonly protocolVersion?: string;
   readonly capabilityRequests: readonly string[];
   readonly engineFacts: readonly EnrollmentEngineFact[];
+  /** The one-use host claim attached to a Web-created pending enrollment. */
+  readonly claim?: EnrollmentClaim;
   readonly at: number;
   readonly id: string;
 }
@@ -175,7 +208,7 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
     status: 'pending',
     everApproved: false,
     worker: {
-      identityDigest: input.identityDigest,
+      identityDigest: input.identityDigest ?? '',
       platform: input.platform,
       ...(protocolVersion !== undefined ? { protocolVersion } : {}),
       // Capability, engine, and model names are structured identifiers, not free
@@ -195,6 +228,7 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
     },
     invalidatedIdentityDigests: [],
     requiresFreshIdentity: false,
+    claim: input.claim === undefined ? undefined : { ...input.claim },
     capabilityPermissions: Object.fromEntries(
       input.capabilityRequests.map((capability) => [
         sanitizeIdentifier(capability, { fallback: 'unknown-capability', kind: 'capability' }),
@@ -241,6 +275,26 @@ export function reconcileWorkerConnection(
         at,
         reason: 'The enrollment is revoked; a fresh reset and Human approval are required.',
       }),
+      requiresHumanApproval: true,
+    };
+  }
+
+  // A pending enrollment that has never bound an identity accepts the first
+  // proven key as its claimed identity. This is the claim path (#115): the
+  // proof has already verified, so the key may be recorded, but the Human still
+  // decides approval and the enrollment cannot approve itself.
+  if (enrollment.status === 'pending' && enrollment.worker.identityDigest === '' && !enrollment.requiresFreshIdentity) {
+    return {
+      outcome: 'identity-claimed',
+      enrollment: recordDecision(
+        { ...enrollment, worker: { ...enrollment.worker, identityDigest } },
+        {
+          kind: 'identity-claimed',
+          actor: 'worker',
+          at,
+          reason: 'A claimed Worker identity proved key possession; Human approval is required before work.',
+        },
+      ),
       requiresHumanApproval: true,
     };
   }
@@ -404,6 +458,7 @@ export function resetEnrollment(enrollment: EnvironmentEnrollment, at: number, r
     worker: { ...enrollment.worker, identityDigest: '' },
     invalidatedIdentityDigests: invalidated,
     requiresFreshIdentity: true,
+    claim: undefined,
     capabilityPermissions: Object.fromEntries(
       Object.keys(enrollment.capabilityPermissions).map((capability) => [capability, false]),
     ),
@@ -493,6 +548,7 @@ export function normalizeEnrollment(enrollment: EnvironmentEnrollment): Environm
           .filter((digest) => digest !== '')
       : [],
     requiresFreshIdentity: enrollment.requiresFreshIdentity === true,
+    claim: normalizeClaim(enrollment.claim),
     decisions: (enrollment.decisions ?? []).map(sanitizeDecision),
   };
 }
@@ -526,5 +582,29 @@ function sanitizeDecision(decision: EnrollmentDecision): EnrollmentDecision {
     // replaced by the product-owned actor rather than partially echoed.
     actor: sanitizeIdentifier(decision.actor ?? '', { fallback: 'operator', maxLength: 64 }),
     reason: sanitizeOperatorText(decision.reason, { fallback }),
+  };
+}
+
+/**
+ * Read one durable claim defensively.
+ *
+ * The secret digest is a one-way hash: an earlier build (or a bypassing writer)
+ * could have stored a raw secret or key material in that field, so it is reduced
+ * to the digest shape or dropped. A claim whose digest is not a digest is no
+ * claim at all, which fails closed.
+ */
+function normalizeClaim(claim: EnrollmentClaim | undefined): EnrollmentClaim | undefined {
+  if (claim === undefined || typeof claim !== 'object') return undefined;
+  const secretDigest = sanitizeIdentifier(claim.secretDigest ?? '', {
+    fallback: '',
+    maxLength: 200,
+    kind: 'digest',
+  });
+  if (secretDigest === '') return undefined;
+  return {
+    secretDigest,
+    issuedAt: typeof claim.issuedAt === 'number' ? claim.issuedAt : 0,
+    expiresAt: typeof claim.expiresAt === 'number' ? claim.expiresAt : 0,
+    ...(typeof claim.consumedAt === 'number' ? { consumedAt: claim.consumedAt } : {}),
   };
 }

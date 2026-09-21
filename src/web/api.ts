@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { TLSSocket } from 'node:tls';
 import { createHash } from 'node:crypto';
 
+import { WebSocketServer } from 'ws';
+import { createWebSocketStream } from 'ws';
+
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
@@ -10,6 +13,7 @@ import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import { composeApiRouters, type ApiRouter } from './router.ts';
+import type { WorkerGateway } from '../worker/gateway.ts';
 import {
   summarizeRunHistory,
   toMessageView,
@@ -26,6 +30,9 @@ import {
  * import from `views.ts` directly.
  */
 export * from './views.ts';
+
+/** The single machine-authenticated Worker upgrade path (ADR-0012). */
+export const WORKER_CONNECT_PATH = '/api/worker/connect';
 
 /**
  * The Web seam for M1.
@@ -79,6 +86,13 @@ export interface RunApiOptions {
   readonly keepAliveMs?: number;
   /** Additive M2 domain routers, run after transport authorization. */
   readonly routers?: readonly ApiRouter[];
+  /**
+   * The enrollment-backed outbound Worker gateway (#115). When present, the
+   * transport accepts the machine-authenticated WS/WSS upgrade at
+   * `/api/worker/connect`; it is deliberately independent of the Human browser
+   * session and CSRF boundary.
+   */
+  readonly workerGateway?: WorkerGateway;
 }
 
 export interface RunApi {
@@ -107,6 +121,40 @@ export function createRunApi(options: RunApiOptions): RunApi {
     });
   });
 
+  // The machine-authentication boundary (#115). A Worker initiates this upgrade
+  // off-loopback only over WSS; loopback may use WS. It is handled before the
+  // browser `request` path and never reads a cookie, CSRF token, or Human actor.
+  if (options.workerGateway !== undefined) {
+    const gateway = options.workerGateway;
+    const wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (request, socket, head) => {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      if (url.pathname !== WORKER_CONNECT_PATH) {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        const encrypted = (request.socket as TLSSocket).encrypted === true;
+        const remoteAddress = request.socket.remoteAddress ?? undefined;
+        void (async () => {
+          const stream = createWebSocketStream(ws);
+          const outcome = await gateway.handle(stream, {
+            secure: encrypted,
+            remoteAddress,
+          });
+          // After acceptance the stream *is* the Worker JSON-RPC channel. The
+          // gateway notifies its accept listeners (the enrollment worker port),
+          // which owns the core-side handle from here.
+          if (!outcome.accepted) ws.close();
+        })();
+      });
+    });
+    server.on('close', () => {
+      wss.close();
+      gateway.close();
+    });
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
@@ -115,6 +163,23 @@ export function createRunApi(options: RunApiOptions): RunApi {
     // command payload.
     const readBody = memoizedJsonReader(request);
     let browserSession: AuthenticatedBrowserSession | undefined;
+
+    // The machine-authentication boundary (#115) runs *before* the Human browser
+    // boundary and never reads a cookie, CSRF token, or Human actor. A Worker
+    // proves identity with its host-local key and a one-use claim, not with a
+    // browser session.
+    if (
+      options.workerGateway !== undefined &&
+      (await options.workerGateway.handleHttpRequest({
+        method: request.method,
+        pathname: url.pathname,
+        segments,
+        readBody,
+        json: (status, body) => sendJson(response, status, body),
+      }))
+    ) {
+      return;
+    }
 
     // Credential exchange is the only anonymous API operation. The credential
     // is sent in a POST body (never a URL) and succeeds by setting an HTTP-only

@@ -28,6 +28,7 @@ const {
   workerTransport: transportMode,
   workspaceRoot,
   readyFile: configuredReadyFile,
+  enrollment: enrollmentTarget,
 } = configuration;
 /**
  * Which engines this environment hosts is an environment fact, so it is selected
@@ -72,7 +73,44 @@ function workerReadiness(): WorkerReadinessFacts {
  * reconnection does not pay a cold start, while session state stays scoped to
  * the connection that owns it.
  */
-if (transportMode === 'stdio') {
+/**
+ * The enrollment-backed outbound path (#115, ADR-0012).
+ *
+ * When a pending enrollment was created in Web, this host Worker dials the
+ * Sprout instance, claims the enrollment with its one-use secret, and proves its
+ * host-local key. The accepted channel then carries the same neutral JSON-RPC
+ * server below. This is preferred over any configured carrier when enabled.
+ */
+if (enrollmentTarget !== undefined) {
+  const { connectWorkerEnrollment } = await import('./enrollment-connector.ts');
+  const connection = await connectWorkerEnrollment({
+    target: enrollmentTarget,
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engineFacts: [...engines.keys()].map((engine) => ({
+      engine,
+      installed: true,
+      authenticated: false,
+      models: [],
+    })),
+    log,
+  });
+  log(
+    `connected outbound to ${enrollmentTarget.host} as enrollment ${connection.enrollmentId} ` +
+      `(epoch ${connection.epoch}), engines: ${[...engines.keys()].join(', ')}`,
+  );
+  const worker = new EnvironmentWorker({
+    environmentInstanceId,
+    engines,
+    input: connection.stream,
+    output: connection.stream,
+    onLog: log,
+    workspaceRoot,
+    readiness: workerReadiness,
+  });
+  connection.stream.on('close', () => {
+    void worker.shutdown().then(() => process.exit(0));
+  });
+} else if (transportMode === 'stdio') {
   // The carrier owns the channel: this process's stdio *is* the transport, so
   // there is no address to publish and nothing to listen on.
   const worker = new EnvironmentWorker({

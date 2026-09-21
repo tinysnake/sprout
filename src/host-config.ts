@@ -98,6 +98,34 @@ export interface WorkerConfiguration {
   readonly readyFile: string | undefined;
   /** Explicit engine binary overrides, keyed by engine command (`SPROUT_<ENGINE>_BIN`). */
   readonly engineBinaries: Readonly<Record<string, string>>;
+  /**
+   * The enrollment-backed outbound connection (#115, ADR-0012).
+   *
+   * When a pending enrollment was created in Web, the host Worker claims it and
+   * dials the Sprout instance itself. The Sprout instance never dials the Worker
+   * and never needs a host address. `undefined` keeps the M1 in-process
+   * configured-Worker path for tests and the container carrier.
+   */
+  readonly enrollment: WorkerEnrollmentTarget | undefined;
+}
+
+/**
+ * How this host Worker reaches its Sprout instance (#115, ADR-0012).
+ *
+ * The private key stays host-local: only the path to the key file is named, and
+ * the one-use claim secret is read from the environment rather than the command
+ * line, so it never enters shell history or process arguments.
+ */
+export interface WorkerEnrollmentTarget {
+  /** The pending enrollment id shown in Web. */
+  readonly enrollmentId: string;
+  /** The Sprout instance host to dial. */
+  readonly host: string;
+  readonly port: number;
+  /** The one-use claim secret, read from the environment, never the command line. */
+  readonly claimSecret: string | undefined;
+  /** Where the host-local private key lives; the Core never reads this file. */
+  readonly identityKeyPath: string;
 }
 
 /**
@@ -178,6 +206,29 @@ export function parseWorkerConfiguration(
     piSessionDirectory: environment['SPROUT_PI_SESSION_DIR'],
     readyFile: environment['SPROUT_READY_FILE'],
     engineBinaries: engineBinaryOverrides(environment),
+    enrollment: workerEnrollmentTarget(environment),
+  };
+}
+
+/**
+ * Read the optional enrollment-backed outbound target (#115).
+ *
+ * All-or-nothing: a partial configuration returns `undefined` so the Worker
+ * falls back to the M1 configured path rather than dialing with missing facts.
+ */
+function workerEnrollmentTarget(
+  environment: HostEnvironment,
+): WorkerEnrollmentTarget | undefined {
+  const enrollmentId = environment['SPROUT_ENROLLMENT_ID'];
+  const host = environment['SPROUT_CORE_HOST'];
+  if (enrollmentId === undefined || host === undefined) return undefined;
+  return {
+    enrollmentId,
+    host,
+    port: numberValue(environment['SPROUT_CORE_PORT'], 5174),
+    claimSecret: environment['SPROUT_ENROLLMENT_CLAIM'],
+    identityKeyPath:
+      environment['SPROUT_WORKER_KEY'] ?? join(environment['HOME'] ?? '.', '.sprout-worker-key.pem'),
   };
 }
 
