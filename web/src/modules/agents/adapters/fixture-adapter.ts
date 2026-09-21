@@ -28,6 +28,46 @@ import type {
 
 let clock = 1_700_000_000_000;
 
+/**
+ * The deterministic mirror of the backend's write-boundary identifier rule.
+ *
+ * The backend refuses a structured identifier that is a machine-host-shaped
+ * token outside a known model family (`buildbox-7`) or a word enum violation,
+ * and refuses a display name that reduces to sensitive content. The fixture
+ * mirrors the same refusals so the page's refused flows are exercised for
+ * real; the backend's boundary remains the one owner of the rule.
+ */
+const FIXTURE_MODEL_FAMILIES =
+  /^(?:gpt|chatgpt|o[1-9]|claude|gemini|glm|codex|pi|deepseek|qwen|llama|mistral|mixtral|grok|sonnet|opus|haiku|kimi|antigravity|workbuddy)(?:$|[._-])/i;
+const FIXTURE_WORD_ENUM = /^[a-z]+(?:[._-][a-z][a-z0-9]*)*$/;
+const FIXTURE_HOST_SHAPED = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{1,4}$|^[A-Za-z]+\d{1,4}$/;
+
+function assertIdentifier(field: 'engine' | 'work model' | 'effort', value: string): void {
+  const cleaned = value.trim();
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(cleaned)) {
+    throw new Error(`an Agent work option requires a valid ${field} identifier`);
+  }
+  if (FIXTURE_HOST_SHAPED.test(cleaned) && !FIXTURE_MODEL_FAMILIES.test(cleaned)) {
+    throw new Error(`an Agent work option requires a valid ${field} identifier`);
+  }
+  if (field !== 'work model' && !FIXTURE_WORD_ENUM.test(cleaned)) {
+    throw new Error(`an Agent work option requires a valid ${field} identifier`);
+  }
+}
+
+function assertWorkOption(option: { readonly engine: string; readonly workModel: string; readonly effort: string }): void {
+  assertIdentifier('engine', option.engine);
+  assertIdentifier('work model', option.workModel);
+  assertIdentifier('effort', option.effort);
+}
+
+/** A display name that is only sensitive content is refused outright. */
+function assertDisplayName(value: string): void {
+  if (/\/Users\/|[A-Z]:\\Users\\|sk-[A-Za-z0-9]{20,}|\b\d{1,3}(\.\d{1,3}){3}\b/.test(value)) {
+    throw new Error('an Agent requires a non-empty display name');
+  }
+}
+
 function nextId(prefix: string): string {
   clock += 1;
   return `${prefix}-${clock.toString(36)}`;
@@ -155,6 +195,9 @@ export function createInitialAgentFixtures(): AgentInstance[] {
           at: clock - 100_000,
           reason: 'Switched the primary option to pi.',
           options: readyOptions,
+          // The current version carries the standing instructions it was
+          // admitted under, exactly like the production projection.
+          instructions: 'Always verify tests before claiming completion. Preserve strict privacy boundaries.',
         },
       ],
       workOptions: readyOptions,
@@ -342,9 +385,11 @@ export class FixtureAgentService implements AgentManagementService {
     if (input.displayName.trim() === '') {
       throw new Error('an Agent requires a non-empty display name');
     }
+    assertDisplayName(input.displayName);
     if (input.workOptions.length === 0) {
       throw new Error('an Agent requires at least one ordered work option');
     }
+    for (const workOption of input.workOptions) assertWorkOption(workOption);
     const now = clock;
     const options = input.workOptions.map((workOption) => ({
       id: nextId('opt'),
@@ -388,6 +433,8 @@ export class FixtureAgentService implements AgentManagementService {
     if (input.workOptions.length === 0) {
       throw new Error('an Agent requires at least one ordered work option');
     }
+    for (const workOption of input.workOptions) assertWorkOption(workOption);
+    if (input.displayName !== undefined) assertDisplayName(input.displayName);
     const options: AgentWorkOptionRow[] = input.workOptions.map((workOption) => {
       const preserved = agent.workOptions.find((existing) => existing.id === workOption.id);
       return {
@@ -428,6 +475,11 @@ export class FixtureAgentService implements AgentManagementService {
       ],
       updatedAt: clock,
     };
+    // An explicit clear must remove the prior instructions from the composed
+    // row; the spread above would otherwise carry them forward silently.
+    if (instructions === undefined) {
+      delete (next as { instructions?: string }).instructions;
+    }
     this.#agents[index] = reevaluate(next);
   }
   async archiveAgent(id: string): Promise<void> {

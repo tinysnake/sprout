@@ -188,6 +188,49 @@ test('reconfigure refuses an option-less edit and an unknown agent', async () =>
   );
 });
 
+test('null clears standing instructions, omission keeps them, and history stays append-only', async () => {
+  let now = 1_000;
+  const service = new AgentService({ store: new InMemoryAgentStore(), clock: () => now });
+  await service.create({
+    id: 'programmer',
+    displayName: 'P',
+    instructions: 'Be careful.',
+    workOptions: [OPTION_A],
+  });
+
+  // An omitted field keeps the current instructions.
+  now = 2_000;
+  const kept = await service.reconfigure('programmer', { workOptions: [OPTION_B] });
+  assert.equal(currentConfiguration(kept).instructions, 'Be careful.');
+
+  // A string replaces them through the privacy boundary.
+  now = 3_000;
+  const replaced = await service.reconfigure('programmer', {
+    workOptions: [OPTION_B],
+    instructions: 'Verify tests.',
+  });
+  assert.equal(currentConfiguration(replaced).instructions, 'Verify tests.');
+
+  // An explicit null clears: the new version records no instructions while
+  // every earlier version keeps the instructions it was admitted under.
+  now = 4_000;
+  const cleared = await service.reconfigure('programmer', {
+    workOptions: [OPTION_B],
+    instructions: null,
+  });
+  assert.equal(currentConfiguration(cleared).instructions, undefined);
+  assert.equal(cleared.configuration.versions[0]!.instructions, 'Be careful.');
+  assert.equal(cleared.configuration.versions[1]!.instructions, 'Be careful.');
+  assert.equal(cleared.configuration.versions[2]!.instructions, 'Verify tests.');
+  assert.equal('instructions' in cleared.configuration.versions[3]!, false);
+
+  // The cleared state is durable, not just the returned row.
+  const reread = await service.get('programmer');
+  assert.ok(reread);
+  assert.equal(currentConfiguration(reread).instructions, undefined);
+  assert.equal(reread.configuration.versions.length, 4);
+});
+
 test('archive is refused while active work depends on the Agent', async () => {
   let activeRun = false;
   let openTask = false;

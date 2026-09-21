@@ -475,3 +475,159 @@ test('the create flow appends a new Agent with its priority 1 option', async () 
     await cleanup();
   }
 });
+
+test('emptying the standing instructions field clears them as a new version', async () => {
+  const { dom, doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { fixture } = await mountedPage(vite, mount);
+
+    (doc.querySelector('[data-agent="programmer"]') as HTMLButtonElement).click();
+    await settle(120);
+    (doc.querySelector('.edit-instructions-btn') as HTMLButtonElement).click();
+    await settle(320);
+
+    const textarea = doc.querySelector('#edit-agent-instructions') as HTMLTextAreaElement;
+    assert.ok(textarea, 'the instructions editor renders');
+    assert.equal(textarea.value.includes('Always verify tests'), true, 'the current instructions prefill');
+
+    // Empty the field exactly like a clearing operator would.
+    textarea.value = '';
+    textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(40);
+    (doc.querySelector('.confirm-edit-instructions-btn') as HTMLButtonElement).click();
+    await settle(400);
+
+    // The clear is durable through the service port: the new version carries
+    // no instructions and the composed row no longer shows any.
+    const cleared = (await fixture.getAgent('programmer'))!;
+    assert.equal(cleared.currentVersion, 4, 'one clear appends exactly one version');
+    assert.equal(cleared.instructions, undefined);
+    assert.equal('instructions' in cleared.versions[3]!, false, 'the cleared version records no instructions');
+    assert.equal(cleared.versions[2]!.instructions, 'Always verify tests before claiming completion. Preserve strict privacy boundaries.');
+    assert.match(cleared.versions[3]!.reason, /Standing instructions updated/);
+    assert.match(doc.body.textContent ?? '', /No standing instructions configured/);
+
+    // The dialog closed on success.
+    assert.equal(doc.querySelector('#edit-agent-instructions'), null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a refused create renders an inline validation-error state without losing the draft', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    await mountedPage(vite, mount);
+
+    (doc.querySelector('.create-agent-btn') as HTMLButtonElement).click();
+    await settle(200);
+    assert.match(doc.body.textContent ?? '', /Create Global Agent Definition/);
+
+    const nameInput = doc.querySelector('#new-agent-name') as HTMLInputElement;
+    const modelInput = doc.querySelector('#new-opt-model') as HTMLInputElement;
+    const inputCtor = doc.defaultView!['Event'] as typeof Event;
+    nameInput.value = 'Leaky Runner';
+    nameInput.dispatchEvent(new inputCtor('input', { bubbles: true }));
+    // A hostname-shaped work model is refused by the backend write boundary.
+    modelInput.value = 'buildbox-7';
+    modelInput.dispatchEvent(new inputCtor('input', { bubbles: true }));
+    await settle(40);
+
+    (doc.querySelector('.confirm-create-agent-btn') as HTMLButtonElement).click();
+    await settle(200);
+
+    const alert = doc.querySelector('[role="alert"]');
+    assert.ok(alert, 'the refused create renders an inline validation-error state');
+    assert.match(alert!.textContent ?? '', /valid work model identifier/);
+    // No raw diagnostic, host path, or credential shape reaches the operator.
+    assert.equal(/\/Users\//.test(alert!.textContent ?? ''), false);
+    assert.equal(/sk-[a-zA-Z0-9]{20,}/.test(alert!.textContent ?? ''), false);
+
+    // The dialog stayed open and the draft survived the refusal.
+    assert.equal((doc.querySelector('#new-agent-name') as HTMLInputElement).value, 'Leaky Runner');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a refused instructions save renders an inline validation-error and appends nothing', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('./adapters/fixture-adapter.ts');
+
+    // A deterministic refusing authority: every reconfiguration is rejected
+    // exactly like the backend's validation write guard would reject it.
+    const base = new agentsModule.FixtureAgentService();
+    const rows = await base.listAgents();
+    const refusing = new agentsModule.FixtureAgentService(
+      rows.map((row) => ({ ...row })),
+      [],
+    );
+    (refusing as unknown as { reconfigureAgent: () => Promise<void> }).reconfigureAgent = async () => {
+      throw new Error('an Agent requires a valid work model identifier');
+    };
+
+    const { app, router } = createSproutApp({ routerBase: '/app/', agentService: refusing });
+    await router.push('/manage/agents');
+    await router.isReady();
+    app.mount(mount);
+    await settle(160);
+
+    (doc.querySelector('[data-agent="programmer"]') as HTMLButtonElement).click();
+    await settle(120);
+    (doc.querySelector('.edit-instructions-btn') as HTMLButtonElement).click();
+    await settle(320);
+
+    const textarea = doc.querySelector('#edit-agent-instructions') as HTMLTextAreaElement;
+    assert.ok(textarea, 'the instructions editor renders');
+    textarea.value = 'Verify tests.';
+    textarea.dispatchEvent(new doc.defaultView!['Event']('input', { bubbles: true }));
+    await settle(40);
+    (doc.querySelector('.confirm-edit-instructions-btn') as HTMLButtonElement).click();
+    await settle(200);
+
+    const alert = doc.querySelector('[role="alert"]');
+    assert.ok(alert, 'the refused save renders an inline validation-error state');
+    assert.match(alert!.textContent ?? '', /valid work model identifier/);
+
+    // The dialog stays open and the typed draft survives the refusal.
+    assert.ok(doc.querySelector('#edit-agent-instructions'), 'the dialog stays open on refusal');
+    assert.equal(textarea.value, 'Verify tests.');
+    void base;
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a refused add-option renders an inline validation-error without changing the record', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { fixture } = await mountedPage(vite, mount);
+    const before = (await fixture.getAgent('programmer'))!;
+
+    (doc.querySelector('[data-agent="programmer"]') as HTMLButtonElement).click();
+    await settle(120);
+    (doc.querySelector('.add-option-btn') as HTMLButtonElement).click();
+    await settle(320);
+
+    const modelInput = doc.querySelector('#add-opt-model') as HTMLInputElement;
+    assert.ok(modelInput, 'the add-option dialog renders');
+    modelInput.value = 'buildbox-7';
+    modelInput.dispatchEvent(new doc.defaultView!['Event']('input', { bubbles: true }));
+    await settle(40);
+    (doc.querySelector('.confirm-add-option-btn') as HTMLButtonElement).click();
+    await settle(200);
+
+    const alert = doc.querySelector('[role="alert"]');
+    assert.ok(alert, 'the refused add-option renders an inline validation-error state');
+    assert.match(alert!.textContent ?? '', /valid work model identifier/);
+    assert.ok(doc.querySelector('#add-opt-model'), 'the dialog stays open on refusal');
+
+    const unchanged = (await fixture.getAgent('programmer'))!;
+    assert.equal(unchanged.currentVersion, before.currentVersion, 'a refusal appends nothing');
+    assert.equal(unchanged.workOptions.length, before.workOptions.length);
+  } finally {
+    await cleanup();
+  }
+});

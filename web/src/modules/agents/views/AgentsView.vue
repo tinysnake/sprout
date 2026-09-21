@@ -15,6 +15,7 @@ import {
 } from '../control-boundary.js';
 import { useShellConnection } from '../../../shell/use-shell-connection.js';
 import { useAnnouncer } from '../../../primitives/announcer.js';
+import { BrowserRequestError } from '../../../transport/browser-transport.js';
 import FilterPillGroup from '../../../primitives/FilterPillGroup.vue';
 import FilterPill from '../../../primitives/FilterPill.vue';
 import Button from '../../../primitives/Button.vue';
@@ -108,18 +109,43 @@ onMounted(() => {
   loadData();
 });
 
-/** Runs one control action, or refuses it immediately through the typed boundary. */
-async function runControl(action: (service: import('../types.js').AgentManagementService) => Promise<void>): Promise<boolean> {
+/**
+ * The outcome of one control action.
+ *
+ * `ok` means the mutation reached the service and a fresh read rendered it.
+ * A refusal — the typed boundary's or the backend's validation write guard —
+ * is a caller-facing `validation-error` state: the message is safe text (the
+ * boundary's own wording or the transport's sanitized failure), never a raw
+ * response body or diagnostic, and the record is unchanged.
+ */
+type ControlOutcome = { readonly ok: true } | { readonly ok: false; readonly message: string };
+
+/** The fallback when a failure carries no safe message of its own. */
+const REFUSAL_FALLBACK = 'The change was refused; the Agent record is unchanged.';
+
+function refusalMessageOf(error: unknown): string {
+  if (error instanceof AgentControlRefused) return error.message;
+  // The shared transport's typed failure already keeps raw bodies and
+  // diagnostics private; only its sanitized sentence is caller-facing.
+  if (error instanceof BrowserRequestError && error.message !== '') return error.message;
+  // Service-level refusals are product-owned sentences (the write boundary's
+  // wording); a failure with no message collapses to the neutral fallback.
+  if (error instanceof Error && error.message !== '') return error.message;
+  return REFUSAL_FALLBACK;
+}
+
+/**
+ * Runs one control action, or refuses it immediately through the typed
+ * boundary. Every failure becomes a visible, announced outcome — never an
+ * unhandled promise rejection.
+ */
+async function runControl(action: (service: import('../types.js').AgentManagementService) => Promise<void>): Promise<ControlOutcome> {
   try {
     await controlBoundary.run(action);
     await loadData();
-    return true;
+    return { ok: true };
   } catch (error) {
-    if (error instanceof AgentControlRefused) {
-      announcer.announce(error.message);
-      return false;
-    }
-    throw error;
+    return { ok: false, message: refusalMessageOf(error) };
   }
 }
 
@@ -191,24 +217,28 @@ const isMobileDetailRoute = computed(() => !!route.params['agentId']);
 
 async function handleCreate(input: CreateAgentInput) {
   createError.value = '';
-  const done = await runControl((service) => service.createAgent(input));
-  if (done) {
+  const outcome = await runControl((service) => service.createAgent(input));
+  if (outcome.ok) {
     isCreateOpen.value = false;
     announcer.announce(`Agent ${input.displayName} created.`);
   } else {
-    createError.value = presentation.value.announce;
+    // The dialog stays open and renders the typed refusal inline; the state
+    // is unchanged and the refusal is announced through the live region.
+    createError.value = outcome.message;
+    announcer.announce(outcome.message);
   }
 }
 
 async function handleEditIdentity(agent: AgentInstance, displayName: string) {
   editError.value = '';
   const input: ReconfigureAgentInput = { workOptions: currentOptionInputs(agent), displayName };
-  const done = await runControl((service) => service.reconfigureAgent(agent.id, input));
-  if (done) {
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) {
     isEditOpen.value = false;
     announcer.announce(`Agent ${displayName} updated as a new configuration version.`);
   } else {
-    editError.value = presentation.value.announce;
+    editError.value = outcome.message;
+    announcer.announce(outcome.message);
   }
 }
 
@@ -219,12 +249,13 @@ async function handleEditInstructions(agent: AgentInstance, instructions: string
     instructions,
     reason: 'Standing instructions updated.',
   };
-  const done = await runControl((service) => service.reconfigureAgent(agent.id, input));
-  if (done) {
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) {
     isEditInstructionsOpen.value = false;
     announcer.announce('Standing instructions updated as a new configuration version.');
   } else {
-    instructionsError.value = presentation.value.announce;
+    instructionsError.value = outcome.message;
+    announcer.announce(outcome.message);
   }
 }
 
@@ -237,12 +268,13 @@ async function handleAddOption(
     workOptions: [...currentOptionInputs(agent), option],
     reason: `Added ${option.engine} work option as priority ${agent.workOptions.length + 1}.`,
   };
-  const done = await runControl((service) => service.reconfigureAgent(agent.id, input));
-  if (done) {
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) {
     isAddOptionOpen.value = false;
     announcer.announce(`Work option added at priority ${agent.workOptions.length + 1}.`);
   } else {
-    addOptionError.value = presentation.value.announce;
+    addOptionError.value = outcome.message;
+    announcer.announce(outcome.message);
   }
 }
 
@@ -261,9 +293,11 @@ async function handleMoveOption(agent: AgentInstance, from: number, to: number) 
     })),
     reason: `Reordered work options: ${moved.engine} moved from priority ${from + 1} to priority ${to + 1}.`,
   };
-  const done = await runControl((service) => service.reconfigureAgent(agent.id, input));
-  if (done) {
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) {
     announcer.announce(`${moved.engine.toUpperCase()} moved to priority ${to + 1}.`);
+  } else {
+    announcer.announce(outcome.message);
   }
 }
 
@@ -281,8 +315,9 @@ async function handleRemoveOption(agent: AgentInstance, optionId: string) {
       })),
     reason: `Removed the ${option?.engine ?? 'selected'} work option.`,
   };
-  const done = await runControl((service) => service.reconfigureAgent(agent.id, input));
-  if (done) announcer.announce('Work option removed.');
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) announcer.announce('Work option removed.');
+  else announcer.announce(outcome.message);
 }
 
 async function handleArchive(agent: AgentInstance) {
@@ -290,14 +325,10 @@ async function handleArchive(agent: AgentInstance) {
   try {
     await controlBoundary.run((service) => service.archiveAgent(agent.id));
   } catch (error) {
-    if (error instanceof AgentControlRefused) {
-      archiveError.value = error.message;
-      announcer.announce(error.message);
-      return;
-    }
-    // The backend's typed safety-guard refusal (ADR-0008) is the dialog's
-    // inline error; the state is unchanged and the dialog stays open.
-    archiveError.value = error instanceof Error ? error.message : 'The archive action was refused.';
+    // Both the typed boundary refusal and the backend's validation refusal
+    // become the dialog's inline validation-error state; the state is
+    // unchanged and the dialog stays open.
+    archiveError.value = refusalMessageOf(error);
     announcer.announce(archiveError.value);
     return;
   }
@@ -307,8 +338,9 @@ async function handleArchive(agent: AgentInstance) {
 }
 
 async function handleRestore(agent: AgentInstance) {
-  const done = await runControl((service) => service.restoreAgent(agent.id));
-  if (done) announcer.announce(`Agent ${agent.displayName} restored.`);
+  const outcome = await runControl((service) => service.restoreAgent(agent.id));
+  if (outcome.ok) announcer.announce(`Agent ${agent.displayName} restored.`);
+  else announcer.announce(outcome.message);
 }
 
 function currentOptionInputs(agent: AgentInstance) {

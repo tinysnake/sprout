@@ -181,7 +181,17 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
           });
         }
         const displayName = stringField(body, 'displayName');
-        const instructions = body['instructions'] === null ? null : stringField(body, 'instructions');
+        // The wire contract: `instructions: null` is an explicit clear, an
+        // omitted field keeps the current instructions, and a string replaces
+        // them. `null` is forwarded verbatim so the service's clear semantics
+        // survive the transport seam.
+        const instructionsField = body['instructions'];
+        const instructions =
+          instructionsField === null
+            ? null
+            : typeof instructionsField === 'string'
+              ? instructionsField
+              : undefined;
         const reason = stringField(body, 'reason');
         try {
           const agent = await agents.reconfigure(segments[2] ?? '', {
@@ -189,7 +199,7 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
             ...(displayName !== undefined ? { displayName } : {}),
             // `instructions: null` clears the standing instructions explicitly;
             // an omitted field keeps the current ones.
-            ...(instructions === null ? { instructions: undefined } : instructions !== undefined ? { instructions } : {}),
+            ...(instructions !== undefined ? { instructions } : {}),
             ...(reason !== undefined ? { reason } : {}),
           });
           return json(context, 200, { agent: toAgentView(agent) });

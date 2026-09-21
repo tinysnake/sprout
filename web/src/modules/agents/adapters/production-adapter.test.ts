@@ -235,3 +235,74 @@ test('run attribution rows come from the durable run history, newest first', asy
   assert.equal(programmerRows[0]!.configurationVersion, 2);
   assert.equal(programmerRows[1]!.engine, 'codex');
 });
+
+test('a null instructions clear reaches the wire verbatim; omission means keep', async () => {
+  const wire = recordingAdapter();
+  const sent: unknown[] = [];
+  const spying = {
+    ...wire.adapter,
+    async reconfigureAgent(_id: string, input: unknown) {
+      sent.push(input);
+      return agent;
+    },
+  };
+  const service = new ProductionAgentService(spying, runHistory([]));
+
+  // The page's Edit Instructions dialog sends `null` when the field is
+  // emptied; the bridge must forward the clear, never collapse it to keep.
+  await service.reconfigureAgent('programmer', {
+    workOptions: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+    instructions: null,
+    reason: 'Standing instructions updated.',
+  });
+  assert.deepEqual(sent[0], {
+    workOptions: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+    instructions: null,
+    reason: 'Standing instructions updated.',
+  });
+
+  // An omitted field stays omitted on the wire (keep-the-current).
+  await service.reconfigureAgent('programmer', {
+    workOptions: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+  });
+  assert.equal('instructions' in (sent[1] as Record<string, unknown>), false);
+
+  // A replacement string rides the wire as a string.
+  await service.reconfigureAgent('programmer', {
+    workOptions: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+    instructions: 'Verify tests.',
+  });
+  assert.equal((sent[2] as { instructions?: unknown }).instructions, 'Verify tests.');
+});
+
+test('a cleared Agent composes without instructions and its history records the clear', async () => {
+  // Version 3 is the clear: it carries no instructions while v2 keeps its own.
+  const cleared: AgentView = {
+    ...agent,
+    configuration: {
+      currentVersion: 3,
+      versions: [
+        agent.configuration.versions[0]!,
+        agent.configuration.versions[1]!,
+        {
+          version: 3,
+          at: 3_000,
+          reason: 'Standing instructions updated.',
+          options: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+        },
+      ],
+    },
+  };
+  const wire = recordingAdapter();
+  const service = new ProductionAgentService(
+    { ...wire.adapter, getAgent: async () => cleared },
+    runHistory([]),
+  );
+  const row = await service.getAgent('programmer');
+  assert.ok(row);
+  assert.equal('instructions' in row, false, 'the cleared Agent composes without instructions');
+  assert.equal(row.versions.length, 3);
+  assert.equal('instructions' in row.versions[0]!, false, 'v1 predates the instructions');
+  assert.equal(row.versions[1]!.instructions, 'Verify tests first.');
+  assert.equal('instructions' in row.versions[2]!, false, 'the clear is visible in history');
+});

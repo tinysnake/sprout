@@ -167,6 +167,8 @@ export class ProductionAgentService implements AgentManagementService {
     await this.#adapter.reconfigureAgent(id, {
       workOptions: input.workOptions,
       ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+      // `null` is an explicit clear and must reach the wire verbatim; only an
+      // omitted field means keep-the-current.
       ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
       ...(input.reason !== undefined ? { reason: input.reason } : {}),
     });
