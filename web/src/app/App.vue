@@ -6,10 +6,20 @@
  */
 import { RouterView } from 'vue-router';
 import AppShell from '../shell/AppShell.vue';
+import AuthGate from './AuthGate.vue';
+import { OPERATOR_SESSION } from './auth.js';
+import { inject } from 'vue';
+
+const operatorSession = inject(OPERATOR_SESSION);
 </script>
 
 <template>
-  <AppShell>
+  <AuthGate v-if="operatorSession !== undefined">
+    <AppShell>
+      <RouterView />
+    </AppShell>
+  </AuthGate>
+  <AppShell v-else>
     <RouterView />
   </AppShell>
 </template>

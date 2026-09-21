@@ -9,6 +9,8 @@ import { AGENT_SERVICE, type AgentManagementService } from '../modules/agents/ty
 import { createAgentBrowserAdapter } from '../adapters/agent-api.js';
 import { ProductionAgentService } from '../modules/agents/adapters/production-adapter.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
+import { createOperatorSessionBrowserAdapter } from '../adapters/operator-session-api.js';
+import { OPERATOR_SESSION } from './auth.js';
 import type { RunView } from '../../../src/web/views.ts';
 import type { ShellConnectionSource } from '../shell/connection.js';
 import { SHELL_CONNECTION_SOURCE } from '../shell/use-shell-connection.js';
@@ -43,6 +45,7 @@ export interface SproutAppOptions {
    * browser-level signal rather than claiming Sprout answered.
    */
   connectionSource?: ShellConnectionSource;
+  operatorSession?: ReturnType<typeof createOperatorSessionBrowserAdapter>;
 }
 
 export function createSproutApp(options: SproutAppOptions = {}) {
@@ -70,6 +73,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);
   }
+  if (options.operatorSession) {
+    app.provide(OPERATOR_SESSION, options.operatorSession);
+  }
 
   return { app, pinia, router };
 }
@@ -84,6 +90,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
     // can never become the production authority. The transport reports the
     // connection fact the Shell and the control boundary read.
     const transport = createBrowserTransport();
+    const operatorSession = createOperatorSessionBrowserAdapter(transport);
     const environmentService = new ProductionEnvironmentService(
       createEnvironmentEnrollmentBrowserAdapter(transport),
     );
@@ -102,6 +109,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       environmentService,
       agentService,
       connectionSource: transport,
+      operatorSession,
     });
     router.isReady().then(() => {
       app.mount(mountEl);
