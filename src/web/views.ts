@@ -87,6 +87,13 @@ export interface RunView {
    * as unspecified rather than invented.
    */
   readonly workOption?: RunWorkOptionAttributionView;
+  /**
+   * The Project workspace binding this run was admitted under (#93), when the
+   * durable record carries one: the opaque workspace identity and, for a
+   * relative binding, the Worker-root-relative location. Absent on a pre-#93
+   * run or a run with no Project access, reported as unspecified.
+   */
+  readonly workspaceBinding?: RunWorkspaceBindingAttributionView;
   readonly failure?: string;
   readonly result?: unknown;
   readonly tokenUsage?: TokenUsage;
@@ -132,6 +139,7 @@ export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals 
 }
 
 export function toRunView(run: AgentRun): RunView {
+  const workspaceBinding = toRunWorkspaceBindingAttribution(run);
   return {
     id: run.id,
     agentId: run.agentId,
@@ -141,6 +149,7 @@ export function toRunView(run: AgentRun): RunView {
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
     handOffAttached: run.handOff !== undefined,
     ...(toRunWorkOptionAttribution(run) !== undefined ? { workOption: toRunWorkOptionAttribution(run)! } : {}),
+    ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
     ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
@@ -722,6 +731,34 @@ export function toRunWorkOptionAttribution(run: AgentRun): RunWorkOptionAttribut
     ...(run.workOption.workModel !== '' ? { workModel: run.workOption.workModel } : {}),
     ...(run.workOption.effort !== '' ? { effort: run.workOption.effort } : {}),
     configurationVersion: run.configurationVersion ?? 1,
+  };
+}
+
+/**
+ * The client-facing run workspace attribution (#93): the durable binding one
+ * run was admitted under. The opaque workspace identity and, for a relative
+ * binding, the Worker-root-relative location — never an absolute host path.
+ * Projected from the durable run record, never re-derived from the access
+ * record's current binding, so history stays historical.
+ */
+export interface RunWorkspaceBindingAttributionView {
+  readonly bindingId?: string;
+  readonly workspaceId: string;
+  readonly kind: string;
+  readonly path?: string;
+}
+
+function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAttributionView | undefined {
+  const binding = run.workspaceBinding;
+  if (binding === undefined) return undefined;
+  const path = binding.path !== undefined ? sanitizeWorkspacePath(binding.path) : undefined;
+  return {
+    ...(binding.bindingId !== undefined
+      ? { bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }) }
+      : {}),
+    workspaceId: sanitizeIdentifier(binding.workspaceId ?? '', { fallback: 'unknown-workspace', kind: 'digest' }),
+    kind: binding.kind === 'relative' ? 'relative' : 'default',
+    ...(path !== undefined ? { path } : {}),
   };
 }
 

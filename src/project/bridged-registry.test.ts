@@ -264,3 +264,86 @@ test('an ended access removes the environment from the Project projection', asyn
   assert.deepEqual(projection.availableEnvironmentInstanceIds, []);
   assert.equal(projection.workspaces, undefined);
 });
+
+/**
+ * The internal runtime boundary (ADR-0009): a corrupt or legacy durable access
+ * record carrying an absolute host path must not project into the M1 registry.
+ * The HTTP view has its own sanitizer; this boundary must not depend on it.
+ */
+test('a corrupt access record with an absolute path projects no location', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
+  await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
+  const authority = (await projects.get('project-corrupt'))!;
+  registry.prepare(authority)();
+  const corrupt = {
+    projectId: 'project-corrupt',
+    environmentInstanceId: 'mac-mini-1',
+    status: 'active',
+    startedAt: 1,
+    updatedAt: 2,
+    current: {
+      bindingId: 'b1',
+      workspaceId: 'a'.repeat(40),
+      kind: 'relative',
+      path: '/Users/<user>/private',
+      boundAt: 1,
+    },
+    history: [
+      {
+        bindingId: 'b1',
+        workspaceId: 'a'.repeat(40),
+        kind: 'relative',
+        path: '/Users/<user>/private',
+        boundAt: 1,
+      },
+    ],
+  } as const;
+
+  registry.prepareAccess('project-corrupt', [corrupt])();
+  const projection = registry.get('project-corrupt');
+  assert.ok(projection);
+  assert.deepEqual(projection.availableEnvironmentInstanceIds, ['mac-mini-1']);
+  assert.deepEqual(
+    projection.workspaces,
+    [{ environmentInstanceId: 'mac-mini-1' }],
+    'the absolute location is dropped, never projected',
+  );
+});
+
+/** Windows-rooted and traversal-shaped corruption are refused the same way. */
+test('a corrupt access record with a traversal path projects no location', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
+  await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
+  const authority = (await projects.get('project-corrupt'))!;
+  registry.prepare(authority)();
+  registry.prepareAccess('project-corrupt', [
+    {
+      projectId: 'project-corrupt',
+      environmentInstanceId: 'mac-mini-1',
+      status: 'active',
+      startedAt: 1,
+      updatedAt: 2,
+      current: {
+        bindingId: 'b2',
+        workspaceId: 'b'.repeat(40),
+        kind: 'relative',
+        path: 'C:\\Users\\x\\secret',
+        boundAt: 1,
+      },
+      history: [
+        {
+          bindingId: 'b2',
+          workspaceId: 'b'.repeat(40),
+          kind: 'relative',
+          path: 'C:\\Users\\x\\secret',
+          boundAt: 1,
+        },
+      ],
+    },
+  ])();
+  const projection = registry.get('project-corrupt');
+  assert.ok(projection);
+  assert.deepEqual(projection.workspaces, [{ environmentInstanceId: 'mac-mini-1' }]);
+});

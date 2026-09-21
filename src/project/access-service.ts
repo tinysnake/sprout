@@ -131,6 +131,14 @@ export class ProjectAccessService {
   readonly #bridge: ProjectAccessBridgePort | undefined;
   readonly #clock: () => number;
   readonly #createBindingId: () => string;
+  /**
+   * The one in-flight mutation per (Project, Environment), so concurrent
+   * grant/change/end calls serialize instead of racing a read-modify-write
+   * through the store. The chain is held across Worker validation too: the next
+   * mutation re-reads durable state only after the previous one has committed,
+   * so the append-only history and the one current binding cannot lose updates.
+   */
+  readonly #locks = new Map<string, Promise<unknown>>();
 
   constructor(options: ProjectAccessServiceOptions) {
     this.#store = options.store;
@@ -151,6 +159,30 @@ export class ProjectAccessService {
     return this.#store.get(projectId, environmentInstanceId);
   }
 
+  /**
+   * Run one (Project, Environment) mutation after every earlier mutation on the
+   * same relationship has settled.
+   *
+   * The append-only history belongs to the relationship as a whole, so its
+   * read-check-validate-write cycle is one serialized section per key. A failed
+   * mutation leaves the chain usable: the next caller re-reads durable state.
+   */
+  async #serialized<T>(
+    projectId: string,
+    environmentInstanceId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const key = `${projectId}\u0000${environmentInstanceId}`;
+    const previous = this.#locks.get(key) ?? Promise.resolve();
+    const next = previous.then(operation, operation);
+    this.#locks.set(key, next);
+    try {
+      return await next;
+    } finally {
+      if (this.#locks.get(key) === next) this.#locks.delete(key);
+    }
+  }
+
   async listForProject(projectId: string): Promise<readonly ProjectEnvironmentAccess[]> {
     return this.#store.listForProject(projectId);
   }
@@ -168,6 +200,12 @@ export class ProjectAccessService {
    * access reactivates the record with a fresh binding while retaining history.
    */
   async grant(input: GrantAccessInput): Promise<ProjectEnvironmentAccess> {
+    return this.#serialized(input.projectId, input.environmentInstanceId, () =>
+      this.#grant(input),
+  );
+  }
+
+  async #grant(input: GrantAccessInput): Promise<ProjectEnvironmentAccess> {
     const project = await this.#requireEditableProject(input.projectId);
     const selection = sanitizeWorkspaceSelection(input.selection);
     await this.#requireAccessibleEnvironment(input.environmentInstanceId);
@@ -205,6 +243,12 @@ export class ProjectAccessService {
    * merged, or deleted.
    */
   async changeWorkspace(input: ChangeWorkspaceInput): Promise<ProjectEnvironmentAccess> {
+    return this.#serialized(input.projectId, input.environmentInstanceId, () =>
+      this.#changeWorkspace(input),
+  );
+  }
+
+  async #changeWorkspace(input: ChangeWorkspaceInput): Promise<ProjectEnvironmentAccess> {
     await this.#requireEditableProject(input.projectId);
     const access = await this.#requireActiveAccess(input.projectId, input.environmentInstanceId);
     const selection = sanitizeWorkspaceSelection(input.selection);
@@ -242,6 +286,10 @@ export class ProjectAccessService {
    * Sprout never deletes or exposes the old workspace's absolute location.
    */
   async end(input: EndAccessInput): Promise<ProjectEnvironmentAccess> {
+    return this.#serialized(input.projectId, input.environmentInstanceId, () => this.#end(input));
+  }
+
+  async #end(input: EndAccessInput): Promise<ProjectEnvironmentAccess> {
     await this.#requireEditableProject(input.projectId);
     const access = await this.#requireActiveAccess(input.projectId, input.environmentInstanceId);
     await this.#requireNoActiveWork(input.projectId, input.environmentInstanceId);
@@ -277,11 +325,19 @@ export class ProjectAccessService {
     try {
       validated = await this.#worker.validate({ projectId, environmentInstanceId, selection });
     } catch (error) {
+      // The Worker exception is hostile text (it may embed host paths,
+      // credentials, or machine identity), so it crosses the privacy boundary
+      // here: the durable error and every API response carry only the
+      // sanitized diagnostic, never the raw message (#87, ADR-0009).
+      const raw = error instanceof Error ? error.message : String(error);
+      const diagnostic = sanitizeOperatorText(raw, {
+        fallback:
+          'the Environment Worker refused the selected Project workspace; its reason was withheld as sensitive',
+        maxLength: 320,
+      });
       throw new ProjectAccessError(
         'workspace-validation-failed',
-        `the Environment Worker could not validate the selected Project workspace: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `the Environment Worker could not validate the selected Project workspace: ${diagnostic}`,
       );
     }
     const workspaceId = sanitizeIdentifier(validated.workspaceId, {
@@ -295,7 +351,18 @@ export class ProjectAccessService {
         'the Environment Worker returned no usable opaque workspace identity',
       );
     }
-    const kind = validated.kind === 'relative' ? 'relative' : 'default';
+    // Fail closed on a kind mismatch (#93 review finding 5): the durable
+    // workspace must be the one the Human selected. A Worker that answers a
+    // relative selection with a different kind — or any kind the request did
+    // not ask for — is coerced into nothing: the mismatch is a validation
+    // failure, never a silent rewrite into a default (or other) binding.
+    const kind = validated.kind === 'default' || validated.kind === 'relative' ? validated.kind : undefined;
+    if (kind === undefined || kind !== selection.kind) {
+      throw new ProjectAccessError(
+        'workspace-validation-failed',
+        `the Environment Worker returned a ${validated.kind === 'default' || validated.kind === 'relative' ? validated.kind : 'malformed'} workspace for a ${selection.kind} selection; the kinds must match`,
+      );
+    }
     // A relative selection must come back with a safe relative location; the
     // Worker is authoritative, but the core never persists anything that looks
     // like an absolute host path.

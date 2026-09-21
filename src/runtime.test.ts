@@ -1251,3 +1251,71 @@ test('archive and restore fail closed for live leases whose run or Task owner ro
 
   await runtime.close();
 });
+
+/**
+ * The durable binding composition (ADR-0008): a run admitted over the composed
+ * graph persists the exact binding facts its access record held at admission,
+ * and a later workspace change cannot rewrite that history.
+ */
+test('a composed run records the durable workspace binding it was admitted under (#93)', async () => {
+  const { runtime } = await build({
+    turns: [scriptedTurn('composition reply')],
+  });
+  await runtime.projectService.create({ id: 'project-bound', displayName: 'Bound' });
+  const requested = await runtime.enrollments.requestEnrollment({
+    environmentInstanceId: INSTANCE_ID,
+    displayName: 'Bound Environment',
+    publicKey: 'bound-public-key',
+    platform: 'macos',
+    protocolVersion: '2.1',
+    capabilityRequests: ['agent-run'],
+    engineFacts: [],
+  });
+  await runtime.enrollments.approve(requested.enrollment.id, {
+    capabilityPermissions: { 'agent-run': true },
+  });
+  await runtime.projectAccess.grant({
+    projectId: 'project-bound',
+    environmentInstanceId: INSTANCE_ID,
+    selection: { kind: 'relative', path: 'repos/sprout' },
+  });
+  await runtime.projectService.addMembership('project-bound', { agentId: 'scout' });
+
+  const { id } = await runtime.orchestrator.submit({
+    agentId: 'scout',
+    prompt: 'inspect the bound workspace',
+    projectId: 'project-bound',
+  });
+  const run = await runtime.orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  const durable = await runtime.stores.projectAccess.get('project-bound', INSTANCE_ID);
+  assert.deepEqual(
+    run.workspaceBinding,
+    {
+      bindingId: durable?.current?.bindingId,
+      workspaceId: durable?.current?.workspaceId,
+      kind: 'relative',
+      path: 'repos/sprout',
+    },
+    'the run carries the durable binding facts, not a re-derivation',
+  );
+  const stored = await runtime.stores.runs.get(id);
+  assert.deepEqual(stored?.workspaceBinding, run.workspaceBinding, 'the binding survives a restart');
+
+  // A later change appends a new binding for future runs; the historical run
+  // still names the binding it used.
+  await runtime.projectAccess.changeWorkspace({
+    projectId: 'project-bound',
+    environmentInstanceId: INSTANCE_ID,
+    selection: { kind: 'relative', path: 'repos/moved' },
+  });
+  const after = await runtime.stores.projectAccess.get('project-bound', INSTANCE_ID);
+  assert.equal(after?.history.length, 2);
+  assert.equal(after?.current?.path, 'repos/moved');
+  const historical = (await runtime.stores.runs.get(id))?.workspaceBinding;
+  assert.equal(historical?.path, 'repos/sprout', 'history is not rewritten by the change');
+  assert.equal(historical?.bindingId, durable?.current?.bindingId);
+
+  await runtime.close();
+});

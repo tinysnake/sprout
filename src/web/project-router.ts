@@ -1,6 +1,7 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import { ProjectAuthorityError } from '../project/authority-model.ts';
 import { ProjectAccessError, type WorkspaceSelection } from '../project/access.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
@@ -96,7 +97,11 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
             error.code === 'active-work-depends-on-binding'
           ? 409
           : 400;
-    return json(context, status, { error: error.message, code: error.code });
+    // The typed code is the stable contract; the message passes the privacy
+    // boundary as defence in depth, so a diagnostic raised anywhere along the
+    // service path can never carry a host path, credential, or machine
+    // identity onto the wire even if an upstream layer missed one (#87).
+    return json(context, status, { error: redactSensitiveText(error.message), code: error.code });
   }
   if (error instanceof ProjectAuthorityError) {
     // Lifecycle conflicts are 409 under the existing Environment/Task router
@@ -114,7 +119,7 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
           error.code === 'human-membership-required'
         ? 409
         : 400;
-    return json(context, status, { error: error.message, code: error.code });
+    return json(context, status, { error: redactSensitiveText(error.message), code: error.code });
   }
   context.response.writeHead(500, { 'content-type': 'application/json' });
   context.response.end(JSON.stringify({ error: 'the request could not be completed' }));

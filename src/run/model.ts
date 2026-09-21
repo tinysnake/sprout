@@ -1,7 +1,25 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
+import type { WorkspaceSelectionKind } from '../project/access.ts';
 
 export type { TokenUsage } from '../engine/port.ts';
+
+/**
+ * The durable workspace facts one run was admitted under (#93, ADR-0008).
+ *
+ * Captured from the Project's access record at admission and never re-derived:
+ * after a later workspace change or a restart, the run's history still names
+ * the binding it actually used. `bindingId` and `workspaceId` are present for
+ * an authority-recorded binding; a legacy configured Project workspace (which
+ * has no binding identity) projects only its kind and relative location.
+ */
+export interface RunWorkspaceBinding {
+  readonly bindingId?: string;
+  readonly workspaceId?: string;
+  readonly kind: WorkspaceSelectionKind;
+  /** Worker-root-relative location, when the workspace named one. */
+  readonly path?: string;
+}
 
 /** The observable lifecycle of one agent run. */
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
@@ -52,6 +70,15 @@ export interface AgentRun {
    * rewritten, so this number always resolves to the options the run saw.
    */
   readonly configurationVersion?: number;
+  /**
+   * The Project workspace binding this run was admitted under (#93).
+   *
+   * A historical fact, like `workOption`: resolved once from the durable access
+   * record before the engine accepted the work, persisted with the run, and
+   * never revisited. A workspace change afterwards appends a new binding for
+   * future runs; it cannot rewrite what this run used.
+   */
+  readonly workspaceBinding?: RunWorkspaceBinding;
   /**
    * The hand-off context attached to this run's input, when there was one.
    *

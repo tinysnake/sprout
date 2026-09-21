@@ -84,6 +84,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'replay_sequence', type: 'INTEGER', notnull: 0, pk: 0 },
     { name: 'work_option', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'configuration_version', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'workspace_binding', type: 'TEXT', notnull: 0, pk: 0 },
   ],
   environment_leases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },

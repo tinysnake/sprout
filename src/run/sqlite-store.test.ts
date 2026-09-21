@@ -298,3 +298,62 @@ test('SqliteStore manages runs, leases, and session keys over one SQLite connect
 
   store.close();
 });
+
+test('a run records the workspace binding it was admitted under, and it survives a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-binding-'));
+  const dbPath = join(dir, 'sprout.db');
+  const workspaceBinding = {
+    bindingId: 'binding-7',
+    workspaceId: 'c'.repeat(24),
+    kind: 'relative',
+    path: 'repos/sprout',
+  } as const;
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ projectId: 'project-sprout', workspaceBinding }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.deepEqual(restored?.workspaceBinding, workspaceBinding);
+});
+
+test('a run with no workspace binding round-trips without inventing one', async () => {
+  const store = new SqliteRunStore({ filename: ':memory:' });
+  await store.save(sampleRun({ projectId: 'project-sprout' }));
+  const restored = await store.get('run-1');
+  store.close();
+  assert.equal('workspaceBinding' in (restored ?? {}), false);
+});
+
+test('a run written before the workspace binding column existed still reads back', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      events TEXT NOT NULL,
+      lease_id TEXT,
+      failure TEXT,
+      result TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+  `);
+  db.exec(`INSERT INTO agent_runs
+    (id, agent_id, prompt, environment_instance_id, status, events, created_at)
+    VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  const store = new SqliteRunStore({ db });
+  const restored = await store.get('legacy-1');
+  assert.equal('workspaceBinding' in (restored ?? {}), false);
+
+  await store.save(sampleRun({ id: 'after-migration', workspaceBinding: { workspaceId: 'd'.repeat(24), kind: 'default' } }));
+  const migrated = await store.get('after-migration');
+  assert.equal(migrated?.workspaceBinding?.workspaceId, 'd'.repeat(24));
+  store.close();
+});

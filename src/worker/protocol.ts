@@ -123,7 +123,11 @@ export interface StartSessionParams {
   /** The engine-neutral reasoning effort this session should use, when configured. */
   readonly effort?: string;
   readonly projectWorkspaceId?: string;
-  /** Worker-root-relative registered repository location, when the Project has one. */
+  /**
+   * Worker-root-relative registered repository location, when the Project has
+   * one. Must be relative: an absolute location is refused at this boundary,
+   * never resolved (#93, ADR-0009).
+   */
   readonly projectWorkspacePath?: string;
   readonly instructions?: string;
   /**

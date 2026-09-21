@@ -815,3 +815,102 @@ test('an agent whose project offers no usable environment is refused explicitly'
   assert.equal(run.status, 'failed');
   assert.match(run.failure ?? '', /no available environment/i);
 });
+
+test('a run records the durable workspace binding it was admitted under and uses it for the Worker start', async () => {
+  const store = new InMemoryRunStore();
+  let adapter: ScriptedEngineAdapter | undefined;
+  const bindingReads: string[] = [];
+  const pool = new EnvironmentPool({
+    definitions: [definition],
+    instances: [instance],
+    clock: { now: () => 1_000 },
+  });
+  const projects = new ProjectRegistry([
+    // A stale projection: the access record moved on, the registry has not.
+    project({ workspaces: [{ environmentInstanceId: 'mac-mini-1', path: 'repos/stale-projection' }] }),
+  ]);
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([
+      ['scripted', (adapter = new ScriptedEngineAdapter({
+        turns: [{ events: successEvents, result: completed }],
+      }))],
+    ]),
+    agents: new AgentRegistry([
+      {
+        id: 'agent-scout',
+        name: 'Scout',
+        engine: 'scripted',
+        capability: 'agent-run',
+        workingDirectory: '/tmp',
+      },
+    ]),
+    projects,
+    pool,
+    store,
+    workspaceBinding: async (projectId, instanceId) => {
+      bindingReads.push(`${projectId}@${instanceId}`);
+      return {
+        bindingId: 'binding-9',
+        workspaceId: 'e'.repeat(24),
+        kind: 'relative',
+        path: 'repos/current-binding',
+      };
+    },
+    leaseTtlMs: 60_000,
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'inspect' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  assert.deepEqual(run.workspaceBinding, {
+    bindingId: 'binding-9',
+    workspaceId: 'e'.repeat(24),
+    kind: 'relative',
+    path: 'repos/current-binding',
+  });
+  assert.deepEqual(bindingReads, ['project-sprout@mac-mini-1'], 'the binding is read once at admission');
+  // The Worker start carries the durable opaque identity and location, not the
+  // registry projection's stale path.
+  assert.equal(adapter!.requests[0]?.projectWorkspaceId, 'e'.repeat(24));
+  assert.equal(adapter!.requests[0]?.projectWorkspacePath, 'repos/current-binding');
+  assert.equal(adapter!.requests[0]?.workingDirectory, 'project-workspace:' + 'e'.repeat(24) + ':repos/current-binding');
+
+  const stored = await store.get(id);
+  assert.deepEqual(stored?.workspaceBinding, run.workspaceBinding, 'the binding is durable');
+});
+
+test('a run with no durable binding falls back to the projection, with its location validated', async () => {
+  // No workspaceBinding port: the pre-#93 graph. The projection's relative
+  // location still crosses the boundary only after the relative-path validator.
+  const { orchestrator, adapter } = build({
+    turns: [{ events: successEvents, result: completed }],
+    projects: [project({ workspaces: [{ environmentInstanceId: 'mac-mini-1', path: 'repos/legacy' }] })],
+  });
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'inspect' });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'completed');
+  assert.equal('workspaceBinding' in run, false, 'no binding is invented');
+  assert.equal(adapter.requests[0]?.projectWorkspaceId, 'project-sprout');
+  assert.equal(adapter.requests[0]?.projectWorkspacePath, 'repos/legacy');
+
+  // A corrupt projection carrying an absolute path must not cross the boundary:
+  // the unsafe location is dropped, and the run keeps the portable default slot.
+  const corrupt = build({
+    turns: [{ events: successEvents, result: completed }],
+    projects: [project({ workspaces: [{ environmentInstanceId: 'mac-mini-1', path: '/etc/passwd' }] })],
+  });
+  const corruptSubmit = await corrupt.orchestrator.submit({ agentId: 'agent-scout', prompt: 'inspect' });
+  const settled = await corrupt.orchestrator.waitFor(corruptSubmit.id);
+  assert.equal(settled.status, 'completed');
+  const request = corrupt.adapter.requests.at(-1);
+  assert.equal(request?.projectWorkspacePath, undefined, 'the absolute path is refused, not forwarded');
+  assert.equal(request?.projectWorkspaceId, 'project-sprout');
+  assert.equal(
+    corrupt.store.writes.some((write) => JSON.stringify(write).includes('/etc/passwd')),
+    false,
+    'the absolute path is never persisted',
+  );
+});

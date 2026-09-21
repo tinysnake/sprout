@@ -5,6 +5,7 @@ import { activeAgentMemberIds, currentProjectContent } from './authority-model.t
 import type { ProjectAuthorityStore } from './authority-store.ts';
 import type { ProjectAuthorityBridgePort } from './authority-service.ts';
 import type { ProjectEnvironmentAccess } from './access.ts';
+import { sanitizeWorkspacePath } from './access.ts';
 import type { ProjectAccessStore } from './access-store.ts';
 import type { ProjectAccessBridgePort } from './access-service.ts';
 
@@ -82,10 +83,21 @@ export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAu
     // Worker-root-relative location; a Worker-managed default binding carries no
     // `path`, and the Worker resolves (and creates) its own default directory for
     // the Project — never falling back to an unrelated instance working directory.
+    //
+    // The projection re-derives the location through the same validator the
+    // domain records with, so a corrupt or legacy durable access cannot project
+    // an absolute host path into the internal runtime surface (ADR-0008/0009).
+    // The HTTP view applies the same rule; this boundary must not depend on it.
+    // An unsafe location is dropped, never repaired or exposed: the Worker then
+    // resolves its own default directory for the Project.
     const workspaces: ProjectWorkspace[] = active.map((access) => {
       const binding = access.current;
-      return binding?.kind === 'relative' && binding.path !== undefined
-        ? { environmentInstanceId: access.environmentInstanceId, path: binding.path }
+      const path =
+        binding?.kind === 'relative' && binding.path !== undefined
+          ? sanitizeWorkspacePath(binding.path)
+          : undefined;
+      return path !== undefined
+        ? { environmentInstanceId: access.environmentInstanceId, path }
         : { environmentInstanceId: access.environmentInstanceId };
     });
     return {

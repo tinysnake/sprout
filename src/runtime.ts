@@ -665,6 +665,21 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           models: engine.models,
         }));
       },
+      // The durable access record a run is admitted under (#93): the binding
+      // facts are captured once, persisted with the run, and used for the
+      // Worker start, so a workspace change or restart afterwards cannot
+      // rewrite what historical work used or where it executed.
+      workspaceBinding: async (projectId, instanceId) => {
+        const access = await openedStores.projectAccess.get(projectId, instanceId);
+        const binding = access?.current;
+        if (access?.status !== 'active' || binding === undefined) return undefined;
+        return {
+          ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+          workspaceId: binding.workspaceId,
+          kind: binding.kind,
+          ...(binding.path !== undefined ? { path: binding.path } : {}),
+        };
+      },
       projects,
       pool,
       store: stores.runs,

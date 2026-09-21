@@ -328,3 +328,30 @@ test('unknown access operations return typed errors rather than 500', async () =
     await runtime.api.close();
   }
 });
+
+/**
+ * The API boundary (ADR-0009): a Worker diagnostic that embeds a host path, a
+ * credential, or machine identity reaches the client only as sanitized text.
+ * The stable typed code is the contract; the message is not a leak channel.
+ */
+test('a Worker validation failure returns the sanitized typed error over HTTP', async () => {
+  const runtime = await accessApi({
+    workerError:
+      'stat failed at /Users/<user>/secret and token=ghp_AAAAAAAAAAAAAAAAAAAAAA on build-7.internal',
+  });
+  try {
+    const response = await command(runtime, '/api/projects/project-sprout/access', {
+      environmentInstanceId: 'mac-mini-1',
+      workspace: { kind: 'default' },
+    });
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string; code: string };
+    assert.equal(body.code, 'workspace-validation-failed');
+    assert.match(body.error, /could not validate the selected Project workspace/);
+    assert.ok(!body.error.includes('/Users/'), 'no host path reaches the API');
+    assert.ok(!body.error.includes('ghp_AAAA'), 'no credential reaches the API');
+    assert.ok(!body.error.includes('build-7.internal'), 'no machine identity reaches the API');
+  } finally {
+    await runtime.api.close();
+  }
+});

@@ -126,11 +126,17 @@ export interface StartSessionRequest {
   /** The engine-neutral reasoning effort this session should use, when configured. */
   readonly effort?: string;
   /**
-   * A Worker-owned Project workspace.  The core names the portable Project id;
-   * only the Worker resolves that id to a host path before starting an engine.
+   * A Worker-owned Project workspace. The core names the portable identity the
+   * Worker validates and returns — the opaque `workspaceId`, never a path (#93).
+   * Only the Worker resolves that identity to a host path before starting an
+   * engine. The Project id remains accepted for pre-#93 callers.
    */
   readonly projectWorkspaceId?: string;
-  /** Worker-root-relative registered repository location, when the Project has one. */
+  /**
+   * Worker-root-relative registered repository location, when the Project has
+   * one. Must be relative: an absolute location is refused at this boundary,
+   * never resolved (#93, ADR-0009).
+   */
   readonly projectWorkspacePath?: string;
   /**
    * Standing instructions assembled by the core, if the adapter accepts them.

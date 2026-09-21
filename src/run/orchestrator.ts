@@ -9,8 +9,9 @@ import { assembleProjectContract, renderProjectContract } from '../project/contr
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
+import { sanitizeWorkspacePath } from '../project/access.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
-import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
+import type { AgentRun, AgentRunStatus, RunObserver, RunWorkspaceBinding } from './model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
@@ -102,6 +103,19 @@ export interface RunOrchestratorOptions {
   readonly engineFacts?: (
     environmentInstanceId: string,
   ) => Promise<readonly AgentWorkOptionEngineFact[]>;
+  /**
+   * The durable Project workspace binding for one (Project, Environment), when
+   * the build wires Project access (#93, ADR-0008).
+   *
+   * Read once at admission and recorded on the run, so a later workspace change
+   * or restart cannot rewrite which binding historical work used. Absent means
+   * the build has no access records and workspace facts come only from the
+   * registry projection, as before.
+   */
+  readonly workspaceBinding?: (
+    projectId: string,
+    environmentInstanceId: string,
+  ) => Promise<RunWorkspaceBinding | undefined>;
 }
 
 export interface SubmitRunRequest {
@@ -185,6 +199,13 @@ export class RunOrchestrator {
   readonly #engineFacts:
     | ((environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>)
     | undefined;
+  /** Reads the durable binding a run is admitted under (#93); optional. */
+  readonly #workspaceBinding:
+    | ((
+        projectId: string,
+        environmentInstanceId: string,
+      ) => Promise<RunWorkspaceBinding | undefined>)
+    | undefined;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -206,6 +227,7 @@ export class RunOrchestrator {
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#engineFacts = options.engineFacts;
+    this.#workspaceBinding = options.workspaceBinding;
   }
 
   /**
@@ -348,12 +370,22 @@ export class RunOrchestrator {
       return { id: taskRun.id };
     }
 
+    // Capture the durable workspace binding facts once, before any engine
+    // accepts the work (ADR-0008): after a later workspace change or a restart,
+    // the run's history still names the binding it actually used. The binding
+    // is a historical fact like the work option and is never re-derived below.
+    const workspaceBinding =
+      resolution.projectId !== undefined && this.#workspaceBinding !== undefined
+        ? await this.#workspaceBinding(resolution.projectId, resolution.instanceId)
+        : undefined;
+
     const recorded: AgentRun = {
       ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
       workOption: admittedOption.option,
       configurationVersion: admittedOption.configurationVersion,
+      ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
       ...(request.environmentLeaseId !== undefined ? { leaseId: request.environmentLeaseId } : {}),
     };
     this.#runs.set(recorded.id, recorded);
@@ -381,17 +413,38 @@ export class RunOrchestrator {
       }
     }
 
+    // The run's own durable binding is the authoritative workspace fact: it was
+    // captured from the access record at admission and never re-read, so a
+    // workspace change or restart after admission cannot change what this run
+    // presents to the Worker. The registry projection is only the fallback for
+    // callers with no access records, and its location passes the same
+    // relative-path validator the domain records with, so a corrupt projection
+    // cannot cross the internal boundary as an absolute host path (ADR-0009).
     const resolvedProject = this.#projects?.get(resolution.projectId);
     const registeredWorkspace = resolvedProject === undefined
       ? undefined
       : workspaceFor(resolvedProject, resolution.instanceId);
+    const binding = recorded.workspaceBinding;
+    const registeredPath = registeredWorkspace?.path;
+    const safeProjectionPath =
+      binding === undefined && registeredPath !== undefined
+        ? sanitizeWorkspacePath(registeredPath)
+        : undefined;
     const workspace = {
-      ...(request.projectWorkspaceId !== undefined
-        ? { projectWorkspaceId: request.projectWorkspaceId }
-        : registeredWorkspace !== undefined ? { projectWorkspaceId: resolution.projectId } : {}),
-      ...(request.projectWorkspacePath !== undefined
-        ? { projectWorkspacePath: request.projectWorkspacePath }
-        : registeredWorkspace?.path !== undefined ? { projectWorkspacePath: registeredWorkspace.path } : {}),
+      ...(binding?.workspaceId !== undefined
+        ? { projectWorkspaceId: binding.workspaceId }
+        : request.projectWorkspaceId !== undefined
+          ? { projectWorkspaceId: request.projectWorkspaceId }
+          : registeredWorkspace !== undefined
+            ? { projectWorkspaceId: resolution.projectId }
+            : {}),
+      ...(binding?.path !== undefined
+        ? { projectWorkspacePath: binding.path }
+        : binding?.workspaceId === undefined && request.projectWorkspacePath !== undefined
+          ? { projectWorkspacePath: request.projectWorkspacePath }
+          : safeProjectionPath !== undefined
+            ? { projectWorkspacePath: safeProjectionPath }
+            : {}),
       ...(request.taskBootstrapInstructions !== undefined ? { taskBootstrapInstructions: request.taskBootstrapInstructions } : {}),
     };
     const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));

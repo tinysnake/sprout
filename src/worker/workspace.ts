@@ -93,6 +93,14 @@ export class WorkerWorkspace {
     await assertProjectSentinel(root, workspace, input.projectId);
   }
 
+  /**
+   * Resolve one Project's workspace to its absolute location on this host.
+   *
+   * The caller names portable facts only. A registered location must be a safe
+   * Worker-root-relative path: an absolute or escaping location is refused at
+   * this boundary rather than resolved, so a corrupt projection cannot cross
+   * the internal Project/Worker boundary as a host path (#93, ADR-0009).
+   */
   async projectWorkingDirectory(projectId: string, workspacePath?: string): Promise<string> {
     const root = await this.#rootPath();
     return this.#workspace(root, projectId, false, workspacePath);
@@ -137,9 +145,14 @@ export class WorkerWorkspace {
   ): Promise<string> {
     if (workspacePath !== undefined) {
       if (!isSafeRelativePath(workspacePath)) {
-        throw new Error('registered Project workspace path must be relative and stay below the Worker root');
+        throw new Error(
+          'registered Project workspace path must be relative and stay below the Worker root',
+        );
       }
       return this.#directory(root, join(root, workspacePath), create);
+    }
+    if (projectId.startsWith('/') || projectId.includes('..') || /^[A-Za-z]:/.test(projectId)) {
+      throw new Error('Project workspace identity must be portable, not a host path');
     }
     const projects = await this.#directory(root, join(root, 'projects'), create);
     return this.#directory(root, join(projects, token(projectId)), create);

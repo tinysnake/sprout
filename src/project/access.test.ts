@@ -336,3 +336,189 @@ test('change and end unbind correctly over a store that returns fresh copies', a
   assert.equal(ended.history.filter((binding) => binding.unboundAt === undefined).length, 0);
   assert.equal(accessIsConsistent(ended), true);
 });
+
+/**
+ * Concurrent workspace mutations on one (Project, Environment) must serialize:
+ * grant, change, and end each run a read-check-validate-write cycle over the
+ * append-only history, so an unsynchronized pair loses an update (the review's
+ * adversarial probe produced history `['first', 'third']`).
+ */
+test('concurrent workspace changes serialize and every binding survives', async () => {
+  const { access } = await service();
+  await access.grant({
+    projectId: 'project-sprout',
+    environmentInstanceId: 'mac-mini-1',
+    selection: { kind: 'relative', path: 'repos/first' },
+  });
+  // Three overlapping changes: without the per-relationship lock the last
+  // writer's stale read drops an earlier binding from the durable history.
+  const [second, , fourth] = await Promise.all([
+    access.changeWorkspace({
+      projectId: 'project-sprout',
+      environmentInstanceId: 'mac-mini-1',
+      selection: { kind: 'relative', path: 'repos/second' },
+    }),
+    access.changeWorkspace({
+      projectId: 'project-sprout',
+      environmentInstanceId: 'mac-mini-1',
+      selection: { kind: 'relative', path: 'repos/third' },
+    }),
+    access.changeWorkspace({
+      projectId: 'project-sprout',
+      environmentInstanceId: 'mac-mini-1',
+      selection: { kind: 'relative', path: 'repos/fourth' },
+    }),
+  ]);
+
+  const durable = await access.get('project-sprout', 'mac-mini-1');
+  assert.ok(durable);
+  assert.equal(durable.status, 'active');
+  assert.deepEqual(
+    durable.history.map((binding) => binding.path),
+    ['repos/first', 'repos/second', 'repos/third', 'repos/fourth'],
+    'append-only history retains every change, in order',
+  );
+  assert.equal(durable.current?.path, 'repos/fourth');
+  assert.equal(durable.current?.bindingId, fourth.current?.bindingId);
+  assert.equal(accessIsConsistent(durable), true);
+  assert.equal(second.history.length, 2);
+});
+
+test('a concurrent grant and end serialize instead of racing the record', async () => {
+  const { access } = await service();
+  await access.grant({
+    projectId: 'project-sprout',
+    environmentInstanceId: 'mac-mini-1',
+    selection: { kind: 'default' },
+  });
+  // Both operations read the same active record; serialized, exactly one of the
+  // two outcomes is possible and the record stays consistent either way.
+  const outcomes = await Promise.allSettled([
+    access.end({ projectId: 'project-sprout', environmentInstanceId: 'mac-mini-1', reason: 'retired' }),
+    access.changeWorkspace({
+      projectId: 'project-sprout',
+      environmentInstanceId: 'mac-mini-1',
+      selection: { kind: 'default' },
+    }),
+  ]);
+  const durable = await access.get('project-sprout', 'mac-mini-1');
+  assert.ok(durable);
+  assert.equal(accessIsConsistent(durable), true);
+  const ended = outcomes[0]?.status === 'fulfilled';
+  if (ended) {
+    assert.equal(durable.status, 'ended');
+    assert.equal(outcomes[1]?.status, 'rejected', 'a change after the end is refused');
+  } else {
+    assert.equal(durable.status, 'active');
+    assert.equal(durable.history.length, 2, 'the change appended its binding');
+  }
+});
+
+/**
+ * A Worker exception is hostile text: it may embed host paths, credentials, or
+ * machine identity. The durable ProjectAccessError — and therefore every API
+ * response — carries only the sanitized diagnostic, never the raw message.
+ */
+test('a Worker validation failure sanitizes the raw error before it is raised', async () => {
+  const { access } = await service({
+    worker: validator({
+      error: `stat failed at /Users/<user>/secret: token=ghp_AAAAAAAAAAAAAAAAAAAAAA --host build-7.internal`,
+    }).port,
+  });
+  let raised: unknown;
+  try {
+    await access.grant({
+      projectId: 'project-sprout',
+      environmentInstanceId: 'mac-mini-1',
+      selection: { kind: 'default' },
+    });
+    assert.fail('the validation failure must be raised');
+  } catch (caught) {
+    raised = caught;
+  }
+  assert.ok(raised instanceof ProjectAccessError);
+  assert.equal(raised.code, 'workspace-validation-failed');
+  assert.match(raised.message, /could not validate the selected Project workspace/);
+  assert.doesNotMatch(raised.message, /\/Users\/<user>\/secret/);
+  assert.doesNotMatch(raised.message, /ghp_AAAA/);
+  assert.doesNotMatch(raised.message, /build-7\.internal/);
+});
+
+/**
+ * A malformed Worker answer must be rejected, never coerced: a relative
+ * selection answered with `kind: 'default'` would otherwise persist a
+ * completely different durable workspace than the one the Human selected.
+ */
+test('a Worker answer whose kind mismatches the selection is rejected, not coerced', async () => {
+  const { access } = await service({
+    worker: validator({
+      result: () => ({ workspaceId: 'a'.repeat(40), kind: 'default' }),
+    }).port,
+  });
+  await assert.rejects(
+    () =>
+      access.grant({
+        projectId: 'project-sprout',
+        environmentInstanceId: 'mac-mini-1',
+        selection: { kind: 'relative', path: 'repos/sprout' },
+      }),
+    (error: unknown) =>
+      error instanceof ProjectAccessError && error.code === 'workspace-validation-failed',
+  );
+  const unchanged = await access.get('project-sprout', 'mac-mini-1');
+  assert.equal(unchanged, undefined, 'a kind mismatch records nothing');
+});
+
+/** The mirror direction: a default selection answered with a relative kind. */
+test('a default selection answered with a relative kind is rejected, not coerced', async () => {
+  const { access } = await service({
+    worker: validator({
+      result: () => ({ workspaceId: 'a'.repeat(40), kind: 'relative', path: 'repos/other' }),
+    }).port,
+  });
+  await assert.rejects(
+    () =>
+      access.grant({
+        projectId: 'project-sprout',
+        environmentInstanceId: 'mac-mini-1',
+        selection: { kind: 'default' },
+      }),
+    (error: unknown) =>
+      error instanceof ProjectAccessError && error.code === 'workspace-validation-failed',
+  );
+  const unchanged = await access.get('project-sprout', 'mac-mini-1');
+  assert.equal(unchanged, undefined, 'a kind mismatch records nothing');
+});
+
+/** A change carries the same fail-closed rule as a grant. */
+test('a workspace change refuses a kind mismatch without unbinding the current workspace', async () => {
+  const { access } = await service();
+  await access.grant({
+    projectId: 'project-sprout',
+    environmentInstanceId: 'mac-mini-1',
+    selection: { kind: 'relative', path: 'repos/first' },
+  });
+  const mismatched = await service({
+    worker: validator({
+      result: () => ({ workspaceId: 'b'.repeat(40), kind: 'default' }),
+    }).port,
+  });
+  await mismatched.access.grant({
+    projectId: 'project-sprout',
+    environmentInstanceId: 'mac-mini-1',
+    selection: { kind: 'default' },
+  });
+  await assert.rejects(
+    () =>
+      mismatched.access.changeWorkspace({
+        projectId: 'project-sprout',
+        environmentInstanceId: 'mac-mini-1',
+        selection: { kind: 'relative', path: 'repos/second' },
+      }),
+    (error: unknown) =>
+      error instanceof ProjectAccessError && error.code === 'workspace-validation-failed',
+  );
+  const unchanged = await mismatched.access.get('project-sprout', 'mac-mini-1');
+  assert.equal(unchanged?.history.length, 1, 'the refused change unbinds nothing');
+  assert.equal(unchanged?.current?.kind, 'default');
+});
