@@ -56,6 +56,7 @@ interface RunRow {
   readonly replay_sequence: number | null;
   readonly work_option: string | null;
   readonly configuration_version: number | null;
+  readonly workspace_binding: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -97,7 +98,10 @@ export class SqliteRunStore implements RunStore {
         hand_off TEXT,
         task_id TEXT,
         token_usage TEXT,
-        replay_sequence INTEGER
+        replay_sequence INTEGER,
+        work_option TEXT,
+        configuration_version INTEGER,
+        workspace_binding TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
@@ -146,8 +150,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -160,7 +164,8 @@ export class SqliteRunStore implements RunStore {
            token_usage = excluded.token_usage,
            replay_sequence = excluded.replay_sequence,
            work_option = excluded.work_option,
-           configuration_version = excluded.configuration_version`,
+           configuration_version = excluded.configuration_version,
+           workspace_binding = excluded.workspace_binding`,
       )
       .run(
         run.id,
@@ -181,6 +186,7 @@ export class SqliteRunStore implements RunStore {
         replaySequence,
         run.workOption ? JSON.stringify(run.workOption) : null,
         run.configurationVersion ?? null,
+        run.workspaceBinding ? JSON.stringify(run.workspaceBinding) : null,
       );
     return replaySequence;
   }
@@ -309,6 +315,10 @@ function toRun(row: RunRow): AgentRun {
     row.token_usage !== null ? (JSON.parse(row.token_usage) as TokenUsage) : undefined;
   const workOption =
     row.work_option !== null ? (JSON.parse(row.work_option) as AgentWorkOption) : undefined;
+  const workspaceBinding =
+    row.workspace_binding !== null && row.workspace_binding !== undefined
+      ? (JSON.parse(row.workspace_binding) as AgentRun['workspaceBinding'])
+      : undefined;
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -324,6 +334,7 @@ function toRun(row: RunRow): AgentRun {
     ...(result !== undefined ? { result } : {}),
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(workOption !== undefined ? { workOption } : {}),
+    ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
     ...(row.configuration_version !== null ? { configurationVersion: row.configuration_version } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),

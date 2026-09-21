@@ -24,6 +24,8 @@ import {
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
   type TaskContextMaterialization,
+  type ValidateWorkspaceParams,
+  type ValidateWorkspaceResult,
   type WorkerInfo,
   type WorkerReadinessFacts,
 } from './protocol.ts';
@@ -151,6 +153,9 @@ export class EnvironmentWorker {
         case WORKER_METHODS.recycleTaskContext:
           this.#transport.respond(id, await this.#recycleTaskContext(params as RecycleTaskContextParams));
           return;
+        case WORKER_METHODS.validateWorkspace:
+          this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
+          return;
         default:
           this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
       }
@@ -200,6 +205,7 @@ export class EnvironmentWorker {
         : await this.#requireWorkspace().projectWorkingDirectory(
           params.projectWorkspaceId,
           params.projectWorkspacePath,
+          params.projectWorkspaceKind,
         ),
       ...(params.model !== undefined ? { model: params.model } : {}),
       ...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -254,6 +260,10 @@ export class EnvironmentWorker {
 
   #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
     return this.#requireWorkspace().recycle(params);
+  }
+
+  #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    return this.#requireWorkspace().validateWorkspace(params);
   }
 
   #requireWorkspace(): WorkerWorkspace {

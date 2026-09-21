@@ -309,3 +309,44 @@ test('the readiness wire view sanitizes the summary reason as free text', () => 
   assert.equal(reason('/srv/sprout/worker').length > 0, true);
   assert.equal(/\/srv\/sprout/.test(reason('/srv/sprout/worker')), false);
 });
+
+test('a run view exposes the workspace binding it was admitted under, sanitized', () => {
+  const view = toRunView(
+    run({
+      projectId: 'project-sprout',
+      workspaceBinding: {
+        bindingId: 'binding-nine',
+        workspaceId: 'a'.repeat(40),
+        kind: 'relative',
+        path: 'repos/sprout',
+      },
+    }),
+  );
+  assert.deepEqual(view.workspaceBinding, {
+    bindingId: 'binding-nine',
+    workspaceId: 'a'.repeat(40),
+    kind: 'relative',
+    path: 'repos/sprout',
+  });
+
+  // A corrupt durable binding cannot carry an absolute host path onto the wire:
+  // the unsafe location is dropped, never repaired or exposed.
+  const corrupt = toRunView(
+    run({
+      projectId: 'project-sprout',
+      workspaceBinding: {
+        bindingId: 'binding-nine',
+        workspaceId: 'a'.repeat(40),
+        kind: 'relative',
+        path: '/Users/<user>/private',
+      },
+    }),
+  );
+  assert.equal(corrupt.workspaceBinding?.path, undefined, 'the absolute location is dropped');
+  assert.ok(!JSON.stringify(corrupt).includes('/Users/'));
+});
+
+test('a run with no workspace binding reports none rather than inventing one', () => {
+  const view = toRunView(run({ projectId: 'project-sprout' }));
+  assert.equal('workspaceBinding' in view, false);
+});

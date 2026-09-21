@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 8;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -505,6 +505,47 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           updated_at INTEGER NOT NULL
         );
       `);
+    },
+  },
+  {
+    fromVersion: 8,
+    toVersion: 9,
+    name: 'project_environment_access_and_workspaces',
+    migrate: (db) => {
+      // A Project Environment access relationship is one JSON document keyed by
+      // the (Project, Environment instance) pair, holding the granted workspace
+      // bindings as append-only history (#93, ADR-0008). The document holds only
+      // the Worker's opaque workspace identity and, for a relative selection, a
+      // Worker-root-relative location — never an absolute host path. Ending
+      // access is a status and a superseded binding is a recorded fact inside
+      // the document; there is no delete.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_environment_access (
+          project_id TEXT NOT NULL,
+          environment_instance_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (project_id, environment_instance_id)
+        );
+      `);
+    },
+  },
+  {
+    fromVersion: 9,
+    toVersion: 10,
+    name: 'durable_run_workspace_binding',
+    migrate: (db) => {
+      // A Project workspace binding is a historical run fact (#93). This must
+      // be added through the versioned transaction and safety-copy protocol,
+      // never by a domain-store constructor after the database is serving.
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+      ).get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'workspace_binding')) {
+        db.exec('ALTER TABLE agent_runs ADD COLUMN workspace_binding TEXT');
+      }
     },
   },
 ];

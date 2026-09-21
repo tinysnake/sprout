@@ -37,13 +37,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 }
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 8);
+  assert.equal(CURRENT_SCHEMA_VERSION, 10);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 8);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 10);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 8,
-    current: 8,
+    max: 10,
+    current: 10,
   });
 });
 
@@ -241,6 +241,81 @@ test('v4 store receives the Environment enrollment and readiness tables transact
   });
 });
 
+test('v9 run history receives workspace_binding through the versioned safety-copy migration', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, 'sprout.db');
+    const safetyPath = defaultSafetyCopyPath(dbPath);
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA user_version = 9;
+      CREATE TABLE agent_runs (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, prompt TEXT NOT NULL,
+        environment_instance_id TEXT NOT NULL, status TEXT NOT NULL,
+        events TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      INSERT INTO agent_runs VALUES ('run-legacy', 'agent', 'hi', 'env', 'completed', '[]', 1);
+    `);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: dbPath });
+    assert.equal(store.schemaVersion, 10);
+    const columns = store.db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+    assert.equal(columns.some((column) => column.name === 'workspace_binding'), true);
+    assert.equal(
+      (store.db.prepare("SELECT id FROM agent_runs WHERE id = 'run-legacy'").get() as { id: string }).id,
+      'run-legacy',
+      'the migration adds the column without replacing existing run rows',
+    );
+    store.close();
+
+    const safety = new DatabaseSync(safetyPath);
+    assert.equal(getSchemaVersion(safety), 9);
+    const safetyColumns = safety.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+    assert.equal(safetyColumns.some((column) => column.name === 'workspace_binding'), false);
+    safety.close();
+  });
+});
+
+test('a failed workspace_binding migration rolls back the column and preserves its safety copy', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, 'sprout.db');
+    const safetyPath = defaultSafetyCopyPath(dbPath);
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA user_version = 9;
+      CREATE TABLE agent_runs (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+      INSERT INTO agent_runs VALUES ('run-legacy', 1);
+    `);
+    legacy.close();
+    const failing: readonly MigrationStep[] = [{
+      fromVersion: 9,
+      toVersion: 10,
+      migrate: (db) => {
+        db.exec('ALTER TABLE agent_runs ADD COLUMN workspace_binding TEXT');
+        throw new Error('simulated binding migration failure');
+      },
+    }];
+
+    assert.throws(
+      () => new SqliteStore({
+        filename: dbPath,
+        targetSchemaVersion: 10,
+        supportedSchemaRange: { min: 9, max: 10, current: 10 },
+        migrations: failing,
+      }),
+      (error: unknown) => error instanceof SchemaMigrationError,
+    );
+    const retained = new DatabaseSync(dbPath);
+    assert.equal(getSchemaVersion(retained), 9);
+    const columns = retained.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+    assert.equal(columns.some((column) => column.name === 'workspace_binding'), false);
+    retained.close();
+    const safety = new DatabaseSync(safetyPath);
+    assert.equal(getSchemaVersion(safety), 9);
+    safety.close();
+  });
+});
+
 test('safety copy creation failure blocks forward migration and leaves database unmodified', async () => {
   await withTempDir(async (dir) => {
     const dbPath = join(dir, 'sprout.db');
@@ -413,7 +488,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Create a database newer than the current maximum.
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 9;
+      PRAGMA user_version = 11;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);
@@ -428,7 +503,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
 
     assert.ok(thrownError instanceof SchemaTooNewError, 'must throw SchemaTooNewError');
     assert.equal(thrownError.name, 'SchemaTooNewError');
-    assert.equal(thrownError.version, 9);
+    assert.equal(thrownError.version, 11);
     assert.deepEqual(thrownError.supportedRange, SUPPORTED_SCHEMA_RANGE);
     assert.ok(thrownError.message.includes('newer than supported range'));
     assert.ok(thrownError.guidance.includes('upgrade Sprout'));
@@ -436,11 +511,11 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Standalone domain stores also refuse the newer version
     assert.throws(
       () => new SqliteRunStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 9,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 11,
     );
     assert.throws(
       () => new SqliteTaskStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 9,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 11,
     );
   });
 });
@@ -716,7 +791,7 @@ test('directly constructed domain adapters enforce schema coordination and safet
     // 2. Direct SqliteLeaseStore on a future schema throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 9; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 11; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

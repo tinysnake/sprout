@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { BridgedProjectRegistry } from './bridged-registry.ts';
 import { ProjectService } from './authority-service.ts';
 import { InMemoryProjectAuthorityStore } from './authority-store.ts';
+import { InMemoryProjectAccessStore } from './access-store.ts';
 import type { Project } from './model.ts';
 
 /**
@@ -108,4 +109,241 @@ test('archived authority Projects disappear from legacy lookup and restore witho
   await projects.restore('project-lifecycle');
   assert.ok(registry.get('project-lifecycle'));
   assert.deepEqual(registry.get('project-lifecycle')?.availableEnvironmentInstanceIds, []);
+});
+
+/**
+ * The Project Environment access projection (#93).
+ *
+ * A granted access relationship is what makes an authority Project's
+ * environments resolvable by a run: only an active access contributes an
+ * available instance, and every active access contributes a workspace entry.
+ * A relative binding names a Worker-root-relative location; a Worker-managed
+ * default binding carries no location, so the Worker resolves its own default
+ * workspace for the Project instead of an unrelated instance working directory.
+ */
+test('granted access projects the Environment and a relative workspace into the M1 registry', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({
+    store: new InMemoryProjectAuthorityStore(),
+    agentAuthority: { agentIsActive: () => true },
+    bridge: registry,
+    clock: () => 5_000,
+  });
+  await projects.create({
+    id: 'project-access',
+    displayName: 'Access',
+    agentMemberships: [{ agentId: 'scout' }],
+  });
+
+  const defaultAccess = {
+    projectId: 'project-access',
+    environmentInstanceId: 'instance-default',
+    status: 'active' as const,
+    startedAt: 1,
+    updatedAt: 1,
+    current: { bindingId: 'b1', workspaceId: 'a'.repeat(40), kind: 'default' as const, boundAt: 1 },
+    history: [{ bindingId: 'b1', workspaceId: 'a'.repeat(40), kind: 'default' as const, boundAt: 1 }],
+  };
+  const relativeAccess = {
+    projectId: 'project-access',
+    environmentInstanceId: 'instance-relative',
+    status: 'active' as const,
+    startedAt: 1,
+    updatedAt: 1,
+    current: {
+      bindingId: 'b2',
+      workspaceId: 'b'.repeat(40),
+      kind: 'relative' as const,
+      path: 'repos/sprout',
+      boundAt: 1,
+    },
+    history: [
+      {
+        bindingId: 'b2',
+        workspaceId: 'b'.repeat(40),
+        kind: 'relative' as const,
+        path: 'repos/sprout',
+        boundAt: 1,
+      },
+    ],
+  };
+  registry.prepareAccess('project-access', [defaultAccess, relativeAccess])();
+
+  const projected = registry.get('project-access');
+  assert.ok(projected);
+  assert.deepEqual(projected.availableEnvironmentInstanceIds, ['instance-default', 'instance-relative']);
+  // The relative binding names a location; the default binding is present but
+  // pathless, so the Worker resolves its own default workspace.
+  assert.deepEqual(projected.workspaces, [
+    { environmentInstanceId: 'instance-default' },
+    { environmentInstanceId: 'instance-relative', path: 'repos/sprout' },
+  ]);
+  assert.equal('path' in (projected.workspaces?.[0] ?? {}), false);
+  assert.equal(projected.workspaces?.[1]?.path, 'repos/sprout');
+});
+
+test('loadAuthorities hydrates access before publishing, so a restart preserves granted environments', async () => {
+  const registry = new BridgedProjectRegistry();
+  const authorityStore = new InMemoryProjectAuthorityStore();
+  const accessStore = new InMemoryProjectAccessStore();
+  const projects = new ProjectService({
+    store: authorityStore,
+    agentAuthority: { agentIsActive: () => true },
+    clock: () => 5_000,
+  });
+  await projects.create({ id: 'project-restart', displayName: 'Restart' });
+  await accessStore.save({
+    projectId: 'project-restart',
+    environmentInstanceId: 'mac-mini-1',
+    status: 'active',
+    startedAt: 1,
+    updatedAt: 1,
+    current: {
+      bindingId: 'b1',
+      workspaceId: 'a'.repeat(40),
+      kind: 'relative',
+      path: 'repos/sprout',
+      boundAt: 1,
+    },
+    history: [
+      { bindingId: 'b1', workspaceId: 'a'.repeat(40), kind: 'relative', path: 'repos/sprout', boundAt: 1 },
+    ],
+  });
+
+  await registry.loadAuthorities(authorityStore, [], accessStore);
+  const restored = registry.get('project-restart');
+  assert.deepEqual(restored?.availableEnvironmentInstanceIds, ['mac-mini-1']);
+  assert.deepEqual(restored?.workspaces, [{ environmentInstanceId: 'mac-mini-1', path: 'repos/sprout' }]);
+});
+
+test('an ended access removes the environment from the Project projection', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({
+    store: new InMemoryProjectAuthorityStore(),
+    agentAuthority: { agentIsActive: () => true },
+    bridge: registry,
+    clock: () => 5_000,
+  });
+  await projects.create({ id: 'project-ended', displayName: 'Ended' });
+  registry.prepareAccess('project-ended', [
+    {
+      projectId: 'project-ended',
+      environmentInstanceId: 'mac-mini-1',
+      status: 'active',
+      startedAt: 1,
+      updatedAt: 1,
+      current: { bindingId: 'b1', workspaceId: 'a'.repeat(40), kind: 'default', boundAt: 1 },
+      history: [{ bindingId: 'b1', workspaceId: 'a'.repeat(40), kind: 'default', boundAt: 1 }],
+    },
+  ])();
+  assert.deepEqual(registry.get('project-ended')?.availableEnvironmentInstanceIds, ['mac-mini-1']);
+
+  registry.prepareAccess('project-ended', [
+    {
+      projectId: 'project-ended',
+      environmentInstanceId: 'mac-mini-1',
+      status: 'ended',
+      startedAt: 1,
+      updatedAt: 2,
+      endedAt: 2,
+      endedReason: 'retired',
+      history: [
+        {
+          bindingId: 'b1',
+          workspaceId: 'a'.repeat(40),
+          kind: 'default',
+          boundAt: 1,
+          unboundAt: 2,
+          unboundReason: 'retired',
+        },
+      ],
+    },
+  ])();
+  const projection = registry.get('project-ended');
+  assert.ok(projection);
+  assert.deepEqual(projection.availableEnvironmentInstanceIds, []);
+  assert.equal(projection.workspaces, undefined);
+});
+
+/**
+ * The internal runtime boundary (ADR-0009): a corrupt or legacy durable access
+ * record carrying an absolute host path must not project into the M1 registry.
+ * The HTTP view has its own sanitizer; this boundary must not depend on it.
+ */
+test('a corrupt access record with an absolute path projects no location', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
+  await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
+  const authority = (await projects.get('project-corrupt'))!;
+  registry.prepare(authority)();
+  const corrupt = {
+    projectId: 'project-corrupt',
+    environmentInstanceId: 'mac-mini-1',
+    status: 'active',
+    startedAt: 1,
+    updatedAt: 2,
+    current: {
+      bindingId: 'b1',
+      workspaceId: 'a'.repeat(40),
+      kind: 'relative',
+      path: '/Users/<user>/private',
+      boundAt: 1,
+    },
+    history: [
+      {
+        bindingId: 'b1',
+        workspaceId: 'a'.repeat(40),
+        kind: 'relative',
+        path: '/Users/<user>/private',
+        boundAt: 1,
+      },
+    ],
+  } as const;
+
+  registry.prepareAccess('project-corrupt', [corrupt])();
+  const projection = registry.get('project-corrupt');
+  assert.ok(projection);
+  assert.deepEqual(projection.availableEnvironmentInstanceIds, ['mac-mini-1']);
+  assert.deepEqual(
+    projection.workspaces,
+    [{ environmentInstanceId: 'mac-mini-1' }],
+    'the absolute location is dropped, never projected',
+  );
+});
+
+/** Windows-rooted and traversal-shaped corruption are refused the same way. */
+test('a corrupt access record with a traversal path projects no location', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
+  await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
+  const authority = (await projects.get('project-corrupt'))!;
+  registry.prepare(authority)();
+  registry.prepareAccess('project-corrupt', [
+    {
+      projectId: 'project-corrupt',
+      environmentInstanceId: 'mac-mini-1',
+      status: 'active',
+      startedAt: 1,
+      updatedAt: 2,
+      current: {
+        bindingId: 'b2',
+        workspaceId: 'b'.repeat(40),
+        kind: 'relative',
+        path: 'C:\\Users\\x\\secret',
+        boundAt: 1,
+      },
+      history: [
+        {
+          bindingId: 'b2',
+          workspaceId: 'b'.repeat(40),
+          kind: 'relative',
+          path: 'C:\\Users\\x\\secret',
+          boundAt: 1,
+        },
+      ],
+    },
+  ])();
+  const projection = registry.get('project-corrupt');
+  assert.ok(projection);
+  assert.deepEqual(projection.workspaces, [{ environmentInstanceId: 'mac-mini-1' }]);
 });

@@ -32,11 +32,18 @@ import { ProjectRegistry } from './project/registry.ts';
 import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
+import type { ProjectAccessStore } from './project/access-store.ts';
+import { sanitizeWorkspacePath } from './project/access.ts';
 import {
   ProjectService,
   type ProjectAgentAuthorityPort,
   type ProjectWorkSafetyPort,
 } from './project/authority-service.ts';
+import {
+  ProjectAccessService,
+  type ProjectBindingWorkSafetyPort,
+  type ProjectEnvironmentAuthorityPort,
+} from './project/access-service.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
@@ -52,6 +59,7 @@ import { TaskService } from './task/service.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo } from './worker/protocol.ts';
+import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
@@ -127,6 +135,8 @@ export interface RuntimeStores {
   readonly agentIdentities: AgentStore;
   /** The durable Project, template, and membership authority records (#92). */
   readonly projectAuthorities: ProjectAuthorityStore;
+  /** The durable Project Environment access and workspace bindings (#93). */
+  readonly projectAccess: ProjectAccessStore;
   close(): void;
 }
 
@@ -143,6 +153,16 @@ export interface RuntimeEnvironment {
   adapters(environmentInstanceId: string): Promise<ReadonlyMap<string, EngineAdapter>>;
   /** Worker-owned Task context operations for one environment instance. */
   contexts(environmentInstanceId: string): Promise<TaskContextWorker>;
+  /**
+   * Ask the Worker serving one instance to validate or prepare a Project
+   * workspace selection (#93). The Worker is the filesystem authority: only it
+   * turns a portable selection into a real workspace, and only it may create the
+   * Worker-managed default.
+   */
+  validateWorkspace?(
+    environmentInstanceId: string,
+    input: ValidateWorkspaceParams,
+  ): Promise<ValidateWorkspaceResult>;
   /**
    * The neutral Worker facts one environment instance reported on `worker/info`,
    * when it is connected (optional: readiness is an additive observation #87).
@@ -207,6 +227,8 @@ export interface SproutRuntime {
   readonly agentService: AgentService;
   /** The Project, template, and membership authority capability (#92). */
   readonly projectService: ProjectService;
+  /** The Project Environment access and workspace capability (#93). */
+  readonly projectAccess: ProjectAccessService;
   /** The engines the configured environment hosts, validated at construction. */
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   /**
@@ -386,7 +408,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // Authority Projects mirror into the same registry so active Project
     // channels are routable. Host composition is not a durable Project
     // Environment grant, so the bridge never injects this instance as access.
-    await projects.loadAuthorities(stores.projectAuthorities);
+    await projects.loadAuthorities(stores.projectAuthorities, [], stores.projectAccess);
     // The durable Project, template-snapshot, and membership authority (#92).
     // It composes over the same durable handle every other M2 domain uses, and
     // its active-work safety facts are read-only projections of the same run
@@ -489,6 +511,110 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // archive commits as removal from every M1 route and wake lookup.
       bridge: projects,
     });
+    /**
+     * The Project Environment access and Project workspace capability (#93).
+     *
+     * The Worker is the filesystem authority: a grant or a workspace change
+     * first asks the resolved Environment's Worker to validate or prepare the
+     * selection, and only then does the durable access relationship change. The
+     * binding bridge republishes the Project's M1 projection so a newly granted
+     * environment is immediately resolvable by a run.
+     */
+    const projectAccessSafety: ProjectBindingWorkSafetyPort = {
+      hasActiveWorkOnEnvironment: async (projectId, environmentInstanceId) => {
+        const runs = await orchestrator.list();
+        if (
+          runs.some(
+            (run) =>
+              run.projectId === projectId &&
+              run.environmentInstanceId === environmentInstanceId &&
+              (run.status === 'queued' || run.status === 'running'),
+          )
+        ) {
+          return true;
+        }
+        const projectTasks = await openedStores.tasks.list({ projectId });
+        if (
+          projectTasks.some(
+            (task) =>
+              !isTerminalTaskStatus(task.status) && task.environmentInstanceId === environmentInstanceId,
+          )
+        ) {
+          return true;
+        }
+        // A held or recovering lease — run-held or Task-held — means the
+        // Environment still owns work even when the rows look finished. An
+        // absent owner row is unknown, never evidence of safety.
+        const leases = pool
+          .leases()
+          .filter(
+            (lease) =>
+              lease.instanceId === environmentInstanceId &&
+              (lease.state === 'active' || lease.state === 'recovering'),
+          );
+        for (const lease of leases) {
+          if (lease.taskId !== undefined) {
+            const task = await openedStores.tasks.get(lease.taskId);
+            if (task === undefined) return true;
+            if (task.projectId === projectId) return true;
+            continue;
+          }
+          if (lease.runId === undefined) return true;
+          const run = await openedStores.runs.get(lease.runId);
+          if (run === undefined) return true;
+          if (run.projectId === projectId) return true;
+        }
+        const recoveryRecords = (await openedStores.recovery.list()).filter(
+          (record) => record.phase !== 'resolved' && record.environmentInstanceId === environmentInstanceId,
+        );
+        for (const record of recoveryRecords) {
+          if (record.taskId !== undefined) {
+            const task = await openedStores.tasks.get(record.taskId);
+            if (task === undefined) return true;
+            if (task.projectId === projectId) return true;
+            continue;
+          }
+          if (record.runId === undefined) return true;
+          const run = await openedStores.runs.get(record.runId);
+          if (run === undefined) return true;
+          if (run.projectId === projectId) return true;
+        }
+        return false;
+      },
+    };
+    // Access names only a Human-approved Environment enrollment (#87): a bare
+    // instance id is never a granted authority, exactly like membership never
+    // names an invented Agent (F5, #92).
+    const projectEnvironmentAuthority: ProjectEnvironmentAuthorityPort = {
+      environmentIsAccessible: async (environmentInstanceId) => {
+        const enrollments = await openedStores.enrollments.list();
+        return enrollments.some(
+          (enrollment) =>
+            enrollment.environmentInstanceId === environmentInstanceId &&
+            enrollment.status === 'approved',
+        );
+      },
+    };
+    const projectAccessService = new ProjectAccessService({
+      store: stores.projectAccess,
+      projects: projectService,
+      worker: {
+        validate: (input) =>
+          environment.validateWorkspace !== undefined
+            ? environment.validateWorkspace(input.environmentInstanceId, {
+                projectId: input.projectId,
+                environmentInstanceId: input.environmentInstanceId,
+                kind: input.selection.kind,
+                ...(input.selection.path !== undefined ? { path: input.selection.path } : {}),
+              })
+            : Promise.reject(
+                new Error('this environment port cannot validate Project workspaces'),
+              ),
+      },
+      environments: projectEnvironmentAuthority,
+      workSafety: projectAccessSafety,
+      bridge: projects,
+    });
     const pool = new EnvironmentPool({
       definitions: [definition],
       instances: [instance],
@@ -539,6 +665,34 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           readiness: engine.readiness,
           models: engine.models,
         }));
+      },
+      // The durable access record a run is admitted under (#93): the binding
+      // facts are captured once, persisted with the run, and used for the
+      // Worker start, so a workspace change or restart afterwards cannot
+      // rewrite what historical work used or where it executed.
+      workspaceBinding: async (projectId, instanceId) => {
+        const access = await openedStores.projectAccess.get(projectId, instanceId);
+        const binding = access?.current;
+        if (access?.status !== 'active' || binding === undefined) return undefined;
+        // Durable access documents may predate the workspace-path invariant.
+        // Refuse an unsafe binding before it can become run history or cross the
+        // Project/Worker boundary; never copy its raw location into either.
+        if (binding.kind === 'relative') {
+          const path = sanitizeWorkspacePath(binding.path);
+          if (path === undefined) return undefined;
+          return {
+            ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+            workspaceId: binding.workspaceId,
+            kind: 'relative',
+            path,
+          };
+        }
+        if (binding.kind !== 'default' || binding.path !== undefined) return undefined;
+        return {
+          ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+          workspaceId: binding.workspaceId,
+          kind: 'default',
+        };
       },
       projects,
       pool,
@@ -677,7 +831,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // composed through the same #85 additive seam. Only the authenticated
         // Human reaches these routes, so create/edit/membership/archive are
         // Human authority by construction (ADR-0008).
-        createProjectRouter({ projects: projectService, legacyProjects: projects }),
+        createProjectRouter({
+          projects: projectService,
+          legacyProjects: projects,
+          access: projectAccessService,
+        }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -733,6 +891,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       recovery,
       agentService,
       projectService,
+      projectAccess: projectAccessService,
       engines,
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then

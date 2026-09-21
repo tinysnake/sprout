@@ -28,7 +28,14 @@ export interface ProjectMembership {
  */
 export interface ProjectWorkspace {
   readonly environmentInstanceId: string;
-  readonly path: string;
+  /**
+   * Worker-root-relative location, when the Human named one.
+   *
+   * An absent location means the Worker-managed default Project workspace: the
+   * Worker creates and resolves its own directory for this Project, so no host
+   * path ever enters the Project's portable state.
+   */
+  readonly path?: string;
 }
 
 /** A collaboration space in which members pursue a goal under shared rules. */
@@ -49,8 +56,9 @@ export interface Project {
    * Optional registered workspace locations, one per Environment instance.
    *
    * An absent entry retains the Worker-managed default workspace for this
-   * Project.  A present entry points at an existing repository below that
-   * Worker's root.
+   * Project. A present entry with a `path` points at an existing repository
+   * below that Worker's root; a present entry without one keeps the Worker
+   * default while still marking the instance as granted.
    */
   readonly workspaces?: readonly ProjectWorkspace[];
   readonly memberships: readonly ProjectMembership[];

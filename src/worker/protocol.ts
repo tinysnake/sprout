@@ -29,6 +29,8 @@ export const WORKER_METHODS = {
   prepareTaskContext: 'context/prepare',
   /** Verify and recycle one owned Task context. */
   recycleTaskContext: 'context/recycle',
+  /** Validate or prepare one Project workspace selection (#93). */
+  validateWorkspace: 'workspace/validate',
 } as const;
 
 export const WORKER_NOTIFICATIONS = {
@@ -121,7 +123,13 @@ export interface StartSessionParams {
   /** The engine-neutral reasoning effort this session should use, when configured. */
   readonly effort?: string;
   readonly projectWorkspaceId?: string;
-  /** Worker-root-relative registered repository location, when the Project has one. */
+  /** How the Worker must interpret the portable workspace identity. */
+  readonly projectWorkspaceKind?: 'default' | 'relative';
+  /**
+   * Worker-root-relative registered repository location, when the Project has
+   * one. Must be relative: an absolute location is refused at this boundary,
+   * never resolved (#93, ADR-0009).
+   */
   readonly projectWorkspacePath?: string;
   readonly instructions?: string;
   /**
@@ -166,6 +174,32 @@ export interface RecycleTaskContextParams {
   readonly taskId: string;
   readonly environmentInstanceId: string;
   readonly environmentLeaseId: string;
+}
+
+/**
+ * One Project workspace selection the core asks the Worker to validate.
+ *
+ * The selection is portable: the Worker-managed default, or a relative location
+ * beneath the Worker's configured workspace root. The absolute location never
+ * crosses this boundary in either direction.
+ */
+export interface ValidateWorkspaceParams {
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly kind: 'default' | 'relative';
+  /** Worker-root-relative location; present only for a `relative` selection. */
+  readonly path?: string;
+}
+
+/**
+ * The portable workspace facts the Worker returns after validating or preparing
+ * a selection. `workspaceId` is an opaque, host-derived identity, never a path.
+ */
+export interface ValidateWorkspaceResult {
+  readonly workspaceId: string;
+  readonly kind: 'default' | 'relative';
+  /** Worker-root-relative location, when the selection named one. */
+  readonly path?: string;
 }
 
 export interface StartSessionResult {
