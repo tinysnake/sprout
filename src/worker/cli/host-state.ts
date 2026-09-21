@@ -19,6 +19,7 @@
  * restrictive storage" means.
  */
 
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -166,17 +167,15 @@ export function workerServiceLabel(environmentInstanceId: string): string {
 /**
  * A filesystem-safe, collision-resistant slug.
  *
- * It is a one-way digest so a label never contains a host-identifying instance
- * name verbatim, and it is stable so install/uninstall/inspect agree.
+ * It is a one-way SHA-256 digest of the value, hex-encoded: a label or plist
+ * path never contains any fragment of the caller-chosen instance name, so no
+ * host-chosen text can leak into host-local service metadata. It is stable so
+ * install/uninstall/inspect agree, and 16 hex characters (64 bits) make a
+ * cross-environment collision negligible for the small number of enrolled
+ * instances one host manages.
  */
 export function stableSlug(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  const base = value.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 24);
-  return `${base === '' ? 'env' : base}.${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16);
 }
 
 /** Ensure the owner-only state directory exists. */
@@ -201,6 +200,20 @@ export function removeFileIfPresent(filePath: string): void {
     unlinkSync(filePath);
   } catch {
     // A missing file is the desired end state.
+  }
+}
+
+/**
+ * Remove a file, tolerating only its absence.
+ *
+ * `reset` must fail closed: a removal error that is silently swallowed could
+ * leave the old identity key behind while the command reports success.
+ */
+function removeFileRequired(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 
@@ -298,16 +311,45 @@ export function writeRuntimeState(paths: WorkerHostPaths, state: WorkerRuntimeSt
   writePrivateFile(paths.runtimePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
-/** Read the live daemon's state record, returning `undefined` when absent. */
+/**
+ * Read the live daemon's state record, returning `undefined` when absent.
+ *
+ * A record that is present but does not match the schema (an unknown state
+ * string, a non-numeric pid or instant) is a *local configuration failure*,
+ * not a silent absence: `status` must never project a corrupt runtime record
+ * into a healthy-looking stopped state, so this throws `invalid`.
+ */
 export function readRuntimeState(paths: WorkerHostPaths): WorkerRuntimeState | undefined {
   if (!existsSync(paths.runtimePath)) return undefined;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(paths.runtimePath, 'utf8')) as WorkerRuntimeState;
-    if (typeof parsed?.pid !== 'number' || typeof parsed?.state !== 'string') return undefined;
-    return parsed;
+    parsed = JSON.parse(readFileSync(paths.runtimePath, 'utf8')) as unknown;
   } catch {
-    return undefined;
+    throw new WorkerHostStateError('invalid', 'the host-local runtime state record is not valid JSON');
   }
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new WorkerHostStateError('invalid', 'the host-local runtime state record is malformed');
+  }
+  const record = parsed as Record<string, unknown>;
+  const state = record['state'];
+  if (
+    typeof record['pid'] !== 'number' ||
+    !Number.isInteger(record['pid']) ||
+    (record['pid'] as number) <= 0 ||
+    typeof state !== 'string' ||
+    !isConnectionState(state) ||
+    typeof record['at'] !== 'number' ||
+    !Number.isFinite(record['at']) ||
+    (record['epoch'] !== undefined && typeof record['epoch'] !== 'number') ||
+    (record['detail'] !== undefined && typeof record['detail'] !== 'string')
+  ) {
+    throw new WorkerHostStateError('invalid', 'the host-local runtime state record is malformed');
+  }
+  return parsed as WorkerRuntimeState;
+}
+
+function isConnectionState(value: string): value is WorkerConnectionState {
+  return ['stopped', 'connecting', 'connected', 'pending-approval', 'incompatible', 'revoked'].includes(value);
 }
 
 /** Remove the runtime state record. */
@@ -463,10 +505,15 @@ function readSecretLine(input: NodeJS.ReadableStream): Promise<string> {
  */
 export class DuplicateWorkerProcessError extends Error {
   override readonly name = 'DuplicateWorkerProcessError';
-  readonly pid: number;
+  /** The pid of the live holder, when the lock file named one legibly. */
+  readonly pid: number | undefined;
 
-  constructor(pid: number) {
-    super(`another Sprout Worker for this environment is already running (pid ${pid})`);
+  constructor(pid?: number) {
+    super(
+      pid === undefined
+        ? 'another Sprout Worker for this environment is already running'
+        : `another Sprout Worker for this environment is already running (pid ${pid})`,
+    );
     this.pid = pid;
   }
 }
@@ -476,13 +523,47 @@ export function workerLockPath(paths: WorkerHostPaths): string {
   return join(paths.stateDirectory, 'worker.lock');
 }
 
+/** How old an unparseable lock file must be before it is safe to reclaim. */
+const LOCK_RECLAIM_GRACE_MS = 1_000;
+
+/**
+ * Classify the current lock file from the caller's point of view.
+ *
+ * - `duplicate`: a live Worker daemon holds it; refuse.
+ * - `stale`: it names a dead or non-Worker pid, or it is unparseable and old
+ *   enough that no concurrent starter can still be writing it; reclaim.
+ * - `contended`: it is unparseable and freshly created, so a concurrent
+ *   starter may be mid-write; refuse rather than steal the lock.
+ */
+function classifyLock(
+  lockPath: string,
+  pid: number,
+  run: CommandRunner,
+): 'duplicate' | 'stale' | 'contended' {
+  const holder = readLockPid(lockPath);
+  if (holder === undefined) {
+    let ageMs = Infinity;
+    try {
+      ageMs = Date.now() - statSync(lockPath).mtimeMs;
+    } catch {
+      return 'stale';
+    }
+    return ageMs > LOCK_RECLAIM_GRACE_MS ? 'stale' : 'contended';
+  }
+  if (holder === pid) return 'stale';
+  if (isProcessAlive(holder) && isWorkerDaemonProcess(holder, run)) return 'duplicate';
+  return 'stale';
+}
+
 /**
  * Acquire the single-instance lock, or throw when a live Worker holds it.
  *
- * The check-then-write is guarded by opening the file exclusively (`wx`), so two
- * concurrent `start` processes cannot both acquire it even when they race. A
- * file that exists but whose recorded pid is dead (or is not this host's Worker)
- * is reclaimed.
+ * The check-then-write race is closed by creating the file exclusively (`wx`):
+ * two concurrent `start` processes can never both acquire it, and the loser of
+ * an `EEXIST` re-reads the winner's pid and fails with the documented
+ * duplicate-process error rather than a generic filesystem failure. A lock that
+ * provably names a dead or non-Worker pid — or stale unparseable content — is
+ * reclaimed by one bounded retry of the exclusive create.
  */
 export function acquireWorkerLock(
   paths: WorkerHostPaths,
@@ -491,22 +572,35 @@ export function acquireWorkerLock(
 ): { readonly release: () => void; readonly path: string } {
   ensureStateDirectory(paths);
   const lockPath = workerLockPath(paths);
-  const existing = readLockPid(lockPath);
-  if (existing !== undefined && existing !== pid && isProcessAlive(existing) && isWorkerDaemonProcess(existing, run)) {
-    throw new DuplicateWorkerProcessError(existing);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let descriptor: number;
+    try {
+      descriptor = openSync(lockPath, 'wx', PRIVATE_FILE_MODE);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const classification = classifyLock(lockPath, pid, run);
+      if (classification === 'duplicate' || classification === 'contended') {
+        throw new DuplicateWorkerProcessError(readLockPid(lockPath));
+      }
+      removeFileIfPresent(lockPath);
+      continue;
+    }
+    try {
+      writeFileSync(descriptor, `${pid}\n`, 'utf8');
+    } finally {
+      closeSync(descriptor);
+    }
+    return {
+      path: lockPath,
+      // Ownership-checked release: a release never removes a lock another
+      // process has since re-created.
+      release: () => {
+        if (readLockPid(lockPath) === pid) removeFileIfPresent(lockPath);
+      },
+    };
   }
-  // Replace any stale or absent lock with ours.
-  removeFileIfPresent(lockPath);
-  const descriptor = openSync(lockPath, 'wx', PRIVATE_FILE_MODE);
-  try {
-    writeFileSync(descriptor, `${pid}\n`, 'utf8');
-  } finally {
-    closeSync(descriptor);
-  }
-  return {
-    path: lockPath,
-    release: () => removeFileIfPresent(lockPath),
-  };
+  // The second exclusive create also lost: a concurrent starter won it.
+  throw new DuplicateWorkerProcessError(readLockPid(lockPath));
 }
 
 function readLockPid(lockPath: string): number | undefined {
@@ -519,17 +613,41 @@ function readLockPid(lockPath: string): number | undefined {
   }
 }
 
-/** Remove every host-local Worker file, used by `reset`. */
+/**
+ * The pid of the live Worker daemon that currently holds the lock, if any.
+ *
+ * `reset` refuses while this returns a pid: removing the identity under a
+ * running foreground Worker would leave a process holding a key the operator
+ * believes is gone.
+ */
+export function activeWorkerLockHolder(
+  paths: WorkerHostPaths,
+  run: CommandRunner = defaultCommandRunner,
+): number | undefined {
+  const pid = readLockPid(workerLockPath(paths));
+  if (pid !== undefined && isProcessAlive(pid) && isWorkerDaemonProcess(pid, run)) return pid;
+  return undefined;
+}
+
+/**
+ * Remove every host-local Worker file, used by `reset`.
+ *
+ * Removal is fail-closed: an unlink error other than an already-absent file
+ * propagates, so `reset` can never report success while the old identity key
+ * or configuration is still on disk.
+ */
 export function removeHostState(paths: WorkerHostPaths): void {
-  removeFileIfPresent(paths.identityPath);
-  removeFileIfPresent(paths.configPath);
-  removeFileIfPresent(paths.runtimePath);
-  removeFileIfPresent(workerLockPath(paths));
+  removeFileRequired(paths.identityPath);
+  removeFileRequired(paths.configPath);
+  removeFileRequired(paths.runtimePath);
+  removeFileRequired(workerLockPath(paths));
   // The directory is removed only when it is empty, so an operator's unrelated
   // files under an overridden state root are never deleted by `reset`.
   try {
     rmdirSync(paths.stateDirectory);
-  } catch {
-    // Missing or non-empty is acceptable.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
+      throw error;
+    }
   }
 }

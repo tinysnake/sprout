@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -213,8 +214,14 @@ test('service labels and slugs are stable and never name a host verbatim', () =>
   const label = workerServiceLabel('Mac Mini of <operator>');
   assert.match(label, /^dev\.sprout\.worker\./);
   assert.ok(!label.includes('<'), 'a label must not contain raw host text');
+  // No fragment of the caller-chosen instance name may survive into the label:
+  // the slug is a pure one-way digest, not a sanitized prefix.
+  assert.ok(!label.includes('Mac'), 'no instance-name fragment survives into the label');
+  assert.ok(!label.includes('operator'), 'no instance-name fragment survives into the label');
   assert.equal(stableSlug('instance-a'), stableSlug('instance-a'));
   assert.notEqual(stableSlug('instance-a'), stableSlug('instance-b'));
+  // The slug is pure hex: it is safe in a label, a file name, and a plist.
+  assert.match(stableSlug('any instance name / with punctuation!'), /^[0-9a-f]+$/);
 });
 
 test('the LaunchAgent restarts on unexpected exit but not on a clean stop', () => {
@@ -313,3 +320,175 @@ test('reinstalling boots the previous job out before bootstrapping the new plist
     cleanup();
   }
 });
+
+test('a malformed runtime state record is refused rather than read as healthy', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 1, state: 'possessed', at: 0 }));
+    assert.throws(
+      () => readRuntimeState(paths),
+      (error: unknown) => error instanceof WorkerHostStateError && error.reason === 'invalid',
+    );
+    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 'many', state: 'connected', at: 0 }));
+    assert.throws(() => readRuntimeState(paths), WorkerHostStateError);
+    writePrivateFile(paths.runtimePath, 'not json at all');
+    assert.throws(() => readRuntimeState(paths), WorkerHostStateError);
+    // A valid record still round-trips.
+    writeRuntimeState(paths, { pid: 42, state: 'connected', at: 1, epoch: 2 });
+    assert.equal(readRuntimeState(paths)?.pid, 42);
+  } finally {
+    cleanup();
+  }
+});
+
+test('concurrent lock acquisition lets exactly one starter win and maps the loser to the duplicate error', { skip: process.platform === 'win32' }, async () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    // A real cross-process race: holder and contender are separate node
+    // processes. The contender is spawned only after the holder has verifiably
+    // acquired the lock, so their attempts are guaranteed to overlap and the
+    // exclusive create must decide a single winner.
+    const holder = spawnChildLockRunner(paths, ['hold']);
+    try {
+      await waitForLine(holder, 'acquired');
+      const contender = spawnChildLockRunner(paths, []);
+      try {
+        const [holderCode, contenderReport] = await Promise.all([
+          onceExit(holder),
+          waitForReport(contender),
+        ]);
+        assert.equal(holderCode, 0, 'the first starter must acquire and release cleanly');
+        assert.equal(contenderReport.outcome, 'DuplicateWorkerProcessError');
+        assert.match(contenderReport.message, /already running/);
+      } finally {
+        contender.kill();
+      }
+    } finally {
+      holder.kill();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('a lock released by one pid never removes a lock another pid re-created', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const first = acquireWorkerLock(paths, 50_001, () => 'sprout worker start');
+    first.release();
+    const second = acquireWorkerLock(paths, 50_002, () => 'sprout worker start');
+    // The first holder's stale release must not destroy the second's lock.
+    first.release();
+    assert.ok(existsSync(second.path), 'an ownership-checked release preserves the newer lock');
+    second.release();
+    assert.equal(existsSync(second.path), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('removeHostState fails closed when a file cannot be removed', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writeConfig(paths, config());
+    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
+    // Make the identity directory immutable-by-simulation: replace the file with
+    // a directory so unlink fails with EISDIR/EPERM rather than ENOENT.
+    rmSync(paths.identityPath, { force: true });
+    mkdirSync(paths.identityPath);
+    assert.throws(() => removeHostState(paths));
+    // The config must survive the failed reset: fail closed means nothing is
+    // silently half-removed and reported as success.
+    assert.ok(existsSync(paths.configPath));
+  } finally {
+    cleanup();
+  }
+});
+
+/** A tiny helper module inlined: spawn a child process that races the lock. */
+function spawnChildLockRunner(
+  paths: ReturnType<typeof workerHostPaths>,
+  args: readonly string[],
+): ChildProcess {
+  const child = spawn(
+    process.execPath,
+    ['--input-type=module', '-e', childLockRunnerScript()],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        SPROUT_WORKER_HOME: paths.stateDirectory,
+        SPROUT_LAUNCH_AGENTS_DIR: paths.launchAgentsDirectory,
+        SPROUT_CLI_PATH: paths.executablePath,
+        SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
+      },
+    },
+  );
+  void args;
+  return child;
+}
+
+function childLockRunnerScript(): string {
+  return [
+    "const { acquireWorkerLock, workerHostPaths, ensureStateDirectory } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
+    'const paths = workerHostPaths();',
+    'ensureStateDirectory(paths);',
+    'try {',
+    "  const lock = acquireWorkerLock(paths, process.pid, () => 'sprout worker start');",
+    "  process.stdout.write('acquired\\n');",
+    '  setTimeout(() => {',
+    '    lock.release();',
+    '    process.exit(0);',
+    '  }, 300);',
+    '} catch (error) {',
+    "  process.stdout.write(JSON.stringify({ outcome: error.name, message: error.message }) + '\\n');",
+    '  process.exit(0);',
+    '}',
+  ].join('\n');
+}
+
+function waitForLine(child: ChildProcess, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`child never printed ${text}`)), 10_000);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.toString('utf8').includes(text)) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function waitForReport(child: ChildProcess): Promise<{ outcome: string; message: string }> {
+  return new Promise((resolve, reject) => {
+    let buffered = '';
+    const timer = setTimeout(() => reject(new Error('child never reported an outcome')), 10_000);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      buffered += chunk.toString('utf8');
+      const line = buffered.split('\n').find((candidate) => candidate.startsWith('{'));
+      if (line !== undefined) {
+        clearTimeout(timer);
+        resolve(JSON.parse(line));
+      }
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function onceExit(child: ChildProcess): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    child.on('exit', (code) => resolve(code));
+    child.on('error', reject);
+  });
+}

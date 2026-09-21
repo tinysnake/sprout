@@ -71,9 +71,17 @@ sprout worker uninstall-service
 The Worker key pair is generated on the host and its private key is stored
 owner-only under `~/.sprout/worker` (override the root with `SPROUT_WORKER_HOME`);
 it is never sent to Sprout, printed, or written to the log. Engine logins stay
-host-local. Exit statuses are documented in `src/worker/cli/worker-cli.ts`:
-`0` success, `1` local/other failure, `2` usage, `3` not enrolled, `4` refused,
-`5` awaiting Human approval, `6` service failure, `7` already running.
+host-local. The LaunchAgent label is a pure digest of the environment instance
+id (`dev.sprout.worker.<sha256-prefix>`), so no caller-chosen instance text
+appears in service metadata. Exit statuses are documented in
+`src/worker/cli/worker-cli.ts`: `0` success, `1` local/other failure, `2` usage,
+`3` not enrolled, `4` refused, `5` awaiting Human approval, `6` service failure,
+`7` already running. `status` validates the configuration and identity-key
+permissions and preserves a recorded refusal (`revoked`/`incompatible`/
+`pending-approval`) even after the Worker process exits. `reset` and
+`uninstall-service` fail closed: they refuse while a foreground Worker holds the
+lock, and they leave host-local state untouched when the LaunchAgent cannot be
+proven unloaded.
 
 ## O7 game workspace
 

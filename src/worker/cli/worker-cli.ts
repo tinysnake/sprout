@@ -26,6 +26,7 @@
  */
 
 import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
@@ -40,10 +41,12 @@ import {
 } from '../enrollment-connector.ts';
 import {
   acquireWorkerLock,
+  activeWorkerLockHolder,
   DuplicateWorkerProcessError,
   ensureStateDirectory,
   isEnrolled,
   isProcessAlive,
+  isWorkerDaemonProcess,
   readConfig,
   readIdentityKey,
   readRuntimeState,
@@ -184,11 +187,33 @@ export function isLocalConfigurationValid(paths: WorkerHostPaths): boolean {
 }
 
 /**
+ * The terminal refusal states `start` persists when the core refuses or pends
+ * the connection.
+ */
+type TerminalRefusalState = 'pending-approval' | 'incompatible' | 'revoked';
+
+function isTerminalRefusalState(state: WorkerConnectionState): state is TerminalRefusalState {
+  return state === 'pending-approval' || state === 'incompatible' || state === 'revoked';
+}
+
+/**
  * Project the host-local state and the live daemon record into one status.
  *
- * A stale runtime record whose pid is dead, or whose pid now belongs to an
- * unrelated process, is reported as `stopped` rather than trusted: the file is
- * evidence only while the process it names is still this host's Worker.
+ * The projection rules, in order:
+ *
+ * 1. An unenrolled host is `not-enrolled`; an unreadable configuration or an
+ *    invalid identity key is a `local-configuration-failure`.
+ * 2. A runtime record naming a live, verified Worker daemon pid is trusted as
+ *    the live state (`connecting`, `connected`, or a terminal refusal).
+ * 3. A runtime record whose pid is dead — or was reused by a non-Worker
+ *    process — preserves a last recorded terminal refusal fact so a refused
+ *    Worker is never reported as a healthy `stopped`; it clears `connecting`
+ *    and `connected` to `stopped`, because those facts only exist while a
+ *    process is actually serving.
+ * 4. No runtime record at all is `stopped`.
+ *
+ * The daemon-identity check is the same command-line match the lock uses, so a
+ * reused pid can never make a dead or foreign process look connected.
  */
 export function projectStatus(input: {
   readonly paths: WorkerHostPaths;
@@ -197,6 +222,7 @@ export function projectStatus(input: {
   readonly configError: 'not-enrolled' | 'invalid' | undefined;
   readonly runtime: WorkerRuntimeState | undefined;
   readonly processAlive: (pid: number) => boolean;
+  readonly processIsWorkerDaemon?: (pid: number) => boolean;
   readonly serviceInstalled: boolean;
 }): WorkerStatus {
   if (!input.enrolled) {
@@ -214,7 +240,18 @@ export function projectStatus(input: {
     protocolVersion: input.config.protocolVersion,
   };
   const runtime = input.runtime;
-  if (runtime === undefined || !input.processAlive(runtime.pid)) {
+  const identityCheck = input.processIsWorkerDaemon ?? ((_pid: number) => true);
+  const trusted = runtime !== undefined && input.processAlive(runtime.pid) && identityCheck(runtime.pid);
+  if (runtime === undefined || !trusted) {
+    if (runtime !== undefined && isTerminalRefusalState(runtime.state)) {
+      // Preserve the durable refusal/pending fact even after the process
+      // exited: revoked or incompatible must never degrade to a healthy stop.
+      return {
+        state: runtime.state,
+        ...base,
+        ...(runtime.detail !== undefined ? { detail: runtime.detail } : {}),
+      };
+    }
     return { state: 'stopped', ...base };
   }
   switch (runtime.state) {
@@ -650,15 +687,44 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         uid,
         ...(runCommand !== undefined ? { run: runCommand } : {}),
       }) !== undefined;
-    const projected = projectStatus({
-      paths,
-      enrolled,
-      config,
-      configError,
-      runtime: readRuntimeState(paths),
-      processAlive: (pid) => isProcessAlive(pid),
-      serviceInstalled,
-    });
+    // A runtime record that is present but malformed is a local configuration
+    // failure, not a healthy stopped state.
+    let runtime: WorkerRuntimeState | undefined;
+    let runtimeInvalid = false;
+    try {
+      runtime = readRuntimeState(paths);
+    } catch {
+      runtime = undefined;
+      runtimeInvalid = true;
+    }
+    const localConfigurationValid = runtimeInvalid ? false : isLocalConfigurationValid(paths);
+    let projected: WorkerStatus;
+    if (runtimeInvalid) {
+      projected = {
+        state: 'local-configuration-failure',
+        serviceInstalled,
+        ...(config !== undefined ? { protocolVersion: config.protocolVersion } : {}),
+        detail: 'the host-local runtime state record is unreadable or malformed',
+      };
+    } else if (enrolled && config !== undefined && !localConfigurationValid) {
+      projected = {
+        state: 'local-configuration-failure',
+        serviceInstalled,
+        ...(config !== undefined ? { protocolVersion: config.protocolVersion } : {}),
+        detail: 'the host-local Worker identity key is missing or readable by other users',
+      };
+    } else {
+      projected = projectStatus({
+        paths,
+        enrolled,
+        config,
+        configError,
+        runtime,
+        processAlive: (pid) => isProcessAlive(pid),
+        processIsWorkerDaemon: (pid) => isWorkerDaemonProcess(pid, runCommand ?? realCommandRunner()),
+        serviceInstalled,
+      });
+    }
     out(`state: ${projected.state}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
     out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
@@ -684,23 +750,49 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker reset: confirmation was not given; nothing was removed');
       return WORKER_EXIT.usage;
     }
-    // Stop a supervised Worker before the identity disappears, so the running
-    // process cannot keep using a key the operator believes is gone. A
-    // foreground Worker must be stopped by its own operator.
+    // Fail closed: a running foreground Worker (holding the single-instance
+    // lock) must be stopped by its own operator before its identity is removed.
+    const lockHolder = activeWorkerLockHolder(paths, runCommand ?? realCommandRunner());
+    if (lockHolder !== undefined) {
+      err(
+        `sprout worker reset: a Worker for this environment is still running (pid ${lockHolder}); stop it before resetting`,
+      );
+      return WORKER_EXIT.failure;
+    }
+    // Stop the supervised service before the identity disappears, and refuse
+    // the reset when the service cannot be proven unloaded: a loaded
+    // LaunchAgent would restart against a half-removed state.
     if (platform === 'darwin') {
+      let config: WorkerHostConfig | undefined;
       try {
-        const config = readConfig(paths);
-        uninstallLaunchAgent({
-          label: workerServiceLabel(config.environmentInstanceId),
-          plistPath: launchAgentPlistPath(paths, config.environmentInstanceId),
-          uid,
-          ...(runCommand !== undefined ? { run: runCommand } : {}),
-        });
+        config = readConfig(paths);
       } catch {
-        // A missing config or plist simply means there is no service to stop.
+        // A missing or unreadable config simply means there is no known
+        // service label to stop; the removal below still has to succeed.
+        config = undefined;
+      }
+      if (config !== undefined && existsSync(launchAgentPlistPath(paths, config.environmentInstanceId))) {
+        try {
+          uninstallLaunchAgent({
+            label: workerServiceLabel(config.environmentInstanceId),
+            plistPath: launchAgentPlistPath(paths, config.environmentInstanceId),
+            uid,
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          });
+        } catch (error) {
+          err(
+            `sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${messageOf(error)})`,
+          );
+          return WORKER_EXIT.serviceFailure;
+        }
       }
     }
-    removeHostState(paths);
+    try {
+      removeHostState(paths);
+    } catch (error) {
+      err(`sprout worker reset: host-local state could not be fully removed (${messageOf(error)})`);
+      return WORKER_EXIT.failure;
+    }
     out('Host-local Worker identity and configuration removed. The old identity can no longer reconnect.');
     return WORKER_EXIT.ok;
   }
@@ -809,6 +901,12 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   function recordState(paths: WorkerHostPaths, state: WorkerRuntimeState): void {
     ensureStateDirectory(paths);
     writeRuntimeState(paths, state);
+  }
+
+  /** The real host command runner, used only when no test seam was injected. */
+  function realCommandRunner(): (command: string, args: readonly string[]) => string {
+    return (command, args) =>
+      execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   }
 
   return { run };

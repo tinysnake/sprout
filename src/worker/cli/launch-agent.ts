@@ -24,7 +24,7 @@
  * embedded, because Sprout has no package-update contract here.
  */
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { execFileSync } from 'node:child_process';
@@ -177,7 +177,32 @@ export function installLaunchAgent(
   return { label: options.label, plistPath: options.plistPath, installed: true };
 }
 
-/** Remove the LaunchAgent from the signed-in user's domain and disk. */
+/**
+ * Why an uninstall stopped before the plist was safe to remove.
+ */
+export type LaunchAgentUninstallFailureReason = 'bootout-failed' | 'delete-failed';
+
+/** Thrown by `uninstallLaunchAgent` when the job could not be cleanly unloaded or removed. */
+export class LaunchAgentUninstallError extends Error {
+  override readonly name = 'LaunchAgentUninstallError';
+  readonly reason: LaunchAgentUninstallFailureReason;
+
+  constructor(reason: LaunchAgentUninstallFailureReason, message: string) {
+    super(message);
+    this.reason = reason;
+  }
+}
+
+/**
+ * Remove the LaunchAgent from the signed-in user's domain and disk.
+ *
+ * This is deliberately fail-closed: a `bootout` error other than "the job is
+ * not loaded" leaves the loaded job in place and is reported, and the plist is
+ * only removed after the job is confirmed gone (or was never loaded). A loaded
+ * service that keeps restarting must never be left behind while the caller
+ * reports success — `reset` in particular refuses to destroy the identity a
+ * loaded service would still use.
+ */
 export function uninstallLaunchAgent(options: {
   readonly label: string;
   readonly plistPath: string;
@@ -188,12 +213,38 @@ export function uninstallLaunchAgent(options: {
   const service = `${launchAgentDomain(options.uid)}/${options.label}`;
   try {
     run('launchctl', ['bootout', service]);
-  } catch {
-    // An already-unloaded job still needs its plist removed.
+  } catch (error) {
+    if (isNotLoaded(error)) {
+      // An already-unloaded job still needs its plist removed below.
+    } else {
+      throw new LaunchAgentUninstallError(
+        'bootout-failed',
+        `launchctl bootout for ${service} failed; the service is left in place (${messageOf(error)})`,
+      );
+    }
   }
   const existed = existsSync(options.plistPath);
-  rmSync(options.plistPath, { force: true });
+  if (existed) {
+    try {
+      unlinkSync(options.plistPath);
+    } catch (error) {
+      throw new LaunchAgentUninstallError(
+        'delete-failed',
+        `the LaunchAgent property list could not be removed (${messageOf(error)})`,
+      );
+    }
+  }
   return { removed: existed };
+}
+
+function isNotLoaded(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not (loaded|bootstrapped)|could not find|no such process|bootstrap failed/i.test(message)
+    || /3: |5: /.test(message);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

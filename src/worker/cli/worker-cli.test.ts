@@ -17,6 +17,7 @@ import {
   ensureStateDirectory,
   readConfig,
   readRuntimeState,
+  writeRuntimeState,
   workerHostPaths,
   workerServiceLabel,
   writePrivateFile,
@@ -489,3 +490,329 @@ test('an unknown subcommand is a usage error', async () => {
     h.cleanup();
   }
 });
+
+test('the default stdin reader claims the secret from a real pipe without echoing it', async () => {
+  const { readSecretFromStdin } = await import('./host-state.ts');
+  const input = new PassThrough();
+  const outputChunks: string[] = [];
+  const output = new PassThrough();
+  output.on('data', (chunk: Buffer) => outputChunks.push(chunk.toString('utf8')));
+  const pending = readSecretFromStdin(input, output, 'prompt: ');
+  input.end('one-use-claim-secret-sentinel\n');
+  const secret = await pending;
+  assert.equal(secret, 'one-use-claim-secret-sentinel');
+  // Only the prompt (and the TTY newline) is written; the secret is never echoed.
+  assert.ok(!outputChunks.join('').includes('one-use-claim-secret-sentinel'));
+  // The real CLI path uses this reader by default: no injected reader needed.
+  const h = harness();
+  try {
+    const { connector } = acceptedConnector();
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      connect: connector,
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+    });
+    // Feed the claim secret through the process-level default reader seam by
+    // replacing readClaimSecret with the real pipe path.
+    const stdin = new PassThrough();
+    const original = process.stdin;
+    Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
+    try {
+      stdin.end('piped-claim-secret\n');
+      // The default reader reads from process.stdin.
+      const status = await cli.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']);
+      // The injected connector accepts; the piped secret must have been read.
+      assert.equal(status, WORKER_EXIT.ok);
+    } finally {
+      Object.defineProperty(process, 'stdin', { value: original, configurable: true });
+    }
+    assert.equal(readConfig(h.paths).enrollmentId, 'enroll-synthetic');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('the default stdin reader reads a real TTY-style raw stream without echo and without storing the claim', async () => {
+  const { readSecretFromStdin } = await import('./host-state.ts');
+  const input = new PassThrough();
+  (input as PassThrough & { isTTY?: boolean }).isTTY = true;
+  let rawMode: boolean | undefined;
+  (input as PassThrough & { setRawMode?: (mode: boolean) => void }).setRawMode = (mode) => {
+    rawMode = mode;
+  };
+  const outputChunks: string[] = [];
+  const output = new PassThrough();
+  output.on('data', (chunk: Buffer) => outputChunks.push(chunk.toString('utf8')));
+  const pending = readSecretFromStdin(input, output, 'hidden: ');
+  // Feed characters one at a time, including a backspace correction.
+  input.write('abc');
+  input.write('\u007f');
+  input.write('d');
+  input.write('\r');
+  const secret = await pending;
+  assert.equal(secret, 'abd', 'raw mode accumulates characters and applies backspace');
+  assert.equal(rawMode, false, 'raw mode is restored after the read');
+  assert.ok(!outputChunks.join('').includes('abcd'), 'the typed secret is never echoed');
+  assert.match(outputChunks.join(''), /hidden: /, 'only the prompt is written');
+});
+
+test('status preserves the recorded terminal refusal after the refused process exits', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writeRuntimeState(h.paths, {
+      pid: 424_242,
+      state: 'revoked',
+      at: 1,
+      detail: 'the Sprout instance refused the connection',
+    });
+    // The recorded pid is dead (nobody alive there), but the refusal fact is
+    // durable: status must report revoked, not a healthy stopped.
+    assert.equal(await h.run(['status']), WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: revoked/);
+    assert.doesNotMatch(h.out.join('\n'), /state: stopped/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status preserves pending-approval and incompatible refusals after exit', async () => {
+  for (const terminal of ['pending-approval', 'incompatible'] as const) {
+    const h = harness();
+    try {
+      seedEnrolledHost(h.paths);
+      writeRuntimeState(h.paths, { pid: 424_242, state: terminal, at: 1 });
+      assert.equal(await h.run(['status']), WORKER_EXIT.ok);
+      assert.match(h.out.join('\n'), new RegExp(`state: ${terminal}`));
+    } finally {
+      h.cleanup();
+    }
+  }
+});
+
+test('status reports a live connected Worker only when the pid is a verified Worker daemon', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    // Use this test's own real pid: liveness is checked against the real OS,
+    // and the seam runner answers the command-line probe as a Worker daemon.
+    writeRuntimeState(h.paths, { pid: process.pid, state: 'connected', at: 1, epoch: 2 });
+    const liveCli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: () => 'sprout worker start',
+    });
+    assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: connected/);
+
+    // A reused pid whose command line is not this host's Worker is not trusted.
+    const h2 = harness();
+    try {
+      seedEnrolledHost(h2.paths);
+      // A live pid (this test) whose command line probe reports a non-Worker:
+      // a reused pid must never be reported as a connected Worker.
+      writeRuntimeState(h2.paths, { pid: process.pid, state: 'connected', at: 1, epoch: 2 });
+      const cli = createWorkerCli({
+        paths: () => h2.paths,
+        stdout: (line) => h2.out.push(line),
+        stderr: (line) => h2.err.push(line),
+        platform: 'darwin',
+        uid: 501,
+        run: (command, args) => {
+          // Only the daemon-identity probe hits the runner; launchctl print for
+          // the not-installed service must still answer as "not loaded".
+          void command;
+          void args;
+          return 'launchd: Could not find service';
+        },
+      });
+      assert.equal(await cli.run(['status']), WORKER_EXIT.ok);
+      assert.match(h2.out.join('\n'), /state: stopped/, 'a non-Worker command line is never reported connected');
+    } finally {
+      h2.cleanup();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status reports a local configuration failure when the identity key is missing', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths, { identity: false });
+    // Config present, identity key absent.
+    assert.equal(existsSync(h.paths.identityPath), false);
+    const status = await h.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status reports a local configuration failure when the identity key is over-permissive', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const { chmodSync } = await import('node:fs');
+    chmodSync(h.paths.identityPath, 0o644);
+    const status = await h.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status reports a malformed runtime record as a local configuration failure', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writePrivateFile(h.paths.runtimePath, JSON.stringify({ pid: 1, state: 'possessed', at: 0 }));
+    const status = await h.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('reset refuses while a live foreground Worker holds the lock', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const holder = acquireWorkerLock(h.paths, process.ppid, () => 'sprout worker start');
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      confirm: async () => true,
+      platform: 'darwin',
+      uid: 501,
+      run: () => 'sprout worker start',
+    });
+    const status = await cli.run(['reset', '--yes']);
+    holder.release();
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.err.join('\n'), /still running/);
+    assert.ok(existsSync(h.paths.identityPath), 'the identity survives a refused reset');
+    assert.ok(existsSync(h.paths.configPath), 'the configuration survives a refused reset');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('reset fails closed when the LaunchAgent cannot be booted out', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const plistPath = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('env-synthetic')}.plist`);
+    writePrivateFile(plistPath, '<plist/>');
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      confirm: async () => true,
+      platform: 'darwin',
+      uid: 501,
+      run: (command, args) => {
+        if (command === 'launchctl' && args[0] === 'bootout') {
+          throw new Error('launchctl: bootout failed: 36: Operation not permitted');
+        }
+        return '';
+      },
+    });
+    const status = await cli.run(['reset', '--yes']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.err.join('\n') + h.out.join('\n'), /could not be removed/);
+    // Fail closed: nothing was destroyed while the service is still loaded.
+    assert.ok(existsSync(h.paths.identityPath));
+    assert.ok(existsSync(h.paths.configPath));
+    assert.ok(existsSync(plistPath), 'the plist of the loaded service is left in place');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('reset succeeds when the service is not loaded and the plist is present', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const plistPath = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('env-synthetic')}.plist`);
+    writePrivateFile(plistPath, '<plist/>');
+    const status = await h.run(['reset', '--yes']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.equal(existsSync(plistPath), false, 'a proven-unloaded service plist is removed');
+    assert.equal(existsSync(h.paths.identityPath), false);
+    assert.equal(existsSync(h.paths.configPath), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('uninstall-service fails closed when bootout fails and keeps the plist', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const plistPath = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('env-synthetic')}.plist`);
+    writePrivateFile(plistPath, '<plist/>');
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: (command, args) => {
+        if (command === 'launchctl' && args[0] === 'bootout') {
+          throw new Error('launchctl: bootout failed: 36: Operation not permitted');
+        }
+        return '';
+      },
+    });
+    const status = await cli.run(['uninstall-service']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.ok(existsSync(plistPath), 'a loaded service plist is never silently deleted');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('uninstall-service treats a not-loaded bootout as removable and succeeds', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const plistPath = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('env-synthetic')}.plist`);
+    writePrivateFile(plistPath, '<plist/>');
+    const status = await h.run(['uninstall-service']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.equal(existsSync(plistPath), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+/** Seed an enrolled host: restrictive config plus (by default) identity key. */
+function seedEnrolledHost(
+  paths: ReturnType<typeof workerHostPaths>,
+  options: { readonly identity?: boolean } = {},
+): void {
+  ensureStateDirectory(paths);
+  writePrivateFile(paths.configPath, JSON.stringify({
+    version: 1,
+    enrollmentId: 'enroll-synthetic',
+    environmentInstanceId: 'env-synthetic',
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    endpoint: { host: '127.0.0.1', port: 5174 },
+    identityFileName: 'identity.pem',
+  }));
+  if (options.identity !== false) {
+    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
+  }
+}

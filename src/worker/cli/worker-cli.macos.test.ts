@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { renderLaunchAgent } from './launch-agent.ts';
+import { existsSync } from 'node:fs';
+
+import { launchAgentPlistPath, renderLaunchAgent } from './launch-agent.ts';
 import { workerServiceLabel } from './host-state.ts';
 
 /**
@@ -99,4 +101,90 @@ test('the rendered LaunchAgent is a valid property list according to plutil', { 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('sprout worker enroll reads a real piped claim secret over the default stdin reader', { skip: !onMac }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-exec-pipe-'));
+  const { EnvironmentEnrollmentService } = await import('../../environment/enrollment-service.ts');
+  const { InMemoryEnrollmentStore } = await import('../../environment/enrollment-store.ts');
+  const { InMemoryEnvironmentReadinessStore } = await import('../../environment/readiness-store.ts');
+  const { WorkerGateway } = await import('../gateway.ts');
+  const { createRunApi } = await import('../../web/api.ts');
+  const enrollments = new EnvironmentEnrollmentService({
+    enrollments: new InMemoryEnrollmentStore(),
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    idFactory: () => 'enroll-e3-pipe',
+  });
+  const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });
+  const api = createRunApi({
+    orchestrator: { subscribe: () => () => undefined, load: async () => undefined } as never,
+    agents: { list: () => [], get: () => undefined } as never,
+    workerGateway: gateway,
+  });
+  const { port } = await api.listen(0, '127.0.0.1');
+  const requested = await enrollments.requestEnrollment({
+    environmentInstanceId: 'mac-mini-e3-pipe',
+    displayName: 'Local Mac',
+    platform: 'macos',
+    capabilityRequests: ['agent-run'],
+    engineFacts: [],
+  });
+  const secret = requested.claim?.secret ?? '';
+  assert.notEqual(secret, '');
+  // The gateway lives in this process, so the child must be spawned
+  // asynchronously: a synchronous spawn would block this event loop and
+  // deadlock the very server the child dials.
+  const child = spawn(
+    sproutExecutable,
+    ['worker', 'enroll', `127.0.0.1:${port}`, 'enroll-e3-pipe'],
+    {
+      env: {
+        ...process.env,
+        HOME: root,
+        SPROUT_WORKER_HOME: join(root, 'state'),
+        SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+  const collected: { out: string; err: string; code: number | null } = { out: '', err: '', code: null };
+  const exited = new Promise<void>((resolve) => {
+    child.stdout.on('data', (chunk: Buffer) => { collected.out += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk: Buffer) => { collected.err += chunk.toString('utf8'); });
+    child.on('exit', (code) => {
+      collected.code = code;
+      resolve();
+    });
+  });
+  // Pipe the one-use claim secret into the child's real stdin; the default
+  // reader (not a test seam) must claim it non-echoingly.
+  child.stdin.end(`${secret}\n`);
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 30_000);
+  await exited;
+  clearTimeout(timeout);
+  try {
+    // A proven-but-unapproved claim is success-with-a-wait (exit 5): the real
+    // piped secret crossed the real default stdin reader into the real gateway.
+    assert.equal(collected.code, 5, `stderr: ${collected.err}`);
+    assert.match(collected.out, /Waiting for Human approval/);
+    assert.ok(!collected.out.includes(secret) && !collected.err.includes(secret), 'the secret is never echoed');
+    const stateRoot = join(root, 'state');
+    assert.ok(existsSync(join(stateRoot, 'identity.pem')), 'the host key was generated');
+    assert.ok(existsSync(join(stateRoot, 'config.json')), 'the reconnect facts were persisted');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    gateway.close();
+    await api.close();
+  }
+});
+
+test('the service label is a pure digest and never carries an instance-name fragment', { skip: !onMac }, () => {
+  const hostile = 'host-chosen-instance-name-with-host-text';
+  const label = workerServiceLabel(hostile);
+  assert.ok(!label.includes('host-chosen'), 'no instance-name fragment may survive into the label');
+  assert.match(label, /^dev\.sprout\.worker\.[0-9a-f]{16}$/);
+  assert.equal(
+    launchAgentPlistPath({ launchAgentsDirectory: '/synthetic/LaunchAgents' } as never, hostile),
+    `/synthetic/LaunchAgents/${label}.plist`,
+  );
 });
