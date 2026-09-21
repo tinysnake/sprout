@@ -205,6 +205,7 @@ export class EnvironmentWorker {
         : await this.#requireWorkspace().projectWorkingDirectory(
           params.projectWorkspaceId,
           params.projectWorkspacePath,
+          params.projectWorkspaceKind,
         ),
       ...(params.model !== undefined ? { model: params.model } : {}),
       ...(params.effort !== undefined ? { effort: params.effort } : {}),

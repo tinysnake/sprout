@@ -98,7 +98,10 @@ export class SqliteRunStore implements RunStore {
         hand_off TEXT,
         task_id TEXT,
         token_usage TEXT,
-        replay_sequence INTEGER
+        replay_sequence INTEGER,
+        work_option TEXT,
+        configuration_version INTEGER,
+        workspace_binding TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
@@ -113,10 +116,6 @@ export class SqliteRunStore implements RunStore {
     // attribution), which the view layer presents as unspecified.
     this.#addColumnIfMissing('agent_runs', 'work_option', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
-    // Durable workspace binding facts (#93). A database from before this column
-    // still has its runs; they simply carry no recorded binding (pre-#93
-    // attribution), which the view layer presents as unspecified.
-    this.#addColumnIfMissing('agent_runs', 'workspace_binding', 'TEXT');
     this.#backfillReplaySequences();
     this.#db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx

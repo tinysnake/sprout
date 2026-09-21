@@ -374,10 +374,15 @@ export class RunOrchestrator {
     // accepts the work (ADR-0008): after a later workspace change or a restart,
     // the run's history still names the binding it actually used. The binding
     // is a historical fact like the work option and is never re-derived below.
-    const workspaceBinding =
+    const rawWorkspaceBinding =
       resolution.projectId !== undefined && this.#workspaceBinding !== undefined
         ? await this.#workspaceBinding(resolution.projectId, resolution.instanceId)
         : undefined;
+    // A binding port may be reading legacy durable data. Never let an unsafe
+    // location become run history or a Worker request: discard malformed facts
+    // before this run is persisted, then use only the independently validated
+    // legacy projection fallback below.
+    const workspaceBinding = sanitizeRunWorkspaceBinding(rawWorkspaceBinding);
 
     const recorded: AgentRun = {
       ...taskRun,
@@ -426,6 +431,7 @@ export class RunOrchestrator {
       : workspaceFor(resolvedProject, resolution.instanceId);
     const binding = recorded.workspaceBinding;
     const registeredPath = registeredWorkspace?.path;
+    const safeRequestedPath = sanitizeWorkspacePath(request.projectWorkspacePath);
     const safeProjectionPath =
       binding === undefined && registeredPath !== undefined
         ? sanitizeWorkspacePath(registeredPath)
@@ -438,10 +444,13 @@ export class RunOrchestrator {
           : registeredWorkspace !== undefined
             ? { projectWorkspaceId: resolution.projectId }
             : {}),
+      ...(binding?.workspaceId !== undefined
+        ? { projectWorkspaceKind: binding.kind }
+        : {}),
       ...(binding?.path !== undefined
         ? { projectWorkspacePath: binding.path }
-        : binding?.workspaceId === undefined && request.projectWorkspacePath !== undefined
-          ? { projectWorkspacePath: request.projectWorkspacePath }
+        : binding?.workspaceId === undefined && safeRequestedPath !== undefined
+          ? { projectWorkspacePath: safeRequestedPath }
           : safeProjectionPath !== undefined
             ? { projectWorkspacePath: safeProjectionPath }
             : {}),
@@ -670,7 +679,7 @@ export class RunOrchestrator {
   async #execute(
     initial: AgentRun,
     agent: AgentDefinition,
-    workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
+    workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspaceKind?: 'default' | 'relative'; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
     // The run executes under the option it was admitted with (#90): the
     // engine, work model, and effort recorded before any engine accepted the
@@ -783,6 +792,7 @@ export class RunOrchestrator {
         appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
         workingDirectory,
         workspace.projectWorkspaceId,
+        workspace.projectWorkspaceKind,
         workspace.projectWorkspacePath,
       );
 
@@ -808,6 +818,7 @@ export class RunOrchestrator {
           appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
           workingDirectory,
           workspace.projectWorkspaceId,
+          workspace.projectWorkspaceKind,
           workspace.projectWorkspacePath,
         );
       }
@@ -861,6 +872,7 @@ export class RunOrchestrator {
     instructions: string | undefined,
     workingDirectory: string,
     projectWorkspaceId: string | undefined,
+    projectWorkspaceKind: 'default' | 'relative' | undefined,
     projectWorkspacePath: string | undefined,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
@@ -875,6 +887,7 @@ export class RunOrchestrator {
         // prior session having carried it (O5).
         ...(instructions !== undefined ? { instructions } : {}),
         ...(projectWorkspaceId !== undefined ? { projectWorkspaceId } : {}),
+        ...(projectWorkspaceKind !== undefined ? { projectWorkspaceKind } : {}),
         ...(projectWorkspacePath !== undefined ? { projectWorkspacePath } : {}),
         ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
@@ -1064,4 +1077,34 @@ function appendBootstrap(instructions: string | undefined, bootstrap: string | u
   return instructions === undefined || instructions === ''
     ? bootstrap
     : `${instructions}\n\n${bootstrap}`;
+}
+
+/**
+ * Normalize a binding received from an authority-facing port before it becomes
+ * an AgentRun fact or a Worker request. Durable records can predate the path
+ * invariant, so an unsafe relative location invalidates the whole binding
+ * rather than being silently reinterpreted as a Worker default.
+ */
+function sanitizeRunWorkspaceBinding(
+  binding: RunWorkspaceBinding | undefined,
+): RunWorkspaceBinding | undefined {
+  if (binding === undefined) return undefined;
+  if (binding.kind === 'relative') {
+    const path = sanitizeWorkspacePath(binding.path);
+    if (path === undefined) return undefined;
+    return {
+      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
+      kind: 'relative',
+      path,
+    };
+  }
+  if (binding.kind === 'default' && binding.path === undefined) {
+    return {
+      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
+      kind: 'default',
+    };
+  }
+  return undefined;
 }

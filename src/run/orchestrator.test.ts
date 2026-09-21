@@ -873,6 +873,7 @@ test('a run records the durable workspace binding it was admitted under and uses
   // The Worker start carries the durable opaque identity and location, not the
   // registry projection's stale path.
   assert.equal(adapter!.requests[0]?.projectWorkspaceId, 'e'.repeat(24));
+  assert.equal(adapter!.requests[0]?.projectWorkspaceKind, 'relative');
   assert.equal(adapter!.requests[0]?.projectWorkspacePath, 'repos/current-binding');
   assert.equal(adapter!.requests[0]?.workingDirectory, 'project-workspace:' + 'e'.repeat(24) + ':repos/current-binding');
 
@@ -913,4 +914,31 @@ test('a run with no durable binding falls back to the projection, with its locat
     false,
     'the absolute path is never persisted',
   );
+});
+
+test('a corrupt durable binding location is dropped before run history and the Worker boundary', async () => {
+  const { adapter, store } = build({
+    turns: [{ events: successEvents, result: completed }],
+  });
+  // Reach into the private-facing port as a legacy/corrupt durable record
+  // would: the orchestrator itself must still sanitize before persistence.
+  const guarded = new RunOrchestrator({
+    engines: new Map([['scripted', adapter]]),
+    agents: new AgentRegistry([{
+      id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp',
+    }]),
+    projects: new ProjectRegistry([project()]),
+    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
+    store,
+    workspaceBinding: async () => ({
+      bindingId: 'corrupt-binding', workspaceId: 'f'.repeat(24), kind: 'relative', path: '../private',
+    }),
+  });
+
+  const { id } = await guarded.submit({ agentId: 'agent-scout', prompt: 'inspect' });
+  const run = await guarded.waitFor(id);
+  assert.equal(run.status, 'completed');
+  assert.equal(run.workspaceBinding, undefined, 'unsafe binding is not persisted as historical run evidence');
+  assert.equal(adapter.requests.at(-1)?.projectWorkspacePath, undefined, 'unsafe location never reaches the Worker');
+  assert.equal(JSON.stringify(await store.get(id)).includes('../private'), false);
 });

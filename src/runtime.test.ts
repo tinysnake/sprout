@@ -603,7 +603,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 10; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 11; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -1316,6 +1316,31 @@ test('a composed run records the durable workspace binding it was admitted under
   const historical = (await runtime.stores.runs.get(id))?.workspaceBinding;
   assert.equal(historical?.path, 'repos/sprout', 'history is not rewritten by the change');
   assert.equal(historical?.bindingId, durable?.current?.bindingId);
+
+  // A corrupt legacy durable access document bypasses the ordinary access
+  // service. Runtime admission must still reject its traversal location before
+  // it becomes a new AgentRun record or reaches the Worker request.
+  assert.ok(after?.current);
+  await runtime.stores.projectAccess.save({
+    ...after,
+    current: { ...after.current, path: '../corrupt-binding' },
+    history: after.history.map((binding) =>
+      binding.bindingId === after.current?.bindingId
+        ? { ...binding, path: '../corrupt-binding' }
+        : binding,
+    ),
+  });
+  const corruptSubmission = await runtime.orchestrator.submit({
+    agentId: 'scout', prompt: 'do not leak the corrupt workspace', projectId: 'project-bound',
+  });
+  const corruptRun = await runtime.orchestrator.waitFor(corruptSubmission.id);
+  assert.equal(corruptRun.status, 'completed');
+  assert.equal(corruptRun.workspaceBinding, undefined);
+  assert.equal(
+    JSON.stringify(await runtime.stores.runs.get(corruptSubmission.id)).includes('../corrupt-binding'),
+    false,
+    'the raw durable corruption is neither run history nor a Worker-bound fact',
+  );
 
   await runtime.close();
 });

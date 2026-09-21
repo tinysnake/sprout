@@ -82,10 +82,7 @@ export interface ProjectBindingWorkSafetyPort {
  * change (the #92 bridge pattern).
  */
 export interface ProjectAccessBridgePort {
-  prepareAccess(
-    projectId: string,
-    accesses: readonly ProjectEnvironmentAccess[],
-  ): (() => void) | Promise<() => void>;
+  prepareAccess(access: ProjectEnvironmentAccess): (() => void) | Promise<() => void>;
 }
 
 export interface ProjectAccessServiceOptions {
@@ -457,10 +454,11 @@ export class ProjectAccessService {
         `project ${access.projectId} access record would violate the one-current-binding invariant`,
       );
     }
-    const all = (await this.#store.listForProject(access.projectId)).filter(
-      (entry) => entry.environmentInstanceId !== access.environmentInstanceId,
-    );
-    const commit = await this.#bridge?.prepareAccess(access.projectId, [...all, access]);
+    // The bridge merges this one relationship at commit time. Rebuilding and
+    // replacing every Environment access from a stale read here would let two
+    // concurrent grants on different Environments erase each other's runtime
+    // projection even though both durable rows committed.
+    const commit = await this.#bridge?.prepareAccess(access);
     await this.#store.save(access);
     commit?.();
   }

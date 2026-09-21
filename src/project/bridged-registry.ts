@@ -139,15 +139,34 @@ export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAu
   }
 
   /**
-   * Store one Project's access records and republish its projection.
+   * Merge one Project/Environment access and republish its projection.
    *
    * ProjectAccessService invokes this before persistence and invokes the
    * returned commit only after persistence succeeds, so a failed write never
    * leaves a projection the runtime could execute against.
    */
-  prepareAccess(projectId: string, accesses: readonly ProjectEnvironmentAccess[]): () => void {
+  prepareAccess(access: ProjectEnvironmentAccess): () => void;
+  /** Compatibility helper for direct hydration/tests; production merges one row. */
+  prepareAccess(projectId: string, accesses: readonly ProjectEnvironmentAccess[]): () => void;
+  prepareAccess(
+    accessOrProjectId: ProjectEnvironmentAccess | string,
+    legacyAccesses?: readonly ProjectEnvironmentAccess[],
+  ): () => void {
+    const accesses = typeof accessOrProjectId === 'string'
+      ? legacyAccesses ?? []
+      : [accessOrProjectId];
     return () => {
-      this.#access.set(projectId, accesses);
+      // Merge at synchronous commit time rather than replacing a snapshot read
+      // before persistence. Commits for separate Environments can then arrive
+      // in either order without dropping the other durable access projection.
+      const projectId = typeof accessOrProjectId === 'string'
+        ? accessOrProjectId
+        : accessOrProjectId.projectId;
+      let merged = this.#access.get(projectId) ?? [];
+      for (const access of accesses) {
+        merged = [...merged.filter((entry) => entry.environmentInstanceId !== access.environmentInstanceId), access];
+      }
+      this.#access.set(projectId, merged);
       const authority = this.#authorities.get(projectId);
       if (authority !== undefined) this.#publish(authority);
     };

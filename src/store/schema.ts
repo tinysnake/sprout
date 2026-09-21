@@ -23,13 +23,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 9;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -528,6 +528,24 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           PRIMARY KEY (project_id, environment_instance_id)
         );
       `);
+    },
+  },
+  {
+    fromVersion: 9,
+    toVersion: 10,
+    name: 'durable_run_workspace_binding',
+    migrate: (db) => {
+      // A Project workspace binding is a historical run fact (#93). This must
+      // be added through the versioned transaction and safety-copy protocol,
+      // never by a domain-store constructor after the database is serving.
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+      ).get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'workspace_binding')) {
+        db.exec('ALTER TABLE agent_runs ADD COLUMN workspace_binding TEXT');
+      }
     },
   },
 ];

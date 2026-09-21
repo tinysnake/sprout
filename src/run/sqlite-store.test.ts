@@ -9,6 +9,7 @@ import type { AgentRun } from './model.ts';
 import { SqliteRunStore } from './sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteStore } from '../store/db.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -157,6 +158,11 @@ test('a run written before the project and hand-off columns existed still reads 
   db.exec(`INSERT INTO agent_runs
     (id, agent_id, prompt, environment_instance_id, status, events, created_at)
     VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  // A shared-handle domain adapter receives a schema-coordinated connection.
+  // Run the versioned migration explicitly rather than relying on its
+  // constructor to issue an unversioned ALTER TABLE.
+  migrateOrInitializeDatabase(db, { filename: ':memory:' });
 
   const store = new SqliteRunStore({ db });
   const restored = await store.get('legacy-1');
@@ -347,6 +353,8 @@ test('a run written before the workspace binding column existed still reads back
   db.exec(`INSERT INTO agent_runs
     (id, agent_id, prompt, environment_instance_id, status, events, created_at)
     VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  migrateOrInitializeDatabase(db, { filename: ':memory:' });
 
   const store = new SqliteRunStore({ db });
   const restored = await store.get('legacy-1');

@@ -277,6 +277,24 @@ test('the Worker validates a default and a relative Project workspace selection 
   assert.ok(!JSON.stringify(relative).includes(root));
 });
 
+test('a validated Worker-managed default identity starts in the directory it validated', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-default-start-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const connection = await worker(root);
+  t.after(() => connection.close());
+
+  const binding = await connection.contexts.validateWorkspace({
+    projectId: 'project-1', environmentInstanceId: 'env-1', kind: 'default',
+  });
+  const boundary = new WorkerWorkspace(root);
+
+  assert.equal(
+    await boundary.projectWorkingDirectory(binding.workspaceId, undefined, binding.kind),
+    await realpath(join(root, 'projects', hash('project-1'))),
+    'the start-session resolver reaches the exact default directory validation prepared, without hashing the opaque id again',
+  );
+});
+
 test('the Worker refuses to validate an escaping or absolute relative selection', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-worker-validate-unsafe-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });

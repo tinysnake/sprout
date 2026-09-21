@@ -101,9 +101,19 @@ export class WorkerWorkspace {
    * this boundary rather than resolved, so a corrupt projection cannot cross
    * the internal Project/Worker boundary as a host path (#93, ADR-0009).
    */
-  async projectWorkingDirectory(projectId: string, workspacePath?: string): Promise<string> {
+  async projectWorkingDirectory(
+    workspaceId: string,
+    workspacePath?: string,
+    workspaceKind?: 'default' | 'relative',
+  ): Promise<string> {
     const root = await this.#rootPath();
-    return this.#workspace(root, projectId, false, workspacePath);
+    if (workspaceKind === 'default') {
+      if (workspacePath !== undefined) {
+        throw new Error('a Worker-managed default workspace cannot carry a registered path');
+      }
+      return this.#workspaceByOpaqueId(root, workspaceId, false);
+    }
+    return this.#workspace(root, workspaceId, false, workspacePath);
   }
 
   /**
@@ -127,9 +137,12 @@ export class WorkerWorkspace {
       await this.#workspace(root, input.projectId, true, input.path);
       return { workspaceId: token(`${input.projectId}\u0000relative\u0000${input.path}`), kind: 'relative', path: input.path };
     }
-    // The Worker-managed default: create and resolve the Project's own directory.
+    // The Worker-managed default lives at the same stable Project layout used by
+    // Task context preparation. Its returned opaque identity is that directory's
+    // name, and start-session receives the explicit `default` discriminator so
+    // it resolves this identity directly rather than hashing it a second time.
     await this.#workspace(root, input.projectId, true);
-    return { workspaceId: token(`${input.projectId}\u0000default`), kind: 'default' };
+    return { workspaceId: token(input.projectId), kind: 'default' };
   }
 
   async #rootPath(): Promise<string> {
@@ -156,6 +169,15 @@ export class WorkerWorkspace {
     }
     const projects = await this.#directory(root, join(root, 'projects'), create);
     return this.#directory(root, join(projects, token(projectId)), create);
+  }
+
+  /** Resolve a Worker-issued default workspace identity without re-hashing it. */
+  async #workspaceByOpaqueId(root: string, workspaceId: string, create: boolean): Promise<string> {
+    if (!/^[a-f0-9]{24}$/.test(workspaceId)) {
+      throw new Error('Worker-managed workspace identity is malformed');
+    }
+    const projects = await this.#directory(root, join(root, 'projects'), create);
+    return this.#directory(root, join(projects, workspaceId), create);
   }
 
   #insideRoot(root: string, path: string): string {

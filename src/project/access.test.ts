@@ -12,6 +12,7 @@ import { InMemoryProjectAccessStore, type ProjectAccessStore } from './access-st
 import { ProjectService } from './authority-service.ts';
 import { InMemoryProjectAuthorityStore } from './authority-store.ts';
 import type { ProjectEnvironmentAccess, ValidatedWorkspace } from './access.ts';
+import { BridgedProjectRegistry } from './bridged-registry.ts';
 
 /**
  * Domain behaviour for Project Environment access and Project workspaces (#93,
@@ -412,6 +413,40 @@ test('a concurrent grant and end serialize instead of racing the record', async 
     assert.equal(durable.status, 'active');
     assert.equal(durable.history.length, 2, 'the change appended its binding');
   }
+});
+
+test('concurrent grants for different Environments merge their runtime projections', async () => {
+  const registry = new BridgedProjectRegistry();
+  const projects = new ProjectService({
+    store: new InMemoryProjectAuthorityStore(),
+    agentAuthority: { agentIsActive: () => true },
+    bridge: registry,
+  });
+  await projects.create({ id: 'project-sprout', displayName: 'Sprout' });
+  const access = new ProjectAccessService({
+    store: new InMemoryProjectAccessStore(),
+    projects,
+    worker: validator().port,
+    environments: { environmentIsAccessible: () => true },
+    bridge: registry,
+    createBindingId: (() => {
+      let id = 0;
+      return () => `binding-${++id}`;
+    })(),
+  });
+
+  await Promise.all([
+    access.grant({ projectId: 'project-sprout', environmentInstanceId: 'env-a', selection: { kind: 'default' } }),
+    access.grant({ projectId: 'project-sprout', environmentInstanceId: 'env-b', selection: { kind: 'relative', path: 'repos/b' } }),
+  ]);
+
+  const projected = registry.get('project-sprout');
+  assert.deepEqual(projected?.availableEnvironmentInstanceIds.slice().sort(), ['env-a', 'env-b']);
+  assert.deepEqual(
+    projected?.workspaces?.slice().sort((a, b) => a.environmentInstanceId.localeCompare(b.environmentInstanceId)),
+    [{ environmentInstanceId: 'env-a' }, { environmentInstanceId: 'env-b', path: 'repos/b' }],
+    'each commit merges only its Environment instead of replacing a stale project-wide snapshot',
+  );
 });
 
 /**

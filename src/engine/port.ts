@@ -133,6 +133,15 @@ export interface StartSessionRequest {
    */
   readonly projectWorkspaceId?: string;
   /**
+   * How the Worker must interpret `projectWorkspaceId`.
+   *
+   * An authority-recorded default is an opaque Worker workspace identity,
+   * while an omitted kind retains the pre-#93 Project-id compatibility path.
+   * Carrying the discriminator prevents a Worker from hashing an opaque default
+   * identity as though it were a Project id.
+   */
+  readonly projectWorkspaceKind?: 'default' | 'relative';
+  /**
    * Worker-root-relative registered repository location, when the Project has
    * one. Must be relative: an absolute location is refused at this boundary,
    * never resolved (#93, ADR-0009).

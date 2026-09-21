@@ -33,6 +33,7 @@ import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
 import type { ProjectAccessStore } from './project/access-store.ts';
+import { sanitizeWorkspacePath } from './project/access.ts';
 import {
   ProjectService,
   type ProjectAgentAuthorityPort,
@@ -673,11 +674,24 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         const access = await openedStores.projectAccess.get(projectId, instanceId);
         const binding = access?.current;
         if (access?.status !== 'active' || binding === undefined) return undefined;
+        // Durable access documents may predate the workspace-path invariant.
+        // Refuse an unsafe binding before it can become run history or cross the
+        // Project/Worker boundary; never copy its raw location into either.
+        if (binding.kind === 'relative') {
+          const path = sanitizeWorkspacePath(binding.path);
+          if (path === undefined) return undefined;
+          return {
+            ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+            workspaceId: binding.workspaceId,
+            kind: 'relative',
+            path,
+          };
+        }
+        if (binding.kind !== 'default' || binding.path !== undefined) return undefined;
         return {
           ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
           workspaceId: binding.workspaceId,
-          kind: binding.kind,
-          ...(binding.path !== undefined ? { path: binding.path } : {}),
+          kind: 'default',
         };
       },
       projects,
