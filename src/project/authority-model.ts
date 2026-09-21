@@ -98,7 +98,7 @@ export interface ProjectContentVersion {
   readonly memberships: readonly ProjectMembership[];
 }
 
-/** The template attribution recorded once, at creation. */
+/** The template attribution and editable starting content recorded once, at creation. */
 export interface ProjectTemplateSnapshot {
   readonly templateId: string;
   readonly templateVersion: number;
@@ -106,6 +106,20 @@ export interface ProjectTemplateSnapshot {
   /** The snapshot of the template's collaboration guidance, taken at creation. */
   readonly collaborationGuidance: string;
   readonly completionGuidance: string;
+  /** The snapshot of the template's goal guidance, taken at creation. */
+  readonly goalGuidance: string;
+  /** The snapshot of the template's suggested rules, taken at creation. */
+  readonly suggestedRules: readonly string[];
+  /** The snapshot of the template's role slots, taken at creation. */
+  readonly roleSlots: readonly {
+    readonly name: string;
+    readonly suggestedResponsibilities: readonly string[];
+    readonly suggestedCollaborationInstructions: string;
+  }[];
+  /** The snapshot of the template's suggested wake policy, taken at creation. */
+  readonly wakePolicy: WakePolicy;
+  /** The snapshot of the template's suggested routing interval, taken at creation. */
+  readonly routingIntervalMs: number;
 }
 
 /** A durable Project authority record. */
@@ -135,6 +149,7 @@ export type ProjectAuthorityErrorCode =
   | 'invalid-content'
   | 'unknown-project'
   | 'unknown-agent'
+  | 'duplicate-membership'
   | 'already-archived'
   | 'not-archived'
   | 'archived-project-is-read-only'

@@ -27,6 +27,21 @@ export interface ProjectTemplateRoleSlot {
   readonly suggestedCollaborationInstructions: string;
 }
 
+/** Recursively freeze a plain template value, so no nested source mutates. */
+export function freezeTemplateValue<T>(value: T): Readonly<T> {
+  if (Array.isArray(value)) {
+    return Object.freeze((value as readonly unknown[]).map((entry) => freezeTemplateValue(entry))) as unknown as Readonly<T>;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const frozen: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      frozen[key] = freezeTemplateValue(entry);
+    }
+    return Object.freeze(frozen) as Readonly<T>;
+  }
+  return Object.freeze(value) as Readonly<T>;
+}
+
 /** The reusable starting shape for a project contract. */
 export interface ProjectTemplate {
   readonly id: string;
@@ -56,7 +71,7 @@ export interface ProjectTemplate {
  * reviewed to carry no concrete Agent id, Environment instance, workspace
  * path, model, or credential.
  */
-export const GENERAL_COLLABORATION_TEMPLATE: ProjectTemplate = Object.freeze({
+export const GENERAL_COLLABORATION_TEMPLATE: ProjectTemplate = freezeTemplateValue({
   id: 'template-general-collaboration',
   name: 'General collaboration',
   version: 1,

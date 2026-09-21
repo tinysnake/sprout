@@ -18,6 +18,7 @@ import {
 import type { ProjectAuthorityStore } from './authority-store.ts';
 import { GENERAL_COLLABORATION_TEMPLATE, type ProjectTemplate } from './template.ts';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
+import type { ProjectTemplateSnapshot } from './authority-model.ts';
 
 /**
  * The caller-facing Project, template, and membership authority (ADR-0008, #92).
@@ -53,6 +54,15 @@ export interface ProjectWorkSafetyPort {
   hasActiveRun(projectId: string): Promise<boolean> | boolean;
   /** Whether the Project owns a Task that has not reached a terminal status. */
   hasUnfinishedTask(projectId: string): Promise<boolean> | boolean;
+  /**
+   * Whether any Environment this Project's work may use still holds a lease —
+   * active or recovering, run-held or Task-held — whose run or Task belongs to
+   * this Project. A restart leaves a failed orphaned run behind a `recovering`
+   * lease, so finished-looking rows are not proof the Environment is idle.
+   */
+  hasHeldOrRecoveringLease(projectId: string): Promise<boolean> | boolean;
+  /** Whether a Task in this Project is mid-recovery or mid-end right now. */
+  hasTaskInRecoveryOrEnding(projectId: string): Promise<boolean> | boolean;
   /** Whether the member has a run that is queued or running in this Project. */
   memberHasActiveRun(projectId: string, memberId: string): Promise<boolean> | boolean;
   /**
@@ -62,9 +72,25 @@ export interface ProjectWorkSafetyPort {
   memberHasUnfinishedTask(projectId: string, memberId: string): Promise<boolean> | boolean;
 }
 
+/**
+ * The narrow read-only surface this Module needs to prove an Agent membership
+ * names a real portable Agent authority (#90). A Project with no Agents stays
+ * valid; an invented membership must not.
+ */
+export interface ProjectAgentAuthorityPort {
+  /** Whether this stable Agent identity exists in the global Agent authority. */
+  agentExists(agentId: string): Promise<boolean> | boolean;
+}
+
 export interface ProjectServiceOptions {
   readonly store: ProjectAuthorityStore;
   readonly workSafety?: ProjectWorkSafetyPort;
+  /**
+   * The global Agent authority membership references (#90). Omitted only by
+   * narrow domain tests; the runtime always supplies it, so a ghost membership
+   * is refused wherever it can become durable.
+   */
+  readonly agentAuthority?: ProjectAgentAuthorityPort;
   /** The template source; production uses the built-in General template. */
   readonly template?: ProjectTemplate;
   readonly clock?: () => number;
@@ -72,6 +98,12 @@ export interface ProjectServiceOptions {
   readonly createId?: () => string;
   /** Who created the Project: the local Human operator's member id. */
   readonly operatorMemberId?: string;
+  /**
+   * Called after every durable change, so the runtime can keep the M1
+   * collaboration registry and Project channel routing in step with the
+   * authority (F1: one stable Project identity, routable from creation).
+   */
+  readonly onChanged?: (project: ProjectAuthority) => void | Promise<void>;
 }
 
 export interface CreateProjectInput {
@@ -131,18 +163,27 @@ export interface ArchiveInput {
 export class ProjectService {
   readonly #store: ProjectAuthorityStore;
   readonly #workSafety: ProjectWorkSafetyPort | undefined;
+  readonly #agentAuthority: ProjectAgentAuthorityPort | undefined;
   readonly #template: ProjectTemplate;
   readonly #clock: () => number;
   readonly #createId: () => string;
   readonly #operatorMemberId: string;
+  readonly #onChanged: ((project: ProjectAuthority) => void | Promise<void>) | undefined;
 
   constructor(options: ProjectServiceOptions) {
     this.#store = options.store;
     this.#workSafety = options.workSafety;
+    this.#agentAuthority = options.agentAuthority;
     this.#template = options.template ?? GENERAL_COLLABORATION_TEMPLATE;
     this.#clock = options.clock ?? Date.now;
     this.#createId = options.createId ?? (() => `project-${Math.random().toString(36).slice(2, 10)}`);
     this.#operatorMemberId = options.operatorMemberId ?? 'operator';
+    this.#onChanged = options.onChanged;
+  }
+
+  /** The #agentAuthority port callers composed with, for narrow read paths. */
+  get agentAuthority(): ProjectAgentAuthorityPort | undefined {
+    return this.#agentAuthority;
   }
 
   /**
@@ -176,8 +217,9 @@ export class ProjectService {
       if (agentId === undefined) {
         throw new ProjectAuthorityError('invalid-identity', 'an Agent membership requires a valid Agent identity');
       }
+      await this.#requireKnownAgent(agentId);
       if (memberships.some((existing) => existing.memberId === agentId)) {
-        throw new ProjectAuthorityError('invalid-identity', `duplicate membership for ${agentId}`);
+        throw new ProjectAuthorityError('duplicate-membership', `duplicate membership for ${agentId}`);
       }
       memberships.push({
         memberId: agentId,
@@ -187,14 +229,26 @@ export class ProjectService {
       });
     }
 
+    // Name-only creation still starts from the template's full editable
+    // content: the goal guidance seeds the goal, the suggested rules seed the
+    // rules, and the suggested wake policy and routing interval seed the
+    // routing decisions (F2). An explicit input replaces the seeded field.
     const firstVersion: ProjectContentVersion = {
       version: 1,
       at: now,
       reason: sanitizeEditReason(input.reason),
-      goal: sanitizeProjectGoal(input.goal),
-      rules: sanitizeProjectRules(input.rules),
-      wakePolicy: sanitizeWakePolicy(input.wakePolicy),
-      routingIntervalMs: sanitizeRoutingIntervalMs(input.routingIntervalMs),
+      goal: input.goal === undefined
+        ? sanitizeProjectGoal(this.#template.goalGuidance)
+        : sanitizeProjectGoal(input.goal),
+      rules: input.rules === undefined
+        ? sanitizeProjectRules(this.#template.suggestedRules)
+        : sanitizeProjectRules(input.rules),
+      wakePolicy: input.wakePolicy === undefined
+        ? sanitizeWakePolicy(this.#template.wakePolicy)
+        : sanitizeWakePolicy(input.wakePolicy),
+      routingIntervalMs: input.routingIntervalMs === undefined
+        ? sanitizeRoutingIntervalMs(this.#template.routingIntervalMs)
+        : sanitizeRoutingIntervalMs(input.routingIntervalMs),
       memberships,
     };
 
@@ -202,22 +256,39 @@ export class ProjectService {
       id,
       displayName: sanitizeProjectDisplayName(input.displayName),
       status: 'active',
-      // The template attribution is a copy taken at creation. The Project is
-      // never linked to the template afterwards: later template changes do not
-      // rewrite an established Project (ADR-0008).
-      template: {
-        templateId: this.#template.id,
-        templateVersion: this.#template.version,
-        templateName: this.#template.name,
-        collaborationGuidance: this.#template.collaborationGuidance,
-        completionGuidance: this.#template.completionGuidance,
-      },
+      // The template attribution and starting content are copies taken at
+      // creation. The Project is never linked to the template afterwards:
+      // later template changes do not rewrite an established Project
+      // (ADR-0008).
+      template: this.#snapshotTemplate(),
       content: { currentVersion: 1, versions: [firstVersion] },
       createdAt: now,
       updatedAt: now,
     };
     await this.#store.save(project);
+    await this.#notify(project);
     return project;
+  }
+
+  /** One deep copy of the template source, attributed and frozen apart. */
+  #snapshotTemplate(): ProjectTemplateSnapshot {
+    const source = this.#template;
+    return {
+      templateId: source.id,
+      templateVersion: source.version,
+      templateName: source.name,
+      collaborationGuidance: source.collaborationGuidance,
+      completionGuidance: source.completionGuidance,
+      goalGuidance: source.goalGuidance,
+      suggestedRules: [...source.suggestedRules],
+      roleSlots: source.roleSlots.map((slot) => ({
+        name: slot.name,
+        suggestedResponsibilities: [...slot.suggestedResponsibilities],
+        suggestedCollaborationInstructions: slot.suggestedCollaborationInstructions,
+      })),
+      wakePolicy: source.wakePolicy,
+      routingIntervalMs: source.routingIntervalMs,
+    };
   }
 
   /** Every durable Project, including archived ones (archived is a status). */
@@ -265,6 +336,7 @@ export class ProjectService {
       updatedAt: now,
     };
     await this.#store.save(next);
+    await this.#notify(next);
     return next;
   }
 
@@ -280,11 +352,12 @@ export class ProjectService {
     if (agentId === undefined) {
       throw new ProjectAuthorityError('invalid-identity', 'an Agent membership requires a valid Agent identity');
     }
+    await this.#requireKnownAgent(agentId);
     const now = this.#clock();
     const current = currentProjectContent(project);
     const existing = current.memberships.find((membership) => membership.memberId === agentId);
     if (existing !== undefined && existing.endedAt === undefined) {
-      throw new ProjectAuthorityError('invalid-identity', `${agentId} is already a member of ${projectId}`);
+      throw new ProjectAuthorityError('duplicate-membership', `${agentId} is already a member of ${projectId}`);
     }
     // A previously ended membership is restored as a fresh relationship: the
     // old entry keeps its end facts for attribution, and the new one starts
@@ -376,6 +449,18 @@ export class ProjectService {
           `project ${projectId} has an unfinished Task; end it before archiving`,
         );
       }
+      if (await this.#workSafety.hasHeldOrRecoveringLease(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} still holds or is recovering an Environment lease; resolve recovery first`,
+        );
+      }
+      if (await this.#workSafety.hasTaskInRecoveryOrEnding(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} has a Task mid-recovery or mid-end; settle it before archiving`,
+        );
+      }
     }
     const now = this.#clock();
     const archivedReason = sanitizeOperatorText(input.reason, {
@@ -390,20 +475,49 @@ export class ProjectService {
       archivedReason,
     };
     await this.#store.save(next);
+    await this.#notify(next);
     return next;
   }
 
   /**
    * Restore one archived Project.
    *
-   * Restore is always safe: nothing was deleted, so restoring only re-enables
-   * new work. Compatibility is re-derived from current facts by the callers of
-   * this Module's read paths, never stored here.
+   * Restore is non-destructive, but it is not unconditional: the world may
+   * have changed while the Project was archived, so restore rechecks the same
+   * active-work safety archive checks (ADR-0008: "Restore rechecks
+   * compatibility"). Nothing was deleted, so a clean restore only re-enables
+   * new work.
    */
   async restore(projectId: string): Promise<ProjectAuthority> {
     const project = await this.#require(projectId);
     if (project.status !== 'archived') {
       throw new ProjectAuthorityError('not-archived', `project ${projectId} is not archived`);
+    }
+    if (this.#workSafety !== undefined) {
+      if (await this.#workSafety.hasActiveRun(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} has an active run; settle it before restoring`,
+        );
+      }
+      if (await this.#workSafety.hasUnfinishedTask(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} has an unfinished Task; end it before restoring`,
+        );
+      }
+      if (await this.#workSafety.hasHeldOrRecoveringLease(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} still holds or is recovering an Environment lease; resolve recovery first`,
+        );
+      }
+      if (await this.#workSafety.hasTaskInRecoveryOrEnding(projectId)) {
+        throw new ProjectAuthorityError(
+          'active-work-depends-on-project',
+          `project ${projectId} has a Task mid-recovery or mid-end; settle it before restoring`,
+        );
+      }
     }
     const now = this.#clock();
     const next: ProjectAuthority = {
@@ -413,6 +527,7 @@ export class ProjectService {
       restoredAt: now,
     };
     await this.#store.save(next);
+    await this.#notify(next);
     return next;
   }
 
@@ -450,6 +565,7 @@ export class ProjectService {
       updatedAt: at,
     };
     await this.#store.save(next);
+    await this.#notify(next);
     return next;
   }
 
@@ -459,6 +575,27 @@ export class ProjectService {
       throw new ProjectAuthorityError('unknown-project', `unknown project: ${projectId}`);
     }
     return project;
+  }
+
+  /**
+   * Refuse a membership that names no real global Agent (F5, #90).
+   *
+   * A Project with no Agent members remains valid; an invented member id does
+   * not. When no Agent authority is composed (narrow domain tests only), the
+   * shape check stays as the only boundary.
+   */
+  async #requireKnownAgent(agentId: string): Promise<void> {
+    if (this.#agentAuthority !== undefined && !(await this.#agentAuthority.agentExists(agentId))) {
+      throw new ProjectAuthorityError(
+        'unknown-agent',
+        `no portable Agent authority exists for ${agentId}; create the Agent first`,
+      );
+    }
+  }
+
+  /** Fire the change hook so the runtime keeps M1 routing in step (F1). */
+  async #notify(project: ProjectAuthority): Promise<void> {
+    await this.#onChanged?.(project);
   }
 
   /** An archived Project is read-only (ADR-0008). */

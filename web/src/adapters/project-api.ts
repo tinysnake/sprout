@@ -40,7 +40,12 @@ export interface ProjectContentVersionView {
 }
 
 export interface ProjectAuthorityView {
+  /** Preserved composer field: the stable identity the client addresses. */
   readonly id: string;
+  /** Preserved composer field, kept in sync with the current goal. */
+  readonly goal: string;
+  /** Preserved composer field: current Agent member ids for @mentions. */
+  readonly memberIds: readonly string[];
   readonly displayName: string;
   readonly status: string;
   readonly template: {
@@ -49,6 +54,15 @@ export interface ProjectAuthorityView {
     readonly templateName: string;
     readonly collaborationGuidance: string;
     readonly completionGuidance: string;
+    readonly goalGuidance: string;
+    readonly suggestedRules: readonly string[];
+    readonly roleSlots: readonly {
+      readonly name: string;
+      readonly suggestedResponsibilities: readonly string[];
+      readonly suggestedCollaborationInstructions: string;
+    }[];
+    readonly wakePolicy: string;
+    readonly routingIntervalMs: number;
   };
   readonly content: {
     readonly currentVersion: number;

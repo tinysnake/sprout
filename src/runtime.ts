@@ -29,9 +29,14 @@ import {
 import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
+import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
-import { ProjectService, type ProjectWorkSafetyPort } from './project/authority-service.ts';
+import {
+  ProjectService,
+  type ProjectAgentAuthorityPort,
+  type ProjectWorkSafetyPort,
+} from './project/authority-service.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
@@ -366,6 +371,22 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // definitions stay the M1 seed registry; the Agent service composes over
     // the same durable handle every other M2 domain uses.
     const agentService = new AgentService({ store: stores.agentIdentities });
+    // The bridge between the M2 Project authority and the M1 collaboration
+    // machinery (#92, F1): authority Projects are projected into the registry
+    // the wake contract and orchestrator read, so one Project identity routes
+    // on its Project channel from the moment it exists.
+    const projects = new BridgedProjectRegistry([
+      runtimeConfiguration.project ?? defaultProject({ projectId, instanceId }),
+    ]);
+    // The default Project above is host-derived configuration, like the
+    // environment definitions. Additional Projects hydrate from the durable
+    // store, which is the same store the runs and leases use (ADR-0002);
+    // in-memory entries win.
+    await projects.load(stores.projects);
+    // Authority Projects mirror into the same registry so their Project
+    // channels are routable; the composed instance is the environment set the
+    // M1 working projection grants.
+    await projects.loadAuthorities(stores.projectAuthorities, [instanceId]);
     // The durable Project, template-snapshot, and membership authority (#92).
     // It composes over the same durable handle every other M2 domain uses, and
     // its active-work safety facts are read-only projections of the same run
@@ -380,6 +401,35 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       hasUnfinishedTask: async (projectId) => {
         const projectTasks = await openedStores.tasks.list({ projectId });
         return projectTasks.some((task) => !isTerminalTaskStatus(task.status));
+      },
+      // A lease — active or recovering, run-held or Task-held — whose run or
+      // Task belongs to this Project means recovery still owns the Environment
+      // even when the rows look finished (F3): a restart leaves a failed
+      // orphaned run behind a `recovering` lease.
+      hasHeldOrRecoveringLease: async (projectId) => {
+        const leases = pool.leases().filter((lease) => lease.state === 'active' || lease.state === 'recovering');
+        for (const lease of leases) {
+          if (lease.taskId !== undefined) {
+            const task = await openedStores.tasks.get(lease.taskId);
+            if (task?.projectId === projectId) return true;
+            continue;
+          }
+          const run = lease.runId !== undefined ? await openedStores.runs.get(lease.runId) : undefined;
+          if (run?.projectId === projectId) return true;
+        }
+        return false;
+      },
+      // Task-end and recovery state live in the Task's environment lifecycle,
+      // separate from Task progress: `ending` is a Task end in progress and
+      // `recovery` is an open recovery (F3, ADR-0008).
+      hasTaskInRecoveryOrEnding: async (projectId) => {
+        const projectTasks = await openedStores.tasks.list({ projectId });
+        return projectTasks.some(
+          (task) =>
+            task.environmentLifecycleState === 'recovery' ||
+            task.environmentLifecycleState === 'ending' ||
+            task.recoveryState !== undefined,
+        );
       },
       memberHasActiveRun: async (projectId, memberId) => {
         const runs = await orchestrator.list();
@@ -397,22 +447,29 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         );
       },
     };
+    // Membership must name a real portable Agent authority (#90, F5). The M1
+    // seed registry stays authoritative for its definition-era Agents; the
+    // durable authority covers every Agent created since #90.
+    const projectAgentAuthority: ProjectAgentAuthorityPort = {
+      agentExists: async (agentId) =>
+        agents.get(agentId) !== undefined || (await agentService.get(agentId)) !== undefined,
+    };
     const projectService = new ProjectService({
       store: stores.projectAuthorities,
       workSafety: projectWorkSafety,
+      agentAuthority: projectAgentAuthority,
+      // Every durable authority change mirrors into the M1 registry, so a
+      // created Project is addressable on its Project channel atomically, and
+      // an ended membership stops being woken (F1).
+      onChanged: (project) => {
+        projects.mirror(project, [instanceId]);
+      },
     });
     const pool = new EnvironmentPool({
       definitions: [definition],
       instances: [instance],
       store: stores.leases,
     });
-    const projects = new ProjectRegistry([
-      runtimeConfiguration.project ?? defaultProject({ projectId, instanceId }),
-    ]);
-    // The default Project above is host-derived configuration, like the environment
-    // definitions. Additional Projects hydrate from the durable store, which is the
-    // same store the runs and leases use (ADR-0002); in-memory entries win.
-    await projects.load(stores.projects);
 
     /**
      * The durable Task service (#28).
@@ -596,7 +653,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // composed through the same #85 additive seam. Only the authenticated
         // Human reaches these routes, so create/edit/membership/archive are
         // Human authority by construction (ADR-0008).
-        createProjectRouter({ projects: projectService }),
+        createProjectRouter({ projects: projectService, legacyProjects: projects }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can

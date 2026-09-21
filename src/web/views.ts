@@ -767,6 +767,15 @@ export interface ProjectAuthorityView {
     readonly templateName: string;
     readonly collaborationGuidance: string;
     readonly completionGuidance: string;
+    readonly goalGuidance: string;
+    readonly suggestedRules: readonly string[];
+    readonly roleSlots: readonly {
+      readonly name: string;
+      readonly suggestedResponsibilities: readonly string[];
+      readonly suggestedCollaborationInstructions: string;
+    }[];
+    readonly wakePolicy: string;
+    readonly routingIntervalMs: number;
   };
   readonly content: {
     readonly currentVersion: number;
@@ -807,6 +816,15 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
       }),
       collaborationGuidance: sanitizeProjectText(project.template.collaborationGuidance),
       completionGuidance: sanitizeProjectText(project.template.completionGuidance),
+      goalGuidance: sanitizeProjectText(project.template.goalGuidance),
+      suggestedRules: project.template.suggestedRules.map((rule) => sanitizeProjectText(rule)),
+      roleSlots: project.template.roleSlots.map((slot) => ({
+        name: sanitizeOperatorText(slot.name, { fallback: 'Role', maxLength: 120 }),
+        suggestedResponsibilities: slot.suggestedResponsibilities.map((entry) => sanitizeProjectText(entry)),
+        suggestedCollaborationInstructions: sanitizeProjectText(slot.suggestedCollaborationInstructions),
+      })),
+      wakePolicy: project.template.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
+      routingIntervalMs: project.template.routingIntervalMs,
     },
     content: {
       currentVersion: project.content.currentVersion,

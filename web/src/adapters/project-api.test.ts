@@ -31,7 +31,11 @@ function recordingTransport(
 }
 
 const project: ProjectAuthorityView = {
+  // Preserved composer fields (F6): the browser authority view keeps the M1
+  // `goal` and `memberIds` projection the existing composer consumes.
   id: 'project-sprout',
+  goal: 'Revised goal',
+  memberIds: ['agent-scout'],
   displayName: 'Sprout',
   status: 'active',
   template: {
@@ -40,6 +44,17 @@ const project: ProjectAuthorityView = {
     templateName: 'General collaboration',
     collaborationGuidance: 'Coordinate through the project channel.',
     completionGuidance: 'A Human validates the outcome.',
+    goalGuidance: 'Coordinate durable, Human-supervised work toward a shared goal.',
+    suggestedRules: ['Report what you actually observed.'],
+    roleSlots: [
+      {
+        name: 'Contributor',
+        suggestedResponsibilities: ['Investigate and implement assigned work'],
+        suggestedCollaborationInstructions: 'Collaborate through the project channel.',
+      },
+    ],
+    wakePolicy: 'explicit-only',
+    routingIntervalMs: 30_000,
   },
   content: {
     currentVersion: 2,
@@ -95,6 +110,15 @@ test('the adapter reads projects through the additive authority routes', async (
     calls.map((call) => call.path),
     ['/api/projects/authorities', '/api/projects/authorities?status=archived', '/api/projects/project-sprout'],
   );
+  // The typed browser view carries the same preserved composer fields the
+  // server projection sends, so the M1 composer and the M2 page share one
+  // wire contract (F6).
+  const viewed = await adapter.getProject('project-sprout');
+  assert.equal(viewed.goal, 'Revised goal');
+  assert.deepEqual(viewed.memberIds, ['agent-scout']);
+  assert.equal(viewed.template.wakePolicy, 'explicit-only');
+  assert.equal(viewed.template.routingIntervalMs, 30_000);
+  assert.equal(viewed.template.roleSlots.length, 1);
 });
 
 test('creation and content edits send POST JSON command bodies', async () => {

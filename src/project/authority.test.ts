@@ -50,10 +50,28 @@ test('the built-in General collaboration template is immutable and carries no co
   assert.ok(!serialized.includes('/'), 'template must not carry a path');
   assert.ok(Object.isFrozen(GENERAL_COLLABORATION_TEMPLATE));
   // Mutating a nested array cannot reach other readers either: the template
-  // module freezes the top level, and the service copies content on creation.
+  // is deep-frozen at module load, and the service copies content on creation.
   assert.throws(() => {
     (GENERAL_COLLABORATION_TEMPLATE as unknown as { version: number }).version = 99;
   });
+  // Deep immutability: no nested object or array may be mutated either (F2).
+  assert.throws(() => {
+    (GENERAL_COLLABORATION_TEMPLATE.suggestedRules as unknown as string[]).push('mutated');
+  });
+  assert.throws(() => {
+    (GENERAL_COLLABORATION_TEMPLATE.roleSlots as unknown as { length: number }).length = 0;
+  });
+  const slot = GENERAL_COLLABORATION_TEMPLATE.roleSlots[0];
+  assert.ok(slot !== undefined);
+  assert.throws(() => {
+    (slot.suggestedResponsibilities as unknown as string[]).push('mutated');
+  });
+  assert.throws(() => {
+    (GENERAL_COLLABORATION_TEMPLATE as unknown as { wakePolicy: string }).wakePolicy = 'explicit';
+  });
+  // The template content survived every mutation attempt verbatim.
+  assert.equal(GENERAL_COLLABORATION_TEMPLATE.suggestedRules.length, 3);
+  assert.equal(GENERAL_COLLABORATION_TEMPLATE.roleSlots.length, 1);
 });
 
 test('a Project can be created with only a name; the Human membership and template snapshot are implicit', async () => {
@@ -66,9 +84,20 @@ test('a Project can be created with only a name; the Human membership and templa
   assert.ok(membershipIsActive(project, 'operator'));
   // Missing Agents and Environments do not invalidate identity.
   assert.deepEqual(activeAgentMemberIds(project), []);
-  // Goal and rules may be absent.
-  assert.equal(currentProjectContent(project).goal, '');
-  assert.deepEqual(currentProjectContent(project).rules, []);
+  // Name-only creation starts from the template's full editable content
+  // (F2): the goal guidance seeds the goal, and the suggested rules, wake
+  // policy, and routing interval seed the routing decisions — all editable
+  // copies, never links.
+  assert.equal(currentProjectContent(project).goal, GENERAL_COLLABORATION_TEMPLATE.goalGuidance);
+  assert.deepEqual(
+    currentProjectContent(project).rules,
+    [...GENERAL_COLLABORATION_TEMPLATE.suggestedRules],
+  );
+  assert.equal(currentProjectContent(project).wakePolicy, GENERAL_COLLABORATION_TEMPLATE.wakePolicy);
+  assert.equal(
+    currentProjectContent(project).routingIntervalMs,
+    GENERAL_COLLABORATION_TEMPLATE.routingIntervalMs,
+  );
   // The template snapshot records its source version at creation.
   assert.equal(project.template.templateId, GENERAL_COLLABORATION_TEMPLATE.id);
   assert.equal(project.template.templateVersion, GENERAL_COLLABORATION_TEMPLATE.version);
@@ -81,6 +110,22 @@ test('creating a Project copies the template as an editable snapshot, not a link
   const projects = service();
   const project = await projects.create({ id: 'project-snap', displayName: 'Snapshot' });
   const copied = currentProjectContent(project);
+
+  // The snapshot records the template's full editable starting content
+  // (F2): goal guidance, suggested rules, role slots, wake policy, and
+  // routing interval are all version-attributed copies taken at creation.
+  assert.equal(project.template.goalGuidance, GENERAL_COLLABORATION_TEMPLATE.goalGuidance);
+  assert.deepEqual(project.template.suggestedRules, [...GENERAL_COLLABORATION_TEMPLATE.suggestedRules]);
+  assert.equal(project.template.roleSlots.length, GENERAL_COLLABORATION_TEMPLATE.roleSlots.length);
+  assert.equal(project.template.wakePolicy, GENERAL_COLLABORATION_TEMPLATE.wakePolicy);
+  assert.equal(project.template.routingIntervalMs, GENERAL_COLLABORATION_TEMPLATE.routingIntervalMs);
+
+  // The copy is decoupled from the source: mutating the snapshot's arrays
+  // cannot reach the template, and the template's deep freeze blocks the
+  // reverse direction.
+  (project.template.suggestedRules as string[]).push('local edit');
+  assert.equal(GENERAL_COLLABORATION_TEMPLATE.suggestedRules.length, 3);
+  assert.notDeepEqual(project.template.suggestedRules, [...GENERAL_COLLABORATION_TEMPLATE.suggestedRules]);
 
   // The copy is editable: a later edit appends a Project content version and
   // leaves the template source untouched.
@@ -188,6 +233,8 @@ test('ending a membership is refused while active work depends on the member', a
   const blockers = {
     hasActiveRun: (projectId: string) => projectId === 'project-busy',
     hasUnfinishedTask: () => false,
+    hasHeldOrRecoveringLease: () => false,
+    hasTaskInRecoveryOrEnding: () => false,
     memberHasActiveRun: (projectId: string, memberId: string) =>
       projectId === 'project-busy' && memberId === 'agent-runner',
     memberHasUnfinishedTask: (projectId: string, memberId: string) =>
@@ -248,6 +295,8 @@ test('archive is refused while active work depends on the Project and retains ev
   const blockers = {
     hasActiveRun: (projectId: string) => projectId === 'project-active',
     hasUnfinishedTask: (projectId: string) => projectId === 'project-tasked',
+    hasHeldOrRecoveringLease: (projectId: string) => projectId === 'project-lease',
+    hasTaskInRecoveryOrEnding: (projectId: string) => projectId === 'project-recovering-task',
     memberHasActiveRun: () => false,
     memberHasUnfinishedTask: () => false,
   };
@@ -265,6 +314,16 @@ test('archive is refused while active work depends on the Project and retains ev
     displayName: 'Unfinished task',
     agentMemberships: [{ agentId: 'agent-two' }],
   });
+  await projects.create({
+    id: 'project-lease',
+    displayName: 'Held lease',
+    agentMemberships: [{ agentId: 'agent-three' }],
+  });
+  await projects.create({
+    id: 'project-recovering-task',
+    displayName: 'Recovering task',
+    agentMemberships: [{ agentId: 'agent-four' }],
+  });
   await projects.create({ id: 'project-restful', displayName: 'Restful' });
 
   await assert.rejects(
@@ -274,6 +333,20 @@ test('archive is refused while active work depends on the Project and retains ev
   );
   await assert.rejects(
     () => projects.archive('project-tasked'),
+    (error: unknown) =>
+      error instanceof ProjectAuthorityError && error.code === 'active-work-depends-on-project',
+  );
+  // A held or recovering lease blocks archive even when every run and Task
+  // row looks settled: a restart leaves a failed orphaned run behind a
+  // `recovering` lease (F3, ADR-0008).
+  await assert.rejects(
+    () => projects.archive('project-lease'),
+    (error: unknown) =>
+      error instanceof ProjectAuthorityError && error.code === 'active-work-depends-on-project',
+  );
+  // A Task mid-recovery or mid-end blocks archive.
+  await assert.rejects(
+    () => projects.archive('project-recovering-task'),
     (error: unknown) =>
       error instanceof ProjectAuthorityError && error.code === 'active-work-depends-on-project',
   );

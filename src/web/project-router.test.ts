@@ -66,7 +66,15 @@ async function projectApi(): Promise<ProjectRuntime> {
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
   const credential = randomBytes(32).toString('base64url');
   await auth.initializeOrRecover(credential);
-  const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 10_000 });
+  const projects = new ProjectService({
+    store: new InMemoryProjectAuthorityStore(),
+    clock: () => 10_000,
+    // The composed global Agent authority (F5): a membership must name a real
+    // portable Agent; an invented id is refused.
+    agentAuthority: {
+      agentExists: (agentId) => ['agent-scout', 'agent-dup', 'agent-leaky'].includes(agentId),
+    },
+  });
   const api = createRunApi({
     orchestrator,
     agents: new AgentRegistry([
@@ -201,7 +209,8 @@ test('archive/restore safety and read-only enforcement are observable over HTTP'
     const archived = await command(runtime, '/api/projects/project-gated/archive', { reason: 'done for now' });
     assert.equal(archived.status, 200);
     const readOnly = await command(runtime, '/api/projects/project-gated/content', { goal: 'x' });
-    assert.equal(readOnly.status, 400);
+    // Archived read-only is a lifecycle conflict, not request validation (F4).
+    assert.equal(readOnly.status, 409);
     assert.equal(((await readOnly.json()) as { code: string }).code, 'archived-project-is-read-only');
     const restored = await command(runtime, '/api/projects/project-gated/restore', {});
     assert.equal(restored.status, 200);
@@ -266,8 +275,17 @@ test('unknown projects and unknown-member operations return typed errors', async
     assert.equal(badEnd.status, 404);
     await command(runtime, '/api/projects', { id: 'project-real', displayName: 'Real' });
     const notMember = await command(runtime, '/api/projects/project-real/memberships/agent-ghost/end', {});
-    assert.equal(notMember.status, 400);
+    assert.equal(notMember.status, 409);
     assert.equal(((await notMember.json()) as { code: string }).code, 'membership-not-active');
+    // A duplicate active membership and an invented member are distinct
+    // conflicts: duplicate is 409, unknown Agent is 404 (F4/F5).
+    await command(runtime, '/api/projects/project-real/memberships', { agentId: 'agent-dup' });
+    const duplicate = await command(runtime, '/api/projects/project-real/memberships', { agentId: 'agent-dup' });
+    assert.equal(duplicate.status, 409);
+    assert.equal(((await duplicate.json()) as { code: string }).code, 'duplicate-membership');
+    const ghost = await command(runtime, '/api/projects/project-real/memberships', { agentId: 'agent-ghost' });
+    assert.equal(ghost.status, 404);
+    assert.equal(((await ghost.json()) as { code: string }).code, 'unknown-agent');
   } finally {
     await runtime.api.close();
   }

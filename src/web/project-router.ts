@@ -1,7 +1,8 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import { ProjectAuthorityError } from '../project/authority-model.ts';
 import type { ProjectService } from '../project/authority-service.ts';
-import { toProjectAuthorityView } from './views.ts';
+import type { ProjectRegistry } from '../project/registry.ts';
+import { toProjectAuthorityView, toProjectView } from './views.ts';
 
 /**
  * The Project, template-snapshot, and membership authority router (#92).
@@ -24,6 +25,14 @@ import { toProjectAuthorityView } from './views.ts';
 
 export interface ProjectRouterOptions {
   readonly projects: ProjectService;
+  /**
+   * The M1 composer registry, when the runtime composed one. Its configured
+   * Projects are merged into `GET /api/projects` so the authority route never
+   * shadows a legacy Project the composer can still address (F1, #85 route
+   * compatibility). Authority records win for a shared id: one stable
+   * identity, never two.
+   */
+  readonly legacyProjects?: ProjectRegistry;
 }
 
 function json(context: ApiRequestContext, status: number, body: unknown): boolean {
@@ -59,7 +68,21 @@ function statusFilter(value: string | undefined): 'active' | 'archived' | undefi
 
 function projectFailure(context: ApiRequestContext, error: unknown): boolean {
   if (error instanceof ProjectAuthorityError) {
-    const status = error.code === 'unknown-project' ? 404 : 400;
+    // Lifecycle conflicts are 409 under the existing Environment/Task router
+    // contract: active work, archived read-only, duplicate membership, and
+    // already-archived are states of the resource, not bad requests (F4).
+    // Only unknown targets and malformed input keep 404/400.
+    const status = error.code === 'unknown-project' || error.code === 'unknown-agent'
+      ? 404
+      : error.code === 'already-archived' ||
+          error.code === 'not-archived' ||
+          error.code === 'archived-project-is-read-only' ||
+          error.code === 'active-work-depends-on-project' ||
+          error.code === 'duplicate-membership' ||
+          error.code === 'membership-not-active' ||
+          error.code === 'human-membership-required'
+        ? 409
+        : 400;
     return json(context, status, { error: error.message, code: error.code });
   }
   context.response.writeHead(500, { 'content-type': 'application/json' });
@@ -68,7 +91,22 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
 }
 
 export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
-  const { projects } = options;
+  const { projects, legacyProjects } = options;
+
+  /**
+   * The merged composer-compatible listing: legacy configured Projects plus
+   * authority records, authority winning a shared id. Every entry carries the
+   * preserved `{ id, goal, memberIds }` composer fields.
+   */
+  async function composerCompatibleList(): Promise<readonly unknown[]> {
+    const listed = await projects.list();
+    const authorityIds = new Set(listed.map((project) => project.id));
+    const legacy = (legacyProjects?.list() ?? [])
+      .filter((project) => !authorityIds.has(project.id))
+      .map(toProjectView);
+    return [...legacy, ...listed.map(toProjectAuthorityView)];
+  }
+
   return {
     name: 'project-authority',
     async handle(context: ApiRequestContext): Promise<boolean> {
@@ -113,20 +151,23 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         }
       }
 
-      // GET /api/projects — list durable Projects, optionally by status.
-      // Additive over the preserved M1 composer route (same path, method GET);
-      // the M1 route only exists when no router answers first, and this
-      // projection is a superset of the composer's fields.
+      // GET /api/projects — list durable Projects, optionally by status,
+      // merged with any configured legacy composer Projects so the authority
+      // route never shadows the preserved M1 route (F1, #85). Legacy entries
+      // carry no lifecycle status, so an explicit status filter is
+      // authority-only.
       if (method === 'GET' && pathname === '/api/projects') {
         const status = statusFilter(context.searchParams.get('status') ?? undefined);
-        const listed = (await projects.list())
-          .filter((project) => status === undefined || project.status === status)
-          .map(toProjectAuthorityView);
+        const listed = status === undefined
+          ? await composerCompatibleList()
+          : (await projects.list())
+              .filter((project) => project.status === status)
+              .map(toProjectAuthorityView);
         return json(context, 200, { projects: listed });
       }
 
-      // GET /api/projects/authorities — the durable authority records, when
-      // both the composer route and this router are mounted.
+      // GET /api/projects/authorities — the durable authority records only,
+      // when both the composer route and this router are mounted.
       if (method === 'GET' && pathname === '/api/projects/authorities') {
         const status = statusFilter(context.searchParams.get('status') ?? undefined);
         const listed = (await projects.list())
