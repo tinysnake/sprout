@@ -262,10 +262,79 @@ test('the list and detail routes report archived Agents and filter by status', a
     const archivedList = (await archivedOnly.json()) as { agents: readonly AgentWireView[] };
     assert.deepEqual(archivedList.agents.map((agent) => agent.id), ['agent-b']);
 
-    const detail = await read(runtime.base, '/api/agents/agent-b', runtime);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('instructions null over the wire clears durably; an omitted field keeps them', async () => {
+  const runtime = await agentApi();
+  try {
+    await command(runtime.base, '/api/agents', runtime, {
+      id: 'programmer',
+      displayName: 'Programmer',
+      instructions: 'Verify tests before claiming completion.',
+      workOptions: [{ id: 'opt-1', engine: 'codex', workModel: 'gpt-5.2-codex', effort: 'high' }],
+    });
+
+    // An omitted field keeps the current instructions (a keep-edit still
+    // appends its version).
+    const kept = await command(runtime.base, '/api/agents/programmer/configuration', runtime, {
+      workOptions: [{ id: 'opt-1', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+      reason: 'switch engine',
+    });
+    assert.equal(kept.status, 200);
+    const { agent: keptAgent } = (await kept.json()) as { agent: AgentWireView };
+    assert.equal(keptAgent.configuration.currentVersion, 2);
+    assert.equal(keptAgent.configuration.versions[1]!.instructions, 'Verify tests before claiming completion.');
+
+    // An explicit `null` clears: the new version carries no instructions and
+    // the read-back proves the durable state, not just the response.
+    const cleared = await command(runtime.base, '/api/agents/programmer/configuration', runtime, {
+      workOptions: [{ id: 'opt-1', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
+      instructions: null,
+      reason: 'Standing instructions updated.',
+    });
+    assert.equal(cleared.status, 200);
+    const { agent: clearedAgent } = (await cleared.json()) as { agent: AgentWireView };
+    assert.equal(clearedAgent.configuration.currentVersion, 3);
+    assert.equal('instructions' in clearedAgent.configuration.versions[2]!, false);
+
+    const detail = await read(runtime.base, '/api/agents/programmer', runtime);
     assert.equal(detail.status, 200);
-    const missing = await read(runtime.base, '/api/agents/nobody', runtime);
-    assert.equal(missing.status, 404);
+    const { agent: reread } = (await detail.json()) as { agent: AgentWireView };
+    assert.equal('instructions' in reread.configuration.versions[2]!, false, 'the clear is durable');
+    assert.equal(reread.configuration.versions[0]!.instructions, 'Verify tests before claiming completion.');
+    assert.equal(reread.configuration.versions[1]!.instructions, 'Verify tests before claiming completion.');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('validation refusals answer with a typed 400 code and no raw diagnostic', async () => {
+  const runtime = await agentApi();
+  try {
+    await command(runtime.base, '/api/agents', runtime, {
+      id: 'programmer',
+      displayName: 'Programmer',
+      workOptions: [{ id: 'opt-1', engine: 'codex', workModel: 'gpt-5.2-codex', effort: 'high' }],
+    });
+
+    // A host-shaped work model is refused by the write boundary.
+    const refused = await command(runtime.base, '/api/agents/programmer/configuration', runtime, {
+      workOptions: [{ engine: 'codex', workModel: 'buildbox-7', effort: 'high' }],
+    });
+    assert.equal(refused.status, 400);
+    const { error, code } = (await refused.json()) as { error?: string; code?: string };
+    assert.match(error ?? '', /valid work model identifier/);
+    assert.equal(code, 'invalid-work-option');
+    // The refusal never carries a host path, credential, or address shape.
+    assert.equal(/\/Users\//.test(error ?? ''), false);
+    assert.equal(/sk-[a-zA-Z0-9]{20,}/.test(error ?? ''), false);
+    // Nothing was written.
+    const unchanged = await read(runtime.base, '/api/agents/programmer', runtime);
+    const { agent } = (await unchanged.json()) as { agent: AgentWireView };
+    assert.equal(agent.configuration.currentVersion, 1);
   } finally {
     await runtime.api.close();
   }

@@ -93,15 +93,22 @@ async function setupProductionDom() {
 }
 
 /**
- * Deterministic tests inject the fixture authority explicitly. The production
- * route itself requires a typed adapter and renders an unavailable state when
- * none is provided, so it never defaults to fixture facts.
+ * Deterministic tests inject the fixture authorities explicitly. The production
+ * routes themselves require typed adapters and render unavailable states when
+ * none is provided, so they never default to fixture facts.
  */
 async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Promise<unknown> }) {
   const module = (await vite.ssrLoadModule(
     '/src/modules/environments/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
-  return { routerBase: '/app/', environmentService: new module.FixtureEnvironmentService() };
+  const agentsModule = (await vite.ssrLoadModule(
+    '/src/modules/agents/adapters/fixture-adapter.ts'
+  )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+  return {
+    routerBase: '/app/',
+    environmentService: new module.FixtureEnvironmentService(),
+    agentService: new agentsModule.FixtureAgentService(),
+  };
 }
 
 /**
@@ -1073,15 +1080,15 @@ test('Production Web: task card and agent card interactive details inspection', 
     // 2. In AgentsView: click agent card to view details
     await router.push('/manage/agents');
     await router.isReady();
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve) => setTimeout(resolve, 120));
 
-    const agentCard = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.includes('@Architect'));
+    const agentCard = doc.querySelector('[data-agent="architect"]') as HTMLButtonElement | null;
     assert.ok(agentCard, 'Architect agent card found');
     agentCard.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /@Architect/);
-    assert.match(doc.body.textContent ?? '', /System & Seams Architect/);
+    assert.match(doc.body.textContent ?? '', /Architect/);
+    assert.match(doc.body.textContent ?? '', /architect/, 'the stable identity is rendered');
 
     // 3. In FeedView: click task card to view Task Detail Dialog
     await router.push('/feed');

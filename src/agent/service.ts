@@ -68,7 +68,13 @@ export interface CreateAgentInput {
 
 export interface ReconfigureAgentInput {
   readonly displayName?: string;
-  readonly instructions?: string | undefined;
+  /**
+   * `undefined` keeps the current standing instructions; `null` clears them
+   * from this version on; a string replaces them through the privacy boundary.
+   * A cleared Agent records no instructions on the new version while earlier
+   * versions and past run attributions keep theirs.
+   */
+  readonly instructions?: string | null;
   readonly workOptions: readonly {
     readonly id?: string;
     readonly engine: string;
@@ -153,7 +159,12 @@ export class AgentService {
       ? sanitizeDisplayName(input.displayName)
       : agent.displayName;
     const instructions =
-      input.instructions === undefined ? current.instructions : sanitizeInstructions(input.instructions);
+      input.instructions === undefined
+        ? current.instructions
+        : input.instructions === null
+          ? // An explicit clear: the new version records no instructions.
+            undefined
+          : sanitizeInstructions(input.instructions);
     const options = input.workOptions.map((option) => sanitizeWorkOption(option));
     const version: AgentConfiguration = {
       currentVersion: agent.configuration.currentVersion + 1,
