@@ -2,7 +2,7 @@
 
 **Issue**: [#114](https://github.com/tinysnake/sprout/issues/114) (part of map #113)
 
-**Research date**: 2026-09-21; **rework revision**: 2026-09-22 (r0-rework1, addressing the independent review verdict on `2d58fb9e`).
+**Research date**: 2026-09-21; **rework revision**: 2026-09-22 (r0-rework2, addressing the independent re-review verdict on `2178d38e`; r0-rework1 addressed the review verdict on `2d58fb9e`).
 
 **Scope**: Codex CLI `0.154.0` and Pi `0.86.1` — the versions installed on the supported macOS research host. Codex `0.154.0` is also the version already probed and adapter-pinned by [#45](https://github.com/tinysnake/sprout/issues/45) and `src/engine/codex.ts`; Pi has moved from `0.85.1` (#45's pin) to `0.86.1`, and every Pi claim below was re-verified against `0.86.1` sources.
 
@@ -20,6 +20,14 @@ This revision resolves the six findings of the independent review verdict on com
 4. **Fact classification made single-valued and explicit**; local catalog presence and account entitlement are separate facts; unknown blocks admission unconditionally.
 5. **Live before/after auth-store hash/mtime evidence added for every retained candidate** (§4.1).
 6. **Codex `doctor` exit semantics corrected** (§2.1).
+
+## Revision note (r0-rework2)
+
+This revision resolves the single blocking auditability finding of the independent re-review verdict on commit `2178d38e`:
+
+1. **Codex refresh-default citation corrected.** The report previously attributed `params.refresh_token.unwrap_or(false)` to `get_account_response` at `6b9826e3`. At that exact commit `get_account_response` uses `let do_refresh = params.refresh_token;`, and the field is a non-optional `bool` with `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` in `codex-rs/app-server-protocol/src/protocol/v2/account.rs` (`GetAccountParams`). The operational conclusion is unchanged and is now cited to the actual pinned implementation and protocol definition (§2.3, [C3]).
+
+No other evidence was weakened or rewritten; the correction is report-only.
 
 ## Executive summary
 
@@ -111,9 +119,10 @@ Live probes (sanitized):
 | Authed ChatGPT, network blackholed | `account.type = chatgpt`, `requiresOpenaiAuth: true` |
 | Fresh `CODEX_HOME` | `account: null`, `requiresOpenaiAuth: true` |
 
-Semantics, from `app-server/src/request_processors/account_processor.rs` `get_account_response` at `6b9826e3`:
+Semantics, from `app-server/src/request_processors/account_processor.rs` `get_account_response` and `app-server-protocol/src/protocol/v2/account.rs` `GetAccountParams` at `6b9826e3`:
 
-- `params.refresh_token` is **absent-by-default `false`** (`let do_refresh = params.refresh_token.unwrap_or(false)`); `refresh_token_if_requested(do_refresh)` performs the OAuth refresh only when explicitly `true`. The readiness contract must send `params: {}` (or omit `refreshToken`), never `refreshToken: true`.
+- `get_account_response` reads `let do_refresh = params.refresh_token;` (a plain `bool`, not an `Option`; there is no `unwrap_or(false)` in this function). The field `GetAccountParams.refresh_token: bool` carries `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` in `codex-rs/app-server-protocol/src/protocol/v2/account.rs`, so an omitted wire `refreshToken` deserializes to `false`. `refresh_token_if_requested(do_refresh)` then performs the OAuth refresh only when the field is explicitly `true`. The readiness contract must send `params: {}` (or omit `refreshToken`), never `refreshToken: true`.
+- For contrast only: the separately-named `get_auth_status_response` handler (the v1 `getAuthStatus` RPC) does call `params.refresh_token.unwrap_or(false)`, because `GetAuthStatusParams.refresh_token` is an `Option<bool>` in `codex-rs/app-server-protocol/src/protocol/v1.rs`. That handler is a different RPC and is not the `account/read` path used here; the earlier report text mistakenly carried its expression onto `get_account_response`.
 - With refresh not requested, the handler reads in-process auth state (`provider.account_state()`); no model or billable endpoint is contacted. The blackholed probe returning a full account proves this.
 - `account/read` returns `email` (and `planType`) for ChatGPT accounts. The Worker readiness contract must reduce the response to `{authenticated: bool, authMode: "chatgpt" | "api_key" | ...}` and must not persist `email` or `planType` (privacy rule in `AGENTS.md`).
 - **Process side effects (not auth-state side effects)**: starting `codex app-server` under a fresh `CODEX_HOME` creates the server's state files (`logs_*.sqlite`, `memories_*.sqlite`, `queue_*.sqlite`, `installation_id`). The authentication store is untouched (verified in §4.1); C4 asserts auth-store immutability, and the server's own state files are out of the readiness fact set.
@@ -311,12 +320,12 @@ All links below are pinned to the resolved commit so they cannot drift.
 
 - **[C1]** [`codex-rs/cli/src/login.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/cli/src/login.rs) — `run_login_status`, message literals, exit codes, `safe_format_key`, no-refresh load path
 - **[C2]** [`codex-rs/login/src/auth/manager.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/login/src/auth/manager.rs) — `load_auth`, `AuthConfig::load_auth`, `should_refresh_proactively`, `refresh_token`
-- **[C3]** [`codex-rs/app-server/src/request_processors/account_processor.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/app-server/src/request_processors/account_processor.rs) — `get_account_response`, `refresh_token_if_requested`, `refresh_token.unwrap_or(false)`
+- **[C3]** [`codex-rs/app-server/src/request_processors/account_processor.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/app-server/src/request_processors/account_processor.rs) — `get_account_response` (`let do_refresh = params.refresh_token;`), `refresh_token_if_requested`; and [`codex-rs/app-server-protocol/src/protocol/v2/account.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/app-server-protocol/src/protocol/v2/account.rs) — `GetAccountParams.refresh_token: bool` with `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` (omitted wire field → `false`), `GetAccountResponse`
 - **[C4]** [`codex-rs/app-server/src/models.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/app-server/src/models.rs) — `supported_models` with `RefreshStrategy::OnlineIfUncached`
 - **[C5]** [`codex-rs/models-manager/src/manager.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/models-manager/src/manager.rs) — `RefreshStrategy`, `MODEL_CACHE_FILE`, `DEFAULT_MODEL_CACHE_TTL`, `build_available_models`
 - **[C6]** [`codex-rs/model-provider/src/models_endpoint.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/model-provider/src/models_endpoint.rs) and [`codex-rs/model-provider-info/src/lib.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/model-provider-info/src/lib.rs) — `MODELS_ENDPOINT = "/models"`, `CHATGPT_CODEX_BASE_URL`
 - **[C7]** [`codex-rs/cli/src/doctor.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/cli/src/doctor.rs) and [`codex-rs/login/src/auth/default_client.rs`](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/login/src/auth/default_client.rs) — `run_doctor` exit semantics (`overall_status == Fail → exit 1`) and headerless reachability probes
-- **[C8]** `codex app-server generate-json-schema --out <dir>` at `0.154.0` — `GetAccountParams`, `GetAccountResponse`, `Account`, `ModelListParams`, `ModelListResponse`, `Model`
+- **[C8]** `codex app-server generate-json-schema --out <dir>` at `0.154.0` — `GetAccountParams` (non-optional `refreshToken: bool`, default absent), `GetAccountResponse`, `Account`, `ModelListParams`, `ModelListResponse`, `Model`
 
 ### Pi (`v0.86.1` → commit `13cbf77df2396303013a41646bcfa77b4271ae56`)
 
