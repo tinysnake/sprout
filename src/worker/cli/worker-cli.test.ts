@@ -14,6 +14,7 @@ import {
 } from './worker-cli.ts';
 import {
   acquireWorkerLock,
+  acquireWorkerResetLock,
   ensureStateDirectory,
   readConfig,
   readRuntimeState,
@@ -21,6 +22,7 @@ import {
   workerHostPaths,
   workerServiceLabel,
   writePrivateFile,
+  type WorkerProcessIdentity,
 } from './host-state.ts';import {
   WorkerEnrollmentPendingError,
   WorkerEnrollmentRefusedError,
@@ -67,6 +69,7 @@ function harness(overrides: {
     confirm: async () => overrides.confirm ?? true,
     platform: overrides.platform ?? 'darwin',
     uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     now: () => 1_000,
     run: (command, args) => {
       // A real `command -v` probe is not part of the CLI's unit contract; the
@@ -85,6 +88,14 @@ function harness(overrides: {
     err,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+function processIdentity(pid: number, tokenCharacter = 'a'): WorkerProcessIdentity {
+  return { pid, startIdentity: `test-start-${pid}-${tokenCharacter}`, ownerToken: tokenCharacter.repeat(43) };
+}
+
+function probe(...identities: readonly WorkerProcessIdentity[]) {
+  return (pid: number): WorkerProcessIdentity | undefined => identities.find((identity) => identity.pid === pid);
 }
 
 /** A connector that answers as an approved, accepted Worker would. */
@@ -124,6 +135,7 @@ test('enroll reads the claim secret from stdin, generates the key, and persists 
     connect: connector,
     platform: 'darwin',
     uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     run: (command, args) => {
       void command;
       void args;
@@ -166,6 +178,7 @@ test('an interrupted enrollment leaves no reusable host-local identity', async (
     connect: connector,
     platform: 'darwin',
     uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     run: () => '',
   });
   try {
@@ -191,6 +204,7 @@ test('a proven-but-unapproved identity persists configuration and reports awaiti
     connect: connector,
     platform: 'darwin',
     uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     run: () => '',
   });
   try {
@@ -217,6 +231,7 @@ test('a refused enrollment reports a refusal and leaves no configuration', async
     connect: connector,
     platform: 'darwin',
     uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     run: () => '',
   });
   try {
@@ -244,6 +259,7 @@ test('enroll rejects a malformed endpoint and never accepts the secret as an arg
 test('start refuses a duplicate live Worker for the same environment', async () => {
   const h = harness();
   const { connector } = acceptedConnector();
+  const holderIdentity = processIdentity(77_001, 'b');
   const cli = createWorkerCli({
     paths: () => h.paths,
     stdout: (line) => h.out.push(line),
@@ -251,7 +267,9 @@ test('start refuses a duplicate live Worker for the same environment', async () 
     connect: connector,
     platform: 'darwin',
     uid: 501,
-    run: () => 'sprout worker start',
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+    run: () => '',
+    processProbe: probe(holderIdentity),
   });
   try {
     ensureStateDirectory(h.paths);
@@ -264,9 +282,8 @@ test('start refuses a duplicate live Worker for the same environment', async () 
       identityFileName: 'identity.pem',
     }));
     writePrivateFile(h.paths.identityPath, 'PRIVATE KEY MATERIAL');
-    // A live lock held by a process whose command line is this host's Worker.
-    // A foreign live pid (with a Worker-looking command line) must refuse start.
-    const held = acquireWorkerLock(h.paths, process.ppid, () => 'sprout worker start');
+    // A live lock held by a distinct opaque owner binding refuses start.
+    const held = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
     void held;
     const status = await cli.run(['start']);
     assert.equal(status, WORKER_EXIT.alreadyRunning);
@@ -288,6 +305,7 @@ test('status reports not-enrolled before and stopped/connected after start', asy
       connect: connector,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async () => undefined,
     });
@@ -350,6 +368,7 @@ test('reset requires explicit confirmation and removes host-local identity', asy
       confirm: async () => false,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
     });
     try {
@@ -386,6 +405,7 @@ test('install-service renders and installs a LaunchAgent; uninstall-service remo
       stderr: (line) => h.err.push(line),
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: (command, args) => {
         calls.push([command, ...args].join(' '));
         return '';
@@ -447,28 +467,28 @@ test('the status projection distinguishes every documented state', () => {
   const base = { paths, enrolled: true, config, configError: undefined, serviceInstalled: false };
   assert.equal(projectStatus({ ...base, runtime: undefined, processAlive: () => true }).state, 'stopped');
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'connecting', at: 0 }, processAlive: () => true }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'connecting', at: 0 }, processAlive: () => true }).state,
     'connecting',
   );
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'connected', at: 0 }, processAlive: () => true }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'connected', at: 0 }, processAlive: () => true }).state,
     'connected',
   );
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'pending-approval', at: 0 }, processAlive: () => true }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'pending-approval', at: 0 }, processAlive: () => true }).state,
     'pending-approval',
   );
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'incompatible', at: 0 }, processAlive: () => true }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'incompatible', at: 0 }, processAlive: () => true }).state,
     'incompatible',
   );
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'revoked', at: 0 }, processAlive: () => true }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'revoked', at: 0 }, processAlive: () => true }).state,
     'revoked',
   );
   // A dead pid is stopped, never trusted as connected.
   assert.equal(
-    projectStatus({ ...base, runtime: { pid: 1, state: 'connected', at: 0 }, processAlive: () => false }).state,
+    projectStatus({ ...base, runtime: { pid: 1, process: processIdentity(1), state: 'connected', at: 0 }, processAlive: () => false }).state,
     'stopped',
   );
   assert.equal(
@@ -514,6 +534,7 @@ test('the default stdin reader claims the secret from a real pipe without echoin
       connect: connector,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
     });
     // Feed the claim secret through the process-level default reader seam by
@@ -565,8 +586,7 @@ test('status preserves the recorded terminal refusal after the refused process e
   try {
     seedEnrolledHost(h.paths);
     writeRuntimeState(h.paths, {
-      pid: 424_242,
-      state: 'revoked',
+      pid: 424_242, process: processIdentity(424_242), state: 'revoked',
       at: 1,
       detail: 'the Sprout instance refused the connection',
     });
@@ -585,7 +605,7 @@ test('status preserves pending-approval and incompatible refusals after exit', a
     const h = harness();
     try {
       seedEnrolledHost(h.paths);
-      writeRuntimeState(h.paths, { pid: 424_242, state: terminal, at: 1 });
+      writeRuntimeState(h.paths, { pid: 424_242, process: processIdentity(424_242), state: terminal, at: 1 });
       assert.equal(await h.run(['status']), WORKER_EXIT.ok);
       assert.match(h.out.join('\n'), new RegExp(`state: ${terminal}`));
     } finally {
@@ -598,43 +618,41 @@ test('status reports a live connected Worker only when the pid is a verified Wor
   const h = harness();
   try {
     seedEnrolledHost(h.paths);
-    // Use this test's own real pid: liveness is checked against the real OS,
-    // and the seam runner answers the command-line probe as a Worker daemon.
-    writeRuntimeState(h.paths, { pid: process.pid, state: 'connected', at: 1, epoch: 2 });
+    // The live PID is trusted only when its token and OS start marker match.
+    const liveIdentity = processIdentity(process.pid, 'f');
+    writeRuntimeState(h.paths, { pid: process.pid, process: liveIdentity, state: 'connected', at: 1, epoch: 2 });
     const liveCli = createWorkerCli({
       paths: () => h.paths,
       stdout: (line) => h.out.push(line),
       stderr: (line) => h.err.push(line),
       platform: 'darwin',
       uid: 501,
-      run: () => 'sprout worker start',
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+      processProbe: probe(liveIdentity),
     });
     assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
     assert.match(h.out.join('\n'), /state: connected/);
 
-    // A reused pid whose command line is not this host's Worker is not trusted.
+    // A reused PID with a different token is not trusted.
     const h2 = harness();
     try {
       seedEnrolledHost(h2.paths);
-      // A live pid (this test) whose command line probe reports a non-Worker:
-      // a reused pid must never be reported as a connected Worker.
-      writeRuntimeState(h2.paths, { pid: process.pid, state: 'connected', at: 1, epoch: 2 });
+      const oldIdentity = processIdentity(process.pid, 'g');
+      const replacementIdentity = processIdentity(process.pid, 'h');
+      writeRuntimeState(h2.paths, { pid: process.pid, process: oldIdentity, state: 'connected', at: 1, epoch: 2 });
       const cli = createWorkerCli({
         paths: () => h2.paths,
         stdout: (line) => h2.out.push(line),
         stderr: (line) => h2.err.push(line),
         platform: 'darwin',
         uid: 501,
-        run: (command, args) => {
-          // Only the daemon-identity probe hits the runner; launchctl print for
-          // the not-installed service must still answer as "not loaded".
-          void command;
-          void args;
-          return 'launchd: Could not find service';
-        },
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+        run: () => '',
+        processProbe: probe(replacementIdentity),
       });
       assert.equal(await cli.run(['status']), WORKER_EXIT.ok);
-      assert.match(h2.out.join('\n'), /state: stopped/, 'a non-Worker command line is never reported connected');
+      assert.match(h2.out.join('\n'), /state: stopped/, 'a same-PID replacement is never reported connected');
     } finally {
       h2.cleanup();
     }
@@ -675,7 +693,7 @@ test('status reports a malformed runtime record as a local configuration failure
   const h = harness();
   try {
     seedEnrolledHost(h.paths);
-    writePrivateFile(h.paths.runtimePath, JSON.stringify({ pid: 1, state: 'possessed', at: 0 }));
+    writePrivateFile(h.paths.runtimePath, JSON.stringify({ pid: 1, process: processIdentity(1), state: 'possessed', at: 0 }));
     const status = await h.run(['status']);
     assert.equal(status, WORKER_EXIT.failure);
     assert.match(h.out.join('\n'), /state: local-configuration-failure/);
@@ -688,7 +706,8 @@ test('reset refuses while a live foreground Worker holds the lock', async () => 
   const h = harness();
   try {
     seedEnrolledHost(h.paths);
-    const holder = acquireWorkerLock(h.paths, process.ppid, () => 'sprout worker start');
+    const holderIdentity = processIdentity(77_002, 'c');
+    const holder = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
     const cli = createWorkerCli({
       paths: () => h.paths,
       stdout: (line) => h.out.push(line),
@@ -696,14 +715,41 @@ test('reset refuses while a live foreground Worker holds the lock', async () => 
       confirm: async () => true,
       platform: 'darwin',
       uid: 501,
-      run: () => 'sprout worker start',
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+      processProbe: probe(holderIdentity),
     });
     const status = await cli.run(['reset', '--yes']);
     holder.release();
     assert.equal(status, WORKER_EXIT.failure);
-    assert.match(h.err.join('\n'), /still running/);
+    assert.match(h.err.join('\n'), /still owns/);
     assert.ok(existsSync(h.paths.identityPath), 'the identity survives a refused reset');
     assert.ok(existsSync(h.paths.configPath), 'the configuration survives a refused reset');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a reset maintenance fence prevents a concurrent start from racing destructive removal', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const resetIdentity = processIdentity(77_003, 'd');
+    const resetLock = acquireWorkerResetLock(h.paths, resetIdentity, probe(resetIdentity));
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+      processProbe: probe(resetIdentity),
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      serve: async () => undefined,
+    });
+    assert.equal(await cli.run(['start']), WORKER_EXIT.alreadyRunning);
+    assert.ok(existsSync(h.paths.configPath), 'the start lost the exclusive fence before any state changed');
+    resetLock.release();
   } finally {
     h.cleanup();
   }
@@ -722,6 +768,7 @@ test('reset fails closed when the LaunchAgent cannot be booted out', async () =>
       confirm: async () => true,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: (command, args) => {
         if (command === 'launchctl' && args[0] === 'bootout') {
           throw new Error('launchctl: bootout failed: 36: Operation not permitted');
@@ -772,6 +819,7 @@ test('uninstall-service fails closed when bootout fails and keeps the plist', as
       stderr: (line) => h.err.push(line),
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: (command, args) => {
         if (command === 'launchctl' && args[0] === 'bootout') {
           throw new Error('launchctl: bootout failed: 36: Operation not permitted');

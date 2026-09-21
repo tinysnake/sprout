@@ -94,6 +94,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       readClaimSecret: async () => secret,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async () => undefined,
     });
@@ -125,6 +126,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       stderr: (line) => err.push(line),
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async ({ connection, environmentInstanceId }) => {
         const engines = new Map<string, never>();
@@ -174,6 +176,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       stderr: (line) => err.push(line),
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
     });
     assert.equal(await statusCli.run(['status']), WORKER_EXIT.ok);
@@ -211,6 +214,7 @@ test('reset after enrollment removes the identity so the old key cannot reconnec
       readClaimSecret: async () => secret,
       platform: 'darwin',
       uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async () => undefined,
     });

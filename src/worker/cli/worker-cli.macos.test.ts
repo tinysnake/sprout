@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { existsSync } from 'node:fs';
-
-import { launchAgentPlistPath, renderLaunchAgent } from './launch-agent.ts';
+import { inspectLaunchAgent, installLaunchAgent, launchAgentPlistPath, renderLaunchAgent, restartLaunchAgent, uninstallLaunchAgent } from './launch-agent.ts';
 import { workerServiceLabel } from './host-state.ts';
 
 /**
@@ -51,6 +50,38 @@ test('sprout worker status on an unconfigured host exits not-enrolled', { skip: 
     });
     assert.equal(result.status, 3, result.stderr);
     assert.match(result.stdout, /state: not-enrolled/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the packaged start re-execs with an inspectable host-local process binding', { skip: !onMac }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-exec-binding-'));
+  try {
+    const state = join(root, 'state');
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    const config = {
+      version: 1,
+      enrollmentId: 'enroll-synthetic',
+      environmentInstanceId: 'env-synthetic',
+      protocolVersion: '2',
+      endpoint: { host: '127.0.0.1', port: 1 },
+      identityFileName: 'identity.pem',
+    };
+    writeFileSync(join(state, 'config.json'), JSON.stringify(config));
+    writeFileSync(join(state, 'identity.pem'), 'test-only-private-key');
+    chmodSync(join(state, 'config.json'), 0o600);
+    chmodSync(join(state, 'identity.pem'), 0o600);
+    const result = spawnSync(sproutExecutable, ['worker', 'start'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents') },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.doesNotMatch(result.stderr, /could not establish a host-local Worker process identity/);
+    const runtime = JSON.parse(readFileSync(join(state, 'runtime.json'), 'utf8')) as { process?: { startIdentity?: unknown; ownerToken?: unknown } };
+    assert.equal(typeof runtime.process?.startIdentity, 'string');
+    assert.match(runtime.process?.ownerToken as string, /^[A-Za-z0-9_-]{43}$/);
+    assert.ok(!result.stdout.includes(runtime.process?.ownerToken as string) && !result.stderr.includes(runtime.process?.ownerToken as string));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -178,6 +209,58 @@ test('sprout worker enroll reads a real piped claim secret over the default stdi
   }
 });
 
+test('the default enrollment reader suppresses echo on a real macOS PTY', { skip: !onMac }, async () => {
+  // Python's `pty.openpty()` allocates a kernel PTY. This is deliberately not a mocked
+  // PassThrough/isTTY pair: the child sees the OS terminal mode that an
+  // operator sees. The child reports only the length, so the assertion can
+  // prove the submitted input was not echoed without writing it to evidence.
+  const secret = 'pty-claim-secret-sentinel';
+  const readerModule = new URL('./host-state.ts', import.meta.url).href;
+  const program = [
+    `import { readSecretFromStdin } from ${JSON.stringify(readerModule)};`,
+    "const value = await readSecretFromStdin(process.stdin, process.stdout, 'hidden: ');",
+    "process.stdout.write(`received:${value.length}\\n`); process.exit(0);",
+  ].join(' ');
+  const ptyBridge = [
+    'import os, pty, select, subprocess, sys, time',
+    'master, slave = pty.openpty()',
+    'child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, close_fds=True)',
+    'os.close(slave)',
+    'stdout = sys.stdout.buffer',
+    "secret = os.environ['SPROUT_TEST_PTY_INPUT'].encode('utf-8') + b'\\r'",
+    'sent = False',
+    'while child.poll() is None:',
+    '  readable, _, _ = select.select([master], [], [])',
+    '  if master in readable:',
+    '    data = os.read(master, 4096)',
+    '    if data: stdout.write(data); stdout.flush()',
+    "    if not sent and b'hidden: ' in data: time.sleep(0.05); os.write(master, secret); sent = True",
+    'sys.exit(child.wait())',
+  ].join('\n');
+  const child = spawn('python3', ['-c', ptyBridge, process.execPath, '--input-type=module', '-e', program], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, SPROUT_TEST_PTY_INPUT: secret },
+  });
+  let output = '';
+  let error = '';
+  child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk: Buffer) => { error += chunk.toString('utf8'); });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('PTY reader did not finish'));
+    }, 10_000);
+    child.once('exit', (status) => {
+      clearTimeout(timeout);
+      resolve(status);
+    });
+    child.once('error', reject);
+  });
+  assert.equal(code, 0, error);
+  assert.match(output, new RegExp(`received:${secret.length}`));
+  assert.ok(!output.includes(secret) && !error.includes(secret), 'a real terminal must not echo the claim');
+});
+
 test('the service label is a pure digest and never carries an instance-name fragment', { skip: !onMac }, () => {
   const hostile = 'host-chosen-instance-name-with-host-text';
   const label = workerServiceLabel(hostile);
@@ -188,3 +271,62 @@ test('the service label is a pure digest and never carries an instance-name frag
     `/synthetic/LaunchAgents/${label}.plist`,
   );
 });
+
+test('a unique temporary LaunchAgent loads, restarts, and uninstalls without touching other user agents', { skip: !onMac }, async (t) => {
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    t.skip('requires a signed-in macOS user launchd domain');
+    return;
+  }
+  try {
+    // Safe preflight: without read access to the current user's domain the
+    // test cannot prove it will address only its exact generated label.
+    execFileSync('/bin/launchctl', ['print', `gui/${uid}`], { stdio: 'ignore' });
+  } catch {
+    t.skip('launchctl cannot safely inspect the current signed-in-user domain');
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-launchd-test-'));
+  const label = `dev.sprout.worker.test.${randomBytes(8).toString('hex')}`;
+  const plistPath = join(root, `${label}.plist`);
+  const scriptPath = join(root, 'hold.sh');
+  const markerPath = join(root, 'starts');
+  try {
+    // The only loaded job is a random, test-owned label and a script in this
+    // temporary directory. It has no Worker identity, config, or access to any
+    // persistent LaunchAgents directory.
+    writeFileSync(scriptPath, `#!/bin/sh\necho "$$" >> "$1"\nwhile :; do sleep 1; done\n`);
+    chmodSync(scriptPath, 0o700);
+    const plist = renderLaunchAgent({
+      label,
+      executablePath: scriptPath,
+      arguments: [markerPath],
+      logPath: join(root, 'agent.log'),
+      environment: { HOME: root, PATH: '/usr/bin:/bin' },
+    });
+    const paths = { launchAgentsDirectory: root } as never;
+    installLaunchAgent({ paths, label, plistPath, plistContent: plist, uid });
+    assert.ok(inspectLaunchAgent({ label, uid }) !== undefined, 'the exact temporary label is loaded');
+    await waitFor(() => existsSync(markerPath) && readFileSync(markerPath, 'utf8').trim() !== '');
+    const beforeRestart = readFileSync(markerPath, 'utf8').trim().split('\n').length;
+    restartLaunchAgent({ label, uid });
+    await waitFor(() => readFileSync(markerPath, 'utf8').trim().split('\n').length > beforeRestart);
+    const removed = uninstallLaunchAgent({ label, plistPath, uid });
+    assert.equal(removed.removed, true);
+    assert.equal(inspectLaunchAgent({ label, uid }), undefined, 'only the generated test job was booted out');
+    assert.equal(existsSync(plistPath), false);
+  } finally {
+    // Idempotent exact-label cleanup protects the signed-in user if an
+    // assertion fails. It never enumerates, unloads, or edits another agent.
+    try { execFileSync('/bin/launchctl', ['bootout', `gui/${uid}/${label}`], { stdio: 'ignore' }); } catch {}
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for isolated LaunchAgent lifecycle event');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

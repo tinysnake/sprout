@@ -41,12 +41,14 @@ import {
 } from '../enrollment-connector.ts';
 import {
   acquireWorkerLock,
-  activeWorkerLockHolder,
+  acquireWorkerResetLock,
+  createWorkerOwnerToken,
+  currentWorkerProcess,
   DuplicateWorkerProcessError,
   ensureStateDirectory,
   isEnrolled,
   isProcessAlive,
-  isWorkerDaemonProcess,
+  probeWorkerProcess,
   readConfig,
   readIdentityKey,
   readRuntimeState,
@@ -62,6 +64,8 @@ import {
   type WorkerHostPaths,
   type WorkerRuntimeState,
   type WorkerConnectionState,
+  type WorkerProcessIdentity,
+  type WorkerProcessProbe,
 } from './host-state.ts';
 import {
   installLaunchAgent,
@@ -159,6 +163,10 @@ export interface WorkerCliDependencies {
   readonly stdout?: (line: string) => void;
   readonly stderr?: (line: string) => void;
   readonly now?: () => number;
+  /** Probe exact host-local process bindings; tests may provide synthetic facts. */
+  readonly processProbe?: WorkerProcessProbe;
+  /** Establish this invocation's binding; test-only callers may supply a synthetic OS seam. */
+  readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
   /**
    * Serve the accepted channel. Defaults to the real `EnvironmentWorker`; tests
    * inject a recorder so `start` can be driven without a live core.
@@ -205,17 +213,17 @@ function isTerminalRefusalState(state: WorkerConnectionState): state is Terminal
  *
  * 1. An unenrolled host is `not-enrolled`; an unreadable configuration or an
  *    invalid identity key is a `local-configuration-failure`.
- * 2. A runtime record naming a live, verified Worker daemon pid is trusted as
- *    the live state (`connecting`, `connected`, or a terminal refusal).
- * 3. A runtime record whose pid is dead — or was reused by a non-Worker
+ * 2. A runtime record whose full host-local process binding is verified is
+ *    trusted as the live state (`connecting`, `connected`, or a terminal refusal).
+ * 3. A runtime record whose process is gone — or whose pid was reused by a non-owner
  *    process — preserves a last recorded terminal refusal fact so a refused
  *    Worker is never reported as a healthy `stopped`; it clears `connecting`
  *    and `connected` to `stopped`, because those facts only exist while a
  *    process is actually serving.
  * 4. No runtime record at all is `stopped`.
  *
- * The daemon-identity check is the same command-line match the lock uses, so a
- * reused pid can never make a dead or foreign process look connected.
+ * The identity check compares an owner token and OS start marker, so a reused
+ * pid can never make a dead, foreign, or other-environment Worker look connected.
  */
 export function projectStatus(input: {
   readonly paths: WorkerHostPaths;
@@ -224,7 +232,7 @@ export function projectStatus(input: {
   readonly configError: 'not-enrolled' | 'invalid' | undefined;
   readonly runtime: WorkerRuntimeState | undefined;
   readonly processAlive: (pid: number) => boolean;
-  readonly processIsWorkerDaemon?: (pid: number) => boolean;
+  readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean;
   readonly serviceInstalled: boolean;
 }): WorkerStatus {
   if (!input.enrolled) {
@@ -242,8 +250,8 @@ export function projectStatus(input: {
     protocolVersion: input.config.protocolVersion,
   };
   const runtime = input.runtime;
-  const identityCheck = input.processIsWorkerDaemon ?? ((_pid: number) => true);
-  const trusted = runtime !== undefined && input.processAlive(runtime.pid) && identityCheck(runtime.pid);
+  const identityCheck = input.processMatchesRuntime ?? ((_process: WorkerProcessIdentity) => true);
+  const trusted = runtime !== undefined && input.processAlive(runtime.pid) && identityCheck(runtime.process);
   if (runtime === undefined || !trusted) {
     if (runtime !== undefined && isTerminalRefusalState(runtime.state)) {
       // Preserve the durable refusal/pending fact even after the process
@@ -327,6 +335,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   const uid = dependencies.uid ?? process.getuid?.() ?? 0;
   const now = dependencies.now ?? (() => Date.now());
   const runCommand = dependencies.run;
+  const processProbe = dependencies.processProbe ?? probeWorkerProcess;
+  const currentProcess = dependencies.currentProcess ?? currentWorkerProcess;
 
   const connect: EnrollmentConnector =
     dependencies.connect ??
@@ -537,83 +547,93 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       return WORKER_EXIT.failure;
     }
 
-    let lock: { release: () => void };
+    // The token is private process environment state, not argv or persisted
+    // portable configuration. It is installed before probing the OS so every
+    // runtime and lock record binds this exact process incarnation.
+    const previousOwnerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'];
+    const ownerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'] ?? createWorkerOwnerToken();
+    process.env['SPROUT_WORKER_OWNER_TOKEN'] = ownerToken;
     try {
-      lock = acquireWorkerLock(paths, process.pid, runCommand);
-    } catch (error) {
-      if (error instanceof DuplicateWorkerProcessError) {
-        err(`sprout worker start: ${error.message}`);
-        return WORKER_EXIT.alreadyRunning;
+      let processIdentity: WorkerProcessIdentity;
+      try {
+        processIdentity = currentProcess(ownerToken);
+      } catch (error) {
+        err(`sprout worker start: ${messageOf(error)}`);
+        return WORKER_EXIT.failure;
       }
-      err(`sprout worker start: ${messageOf(error)}`);
-      return WORKER_EXIT.failure;
-    }
 
-    const engineIds = safeEngineIds(environment);
-    recordState(paths, { pid: process.pid, state: 'connecting', at: now() });
+      let lock: { release: () => void };
+      try {
+        lock = acquireWorkerLock(paths, processIdentity, processProbe);
+      } catch (error) {
+        if (error instanceof DuplicateWorkerProcessError) {
+          err(`sprout worker start: ${error.message}`);
+          return WORKER_EXIT.alreadyRunning;
+        }
+        err(`sprout worker start: ${messageOf(error)}`);
+        return WORKER_EXIT.failure;
+      }
 
-    let connection: WorkerEnrollmentConnection;
-    try {
-      connection = await connect({
-        host: config.endpoint.host,
-        port: config.endpoint.port,
-        enrollmentId: config.enrollmentId,
-        claimSecret: undefined,
-        identityKeyPath: identityPath,
-        engineFacts: engineFacts(engineIds),
-        log: (line) => err(`[sprout-worker] ${line}`),
-      });
-    } catch (error) {
-      if (error instanceof WorkerEnrollmentPendingError) {
-        recordState(paths, {
-          pid: process.pid,
-          state: 'pending-approval',
-          at: now(),
-          detail: 'the Worker identity is proven and awaiting Human approval',
+      const engineIds = safeEngineIds(environment);
+      recordState(paths, { pid: process.pid, process: processIdentity, state: 'connecting', at: now() });
+
+      let connection: WorkerEnrollmentConnection;
+      try {
+        connection = await connect({
+          host: config.endpoint.host,
+          port: config.endpoint.port,
+          enrollmentId: config.enrollmentId,
+          claimSecret: undefined,
+          identityKeyPath: identityPath,
+          engineFacts: engineFacts(engineIds),
+          log: (line) => err(`[sprout-worker] ${line}`),
         });
-        err('sprout worker start: identity proven; waiting for Human approval in Sprout Web');
+      } catch (error) {
+        if (error instanceof WorkerEnrollmentPendingError) {
+          recordState(paths, {
+            pid: process.pid, process: processIdentity, state: 'pending-approval', at: now(),
+            detail: 'the Worker identity is proven and awaiting Human approval',
+          });
+          err('sprout worker start: identity proven; waiting for Human approval in Sprout Web');
+          lock.release();
+          return WORKER_EXIT.awaitingApproval;
+        }
+        if (error instanceof WorkerEnrollmentRefusedError) {
+          recordState(paths, {
+            pid: process.pid, process: processIdentity, state: error.code === 'incompatible' ? 'incompatible' : 'revoked', at: now(), detail: error.message,
+          });
+          err(`sprout worker start: ${error.message}`);
+          lock.release();
+          return WORKER_EXIT.refused;
+        }
+        recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: messageOf(error) });
+        err(`sprout worker start: ${messageOf(error)}`);
         lock.release();
-        return WORKER_EXIT.awaitingApproval;
+        return WORKER_EXIT.failure;
       }
-      if (error instanceof WorkerEnrollmentRefusedError) {
-        recordState(paths, {
-          pid: process.pid,
-          state: error.code === 'incompatible' ? 'incompatible' : 'revoked',
-          at: now(),
-          detail: error.message,
-        });
-        err(`sprout worker start: ${error.message}`);
+
+      recordState(paths, { pid: process.pid, process: processIdentity, state: 'connected', at: now(), epoch: connection.epoch });
+      out(`Connected to Sprout as enrollment ${connection.enrollmentId} (epoch ${connection.epoch}).`);
+
+      const release = (finalState: WorkerConnectionState): void => {
+        recordState(paths, { pid: process.pid, process: processIdentity, state: finalState, at: now() });
         lock.release();
-        return WORKER_EXIT.refused;
+      };
+
+      try {
+        if (dependencies.serve !== undefined) {
+          await dependencies.serve({ connection, environmentInstanceId: config.environmentInstanceId, engineIds });
+        } else {
+          await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
+        }
+      } finally {
+        release('stopped');
       }
-      recordState(paths, { pid: process.pid, state: 'stopped', at: now(), detail: messageOf(error) });
-      err(`sprout worker start: ${messageOf(error)}`);
-      lock.release();
-      return WORKER_EXIT.failure;
-    }
-
-    recordState(paths, { pid: process.pid, state: 'connected', at: now(), epoch: connection.epoch });
-    out(`Connected to Sprout as enrollment ${connection.enrollmentId} (epoch ${connection.epoch}).`);
-
-    const release = (finalState: WorkerConnectionState): void => {
-      recordState(paths, { pid: process.pid, state: finalState, at: now() });
-      lock.release();
-    };
-
-    try {
-      if (dependencies.serve !== undefined) {
-        await dependencies.serve({
-          connection,
-          environmentInstanceId: config.environmentInstanceId,
-          engineIds,
-        });
-      } else {
-        await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
-      }
+      return WORKER_EXIT.ok;
     } finally {
-      release('stopped');
+      if (previousOwnerToken === undefined) delete process.env['SPROUT_WORKER_OWNER_TOKEN'];
+      else process.env['SPROUT_WORKER_OWNER_TOKEN'] = previousOwnerToken;
     }
-    return WORKER_EXIT.ok;
   }
 
   async function serveForeground(
@@ -723,7 +743,13 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         configError,
         runtime,
         processAlive: (pid) => isProcessAlive(pid),
-        processIsWorkerDaemon: (pid) => isWorkerDaemonProcess(pid, runCommand ?? realCommandRunner()),
+        processMatchesRuntime: (identity) => {
+          const observed = processProbe(identity.pid);
+          return observed !== undefined &&
+            observed.pid === identity.pid &&
+            observed.startIdentity === identity.startIdentity &&
+            observed.ownerToken === identity.ownerToken;
+        },
         serviceInstalled,
       });
     }
@@ -752,63 +778,74 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker reset: confirmation was not given; nothing was removed');
       return WORKER_EXIT.usage;
     }
-    // Fail closed: a running foreground Worker (holding the single-instance
-    // lock) must be stopped by its own operator before its identity is removed.
-    const lockHolder = activeWorkerLockHolder(paths, runCommand ?? realCommandRunner());
-    if (lockHolder !== undefined) {
-      err(
-        `sprout worker reset: a Worker for this environment is still running (pid ${lockHolder}); stop it before resetting`,
-      );
+
+    // Reset itself owns the same exclusive fence as start. Acquiring it is the
+    // liveness check and closes the old check-then-remove race: no new start can
+    // acquire the Worker lock until this reset has either failed or completed.
+    const previousOwnerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'];
+    const ownerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'] ?? createWorkerOwnerToken();
+    process.env['SPROUT_WORKER_OWNER_TOKEN'] = ownerToken;
+    let resetLock: { release: () => void };
+    try {
+      resetLock = acquireWorkerResetLock(paths, currentProcess(ownerToken), processProbe);
+    } catch (error) {
+      if (error instanceof DuplicateWorkerProcessError) {
+        err(`sprout worker reset: a Worker or reset still owns this host-local state${error.pid === undefined ? '' : ` (pid ${error.pid})`}; nothing was removed`);
+        return WORKER_EXIT.failure;
+      }
+      err(`sprout worker reset: could not establish exclusive ownership; nothing was removed (${messageOf(error)})`);
       return WORKER_EXIT.failure;
     }
-    // Stop the supervised service before the identity disappears, and refuse
-    // the reset when the service cannot be proven unloaded: a loaded
-    // LaunchAgent would restart against a half-removed state.
-    if (platform === 'darwin') {
-      const command = runCommand ?? realCommandRunner();
-      let config: WorkerHostConfig | undefined;
-      try {
-        config = readConfig(paths);
-      } catch {
-        // Do not let damaged metadata hide a loaded service. Labels are also
-        // discovered from the LaunchAgent directory and launchd's domain.
-        config = undefined;
-      }
-      let labels: readonly string[];
-      try {
-        labels = [...new Set([
-          ...(config === undefined ? [] : [workerServiceLabel(config.environmentInstanceId)]),
-          ...storedWorkerServiceLabels(paths.launchAgentsDirectory),
-          ...loadedWorkerServiceLabels(command, uid),
-        ])];
-      } catch (error) {
-        err(`sprout worker reset: LaunchAgent state could not be inspected; host-local state was left untouched (${messageOf(error)})`);
-        return WORKER_EXIT.serviceFailure;
-      }
-      for (const label of labels) {
+
+    try {
+      // Stop the supervised service before the identity disappears, and refuse
+      // the reset when the service cannot be proven unloaded: a loaded
+      // LaunchAgent would restart against a half-removed state.
+      if (platform === 'darwin') {
+        const command = runCommand ?? realCommandRunner();
+        let config: WorkerHostConfig | undefined;
         try {
-          uninstallLaunchAgent({
-            label,
-            plistPath: join(paths.launchAgentsDirectory, `${label}.plist`),
-            uid,
-            run: command,
-          });
+          config = readConfig(paths);
+        } catch {
+          // Do not let damaged metadata hide a loaded service. Labels are also
+          // discovered from the LaunchAgent directory and launchd's domain.
+          config = undefined;
+        }
+        let labels: readonly string[];
+        try {
+          labels = [...new Set([
+            ...(config === undefined ? [] : [workerServiceLabel(config.environmentInstanceId)]),
+            ...storedWorkerServiceLabels(paths.launchAgentsDirectory),
+            ...loadedWorkerServiceLabels(command, uid),
+          ])];
         } catch (error) {
-          err(
-            `sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${messageOf(error)})`,
-          );
+          err(`sprout worker reset: LaunchAgent state could not be inspected; host-local state was left untouched (${messageOf(error)})`);
           return WORKER_EXIT.serviceFailure;
         }
+        for (const label of labels) {
+          try {
+            uninstallLaunchAgent({ label, plistPath: join(paths.launchAgentsDirectory, `${label}.plist`), uid, run: command });
+          } catch (error) {
+            err(`sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${messageOf(error)})`);
+            return WORKER_EXIT.serviceFailure;
+          }
+        }
       }
+      try {
+        // Leave the maintenance fence in place until every other record is
+        // gone; its ownership-checked release happens in finally below.
+        removeHostState(paths, { preserveLock: true });
+      } catch (error) {
+        err(`sprout worker reset: host-local state could not be fully removed (${messageOf(error)})`);
+        return WORKER_EXIT.failure;
+      }
+      out('Host-local Worker identity and configuration removed. The old identity can no longer reconnect.');
+      return WORKER_EXIT.ok;
+    } finally {
+      resetLock.release();
+      if (previousOwnerToken === undefined) delete process.env['SPROUT_WORKER_OWNER_TOKEN'];
+      else process.env['SPROUT_WORKER_OWNER_TOKEN'] = previousOwnerToken;
     }
-    try {
-      removeHostState(paths);
-    } catch (error) {
-      err(`sprout worker reset: host-local state could not be fully removed (${messageOf(error)})`);
-      return WORKER_EXIT.failure;
-    }
-    out('Host-local Worker identity and configuration removed. The old identity can no longer reconnect.');
-    return WORKER_EXIT.ok;
   }
 
   async function installService(paths: WorkerHostPaths, args: readonly string[]): Promise<number> {

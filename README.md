@@ -81,7 +81,10 @@ permissions and preserves a recorded refusal (`revoked`/`incompatible`/
 `pending-approval`) even after the Worker process exits. `reset` and
 `uninstall-service` fail closed: they refuse while a foreground Worker holds the
 lock, and they leave host-local state untouched when the LaunchAgent cannot be
-proven unloaded.
+proven unloaded. Runtime and lock ownership use an owner-only, per-start opaque
+token plus the OS process-start identity (never command-line matching), so PID
+reuse, another environment's Worker, and an in-progress reset cannot inherit or
+release the Worker state.
 
 ## O7 game workspace
 

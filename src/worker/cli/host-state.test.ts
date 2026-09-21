@@ -24,6 +24,7 @@ import {
   workerServiceLabel,
   WorkerHostStateError,
   type WorkerHostConfig,
+  type WorkerProcessIdentity,
 } from './host-state.ts';
 import {
   launchAgentPlistPath,
@@ -67,6 +68,14 @@ function config(overrides: Partial<WorkerHostConfig> = {}): WorkerHostConfig {
     identityFileName: 'identity.pem',
     ...overrides,
   };
+}
+
+function processIdentity(pid: number, tokenCharacter = 'a'): WorkerProcessIdentity {
+  return { pid, startIdentity: `test-start-${pid}-${tokenCharacter}`, ownerToken: tokenCharacter.repeat(43) };
+}
+
+function probe(...identities: readonly WorkerProcessIdentity[]) {
+  return (pid: number): WorkerProcessIdentity | undefined => identities.find((identity) => identity.pid === pid);
 }
 
 test('state and configuration files are owner-only and the directory is restrictive', () => {
@@ -150,26 +159,27 @@ test('the single-instance lock refuses a live holder and reclaims a stale one', 
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
-    // This test's own pid is treated as a live Worker that is NOT verified as a
-    // daemon by the substituted runner, so a same-pid re-acquire is allowed and a
-    // foreign live pid guarded by a real-looking command line is refused.
-    const held = acquireWorkerLock(paths, process.pid, () => 'sprout worker start');
+    const holderIdentity = processIdentity(51_001, 'b');
+    const requesterIdentity = processIdentity(51_002, 'c');
+    const held = acquireWorkerLock(paths, requesterIdentity, probe(requesterIdentity));
     assert.ok(existsSync(held.path));
     held.release();
 
-    // A lock naming a live pid whose command line is this host's Worker refuses.
-    writePrivateFile(held.path, `${process.ppid}\n`);
+    // Exact token/start identity, rather than command words, decides ownership.
+    const foreign = acquireWorkerLock(paths, holderIdentity, probe(holderIdentity));
     assert.throws(
-      () => acquireWorkerLock(paths, process.pid, () => 'sprout worker start'),
+      () => acquireWorkerLock(paths, requesterIdentity, probe(holderIdentity)),
       (error: unknown) => error instanceof DuplicateWorkerProcessError,
     );
+    foreign.release();
 
-    // A stale lock (a pid that is not alive) is reclaimed.
+    // A stale lock with no matching process binding is reclaimed.
     clearRuntimeState(paths);
-    rmSync(held.path, { force: true });
-    const reclaimed = acquireWorkerLock(paths, process.pid, () => 'sprout worker start');
+    const stale = acquireWorkerLock(paths, holderIdentity, probe(holderIdentity));
+    const reclaimed = acquireWorkerLock(paths, requesterIdentity, () => undefined);
     assert.ok(existsSync(reclaimed.path));
     reclaimed.release();
+    stale.release();
   } finally {
     cleanup();
   }
@@ -180,12 +190,13 @@ test('runtime state round-trips and clears without a secret', () => {
   try {
     ensureStateDirectory(paths);
     assert.equal(readRuntimeState(paths), undefined);
-    writeRuntimeState(paths, { pid: 4242, state: 'connected', at: 1_000, epoch: 3 });
+    writeRuntimeState(paths, { pid: 4242, process: processIdentity(4242), state: 'connected', at: 1_000, epoch: 3 });
     const read = readRuntimeState(paths);
     assert.equal(read?.state, 'connected');
     assert.equal(read?.epoch, 3);
     const raw = readFileSync(paths.runtimePath, 'utf8');
-    assert.doesNotMatch(raw, /secret|token|password/i);
+    assert.doesNotMatch(raw, /secret|password/i);
+    assert.match(raw, /ownerToken/, 'the opaque owner token is required only for local process ownership');
     clearRuntimeState(paths);
     assert.equal(readRuntimeState(paths), undefined);
   } finally {
@@ -199,7 +210,7 @@ test('reset removes identity, configuration, and runtime state', () => {
     ensureStateDirectory(paths);
     writeConfig(paths, config());
     writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
-    writeRuntimeState(paths, { pid: 1, state: 'stopped', at: 0 });
+    writeRuntimeState(paths, { pid: 1, process: processIdentity(1), state: 'stopped', at: 0 });
     removeHostState(paths);
     assert.equal(isEnrolled(paths), false);
     assert.equal(existsSync(paths.identityPath), false);
@@ -325,7 +336,7 @@ test('a malformed runtime state record is refused rather than read as healthy', 
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
-    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 1, state: 'possessed', at: 0 }));
+    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 1, process: processIdentity(1), state: 'possessed', at: 0 }));
     assert.throws(
       () => readRuntimeState(paths),
       (error: unknown) => error instanceof WorkerHostStateError && error.reason === 'invalid',
@@ -335,7 +346,7 @@ test('a malformed runtime state record is refused rather than read as healthy', 
     writePrivateFile(paths.runtimePath, 'not json at all');
     assert.throws(() => readRuntimeState(paths), WorkerHostStateError);
     // A valid record still round-trips.
-    writeRuntimeState(paths, { pid: 42, state: 'connected', at: 1, epoch: 2 });
+    writeRuntimeState(paths, { pid: 42, process: processIdentity(42), state: 'connected', at: 1, epoch: 2 });
     assert.equal(readRuntimeState(paths)?.pid, 42);
   } finally {
     cleanup();
@@ -377,10 +388,12 @@ test('a lock released by one pid never removes a lock another pid re-created', (
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
-    const first = acquireWorkerLock(paths, 50_001, () => 'sprout worker start');
+    const firstIdentity = processIdentity(50_001, 'd');
+    const secondIdentity = processIdentity(50_001, 'e');
+    const first = acquireWorkerLock(paths, firstIdentity, probe(firstIdentity));
     first.release();
-    const second = acquireWorkerLock(paths, 50_002, () => 'sprout worker start');
-    // The first holder's stale release must not destroy the second's lock.
+    const second = acquireWorkerLock(paths, secondIdentity, probe(secondIdentity));
+    // The first holder's stale release must not destroy a same-PID replacement.
     first.release();
     assert.ok(existsSync(second.path), 'an ownership-checked release preserves the newer lock');
     second.release();
@@ -425,6 +438,7 @@ function spawnChildLockRunner(
         SPROUT_LAUNCH_AGENTS_DIR: paths.launchAgentsDirectory,
         SPROUT_CLI_PATH: paths.executablePath,
         SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
+        SPROUT_WORKER_OWNER_TOKEN: (args.includes('hold') ? 'h' : 'i').repeat(43),
       },
     },
   );
@@ -434,11 +448,11 @@ function spawnChildLockRunner(
 
 function childLockRunnerScript(): string {
   return [
-    "const { acquireWorkerLock, workerHostPaths, ensureStateDirectory } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
+    "const { acquireWorkerLock, currentWorkerProcess, workerHostPaths, ensureStateDirectory } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
     'const paths = workerHostPaths();',
     'ensureStateDirectory(paths);',
     'try {',
-    "  const lock = acquireWorkerLock(paths, process.pid, () => 'sprout worker start');",
+    '  const lock = acquireWorkerLock(paths, currentWorkerProcess(process.env.SPROUT_WORKER_OWNER_TOKEN));',
     "  process.stdout.write('acquired\\n');",
     '  setTimeout(() => {',
     '    lock.release();',
