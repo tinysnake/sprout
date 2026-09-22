@@ -329,7 +329,10 @@ test('start refuses a duplicate live Worker for the same environment', async () 
 });
 
 test('start keeps a hostile protocol refusal out of CLI and persisted diagnostics', async () => {
-  const hostileProtocol = '1./private/worker.sock:7443';
+  const privacyMarker = 'SPROUT_SYNTHETIC_CLI_SENTINEL_94e8c84957f242ec8a7a763b136c5c95';
+  const privatePath = `/synthetic-private/${privacyMarker}/worker.sock`;
+  const networkEndpoint = `${privacyMarker.toLowerCase()}.invalid:61947`;
+  const hostileProtocol = `1;marker=${privacyMarker};path=${privatePath};endpoint=${networkEndpoint}`;
   const h = harness({
     connect: async () => {
       throw new WorkerEnrollmentRefusedError(hostileProtocol, 'incompatible');
@@ -338,8 +341,13 @@ test('start keeps a hostile protocol refusal out of CLI and persisted diagnostic
   try {
     seedEnrolledHost(h.paths);
     assert.equal(await h.run(['start']), WORKER_EXIT.refused);
-    assert.equal(readRuntimeState(h.paths)?.detail, WORKER_DIAGNOSTICS.protocolIncompatible);
-    assert.doesNotMatch(h.out.join('\n') + h.err.join('\n'), /private|worker\.sock|7443/);
+    const runtime = readRuntimeState(h.paths);
+    assert.equal(runtime?.detail, WORKER_DIAGNOSTICS.protocolIncompatible);
+    assert.match(h.err.join('\n'), new RegExp(WORKER_DIAGNOSTICS.connectionRefused));
+    const exposed = JSON.stringify({ stdout: h.out, stderr: h.err, runtime });
+    for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
+      assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through the CLI: ${sentinel}`);
+    }
   } finally {
     h.cleanup();
   }

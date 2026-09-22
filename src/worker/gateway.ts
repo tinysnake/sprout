@@ -216,7 +216,12 @@ export class WorkerGateway {
     // Step 4: refuse a protocol mismatch before acceptance, so a Worker the core
     // cannot speak to never receives an epoch or carries a command.
     const compatibility = protocolCompatibility(prove.protocolVersion, this.#supportedProtocol);
-    const protocolVersion = sanitizeProtocolVersion(prove.protocolVersion);
+    // Only a string token can enter readiness. A present non-string remains
+    // incompatible above, but its raw JSON value dies at this boundary rather
+    // than reaching refusal JSON, logs, CLI state, or durable diagnostics.
+    const protocolVersion = typeof prove.protocolVersion === 'string'
+      ? sanitizeProtocolVersion(prove.protocolVersion)
+      : undefined;
     if (compatibility.state === 'incompatible') {
       // Record the observation (the enrollment is preserved) but do not accept.
       await this.#enrollments.connectWorker({

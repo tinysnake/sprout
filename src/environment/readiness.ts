@@ -122,10 +122,13 @@ export function protocolMajor(version: string | undefined): number | undefined {
  * intact and blocks new work; an unreported version does not).
  */
 export function protocolCompatibility(
-  version: string | undefined,
+  version: unknown,
   supported: ProtocolVersionRange,
 ): { readonly state: ProtocolCompatibility; readonly detail?: string } {
   if (version === undefined) return { state: 'unknown' };
+  if (typeof version !== 'string') {
+    return { state: 'incompatible', detail: PROTOCOL_INCOMPATIBLE_DETAIL };
+  }
   const safeVersion = sanitizeProtocolVersion(version);
   const major = protocolMajor(safeVersion);
   // A present but malformed version is incompatible, not unknown: it is

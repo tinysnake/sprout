@@ -437,7 +437,7 @@ async function openRawWorker(
   h: Harness,
   keyPath: string,
   claimSecret: string,
-  protocolVersion = WORKER_PROTOCOL_VERSION,
+  protocolVersion: unknown = WORKER_PROTOCOL_VERSION,
 ) {
   const { WebSocket, createWebSocketStream } = await import('ws');
   const identity = loadOrCreateWorkerIdentity(keyPath);
@@ -496,7 +496,10 @@ async function openRawWorker(
 test('a real gateway refusal never echoes malformed protocol evidence to the stream or diagnostics', async () => {
   const h = await harness();
   const key = tmpKey();
-  const hostileProtocol = '1./private/worker.sock:7443';
+  const privacyMarker = 'SPROUT_SYNTHETIC_PROTOCOL_SENTINEL_7d6c0d34c9174db09f9cd0c860fc92a1';
+  const privatePath = `/synthetic-private/${privacyMarker}/worker.sock`;
+  const networkEndpoint = `${privacyMarker.toLowerCase()}.invalid:61947`;
+  const hostileProtocol = `1;marker=${privacyMarker};path=${privatePath};endpoint=${networkEndpoint}`;
   const fixedReason = 'the Worker protocol is incompatible with this Sprout build';
   try {
     const secret = await requestPending(h);
@@ -532,8 +535,49 @@ test('a real gateway refusal never echoes malformed protocol evidence to the str
       state: 'incompatible',
       detail: fixedReason,
     });
-    const exposed = JSON.stringify({ frame: raw.frame, refusalMessage, logs, durable });
-    assert.doesNotMatch(exposed, /private|worker\.sock|7443/);
+    const exposed = JSON.stringify({ refusal: raw.frame, reason: refusalMessage, connectorLogs: logs, readiness: durable });
+    for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
+      assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through an exposed surface: ${sentinel}`);
+    }
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('a real gateway refuses every present non-string protocol version without retaining its value', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  const privacyMarker = 'SPROUT_SYNTHETIC_NONSTRING_SENTINEL_2d606e03b65a4f95a839063bbd8179bd';
+  const fixedRefusal = {
+    type: 'worker/refused',
+    reason: 'the Worker protocol is incompatible with this Sprout build',
+    code: 'incompatible',
+  };
+  const malformedVersions: readonly { readonly kind: string; readonly value: unknown }[] = [
+    { kind: 'number', value: 2 },
+    { kind: 'object', value: { marker: privacyMarker, path: `/synthetic-private/${privacyMarker}/worker.sock` } },
+    { kind: 'array', value: [privacyMarker, `${privacyMarker.toLowerCase()}.invalid:61947`] },
+    { kind: 'null', value: null },
+  ];
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+
+    for (const malformed of malformedVersions) {
+      const raw = await openRawWorker(h, key.path, '', malformed.value);
+      assert.deepEqual(raw.frame, fixedRefusal, `${malformed.kind} protocolVersion must fail closed`);
+      raw.close();
+
+      const readiness = await h.enrollments.readiness('enroll-1');
+      assert.deepEqual(readiness.readiness.compatibility, {
+        state: 'incompatible',
+        detail: fixedRefusal.reason,
+      });
+      const exposed = JSON.stringify({ refusal: raw.frame, reason: fixedRefusal.reason, readiness });
+      assert.equal(exposed.includes(privacyMarker), false, `${malformed.kind} protocolVersion entered diagnostics`);
+      assert.equal(h.gateway.liveFor('mac-mini-1'), undefined, `${malformed.kind} protocolVersion was accepted`);
+    }
   } finally {
     key.cleanup();
     await h.close();
