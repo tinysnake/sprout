@@ -51,7 +51,24 @@ export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, ma
 function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
-    ...observed,
+    ...(observed.enrollmentId !== undefined
+      ? {
+          enrollmentId: sanitizeIdentifier(observed.enrollmentId, {
+            fallback: '',
+            maxLength: 200,
+            kind: 'generic',
+          }),
+        }
+      : {}),
+    ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0
+      ? { connectionEpoch: observed.connectionEpoch }
+      : {}),
+    connection: {
+      state: observed.connection.state,
+      ...(observed.connection.lastConfirmedAt !== undefined
+        ? { lastConfirmedAt: observed.connection.lastConfirmedAt }
+        : {}),
+    },
     compatibility: {
       state: observed.compatibility.state,
       ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
@@ -115,8 +132,17 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly claimSecretFactory?: () => string;
   /** How long a host claim stays usable. Defaults to 15 minutes. */
   readonly claimTtlMs?: number;
+  /**
+   * Invoked after a durable enrollment authority decision is written (E2, #116).
+   *
+   * The dynamic Environment catalog observes approval, revocation, reset, and
+   * permission changes through this hook, so a newly approved or revoked instance
+   * becomes eligible or ineligible without a process restart. The hook is an
+   * observation only: a failure in it must never roll back the durable decision,
+   * so callers must not throw from it.
+   */
+  readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
 }
-
 /** A new pending enrollment request plus the host bootstrap guidance it unlocks. */
 export interface PendingEnrollmentResult {
   readonly enrollment: EnvironmentEnrollment;
@@ -154,6 +180,7 @@ export class EnvironmentEnrollmentService {
   readonly #proofAuthority: WorkerProofAuthority;
   readonly #claimSecretFactory: () => string;
   readonly #claimTtlMs: number;
+  readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -168,6 +195,16 @@ export class EnvironmentEnrollmentService {
       options.proofAuthority ?? new WorkerProofAuthority({ clock: this.#clock });
     this.#claimSecretFactory = options.claimSecretFactory ?? createClaimSecret;
     this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
+    this.#onMutation = options.onMutation;
+  }
+
+  /** Announce a durable decision to the catalog observer, never throwing. */
+  #announce(enrollment: EnvironmentEnrollment): void {
+    try {
+      this.#onMutation?.(enrollment);
+    } catch {
+      // Observation must never turn a durable authority decision into a failure.
+    }
   }
 
   async list(): Promise<readonly EnvironmentEnrollment[]> {
@@ -200,6 +237,10 @@ export class EnvironmentEnrollmentService {
   ): Promise<PendingEnrollmentResult> {
     const at = this.#clock();
     const { publicKey, ...rest } = input;
+    // An Environment instance has one durable enrollment authority. Identity
+    // rotation uses the existing reset/reapproval lifecycle on that record;
+    // creating a sibling record would split epoch, readiness, and transport
+    // ownership for one physical Environment.
     // A pre-known identity needs no claim: there is nothing to bind. Web, which
     // never supplies a key, gets a one-use secret so the identity is bound only
     // after the host claims it and proves key possession (ADR-0012).
@@ -218,7 +259,13 @@ export class EnvironmentEnrollmentService {
       at,
       id: (this.#idFactory ?? createEnrollmentId)(),
     });
-    await this.#enrollments.save(enrollment);
+    if (!(await this.#enrollments.createIfInstanceAbsent(enrollment))) {
+      throw new EnrollmentError(
+        'duplicate-instance',
+        'This Environment instance already has an enrollment; reset and reapprove that enrollment to rotate its Worker identity.',
+      );
+    }
+    this.#announce(enrollment);
     return {
       enrollment,
       claim:
@@ -343,6 +390,7 @@ export class EnvironmentEnrollmentService {
       await this.#readiness.saveReadiness(
         enrollment.environmentInstanceId,
         sanitizeObservedReadiness({
+          enrollmentId: enrollment.id,
           connection: input.connection,
           compatibility: input.compatibility,
           engines: input.engines,
@@ -358,7 +406,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     await this.#readiness.saveReadiness(
       enrollment.environmentInstanceId,
-      sanitizeObservedReadiness(observed),
+      sanitizeObservedReadiness({ ...observed, enrollmentId: enrollment.id }),
     );
   }
 
@@ -386,6 +434,7 @@ export class EnvironmentEnrollmentService {
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
     });
     await this.#enrollments.save(approved);
+    this.#announce(approved);
     return { enrollment: approved };
   }
 
@@ -393,6 +442,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const revoked = revokeEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(revoked);
+    this.#announce(revoked);
     return revoked;
   }
 
@@ -400,6 +450,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const reset = resetEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(reset);
+    this.#announce(reset);
     return reset;
   }
 
@@ -411,6 +462,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const updated = setCapabilityPermission(enrollment, capability, allowed, this.#clock());
     await this.#enrollments.save(updated);
+    this.#announce(updated);
     return updated;
   }
 
@@ -433,8 +485,19 @@ export class EnvironmentEnrollmentService {
         readonly models: readonly string[];
       }[];
     },
+    options: {
+      /** The accepted connection epoch that supplied this Worker observation. */
+      readonly connectionEpoch?: number;
+      /** Refuses a stale observation immediately before it becomes durable. */
+      readonly isCurrent?: () => boolean;
+    } = {},
   ): Promise<void> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
+    // The runtime supplies the gateway authority check for inbound observations.
+    // A late request from a disconnected/replaced channel must not overwrite the
+    // current epoch's facts. Callers without an epoch retain the old additive
+    // readiness seam, but the catalog treats those legacy facts as non-authoritative.
+    if (options.isCurrent !== undefined && !options.isCurrent()) return;
     const observed = observedFactsFromWorkerReadiness({
       ...readiness,
       at: this.#clock(),
@@ -442,7 +505,11 @@ export class EnvironmentEnrollmentService {
     });
     await this.#readiness.saveReadiness(
       enrollment.environmentInstanceId,
-      sanitizeObservedReadiness(observed),
+      sanitizeObservedReadiness({
+        ...observed,
+        enrollmentId: enrollment.id,
+        ...(options.connectionEpoch !== undefined ? { connectionEpoch: options.connectionEpoch } : {}),
+      }),
     );
   }
 

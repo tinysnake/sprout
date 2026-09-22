@@ -7,13 +7,17 @@
  * deterministically. This Module owns that monotonic generation count so the
  * gateway, the service, and their tests cannot disagree about authority.
  *
- * The registry is deliberately in-memory: an epoch is the authority generation
- * of a live transport, so it has no meaning across a restart. After a restart the
- * first accepted connection is the new epoch and any old transport is already
- * gone, which fails closed rather than resurrecting authority.
+ * Current transport ownership is deliberately in-memory, but the epoch high-water
+ * mark is durable in production. Readiness observations survive restart, so a
+ * post-restart authenticated connection must receive a generation greater than
+ * every persisted prior observation rather than reusing epoch 1.
  */
 
 import { randomUUID } from 'node:crypto';
+import {
+  InMemoryWorkerConnectionEpochStore,
+  type WorkerConnectionEpochStore,
+} from './worker-epoch-store.ts';
 
 /** One accepted connection generation for an enrollment. */
 export interface WorkerConnectionEpoch {
@@ -38,6 +42,8 @@ export type WorkerEpochDecision =
 export interface WorkerConnectionRegistryOptions {
   readonly clock?: () => number;
   readonly idFactory?: () => string;
+  /** Durable in production, so restart can never reuse an authority epoch. */
+  readonly store?: WorkerConnectionEpochStore;
 }
 
 /**
@@ -47,16 +53,16 @@ export interface WorkerConnectionRegistryOptions {
 export class WorkerConnectionRegistry {
   readonly #clock: () => number;
   readonly #idFactory: () => string;
+  readonly #store: WorkerConnectionEpochStore;
   /** Current epoch per enrollment id. */
   readonly #current = new Map<string, WorkerConnectionEpoch>();
-  /** Highest epoch ever accepted per enrollment, so a reconnect stays monotonic. */
-  readonly #highWater = new Map<string, number>();
   /** Superseded connections, so a stale event can be classified deterministically. */
   readonly #superseded = new Set<string>();
 
   constructor(options: WorkerConnectionRegistryOptions = {}) {
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `conn-${randomUUID()}`);
+    this.#store = options.store ?? new InMemoryWorkerConnectionEpochStore();
   }
 
   /**
@@ -73,10 +79,9 @@ export class WorkerConnectionRegistry {
       // named `superseded` instead of silently vanishing.
       this.#superseded.add(previous.connectionId);
     }
-    // The high-water mark never decreases, so a connection that ends and is
-    // replaced still receives a strictly greater epoch (monotonic authority).
-    const next = (this.#highWater.get(enrollmentId) ?? 0) + 1;
-    this.#highWater.set(enrollmentId, next);
+    // The durable high-water mark never decreases, including across process
+    // restart, so old persisted readiness can never match a new connection.
+    const next = this.#store.next(enrollmentId);
     const epoch: WorkerConnectionEpoch = {
       epoch: next,
       connectionId: this.#idFactory(),

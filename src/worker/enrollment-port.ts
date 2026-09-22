@@ -1,10 +1,18 @@
 /**
- * The environment port over the enrollment-backed Worker gateway (#115).
+ * The enrollment-backed Environment worker registry (#115, E2 #116, ADR-0012).
  *
- * Accepted Worker connections arrive outbound from the host, so this Module
- * adapts each accepted connection to the same `RuntimeEnvironment` seam the M1
- * configured carriers satisfy: engines, Task contexts, workspace validation, and
- * neutral `worker/info` facts. Nothing above it learns how the Worker connected.
+ * Accepted Worker connections arrive outbound from the host, so this Module is
+ * the production, instance-keyed Worker registry: every accepted connection is
+ * keyed by its environment instance id and adapted to the same
+ * `RuntimeEnvironment` seam the M1 configured carriers satisfy — engines, Task
+ * contexts, workspace validation, and neutral `worker/info` facts. Nothing above
+ * it learns how the Worker connected.
+ *
+ * It never starts or dials a Worker: an adapter, context, or readiness lookup
+ * only reaches a channel the gateway already authenticated and accepted, and a
+ * lookup for an instance with no accepted connection fails closed. This is what
+ * makes an authenticated inbound connection the one production admission path
+ * (E2) rather than a remote start.
  *
  * Identification is **lazy**: the core asks for an instance's adapters or facts
  * only when it has work or an observation, and only then does it issue the
@@ -14,7 +22,7 @@
  *
  * A connection is keyed by its accepted epoch. A newer epoch for the same
  * instance replaces the cached handle, so a stale connection's sessions cannot be
- * reached through this port.
+ * reached through this registry.
  */
 
 import { WorkerClient, WorkerContextClient } from './client.ts';
@@ -50,6 +58,8 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   /** Accepted connections awaiting identification or already identified. */
   readonly #accepted = new Map<string, WorkerGatewayAcceptance>();
   readonly #identified = new Map<string, CachedConnection>();
+  /** One in-flight `worker/info` request per accepted instance/epoch. */
+  readonly #identifying = new Map<string, Promise<WorkerConnection | undefined>>();
   #closed = false;
 
   constructor(options: EnrollmentWorkerPortOptions) {
@@ -97,6 +107,20 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
    * Worker JSON-RPC starts flowing over the authenticated channel.
    */
   async #connection(instanceId: string): Promise<WorkerConnection | undefined> {
+    const existing = this.#identified.get(instanceId);
+    if (existing !== undefined && existing.connection.alive) return existing.connection;
+    const inFlight = this.#identifying.get(instanceId);
+    if (inFlight !== undefined) return inFlight;
+    const identifying = this.#connect(instanceId);
+    this.#identifying.set(instanceId, identifying);
+    try {
+      return await identifying;
+    } finally {
+      if (this.#identifying.get(instanceId) === identifying) this.#identifying.delete(instanceId);
+    }
+  }
+
+  async #connect(instanceId: string): Promise<WorkerConnection | undefined> {
     const existing = this.#identified.get(instanceId);
     if (existing !== undefined && existing.connection.alive) return existing.connection;
 
@@ -203,8 +227,12 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   async close(): Promise<void> {
     this.#closed = true;
     const connections = [...this.#identified.values()];
+    const acceptances = [...this.#accepted.values()];
     this.#identified.clear();
     this.#accepted.clear();
-    await Promise.all(connections.map(({ connection }) => connection.close()));
+    await Promise.all([
+      ...connections.map(({ connection }) => connection.close()),
+      ...acceptances.map((acceptance) => Promise.resolve(acceptance.close())),
+    ]);
   }
 }

@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
+import { createPendingEnrollment } from '../environment/enrollment.ts';
+import { workerIdentityDigest } from '../environment/enrollment-identity.ts';
 import { WorkerGateway } from './gateway.ts';
 import { EnrollmentWorkerPort } from './enrollment-port.ts';
 import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } from './enrollment-connector.ts';
@@ -32,14 +34,16 @@ interface Harness {
   readonly base: string;
   readonly port: number;
   readonly enrollments: EnvironmentEnrollmentService;
+  readonly enrollmentStore: InMemoryEnrollmentStore;
   readonly gateway: WorkerGateway;
   readonly port_: EnrollmentWorkerPort;
   close(): Promise<void>;
 }
 
 async function harness(): Promise<Harness> {
+  const enrollmentStore = new InMemoryEnrollmentStore();
   const enrollments = new EnvironmentEnrollmentService({
-    enrollments: new InMemoryEnrollmentStore(),
+    enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
     idFactory: () => 'enroll-1',
   });
@@ -55,6 +59,7 @@ async function harness(): Promise<Harness> {
     base: `127.0.0.1:${port}`,
     port,
     enrollments,
+    enrollmentStore,
     gateway,
     port_,
     close: async () => {
@@ -107,8 +112,12 @@ async function claimProveApprove(h: Harness, keyPath: string, secret: string): P
 }
 
 async function connect(h: Harness, claimSecret: string, keyPath: string) {
+  return connectEnrollment(h, 'enroll-1', claimSecret, keyPath);
+}
+
+async function connectEnrollment(h: Harness, enrollmentId: string, claimSecret: string, keyPath: string) {
   return connectWorkerEnrollment({
-    target: target(h.port, claimSecret, keyPath),
+    target: { ...target(h.port, claimSecret, keyPath), enrollmentId },
     protocolVersion: WORKER_PROTOCOL_VERSION,
     engineFacts: [{ engine: 'codex', installed: true, authenticated: false, models: [] }],
   });
@@ -269,6 +278,46 @@ test('a duplicate live process with the same key replaces the epoch and invalida
     second.close();
   } finally {
     key.cleanup();
+    await h.close();
+  }
+});
+
+test('a legacy duplicate enrollment cannot retain a second live transport for one instance', async () => {
+  const h = await harness();
+  const firstKey = tmpKey();
+  const secondKey = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, firstKey.path, secret);
+    const first = await connect(h, '', firstKey.path);
+
+    // New enrollment creation now rejects this shape, but historical records may
+    // contain it. Exercise the actual gateway acceptance path against such a
+    // record rather than trusting a map-only unit seam.
+    const secondIdentity = loadOrCreateWorkerIdentity(secondKey.path);
+    const legacySibling = createPendingEnrollment({
+      id: 'enroll-2',
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Historical duplicate',
+      identityDigest: workerIdentityDigest(workerPublicKey(secondIdentity.privateKey)),
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [],
+      at: 1,
+    });
+    await h.enrollmentStore.save(legacySibling);
+    await h.enrollments.approve('enroll-2', { capabilityPermissions: { 'agent-run': true } });
+
+    const second = await connectEnrollment(h, 'enroll-2', '', secondKey.path);
+    assert.equal(second.epoch, 1, 'a legacy sibling can have its own numeric epoch namespace');
+    assert.equal(h.gateway.liveFor('mac-mini-1')?.enrollment.id, 'enroll-2');
+    assert.equal(h.gateway.epochs.isCurrent('enroll-1', first.connectionId), false);
+    assert.equal(h.gateway.epochs.isCurrent('enroll-2', second.connectionId), true);
+    first.close();
+    second.close();
+  } finally {
+    firstKey.cleanup();
+    secondKey.cleanup();
     await h.close();
   }
 });
@@ -653,4 +702,33 @@ test('the accepted WS channel carries requests, notifications, interrupts, close
   assert.equal(await second.interrupt(), true);
   assert.equal((await interruptedTurn.completion).status, 'interrupted');
   await second.close();
+});
+
+/**
+ * E2 (#116): the enrollment-backed registry accepts authenticated inbound
+ * connections by instance id and never starts or dials a production Worker in
+ * response to an adapter, context, or readiness lookup.
+ */
+test('adapter, context, and readiness lookups never dial or start a production Worker', async () => {
+  const h = await harness();
+  try {
+    // No connection has ever been accepted. Every lookup fails closed or returns
+    // undefined rather than opening a Worker process or dialing a host.
+    assert.equal(await h.port_.info('mac-mini-1'), undefined);
+    await assert.rejects(
+      () => h.port_.adapters('mac-mini-1'),
+      /no accepted enrollment-backed Worker connection/,
+    );
+    await assert.rejects(
+      () => h.port_.contexts('mac-mini-1'),
+      /no accepted enrollment-backed Worker connection/,
+    );
+
+    // A lookup for an instance the catalog never enrolled is equally closed: the
+    // port holds no dialer and cannot invent a connection.
+    assert.equal(await h.port_.info('never-enrolled'), undefined);
+    await assert.rejects(() => h.port_.adapters('never-enrolled'));
+  } finally {
+    await h.close();
+  }
 });

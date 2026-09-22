@@ -26,6 +26,10 @@ import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from '../auth/session-policy.ts';
+import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
+import { ADMISSION_CAPABILITY, projectCatalogEntry } from '../environment/catalog.ts';
+import { createPendingEnrollment } from '../environment/enrollment.ts';
+import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-schema-test-'));
@@ -37,13 +41,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 }
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 10);
+  assert.equal(CURRENT_SCHEMA_VERSION, 14);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 10);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 14);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 10,
-    current: 10,
+    max: 14,
+    current: 14,
   });
 });
 
@@ -87,6 +91,102 @@ test('empty in-memory store initializes schema at current version', () => {
   assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
   assert.equal(getSchemaVersion(store.db), CURRENT_SCHEMA_VERSION);
   store.close();
+});
+
+test('v12 migration seeds epoch high-water and instance enrollment authority before reconnect', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, 'sprout.db');
+    const staleReadiness = {
+      enrollmentId: 'enrollment-a',
+      connectionEpoch: 7,
+      connection: { state: 'online' as const, lastConfirmedAt: 1 },
+      compatibility: { state: 'compatible' as const, workerProtocolVersion: '2' },
+      engines: [{
+        engine: 'scripted',
+        installed: true,
+        readiness: 'ready' as const,
+        required: true,
+        models: { state: 'available' as const, models: ['scripted-model'] },
+      }],
+    };
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA user_version = 12;
+      CREATE TABLE environment_enrollments (
+        id TEXT PRIMARY KEY,
+        environment_instance_id TEXT NOT NULL,
+        document TEXT NOT NULL
+      );
+      CREATE TABLE environment_readiness (
+        environment_instance_id TEXT PRIMARY KEY,
+        document TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    legacy.prepare(
+      'INSERT INTO environment_enrollments (id, environment_instance_id, document) VALUES (?, ?, ?)',
+    ).run('enrollment-a', 'instance-a', '{}');
+    legacy.prepare(
+      'INSERT INTO environment_readiness (environment_instance_id, document, updated_at) VALUES (?, ?, ?)',
+    ).run('instance-a', JSON.stringify(staleReadiness), 1);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: dbPath });
+    assert.equal(store.schemaVersion, 14);
+    const seeded = store.db.prepare(
+      'SELECT high_water FROM worker_connection_epochs WHERE enrollment_id = ?',
+    ).get('enrollment-a') as { readonly high_water: number } | undefined;
+    assert.equal(seeded?.high_water, 7, 'migration carries forward persisted epoch evidence');
+    const authority = store.db.prepare(
+      'SELECT enrollment_id FROM environment_instance_enrollment_authority WHERE environment_instance_id = ?',
+    ).get('instance-a') as { readonly enrollment_id: string } | undefined;
+    assert.equal(authority?.enrollment_id, 'enrollment-a', 'v14 reserves the existing enrollment authority');
+
+    const workerEpochs = new WorkerConnectionRegistry({
+      store: store.workerConnectionEpochs,
+      idFactory: () => 'connection-after-upgrade',
+    });
+    const firstPostUpgrade = workerEpochs.accept('enrollment-a');
+    assert.equal(firstPostUpgrade.epoch, 8, 'the first post-upgrade epoch is strictly newer');
+    assert.notEqual(firstPostUpgrade.epoch, 7, 'persisted readiness can never match the new connection');
+
+    const enrollment = {
+      ...createPendingEnrollment({
+        id: 'enrollment-a',
+        environmentInstanceId: 'instance-a',
+        displayName: 'Environment A',
+        identityDigest: 'identity-a',
+        platform: 'macos',
+        capabilityRequests: [ADMISSION_CAPABILITY],
+        engineFacts: [],
+        at: 1,
+      }),
+      status: 'approved' as const,
+      everApproved: true,
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    };
+    const persistedReadiness = await store.environmentReadiness.getReadiness('instance-a');
+    assert.ok(persistedReadiness !== undefined);
+    assert.equal(projectCatalogEntry({
+      enrollment,
+      observed: persistedReadiness,
+      currentEpoch: firstPostUpgrade.epoch,
+      workSafety: 'clear',
+      requiredEngines: ['scripted'],
+      supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+      now: 1,
+    }).eligible, false, 'stale v12 readiness cannot admit the new connection');
+    assert.equal(projectCatalogEntry({
+      enrollment,
+      observed: { ...staleReadiness, connectionEpoch: firstPostUpgrade.epoch },
+      currentEpoch: firstPostUpgrade.epoch,
+      workSafety: 'clear',
+      requiredEngines: ['scripted'],
+      supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+      now: 1,
+    }).eligible, true, 'only fresh readiness from the post-upgrade connection can admit');
+    store.close();
+  });
 });
 
 test('non-empty store receives pre-migration safety copy before forward migration', async () => {
@@ -258,7 +358,7 @@ test('v9 run history receives workspace_binding through the versioned safety-cop
     legacy.close();
 
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 10);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
     const columns = store.db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
     assert.equal(columns.some((column) => column.name === 'workspace_binding'), true);
     assert.equal(
@@ -488,7 +588,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Create a database newer than the current maximum.
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 11;
+      PRAGMA user_version = 15;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);
@@ -503,7 +603,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
 
     assert.ok(thrownError instanceof SchemaTooNewError, 'must throw SchemaTooNewError');
     assert.equal(thrownError.name, 'SchemaTooNewError');
-    assert.equal(thrownError.version, 11);
+    assert.equal(thrownError.version, 15);
     assert.deepEqual(thrownError.supportedRange, SUPPORTED_SCHEMA_RANGE);
     assert.ok(thrownError.message.includes('newer than supported range'));
     assert.ok(thrownError.guidance.includes('upgrade Sprout'));
@@ -511,11 +611,11 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Standalone domain stores also refuse the newer version
     assert.throws(
       () => new SqliteRunStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 11,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 15,
     );
     assert.throws(
       () => new SqliteTaskStore({ filename: dbPath }),
-      (err: unknown) => err instanceof SchemaTooNewError && err.version === 11,
+      (err: unknown) => err instanceof SchemaTooNewError && err.version === 15,
     );
   });
 });
@@ -791,7 +891,7 @@ test('directly constructed domain adapters enforce schema coordination and safet
     // 2. Direct SqliteLeaseStore on a future schema throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 11; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 15; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

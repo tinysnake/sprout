@@ -10,6 +10,24 @@ import type { ConnectionFact, CompatibilityFact, EngineReadinessFact, ProbeResul
  * value without erasing what was observed before.
  */
 export interface ObservedReadiness {
+  /**
+   * The durable enrollment authority whose accepted Worker produced these facts.
+   *
+   * Readiness documents are keyed by Environment instance for inspection, but
+   * a new enrollment may never inherit another enrollment's observations merely
+   * because their per-enrollment epoch numbers happen to be equal. Older
+   * unscoped documents remain inspectable and deliberately cannot admit work.
+   */
+  readonly enrollmentId?: string;
+  /**
+   * The accepted Worker connection epoch that produced these facts.
+   *
+   * Older rows have no epoch and remain inspectable, but cannot establish
+   * admission for a live enrolled Worker. This is deliberately optional for
+   * additive reads of pre-E2 records; catalog admission requires an exact match
+   * with its current epoch.
+   */
+  readonly connectionEpoch?: number;
   readonly connection: ConnectionFact;
   readonly compatibility: CompatibilityFact;
   readonly engines: readonly EngineReadinessFact[];

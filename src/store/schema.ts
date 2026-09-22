@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -5,6 +6,7 @@ import {
   BROWSER_SESSION_ABSOLUTE_LIFETIME_MS,
   BROWSER_SESSION_IDLE_LIFETIME_MS,
 } from '../auth/session-policy.ts';
+import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy.ts';
 
 /**
  * Sprout database schema versioning, safety copy, and forward migration (#83, ADR-0009).
@@ -23,13 +25,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 10;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 14;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -548,7 +550,213 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       }
     },
   },
+  {
+    fromVersion: 10,
+    toVersion: 11,
+    name: 'environment_catalog',
+    migrate: (db) => {
+      // The durable Environment catalog (E2, #116, ADR-0012): each enrolled
+      // Environment instance is one JSON document keyed by its instance id,
+      // holding the portable definition and instance record. The record is pure
+      // identity — no private key, credential, host address, or absolute path
+      // has a column here — and it survives SQLite reopen independently of
+      // current connectivity, so an offline, incompatible, archived, revoked, or
+      // recovering instance remains an inspectable catalog entry.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_catalog (
+          instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    fromVersion: 11,
+    toVersion: 12,
+    name: 'sanitize_environment_catalog_records',
+    migrate: (db) => {
+      // v11 documented portable catalog records but did not enforce that
+      // boundary in its store adapter. Rewrite every historical document from
+      // selected safe fields inside the same transactional migration, removing
+      // host paths, credentials, keys, network details, and raw diagnostics.
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'environment_catalog'",
+      ).get();
+      if (table === undefined) return;
+      const rows = db.prepare(
+        'SELECT instance_id, enrollment_id, document, updated_at FROM environment_catalog ORDER BY instance_id',
+      ).all() as unknown as readonly {
+        readonly instance_id: string;
+        readonly enrollment_id: string;
+        readonly document: string;
+        readonly updated_at: number;
+      }[];
+      // Rebuild instead of updating primary keys in place. This makes the
+      // migration total even when several private legacy keys sanitize to the
+      // same candidate. `collisionSafeCatalogId` deterministically disambiguates
+      // that candidate without retaining any source identity.
+      db.exec(`
+        DROP TABLE IF EXISTS environment_catalog_v12;
+        CREATE TABLE environment_catalog_v12 (
+          instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      const insert = db.prepare(
+        `INSERT INTO environment_catalog_v12
+          (instance_id, enrollment_id, document, updated_at) VALUES (?, ?, ?, ?)`,
+      );
+      const used = new Set<string>();
+      for (const row of rows) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.document);
+        } catch {
+          parsed = {};
+        }
+        const document = parsed !== null && typeof parsed === 'object'
+          ? parsed as { readonly definition?: unknown; readonly instance?: unknown }
+          : {};
+        const safe = sanitizeEnvironmentCatalogRecord({
+          instanceId: row.instance_id,
+          enrollmentId: row.enrollment_id,
+          definition: document.definition,
+          instance: document.instance,
+          updatedAt: row.updated_at,
+        });
+        const instanceId = collisionSafeCatalogId(safe.instanceId, row, used);
+        used.add(instanceId);
+        insert.run(
+          instanceId,
+          safe.enrollmentId,
+          JSON.stringify({
+            definition: safe.definition,
+            instance: { ...safe.instance, id: instanceId },
+          }),
+          safe.updatedAt,
+        );
+      }
+      db.exec(`
+        DROP TABLE environment_catalog;
+        ALTER TABLE environment_catalog_v12 RENAME TO environment_catalog;
+      `);
+    },
+  },
+  {
+    fromVersion: 12,
+    toVersion: 13,
+    name: 'durable_worker_connection_epochs',
+    migrate: (db) => {
+      // Readiness is durable, so its authority generation cannot restart at 1
+      // on every process. This high-water table allocates a strictly increasing
+      // epoch for each authenticated enrollment connection across reopen.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_connection_epochs (
+          enrollment_id TEXT PRIMARY KEY,
+          high_water INTEGER NOT NULL CHECK (high_water > 0)
+        );
+      `);
+      const readinessTables = db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('environment_enrollments', 'environment_readiness')
+      `).all() as unknown as readonly { readonly name: string }[];
+      if (readinessTables.length !== 2) return;
+      // A v12 readiness document may already name an authority epoch. Seed
+      // every enrollment's allocator from that durable evidence before any
+      // post-upgrade connection can call `next()`: otherwise its first epoch
+      // could reuse (for example) epoch 1 and make stale facts authoritative.
+      //
+      // Readiness is keyed by Environment instance while epochs are keyed by
+      // enrollment, so join through the durable enrollment mapping. If legacy
+      // data has several enrollment rows for one instance, conservatively seed
+      // each of them. The UPSERT also retains a greater existing high-water if
+      // this migration is ever applied to a partially prepared store.
+      const rows = db.prepare(`
+        SELECT e.id AS enrollment_id, r.document AS readiness_document
+        FROM environment_enrollments AS e
+        INNER JOIN environment_readiness AS r
+          ON r.environment_instance_id = e.environment_instance_id
+        ORDER BY e.id
+      `).all() as unknown as readonly {
+        readonly enrollment_id: string;
+        readonly readiness_document: string;
+      }[];
+      const seed = db.prepare(`
+        INSERT INTO worker_connection_epochs (enrollment_id, high_water)
+        VALUES (?, ?)
+        ON CONFLICT(enrollment_id) DO UPDATE SET
+          high_water = MAX(worker_connection_epochs.high_water, excluded.high_water)
+      `);
+      for (const row of rows) {
+        let readiness: unknown;
+        try {
+          readiness = JSON.parse(row.readiness_document);
+        } catch {
+          continue;
+        }
+        const epoch = readiness !== null && typeof readiness === 'object'
+          ? (readiness as { readonly connectionEpoch?: unknown }).connectionEpoch
+          : undefined;
+        if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch <= 0) continue;
+        seed.run(row.enrollment_id, epoch);
+      }
+    },
+  },
+  {
+    fromVersion: 13,
+    toVersion: 14,
+    name: 'one_enrollment_authority_per_environment_instance',
+    migrate: (db) => {
+      // New enrollment creation reserves one durable authority row per
+      // Environment instance. Historical sibling records are retained for
+      // inspection; choosing the stable lowest id only controls future creation
+      // and never deletes or rewrites those records.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_instance_enrollment_authority (
+          environment_instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL
+        );
+      `);
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'environment_enrollments'",
+      ).get();
+      if (table === undefined) return;
+      db.exec(`
+        INSERT OR IGNORE INTO environment_instance_enrollment_authority
+          (environment_instance_id, enrollment_id)
+        SELECT environment_instance_id, MIN(id)
+        FROM environment_enrollments
+        GROUP BY environment_instance_id;
+      `);
+    },
+  },
 ];
+
+/** Resolve even an adversarial candidate collision without exposing legacy keys. */
+function collisionSafeCatalogId(
+  candidate: string,
+  row: {
+    readonly instance_id: string;
+    readonly enrollment_id: string;
+    readonly document: string;
+    readonly updated_at: number;
+  },
+  used: ReadonlySet<string>,
+): string {
+  if (!used.has(candidate)) return candidate;
+  const source = `${row.instance_id}\0${row.enrollment_id}\0${row.document}\0${row.updated_at}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const digest = createHash('sha256')
+      .update(`sprout-catalog-collision\0${attempt}\0${source}`)
+      .digest('hex');
+    const resolved = `unknown-instance-${digest}`;
+    if (!used.has(resolved)) return resolved;
+  }
+}
 
 /** Options for database migration and initialization. */
 export interface MigrateDatabaseOptions {

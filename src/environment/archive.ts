@@ -70,6 +70,12 @@ export interface EnvironmentArchiveServiceOptions {
   readonly leases: ArchiveLeasePort;
   readonly recovery?: ArchiveRecoveryPort;
   readonly clock?: () => number;
+  /**
+   * Invoked after an archive or restore decision is written (E2, #116), so the
+   * dynamic Environment catalog observes an archived instance becoming
+   * ineligible without a restart. An observation only; it must never throw.
+   */
+  readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
 }
 
 /**
@@ -84,12 +90,23 @@ export class EnvironmentArchiveService {
   readonly #leases: ArchiveLeasePort;
   readonly #recovery: ArchiveRecoveryPort | undefined;
   readonly #clock: () => number;
+  readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
 
   constructor(options: EnvironmentArchiveServiceOptions) {
     this.#enrollments = options.enrollments;
     this.#leases = options.leases;
     this.#recovery = options.recovery;
     this.#clock = options.clock ?? Date.now;
+    this.#onMutation = options.onMutation;
+  }
+
+  /** Announce a durable decision to the catalog observer, never throwing. */
+  #announce(enrollment: EnvironmentEnrollment): void {
+    try {
+      this.#onMutation?.(enrollment);
+    } catch {
+      // Observation must never turn a durable archive/restore into a failure.
+    }
   }
 
   /**
@@ -131,6 +148,7 @@ export class EnvironmentArchiveService {
       ],
     };
     await this.#enrollments.save(archived);
+    this.#announce(archived);
     return archived;
   }
 
@@ -178,11 +196,11 @@ export class EnvironmentArchiveService {
       ],
     };
     await this.#enrollments.save(restored);
+    this.#announce(restored);
     return restored;
   }
 
-  async #require(enrollmentId: string): Promise<EnvironmentEnrollment> {
-    const enrollment = await this.#enrollments.get(enrollmentId);
+  async #require(enrollmentId: string): Promise<EnvironmentEnrollment> {    const enrollment = await this.#enrollments.get(enrollmentId);
     if (enrollment === undefined) {
       throw new ArchiveError('unknown-enrollment', `Unknown enrollment: ${enrollmentId}`);
     }
