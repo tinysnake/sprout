@@ -114,6 +114,15 @@ What now works or what was learned.
 
 The record reports evidence; it does not redefine acceptance after implementation.
 
+### Verification commands
+
+`npm test` and `npm run typecheck` are the standard evidence. `npm test` prints a
+failure-only report, so a passing run is a short counter block and a failing run
+adds only the failing tests with their reason and location. Do not paste a whole
+passing run into a work record; quote the counters. When a large command output
+is genuinely needed, filter it at the shell (for example `npm test 2>&1 | tail -40`)
+rather than reading the whole log into context.
+
 ## Loop
 
 ### 1. Reconcile

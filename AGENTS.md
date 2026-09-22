@@ -10,6 +10,12 @@ This rule applies strictly to:
 
 When recording command outputs, probe results, test transcripts, or error logs, always sanitize them before writing: replace specific identities, IPs, and host paths with generic placeholders (such as `<user>@<windows-host>`, `~/.local/bin/...`).
 
+## Tests and command output
+
+Run the test suite with `npm test`, never with a raw `node --test ...` invocation. `npm test` prints the pass/fail counters and, only when something fails, the failing tests with their reason and location. A raw `node --test` prints every passing test, which floods an agent's context with material it already knows. Use `npm run test:full` only when every test name is genuinely needed, and redirect it to a file instead of reading all of it.
+
+Filter large command output at the shell (`... | tail -40`, `rg -n 'fail|Error|not ok'`) rather than loading the whole output into context.
+
 ## Agent skills
 
 ### Issue tracker

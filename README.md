@@ -79,7 +79,8 @@ workspace.
 ## Test
 
 ```bash
-npm test                # automated tests (no engine, network, or Docker needed)
+npm test                # automated tests, failure-only report (no engine, network, or Docker needed)
+npm run test:full       # same run with every passing test named
 npm run typecheck       # server and client type checking
 npm run smoke           # live check: real Codex in a worker on the macOS host
 npm run image:build     # build the container environment image
@@ -93,6 +94,11 @@ the platform facts that are easy to get wrong.
 `npm test` uses controlled adapters at the engine and environment seams, so it
 needs neither Codex nor Docker. `npm run smoke` is the opposite: it exercises the
 real seams and prints the observed evidence.
+
+`npm test` runs through `scripts/test-summary.ts`, which prints the pass/fail
+counters and, only when something fails, that failure's reason and location. Use
+`npm run test:full` when you need to see every passing test named; run it into a
+file rather than reading the whole thing into context.
 
 ## Layout
 
