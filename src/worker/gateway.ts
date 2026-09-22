@@ -50,6 +50,12 @@ export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
 export interface WorkerGatewayOptions {
   readonly enrollments: EnvironmentEnrollmentService;
   readonly epochs?: WorkerConnectionRegistry;
+  /**
+   * Core-owned configured work-model targets. Captured at acceptance and sent
+   * only over the authenticated JSON-RPC channel; a browser never supplies
+   * these probe inputs.
+   */
+  readonly requiredModels?: () => readonly string[];
   /** Milliseconds before an incomplete handshake is refused. */
   readonly handshakeTimeoutMs?: number;
   /** The Worker protocol range this core supports. */
@@ -67,6 +73,8 @@ export interface WorkerGatewayAcceptance {
   readonly accepted: true;
   readonly enrollment: EnvironmentEnrollment;
   readonly epoch: WorkerConnectionEpoch;
+  /** Core-configured targets to compare locally during a readiness probe. */
+  readonly requiredModels: readonly string[];
   /**
    * The line-framed JSON-RPC channel over the same socket. The core builds its
    * `WorkerClient` adapters from this, exactly as it does for any carrier.
@@ -103,6 +111,7 @@ export class WorkerGateway {
   readonly #epochs: WorkerConnectionRegistry;
   readonly #handshakeTimeoutMs: number;
   readonly #supportedProtocol: ProtocolVersionRange;
+  readonly #requiredModels: () => readonly string[];
   /**
    * Live accepted connections per enrollment. Normal enrollment creation makes
    * this a one-to-one relation with an Environment instance; the instance id is
@@ -152,6 +161,7 @@ export class WorkerGateway {
     this.#epochs = options.epochs ?? new WorkerConnectionRegistry();
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS;
     this.#supportedProtocol = options.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL;
+    this.#requiredModels = options.requiredModels ?? (() => []);
   }
 
   get epochs(): WorkerConnectionRegistry {
@@ -457,6 +467,7 @@ export class WorkerGateway {
       accepted: true,
       enrollment: outcome.enrollment,
       epoch,
+      requiredModels: [...new Set(this.#requiredModels().filter((model): model is string => typeof model === 'string' && model !== ''))],
       transport,
       onChannelClosed: (listener) => {
         channelClosedListeners.add(listener);

@@ -65,7 +65,7 @@ import {
 import { TaskService } from './task/service.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
-import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
+import type { WorkerInfo, WorkerReadinessFacts, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -78,6 +78,7 @@ import {
   type EnvironmentWorkerConfiguration,
 } from './worker/environment-worker.ts';
 import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
+import { effectiveWorkOptions } from './agent/model.ts';
 import { createWorkerProbeRequester } from './worker/readiness-requester.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
@@ -1018,7 +1019,21 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // WS/WSS connection carrying the existing neutral Worker JSON-RPC under a
     // monotonic connection epoch. The gateway owns exactly one registry shared
     // with the runtime, so the catalog sees the same epoch the gateway accepted.
-    const workerGateway = new WorkerGateway({ enrollments, epochs: workerEpochs });
+    const workerGateway = new WorkerGateway({
+      enrollments,
+      epochs: workerEpochs,
+      // Agent configuration is the core-owned declaration of the model a
+      // future run will target. Codex is the sole engine with a safe local
+      // catalog probe; do not feed a Pi-only target to Codex and claim a false
+      // target absence. The Worker may only compare these locally and must not
+      // infer account entitlement.
+      requiredModels: () => [...new Set(
+        agents.list().flatMap((agent) => effectiveWorkOptions(agent)
+          .filter((option) => option.engine === 'codex')
+          .map((option) => option.workModel))
+          .filter((model) => model !== ''),
+      )],
+    });
     invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
@@ -1059,18 +1074,18 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       void refreshEnvironmentCatalog().catch(() => undefined);
     });
     /**
-     * Observe the accepted Worker's declared readiness and re-project the catalog.
+     * Observe the accepted Worker's readiness and re-project the catalog.
      *
-     * The facts come from the Worker's own `worker/info` over the already-accepted
-     * inbound channel; nothing here dials a Worker. A missing or unapproved
-     * enrollment, or a Worker that declares no readiness, leaves the catalog
-     * unchanged and the instance ineligible rather than inventing facts.
+     * When the Worker supports a probe, it receives the core-configured target
+     * models over the already-accepted channel. Otherwise the Worker-declared
+     * `worker/info` observation remains the non-fabricating fallback. Nothing
+     * here dials a Worker.
      */
     const observeAcceptedWorkerReadiness = async (
       acceptance: WorkerGatewayAcceptance,
       attempt = 0,
     ): Promise<void> => {
-      if (runtimeEnvironment.info === undefined) return;
+      if (runtimeEnvironment.info === undefined && runtimeEnvironment.probeReadiness === undefined) return;
       const { enrollment, epoch } = acceptance;
       // Both sides of the asynchronous `worker/info` request must still name
       // this precise connection. A reconnect/replacement is not proof that the
@@ -1093,9 +1108,17 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       if (!isCurrent()) return;
       const currentEnrollment = await enrollments.get(enrollment.id);
       if (currentEnrollment === undefined || currentEnrollment.status !== 'approved' || !isCurrent()) return;
-      let info: WorkerInfo | undefined;
+      let readiness: WorkerReadinessFacts | undefined;
       try {
-        info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
+        const probe = acceptance.requiredModels.length === 0 || runtimeEnvironment.probeReadiness === undefined
+          ? undefined
+          : await runtimeEnvironment.probeReadiness(enrollment.environmentInstanceId);
+        if (probe !== undefined) {
+          readiness = probe.readiness;
+        } else {
+          const info = await runtimeEnvironment.info?.(enrollment.environmentInstanceId);
+          readiness = info?.readiness;
+        }
       } catch {
         // A channel that cannot identify itself is already offline; the close
         // listener re-projects. A just-accepted Worker may also still be
@@ -1103,12 +1126,12 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         retryAfterWorkerStarts();
         return;
       }
-      if (info === undefined || info.readiness === undefined) {
+      if (readiness === undefined) {
         retryAfterWorkerStarts();
         return;
       }
       if (!isCurrent()) return;
-      await enrollments.observeWorkerReadiness(enrollment.id, info.readiness, {
+      await enrollments.observeWorkerReadiness(enrollment.id, readiness, {
         enrollmentId: enrollment.id,
         connectionEpoch: epoch.epoch,
         // The service repeats this check immediately before durable storage. If

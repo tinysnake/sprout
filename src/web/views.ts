@@ -479,7 +479,10 @@ export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeRe
     protocolOk: probe.protocolOk,
     enginesOk: probe.enginesOk,
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
-    ...(probe.source !== undefined ? { source: probe.source } : {}),
+    // This is deliberately repeated at the wire boundary for historical or
+    // bypassing documents. Probe provenance is closed-world, not arbitrary
+    // Worker text.
+    ...(probe.source === 'worker' ? { source: 'worker' as const } : {}),
     ...(probe.version !== undefined
       ? { version: probeVersionOrUnknown(probe.version) }
       : {}),

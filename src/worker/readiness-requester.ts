@@ -19,6 +19,7 @@ import type { ProbeResultFact } from '../environment/readiness.ts';
 import type { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
 import type { RuntimeEnvironment } from '../runtime.ts';
 import type { WorkerGateway } from './gateway.ts';
+import type { WorkerReadinessProbeResult } from './protocol.ts';
 
 export interface WorkerProbeRequesterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
@@ -58,6 +59,9 @@ export function createWorkerProbeRequester(
     if (!isCurrent()) throw new Error('the Environment Worker is offline');
     const result = await environment.probeReadiness?.(enrollment.environmentInstanceId);
     if (result === undefined) throw new Error('the Environment Worker is offline');
+    if (!isCompleteProbeResult(result)) {
+      throw new Error('the Environment Worker returned an invalid readiness probe result');
+    }
     const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
       enrollmentId,
       connectionEpoch: live.epoch.epoch,
@@ -67,12 +71,91 @@ export function createWorkerProbeRequester(
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
     await options.refreshEnvironmentCatalog();
+    // Read back the durable, ingress-sanitized fact. The Worker result itself
+    // is untrusted runtime JSON-RPC input; returning it would allow a response
+    // that was never committed or whose privacy reduction differs from GET.
+    const committed = (await enrollments.readiness(enrollmentId)).probes
+      .filter((probe) =>
+        probe.enrollmentId === enrollmentId &&
+        probe.connectionEpoch === live.epoch.epoch &&
+        sameProbe(probe, result.probe),
+      )
+      .at(-1);
     // Final authority check after the catalog refresh: a revoke/reset can land
     // inside that await, and a response must never carry a probe from an epoch
     // the lifecycle has since invalidated (R118-EPOCH-001).
-    if (!isCurrent()) {
+    if (!isCurrent() || committed === undefined) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
-    return { ...result.probe, enrollmentId: live.enrollment.id, connectionEpoch: live.epoch.epoch };
+    return committed;
   };
+}
+
+/** Runtime JSON-RPC validation; protocol TypeScript types do not validate peers. */
+function isCompleteProbeResult(value: unknown): value is WorkerReadinessProbeResult {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe']) || !isProbe(value.probe)) return false;
+  const readiness = value.readiness;
+  if (!isRecord(readiness) || !hasOnlyKeys(readiness, ['protocolVersion', 'observedAt', 'engines', 'probe'])) return false;
+  if (typeof readiness.protocolVersion !== 'string' || readiness.protocolVersion === '') return false;
+  if (readiness.observedAt !== undefined && !isNonNegativeNumber(readiness.observedAt)) return false;
+  if (!Array.isArray(readiness.engines) || !readiness.engines.every(isEngine)) return false;
+  // A probe is complete only when both protocol locations are structurally
+  // valid and identical. This prevents durable GET/history and POST response
+  // from describing different observations.
+  return isProbe(readiness.probe) && sameProbe(readiness.probe, value.probe);
+}
+
+function isEngine(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'engine', 'version', 'installed', 'readiness', 'modelAvailability', 'models',
+    'authenticated', 'authMode', 'authType', 'modelIdPresent', 'probedAt', 'probeExitCode', 'source',
+  ])) return false;
+  return typeof value.engine === 'string' && value.engine !== '' &&
+    (value.version === undefined || typeof value.version === 'string') &&
+    typeof value.installed === 'boolean' &&
+    (value.readiness === 'ready' || value.readiness === 'login-required' || value.readiness === 'missing' || value.readiness === 'unknown') &&
+    (value.modelAvailability === 'available' || value.modelAvailability === 'none' || value.modelAvailability === 'unknown') &&
+    Array.isArray(value.models) && value.models.every((model) => typeof model === 'string') &&
+    (value.authenticated === undefined || typeof value.authenticated === 'boolean') &&
+    (value.authMode === undefined || typeof value.authMode === 'string') &&
+    (value.authType === undefined || typeof value.authType === 'string') &&
+    (value.modelIdPresent === undefined || typeof value.modelIdPresent === 'boolean') &&
+    (value.probedAt === undefined || isNonNegativeNumber(value.probedAt)) &&
+    (value.probeExitCode === undefined || Number.isSafeInteger(value.probeExitCode)) &&
+    (value.source === undefined || typeof value.source === 'string');
+}
+
+function isProbe(value: unknown): value is WorkerReadinessProbeResult['probe'] {
+  return isRecord(value) && hasOnlyKeys(value, [
+    'at', 'latencyMs', 'protocolOk', 'enginesOk', 'source', 'version', 'summary',
+  ]) &&
+    isNonNegativeNumber(value.at) &&
+    isNonNegativeNumber(value.latencyMs) &&
+    typeof value.protocolOk === 'boolean' &&
+    typeof value.enginesOk === 'boolean' &&
+    value.source === 'worker' &&
+    typeof value.version === 'string' && value.version !== '' &&
+    typeof value.summary === 'string';
+}
+
+function sameProbe(left: WorkerReadinessProbeResult['probe'] | ProbeResultFact, right: WorkerReadinessProbeResult['probe']): boolean {
+  return left.at === right.at &&
+    left.latencyMs === right.latencyMs &&
+    left.protocolOk === right.protocolOk &&
+    left.enginesOk === right.enginesOk &&
+    left.source === right.source &&
+    left.version === right.version &&
+    left.summary === right.summary;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }

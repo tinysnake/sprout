@@ -358,6 +358,38 @@ test('a pre-epoch reconciliation cannot overwrite a reset that lands during its 
   assert.deepEqual(durable?.decisions.map((decision) => decision.kind), ['requested', 'approved', 'reset']);
 });
 
+test('a pre-epoch reconciliation cannot overwrite a permission update that lands during its durable read', async () => {
+  const store = new GatedEnrollmentStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: store,
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
+    idFactory: () => 'enroll-1',
+    clock: () => 1_000,
+  });
+  const identity = workerIdentityFixture();
+  await service.requestEnrollment({
+    environmentInstanceId: 'env-1', displayName: 'Environment', publicKey: identity.publicKey,
+    platform: 'macos', capabilityRequests: ['agent-run'], engineFacts: [],
+  });
+  await service.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
+  const proof = await identity.prove(service, 'enroll-1');
+  store.blockNthGetFromNow(2);
+  const connecting = service.connectWorker({
+    enrollmentId: 'enroll-1', proof, connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2' }, engines: [],
+  });
+  await store.gateReached;
+  await service.setCapabilityPermission('enroll-1', 'agent-run', false);
+  store.releaseGet();
+
+  const outcome = await connecting;
+  assert.equal(outcome.authoritySuperseded, true);
+  const durable = await service.get('enroll-1');
+  assert.equal(durable?.capabilityPermissions['agent-run'], false, 'the later permission decision remains durable');
+  assert.deepEqual(durable?.decisions.map((decision) => decision.kind), ['requested', 'approved']);
+});
+
 test('concurrent lifecycle decisions are serialized through the durable revision CAS', async () => {
   const store = new InMemoryEnrollmentStore();
   const service = new EnvironmentEnrollmentService({

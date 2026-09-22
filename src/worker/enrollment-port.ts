@@ -224,7 +224,15 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     if (this.#closed) return undefined;
     const connection = await this.#connection(environmentInstanceId);
     if (connection === undefined || !connection.alive) return undefined;
-    return connection.readiness?.probe({});
+    // The core captured these configured targets at gateway acceptance. They
+    // are never browser request data and travel only on the authenticated
+    // Worker JSON-RPC channel.
+    const acceptance = this.#accepted.get(environmentInstanceId);
+    return connection.readiness?.probe({
+      ...(acceptance !== undefined && acceptance.requiredModels.length > 0
+        ? { requiredModels: acceptance.requiredModels }
+        : {}),
+    });
   }
 
   async close(): Promise<void> {

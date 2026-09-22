@@ -139,6 +139,11 @@ function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
       ? { connectionEpoch: probe.connectionEpoch }
       : {}),
     ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) ?? 'unknown-version' } : {}),
+    // Probe provenance is a closed-world fact just like engine provenance.
+    // JSON-RPC is runtime input, so its TypeScript union cannot prevent a
+    // proven but malicious Worker from attempting to retain an account or
+    // provider identifier here.
+    ...(probe.source === 'worker' ? { source: 'worker' as const } : {}),
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
   };
 }
@@ -459,11 +464,15 @@ export class EnvironmentEnrollmentService {
     // can never clobber a newer revoke/reset. Re-read the lifecycle first: if a
     // Human decision landed while the proof verified, this reconciliation is
     // history that must not be published at all.
-    const current = await this.#requireEnrollment(enrollment.id);
+    await this.#requireEnrollment(enrollment.id);
     if (this.#authority.generation(enrollment.id) !== lifecycleGeneration) {
       return { ...outcome, authoritySuperseded: true };
     }
-    const saved = await this.#enrollments.saveIfRevision(outcome.enrollment, current.revision);
+    // The candidate was derived from `enrollment`, not from the re-read above.
+    // Binding its CAS to that source revision makes a newer durable document
+    // unwriteable even when its revision happens to equal the candidate's
+    // revision shape (for example a concurrent permission edit).
+    const saved = await this.#enrollments.saveIfRevision(outcome.enrollment, enrollment.revision);
     if (saved === undefined) {
       return { ...outcome, authoritySuperseded: true };
     }
@@ -547,6 +556,10 @@ export class EnvironmentEnrollmentService {
     capability: string,
     allowed: boolean,
   ): Promise<EnvironmentEnrollment> {
+    // Capability permission changes whether the currently accepted Worker may
+    // exercise authority. Fence an in-flight pre-epoch reconciliation before
+    // publishing the durable decision, exactly as revoke/reset do.
+    this.#loseAuthority(enrollmentId);
     const at = this.#clock();
     const updated = await this.#mutateWithCas(
       enrollmentId,
