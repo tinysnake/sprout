@@ -1025,7 +1025,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // crosses the same socket. Without it an RPC request can be discarded as
       // an unexpected final handshake frame.
       const timer = setTimeout(() => {
-        void observeAcceptedWorkerReadiness(acceptance);
+        void observeAcceptedWorkerReadiness(acceptance).catch(() => undefined);
       }, 10);
       timer.unref();
     });
@@ -1038,7 +1038,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       if (environmentCatalog.clearEpoch(closed.enrollmentId, closed.epoch.epoch)) {
         publishCatalogMembership();
       }
-      void refreshEnvironmentCatalog();
+      void refreshEnvironmentCatalog().catch(() => undefined);
     });
     /**
      * Observe the accepted Worker's declared readiness and re-project the catalog.
@@ -1068,7 +1068,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // unreferenced and ends naturally on channel loss/replacement.
         if (!isCurrent() || attempt >= 2_000) return;
         const timer = setTimeout(() => {
-          void observeAcceptedWorkerReadiness(acceptance, attempt + 1);
+          void observeAcceptedWorkerReadiness(acceptance, attempt + 1).catch(() => undefined);
         }, 10);
         timer.unref();
       };
@@ -1294,6 +1294,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // The enrollment-backed connections are owned by the gateway; the port
         // stops reaching them before they are torn down.
         await enrollmentEnvironment.close();
+        workerGateway.close();
         // The environment port owns its worker channels. A *container* is not
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.

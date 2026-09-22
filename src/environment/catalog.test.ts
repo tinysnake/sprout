@@ -72,6 +72,7 @@ function observed(overrides: {
   readonly protocolVersion?: string;
   readonly engineReadiness?: 'ready' | 'unknown' | 'missing' | 'login-required';
   readonly models?: 'available' | 'unknown' | 'none';
+  readonly enrollmentId?: string;
   readonly connectionEpoch?: number;
 } = {}): ObservedReadiness {
   const engines: EngineReadinessFact[] = [
@@ -84,6 +85,7 @@ function observed(overrides: {
     },
   ];
   return {
+    enrollmentId: overrides.enrollmentId ?? 'enroll-1',
     connectionEpoch: overrides.connectionEpoch ?? 1,
     connection: { state: overrides.connection ?? 'online', lastConfirmedAt: NOW },
     compatibility: {
@@ -97,10 +99,13 @@ function observed(overrides: {
 function input(overrides: Partial<EnvironmentCatalogInput> & {
   readonly enrollment?: EnvironmentEnrollment;
 } = {}): EnvironmentCatalogInput {
+  const selectedEnrollment = overrides.enrollment ?? enrollment();
   return {
-    enrollment: overrides.enrollment ?? enrollment(),
+    enrollment: selectedEnrollment,
     currentEpoch: 'currentEpoch' in overrides ? overrides.currentEpoch : 1,
-    observed: 'observed' in overrides ? overrides.observed : observed(),
+    observed: 'observed' in overrides
+      ? overrides.observed
+      : observed({ enrollmentId: selectedEnrollment.id }),
     workSafety: overrides.workSafety ?? ('clear' as WorkSafetyState),
     requiredEngines: overrides.requiredEngines ?? ['codex'],
     supportedProtocol: overrides.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL,
@@ -222,6 +227,54 @@ test('readiness is authoritative only for its current Worker connection epoch', 
   assert.equal(catalog.entry('mac-enrolled-1')?.eligible, false);
 });
 
+test('a newly accepted enrollment synchronously discards same-instance facts from a prior enrollment', () => {
+  const first = enrollment({ id: 'enroll-first', instanceId: 'shared-instance' });
+  const replacement = enrollment({ id: 'enroll-replacement', instanceId: 'shared-instance' });
+  const catalog = new EnvironmentCatalog();
+  catalog.update([
+    input({
+      enrollment: first,
+      currentEpoch: 1,
+      observed: observed({ enrollmentId: first.id, connectionEpoch: 1 }),
+    }),
+  ]);
+  assert.equal(catalog.entry('shared-instance')?.eligible, true);
+
+  // This models a legacy sibling arriving between refreshes. Its new
+  // per-enrollment epoch is also numerically one, but setEpoch must first
+  // erase the prior observed facts before it publishes any membership.
+  catalog.update([
+    input({
+      enrollment: replacement,
+      currentEpoch: undefined,
+      observed: observed({ enrollmentId: first.id, connectionEpoch: 1 }),
+    }),
+  ]);
+  catalog.setEpoch(replacement.id, 1);
+  assert.equal(catalog.entry('shared-instance')?.eligible, false);
+  assert.equal(catalog.entry('shared-instance')?.observed, undefined);
+
+  // A store refresh cannot re-authorize the old enrollment just because its
+  // numeric epoch equals the replacement's first epoch.
+  catalog.update([
+    input({
+      enrollment: replacement,
+      currentEpoch: 1,
+      observed: observed({ enrollmentId: first.id, connectionEpoch: 1 }),
+    }),
+  ]);
+  assert.equal(catalog.entry('shared-instance')?.eligible, false);
+
+  catalog.update([
+    input({
+      enrollment: replacement,
+      currentEpoch: 1,
+      observed: observed({ enrollmentId: replacement.id, connectionEpoch: 1 }),
+    }),
+  ]);
+  assert.equal(catalog.entry('shared-instance')?.eligible, true);
+});
+
 test('an unknown Worker platform remains explicit and cannot admit or resolve as macOS', () => {
   const known = enrollment();
   const entry = projectCatalogEntry(input({
@@ -288,7 +341,11 @@ test('an eligible enrollment is preferred over a superseded sibling for one inst
   const catalog = new EnvironmentCatalog();
   catalog.update([
     input({ enrollment: pending, observed: undefined, currentEpoch: undefined }),
-    input({ enrollment: approved, currentEpoch: 3, observed: observed({ connectionEpoch: 3 }) }),
+    input({
+      enrollment: approved,
+      currentEpoch: 3,
+      observed: observed({ enrollmentId: 'enroll-new', connectionEpoch: 3 }),
+    }),
   ]);
   const entry = catalog.entry('host-a');
   assert.equal(entry?.enrollmentId, 'enroll-new');

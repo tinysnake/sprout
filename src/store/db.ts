@@ -72,7 +72,8 @@ export {
  * - authority domain: `operator_identity`, `browser_sessions`
  *   (`auth/sqlite-store.ts`)
  * - agent domain: `agents` (`agent/sqlite-store.ts`)
- * - enrollment domain: `environment_enrollments`
+ * - enrollment domain: `environment_enrollments`,
+ *   `environment_instance_enrollment_authority`
  *   (`environment/sqlite-enrollment-store.ts`)
  * - catalog domain: `environment_catalog`
  *   (`environment/sqlite-catalog-store.ts`)

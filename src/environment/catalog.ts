@@ -185,7 +185,9 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
   // properties of an instance. A reconnect/replacement must re-establish them:
   // an observation from a prior epoch is inspectable but non-authoritative.
   const currentEpochReadiness =
-    input.currentEpoch !== undefined && input.observed?.connectionEpoch === input.currentEpoch;
+    input.currentEpoch !== undefined &&
+    input.observed?.enrollmentId === enrollment.id &&
+    input.observed.connectionEpoch === input.currentEpoch;
   // Every *required* engine must have established (non-unknown) readiness and
   // an available model. An unrequired engine stays an honestly non-blocking
   // fact. Strict probe-driven admission for the remaining dimensions arrives
@@ -268,7 +270,10 @@ export function admissionRefusal(entry: EnvironmentCatalogEntry): EnvironmentAdm
   if (entry.currentEpoch === undefined) {
     return refusal(entry, 'not-current-epoch', 'No current Worker connection epoch is accepted.');
   }
-  if (entry.observed?.connectionEpoch !== entry.currentEpoch) {
+  if (
+    entry.observed?.enrollmentId !== entry.enrollmentId ||
+    entry.observed.connectionEpoch !== entry.currentEpoch
+  ) {
     return refusal(
       entry,
       'not-current-epoch',
@@ -334,13 +339,15 @@ export class EnvironmentCatalog {
 
   /**
    * Record the accepted connection epoch for one enrollment without a full
-   * store re-read, so a newly accepted connection becomes visible to admission
-   * on the same turn it is accepted rather than after the next refresh.
+   * store re-read. Acceptance synchronously discards the previous observed
+   * facts before publishing the new epoch: facts from a prior connection or
+   * enrollment are inspectable in durable storage, but cannot bridge this
+   * authority transition in the catalog/pool.
    */
   setEpoch(enrollmentId: string, epoch: number | undefined): void {
     for (const [instanceId, input] of this.#inputs) {
       if (input.enrollment.id !== enrollmentId) continue;
-      this.#inputs.set(instanceId, { ...input, currentEpoch: epoch });
+      this.#inputs.set(instanceId, { ...input, observed: undefined, currentEpoch: epoch });
       this.#reproject();
       return;
     }

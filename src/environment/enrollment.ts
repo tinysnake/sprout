@@ -141,6 +141,8 @@ export interface EnrollmentConnectionOutcome {
 
 export type EnrollmentErrorCode =
   | 'unknown-enrollment'
+  /** An existing enrollment owns this Environment instance; reset it instead. */
+  | 'duplicate-instance'
   | 'revoked-enrollment'
   | 'duplicate-identity'
   | 'not-pending'

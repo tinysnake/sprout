@@ -39,6 +39,8 @@ import { InMemoryCollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
+import { createPendingEnrollment } from './environment/enrollment.ts';
+import { workerIdentityDigest } from './environment/enrollment-identity.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
@@ -612,7 +614,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 14; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 15; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -2073,6 +2075,137 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
     );
   } finally {
     await worker?.shutdown().catch(() => undefined);
+    for (const connection of connections) connection.close();
+    await runtime.close();
+  }
+});
+
+test('E2: a legacy same-instance enrollment cannot inherit stale readiness through gateway acceptance', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-instance-authority-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+      engineId: 'scripted',
+      runtimeConfiguration: {},
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  const { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } = await import(
+    './worker/enrollment-connector.ts'
+  );
+  const { EnvironmentWorker } = await import('./worker/server.ts');
+  const { WORKER_PROTOCOL_VERSION } = await import('./worker/protocol.ts');
+  const keyDirectory = mkdtempSync(join(tmpdir(), 'sprout-e2-instance-authority-key-'));
+  t.after(() => rmSync(keyDirectory, { recursive: true, force: true }));
+  const firstKeyPath = join(keyDirectory, 'first-worker-key.pem');
+  const secondKeyPath = join(keyDirectory, 'second-worker-key.pem');
+  const instanceId = 'one-instance';
+  const connections: { close(): void }[] = [];
+  let firstWorker: InstanceType<typeof EnvironmentWorker> | undefined;
+  let secondWorker: InstanceType<typeof EnvironmentWorker> | undefined;
+  try {
+    const firstIdentity = loadOrCreateWorkerIdentity(firstKeyPath);
+    const first = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: instanceId,
+      displayName: 'First authority',
+      publicKey: workerPublicKey(firstIdentity.privateKey),
+      platform: 'macos',
+      capabilityRequests: [ADMISSION_CAPABILITY],
+      engineFacts: [],
+    });
+    await runtime.enrollments.approve(first.enrollment.id, {
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    });
+    const { port } = await runtime.api.listen(0, '127.0.0.1');
+    const firstConnection = await connectWorkerEnrollment({
+      target: {
+        enrollmentId: first.enrollment.id,
+        host: '127.0.0.1',
+        port,
+        claimSecret: undefined,
+        identityKeyPath: firstKeyPath,
+      },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [],
+    });
+    connections.push(firstConnection);
+    firstWorker = new EnvironmentWorker({
+      environmentInstanceId: instanceId,
+      engines: new Map(),
+      input: firstConnection.stream,
+      output: firstConnection.stream,
+      readiness: () => ({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+      }),
+    });
+    await waitFor(
+      () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
+      'the first enrollment to establish readiness',
+    );
+    assert.equal((await runtime.stores.environmentReadiness.getReadiness(instanceId))?.enrollmentId, first.enrollment.id);
+
+    // Public creation now refuses another authority for this instance. Insert a
+    // historical sibling directly to prove the runtime and real gateway still
+    // fail closed when reopening legacy data with that invalid shape.
+    const secondIdentity = loadOrCreateWorkerIdentity(secondKeyPath);
+    const legacySibling = createPendingEnrollment({
+      id: 'legacy-second-enrollment',
+      environmentInstanceId: instanceId,
+      displayName: 'Historical sibling',
+      identityDigest: workerIdentityDigest(workerPublicKey(secondIdentity.privateKey)),
+      platform: 'macos',
+      capabilityRequests: [ADMISSION_CAPABILITY],
+      engineFacts: [],
+      at: Date.now() + 1,
+    });
+    await runtime.stores.enrollments.save(legacySibling);
+    await runtime.enrollments.approve(legacySibling.id, {
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    });
+    await runtime.refreshEnvironmentCatalog();
+
+    const secondConnection = await connectWorkerEnrollment({
+      target: {
+        enrollmentId: legacySibling.id,
+        host: '127.0.0.1',
+        port,
+        claimSecret: undefined,
+        identityKeyPath: secondKeyPath,
+      },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [],
+    });
+    connections.push(secondConnection);
+    assert.equal(secondConnection.epoch, 1, 'the sibling has a fresh per-enrollment epoch');
+    assert.equal(runtime.workerGateway.liveFor(instanceId)?.enrollment.id, legacySibling.id);
+    assert.equal(runtime.workerEpochs.isCurrent(first.enrollment.id, firstConnection.connectionId), false);
+    assert.equal(runtime.environmentCatalog.entry(instanceId)?.eligible, false, 'acceptance clears stale facts before publishing epoch one');
+    assert.equal(runtime.pool.requiresLease(instanceId, ADMISSION_CAPABILITY), undefined);
+
+    // Fresh readiness from the second accepted transport is the only fact that
+    // can restore admission. This proves both exact readiness ownership and the
+    // one-live-transport gateway fence in the production composition.
+    secondWorker = new EnvironmentWorker({
+      environmentInstanceId: instanceId,
+      engines: new Map(),
+      input: secondConnection.stream,
+      output: secondConnection.stream,
+      readiness: () => ({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+      }),
+    });
+    await waitFor(
+      () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
+      'fresh second-enrollment readiness',
+    );
+    assert.equal((await runtime.stores.environmentReadiness.getReadiness(instanceId))?.enrollmentId, legacySibling.id);
+  } finally {
+    await firstWorker?.shutdown().catch(() => undefined);
+    await secondWorker?.shutdown().catch(() => undefined);
     for (const connection of connections) connection.close();
     await runtime.close();
   }

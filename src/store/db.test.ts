@@ -179,6 +179,10 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  environment_instance_enrollment_authority: [
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_catalog: [
     { name: 'instance_id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -336,6 +340,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'environment_catalog',
         'environment_enrollments',
         'environment_force_releases',
+        'environment_instance_enrollment_authority',
         'environment_leases',
         'environment_probes',
         'environment_readiness',

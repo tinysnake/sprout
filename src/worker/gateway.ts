@@ -101,10 +101,26 @@ export class WorkerGateway {
   readonly #epochs: WorkerConnectionRegistry;
   readonly #handshakeTimeoutMs: number;
   readonly #supportedProtocol: ProtocolVersionRange;
-  /** Live accepted connections per enrollment, so a new epoch can supersede. */
-  readonly #live = new Map<string, { connectionId: string; transport: JsonRpcTransport }>();
+  /**
+   * Live accepted connections per enrollment. Normal enrollment creation makes
+   * this a one-to-one relation with an Environment instance; the instance id is
+   * retained here too so a damaged/legacy duplicate cannot keep a second
+   * transport alive.
+   */
+  readonly #live = new Map<
+    string,
+    { readonly connectionId: string; readonly environmentInstanceId: string; readonly transport: JsonRpcTransport }
+  >();
   /** Live accepted connections keyed by environment instance id (#115). */
   readonly #byInstance = new Map<string, WorkerGatewayAcceptance>();
+  /**
+   * The accepted-or-accepting authority for one Environment instance.
+   *
+   * This separately fences historical sibling enrollment ids while their
+   * readiness barriers are in flight: a per-enrollment epoch check alone would
+   * let an older sibling register after a newer sibling had won the instance.
+   */
+  readonly #instanceAuthority = new Map<string, { readonly enrollmentId: string; readonly connectionId: string }>();
   /**
    * Accepted connections that have not finished the `worker/ready` barrier.
    *
@@ -113,7 +129,10 @@ export class WorkerGateway {
    * an older in-flight connection must never register itself once a newer epoch
    * has been accepted (the readiness-barrier race).
    */
-  readonly #inFlight = new Map<string, { readonly enrollmentId: string; readonly stream: Duplex }>();
+  readonly #inFlight = new Map<
+    string,
+    { readonly enrollmentId: string; readonly environmentInstanceId: string; readonly stream: Duplex }
+  >();
   readonly #acceptListeners = new Set<(acceptance: WorkerGatewayAcceptance) => void>();
   /**
    * Channel-loss listeners, fired once whenever a live connection ends.
@@ -156,17 +175,21 @@ export class WorkerGateway {
   }
 
   /**
-   * Supersede every registered connection for one enrollment with a newer epoch.
+   * Enforce exclusive live transport ownership for one Environment instance.
    *
-   * Only the registered live transport is closed here. A connection still
-   * waiting on the readiness barrier is deliberately left to re-check authority
-   * after that barrier: it must never be able to register itself once a newer
-   * epoch exists, and destroying its stream from here would race the arrival of
-   * its `worker/ready` frame.
+   * New records cannot share an instance id (the enrollment service directs
+   * identity rotation through reset/reapproval), but older/corrupt records may
+   * still exist. They must not let two Workers command one instance. Fence both
+   * registered transports before publishing the newcomer. In-flight handshake
+   * transports have no command channel yet; `#instanceAuthority` fences them at
+   * the barrier without destroying their refusal response.
    */
-  #supersedePrior(enrollmentId: string): void {
-    const previous = this.#live.get(enrollmentId);
-    if (previous !== undefined) previous.transport.close();
+  #supersedePriorForInstance(environmentInstanceId: string): void {
+    for (const [enrollmentId, live] of this.#live) {
+      if (live.environmentInstanceId !== environmentInstanceId) continue;
+      this.#epochs.invalidate(enrollmentId, live.connectionId);
+      live.transport.close();
+    }
   }
 
   /**
@@ -284,12 +307,20 @@ export class WorkerGateway {
       };
     }
 
-    // Accept: a newer epoch supersedes and tears down any prior registered
-    // connection. A connection still waiting on the readiness barrier re-checks
-    // authority after that barrier instead (see below).
+    // Accept: a newer epoch owns this Environment instance exclusively. The
+    // regular path has one durable enrollment per instance; this also fences a
+    // legacy duplicate before it can leave two transports live.
     const epoch = this.#epochs.accept(enrollmentId);
-    this.#supersedePrior(enrollmentId);
-    this.#inFlight.set(epoch.connectionId, { enrollmentId, stream });
+    this.#supersedePriorForInstance(outcome.enrollment.environmentInstanceId);
+    this.#instanceAuthority.set(outcome.enrollment.environmentInstanceId, {
+      enrollmentId,
+      connectionId: epoch.connectionId,
+    });
+    this.#inFlight.set(epoch.connectionId, {
+      enrollmentId,
+      environmentInstanceId: outcome.enrollment.environmentInstanceId,
+      stream,
+    });
     safeWrite(stream, {
       type: 'worker/accepted',
       enrollmentId,
@@ -315,7 +346,10 @@ export class WorkerGateway {
     // Readiness-barrier race: a newer epoch may have been accepted while this
     // older connection waited. Re-check authority after the barrier, so a
     // delayed older connection can never register itself as live or routable.
-    if (!this.#epochs.isCurrent(enrollmentId, epoch.connectionId)) {
+    const ownsInstance =
+      this.#instanceAuthority.get(outcome.enrollment.environmentInstanceId)?.enrollmentId === enrollmentId &&
+      this.#instanceAuthority.get(outcome.enrollment.environmentInstanceId)?.connectionId === epoch.connectionId;
+    if (!this.#epochs.isCurrent(enrollmentId, epoch.connectionId) || !ownsInstance) {
       reader.dispose();
       safeWrite(stream, { type: 'worker/refused', reason: 'a newer Worker connection epoch superseded this connection' });
       stream.destroy();
@@ -335,6 +369,10 @@ export class WorkerGateway {
         if (live?.epoch.connectionId === epoch.connectionId) {
           this.#byInstance.delete(outcome.enrollment.environmentInstanceId);
         }
+        const authority = this.#instanceAuthority.get(outcome.enrollment.environmentInstanceId);
+        if (authority?.connectionId === epoch.connectionId) {
+          this.#instanceAuthority.delete(outcome.enrollment.environmentInstanceId);
+        }
         for (const listener of channelClosedListeners) listener();
         channelClosedListeners.clear();
         for (const listener of this.#closeListeners) {
@@ -346,7 +384,11 @@ export class WorkerGateway {
         }
       },
     });
-    this.#live.set(enrollmentId, { connectionId: epoch.connectionId, transport });
+    this.#live.set(enrollmentId, {
+      connectionId: epoch.connectionId,
+      environmentInstanceId: outcome.enrollment.environmentInstanceId,
+      transport,
+    });
     const acceptance: WorkerGatewayAcceptance = {
       accepted: true,
       enrollment: outcome.enrollment,
@@ -377,6 +419,7 @@ export class WorkerGateway {
     this.#inFlight.clear();
     this.#live.clear();
     this.#byInstance.clear();
+    this.#instanceAuthority.clear();
     this.#acceptListeners.clear();
     this.#closeListeners.clear();
   }

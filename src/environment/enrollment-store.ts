@@ -10,6 +10,11 @@ import type { EnvironmentEnrollment } from './enrollment.ts';
  * capability permissions belong to the enrollment as a whole.
  */
 export interface EnrollmentStore {
+  /**
+   * Atomically create the one durable enrollment authority for an Environment
+   * instance. `false` means an existing authority owns that instance.
+   */
+  createIfInstanceAbsent(enrollment: EnvironmentEnrollment): Promise<boolean>;
   save(enrollment: EnvironmentEnrollment): Promise<void>;
   get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined>;
   list(): Promise<readonly EnvironmentEnrollment[]>;
@@ -34,6 +39,16 @@ export interface EnrollmentStore {
 
 export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #enrollments = new Map<string, EnvironmentEnrollment>();
+
+  async createIfInstanceAbsent(enrollment: EnvironmentEnrollment): Promise<boolean> {
+    if ([...this.#enrollments.values()].some(
+      (existing) => existing.environmentInstanceId === enrollment.environmentInstanceId,
+    )) {
+      return false;
+    }
+    this.#enrollments.set(enrollment.id, enrollment);
+    return true;
+  }
 
   async save(enrollment: EnvironmentEnrollment): Promise<void> {
     this.#enrollments.set(enrollment.id, enrollment);

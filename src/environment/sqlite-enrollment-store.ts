@@ -44,10 +44,43 @@ export class SqliteEnrollmentStore implements EnrollmentStore {
       );
       CREATE INDEX IF NOT EXISTS environment_enrollments_instance_idx
         ON environment_enrollments (environment_instance_id);
+      CREATE TABLE IF NOT EXISTS environment_instance_enrollment_authority (
+        environment_instance_id TEXT PRIMARY KEY,
+        enrollment_id TEXT NOT NULL
+      );
     `);
   }
 
+  async createIfInstanceAbsent(enrollment: EnvironmentEnrollment): Promise<boolean> {
+    // The authority row is the SQLite serialization point: a concurrent Web
+    // request in another process cannot create a sibling enrollment after both
+    // requests observed an empty list. Existing historical siblings remain
+    // inspectable; the v14 migration assigns their pre-existing instance one
+    // creation authority without deleting either record.
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const reserved = this.#db.prepare(
+        `INSERT OR IGNORE INTO environment_instance_enrollment_authority
+          (environment_instance_id, enrollment_id) VALUES (?, ?)`,
+      ).run(enrollment.environmentInstanceId, enrollment.id);
+      if (reserved.changes !== 1) {
+        this.#db.exec('COMMIT');
+        return false;
+      }
+      this.#save(enrollment);
+      this.#db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async save(enrollment: EnvironmentEnrollment): Promise<void> {
+    this.#save(enrollment);
+  }
+
+  #save(enrollment: EnvironmentEnrollment): void {
     this.#db
       .prepare(
         `INSERT INTO environment_enrollments (id, environment_instance_id, document)

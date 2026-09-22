@@ -51,6 +51,15 @@ export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, ma
 function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
+    ...(observed.enrollmentId !== undefined
+      ? {
+          enrollmentId: sanitizeIdentifier(observed.enrollmentId, {
+            fallback: '',
+            maxLength: 200,
+            kind: 'generic',
+          }),
+        }
+      : {}),
     ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0
       ? { connectionEpoch: observed.connectionEpoch }
       : {}),
@@ -228,6 +237,10 @@ export class EnvironmentEnrollmentService {
   ): Promise<PendingEnrollmentResult> {
     const at = this.#clock();
     const { publicKey, ...rest } = input;
+    // An Environment instance has one durable enrollment authority. Identity
+    // rotation uses the existing reset/reapproval lifecycle on that record;
+    // creating a sibling record would split epoch, readiness, and transport
+    // ownership for one physical Environment.
     // A pre-known identity needs no claim: there is nothing to bind. Web, which
     // never supplies a key, gets a one-use secret so the identity is bound only
     // after the host claims it and proves key possession (ADR-0012).
@@ -246,7 +259,12 @@ export class EnvironmentEnrollmentService {
       at,
       id: (this.#idFactory ?? createEnrollmentId)(),
     });
-    await this.#enrollments.save(enrollment);
+    if (!(await this.#enrollments.createIfInstanceAbsent(enrollment))) {
+      throw new EnrollmentError(
+        'duplicate-instance',
+        'This Environment instance already has an enrollment; reset and reapprove that enrollment to rotate its Worker identity.',
+      );
+    }
     this.#announce(enrollment);
     return {
       enrollment,
@@ -372,6 +390,7 @@ export class EnvironmentEnrollmentService {
       await this.#readiness.saveReadiness(
         enrollment.environmentInstanceId,
         sanitizeObservedReadiness({
+          enrollmentId: enrollment.id,
           connection: input.connection,
           compatibility: input.compatibility,
           engines: input.engines,
@@ -387,7 +406,7 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     await this.#readiness.saveReadiness(
       enrollment.environmentInstanceId,
-      sanitizeObservedReadiness(observed),
+      sanitizeObservedReadiness({ ...observed, enrollmentId: enrollment.id }),
     );
   }
 
@@ -488,6 +507,7 @@ export class EnvironmentEnrollmentService {
       enrollment.environmentInstanceId,
       sanitizeObservedReadiness({
         ...observed,
+        enrollmentId: enrollment.id,
         ...(options.connectionEpoch !== undefined ? { connectionEpoch: options.connectionEpoch } : {}),
       }),
     );

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { EnvironmentArchiveService, ArchiveError } from './archive.ts';
-import { approveEnrollment } from './enrollment.ts';
+import { approveEnrollment, EnrollmentError } from './enrollment.ts';
 import { SqliteEnrollmentStore } from './sqlite-enrollment-store.ts';
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { workerIdentityFixture, type WorkerIdentityFixture } from './worker-identity-fixture.ts';
@@ -105,6 +105,27 @@ test('an approved enrollment and its capability permissions survive a store reop
     assert.equal(reopened?.capabilityPermissions['agent-run'], true);
     assert.deepEqual(reopened?.decisions.map((decision) => decision.kind), ['requested', 'approved']);
     second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('SQLite reserves one enrollment authority per Environment instance across reopen', async () => {
+  const { directory, path } = databasePath();
+  try {
+    const firstStores = stores(path);
+    const firstService = service(firstStores);
+    await request(firstService, workerIdentityFixture());
+    firstStores.close();
+
+    const reopenedStores = stores(path);
+    const reopenedService = service(reopenedStores);
+    await assert.rejects(
+      () => request(reopenedService, workerIdentityFixture()),
+      (error: unknown) => error instanceof EnrollmentError && error.code === 'duplicate-instance',
+    );
+    assert.equal((await reopenedService.list()).length, 1);
+    reopenedStores.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

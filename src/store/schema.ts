@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 13;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 13;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 14;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -704,6 +704,34 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch <= 0) continue;
         seed.run(row.enrollment_id, epoch);
       }
+    },
+  },
+  {
+    fromVersion: 13,
+    toVersion: 14,
+    name: 'one_enrollment_authority_per_environment_instance',
+    migrate: (db) => {
+      // New enrollment creation reserves one durable authority row per
+      // Environment instance. Historical sibling records are retained for
+      // inspection; choosing the stable lowest id only controls future creation
+      // and never deletes or rewrites those records.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_instance_enrollment_authority (
+          environment_instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL
+        );
+      `);
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'environment_enrollments'",
+      ).get();
+      if (table === undefined) return;
+      db.exec(`
+        INSERT OR IGNORE INTO environment_instance_enrollment_authority
+          (environment_instance_id, enrollment_id)
+        SELECT environment_instance_id, MIN(id)
+        FROM environment_enrollments
+        GROUP BY environment_instance_id;
+      `);
     },
   },
 ];

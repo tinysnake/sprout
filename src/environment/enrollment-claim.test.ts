@@ -172,6 +172,26 @@ test('a pre-provisioned public key needs no claim and retains only its digest', 
   assert.equal(JSON.stringify(result.enrollment).includes(worker.publicKey), false);
 });
 
+test('an Environment instance has one durable enrollment and rotates identity through reset', async () => {
+  const { enrollments } = service();
+  const first = await requestIdentityFree(enrollments);
+  await assert.rejects(
+    () =>
+      enrollments.requestEnrollment({
+        environmentInstanceId: first.enrollment.environmentInstanceId,
+        displayName: 'Same Environment',
+        platform: 'macos',
+        capabilityRequests: ['agent-run'],
+        engineFacts: [],
+      }),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'duplicate-instance',
+  );
+  await enrollments.reset(first.enrollment.id, 'rotate Worker identity');
+  const reset = await enrollments.get(first.enrollment.id);
+  assert.equal(reset?.status, 'pending');
+  assert.equal((await enrollments.list()).length, 1, 'reset retains the one durable authority record');
+});
+
 /**
  * Exactly-once claim consumption under concurrency (#115 review finding 1).
  *

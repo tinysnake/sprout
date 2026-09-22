@@ -227,8 +227,12 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   async close(): Promise<void> {
     this.#closed = true;
     const connections = [...this.#identified.values()];
+    const acceptances = [...this.#accepted.values()];
     this.#identified.clear();
     this.#accepted.clear();
-    await Promise.all(connections.map(({ connection }) => connection.close()));
+    await Promise.all([
+      ...connections.map(({ connection }) => connection.close()),
+      ...acceptances.map((acceptance) => Promise.resolve(acceptance.close())),
+    ]);
   }
 }
