@@ -167,6 +167,27 @@ function engineRows(readiness: EnvironmentReadinessView): Record<string, EngineS
   return rows;
 }
 
+/** Worker-proven engine detail, reduced by the server before it reaches Web. */
+function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance['engineDetails'] {
+  const details: NonNullable<EnvironmentInstance['engineDetails']> = {};
+  for (const engine of readiness.engines) {
+    details[engine.engine] = {
+      version: engine.version ?? (engine.installed ? 'installed' : 'unknown'),
+      authStatus: engine.readiness,
+      modelAvailability: engine.models.state,
+      ...(engine.source !== undefined || engine.probedAt !== undefined
+        ? {
+            notes: [
+              engine.source !== undefined ? `Source: ${engine.source}` : undefined,
+              engine.probedAt !== undefined ? `Observed: ${new Date(engine.probedAt).toISOString()}` : undefined,
+            ].filter((value): value is string => value !== undefined).join(' · '),
+          }
+        : {}),
+    };
+  }
+  return details;
+}
+
 /** Compose one page row from the production facts. */
 function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInstance {
   const { enrollment, readiness, probes, recovery, forceReleases } = facts;
@@ -195,6 +216,7 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     activeLeaseHolder: openLease,
     capabilityPermissions: capabilityRows(enrollment),
     engineReadiness: engineRows(readiness),
+    engineDetails: engineDetails(readiness),
     leaseRecovery: leaseRecoveryOf(recovery),
     forcedReleaseRecord: auditOf(forceReleases),
     probeHistory: probesOf(probes, now),

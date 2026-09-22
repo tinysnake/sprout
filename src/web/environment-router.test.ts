@@ -118,15 +118,19 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
       enrollments,
       recovery,
       archive,
-      requestProbe: async (enrollmentId) => enrollments.recordProbe(enrollmentId, {
-        at: workerProbeAt++,
-        latencyMs: 7,
-        protocolOk: true,
-        enginesOk: false,
-        source: 'worker' as const,
-        version: '0.154.0',
-        summary: 'Worker non-inference readiness probe completed.',
-      }),
+      requestProbe: async (enrollmentId) => {
+        const probe = await enrollments.recordProbe(enrollmentId, {
+          at: workerProbeAt++,
+          latencyMs: 7,
+          protocolOk: true,
+          enginesOk: false,
+          source: 'worker' as const,
+          version: '0.154.0',
+          summary: 'Worker non-inference readiness probe completed.',
+        });
+        if (probe === undefined) throw new Error('synthetic Worker probe was rejected');
+        return probe;
+      },
     })],
   });
   const { port } = await api.listen(0);

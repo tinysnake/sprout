@@ -1137,14 +1137,13 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       const isCurrent = (): boolean =>
         workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
         workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
-      await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
+      const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
         connectionEpoch: live.epoch.epoch,
         isCurrent,
       });
-      if (!isCurrent()) {
+      if (!recorded || !isCurrent()) {
         throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
       }
-      await enrollments.recordProbe(enrollmentId, result.probe);
       await refreshEnvironmentCatalog();
       return result.probe;
     };

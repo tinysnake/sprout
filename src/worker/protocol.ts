@@ -76,6 +76,17 @@ export interface WorkerEngineReadinessFact {
   readonly source?: 'codex-account-read' | 'pi-auth-check' | 'unknown';
 }
 
+/** One Worker-measured non-inference readiness probe record. */
+export interface WorkerProbeFact {
+  readonly at: number;
+  readonly latencyMs: number;
+  readonly protocolOk: boolean;
+  readonly enginesOk: boolean;
+  readonly source: 'worker';
+  readonly version: string;
+  readonly summary: string;
+}
+
 /**
  * The Worker's neutral readiness projection.
  *
@@ -88,6 +99,8 @@ export interface WorkerReadinessFacts {
   readonly engines: readonly WorkerEngineReadinessFact[];
   /** Observation time is supplied by the Worker, never by the browser. */
   readonly observedAt?: number;
+  /** The startup or most-recent explicit Worker probe which produced these facts. */
+  readonly probe?: WorkerProbeFact;
 }
 
 export interface WorkerReadinessProbeParams {
@@ -97,15 +110,7 @@ export interface WorkerReadinessProbeParams {
 
 export interface WorkerReadinessProbeResult {
   readonly readiness: WorkerReadinessFacts;
-  readonly probe: {
-    readonly at: number;
-    readonly latencyMs: number;
-    readonly protocolOk: boolean;
-    readonly enginesOk: boolean;
-    readonly source: 'worker';
-    readonly version: string;
-    readonly summary: string;
-  };
+  readonly probe: WorkerProbeFact;
 }
 
 /**

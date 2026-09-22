@@ -310,6 +310,32 @@ test('the readiness wire view sanitizes the summary reason as free text', () => 
   assert.equal(/\/srv\/sprout/.test(reason('/srv/sprout/worker')), false);
 });
 
+test('the readiness wire view retains only safe Worker provenance and independent engine facts', () => {
+  const view = toEnvironmentReadinessView({
+    environmentInstanceId: 'env-1',
+    summary: { level: 'yellow', reason: 'Model entitlement is unavailable.' },
+    readiness: {
+      enrollmentStatus: 'approved',
+      connection: { state: 'online', lastConfirmedAt: 1_000 },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      capabilities: [{ name: 'agent-run', permission: 'allowed', required: true }],
+      engines: [{
+        engine: 'pi', version: '0.86.1', installed: true, readiness: 'ready', required: true,
+        models: { state: 'unknown', models: [] }, authenticated: true, authType: 'oauth',
+        modelIdPresent: false, probedAt: 1_234, probeExitCode: 0, source: 'pi-auth-check',
+      }],
+      workSafety: { state: 'clear' },
+    },
+  });
+  assert.deepEqual(view.engines[0], {
+    engine: 'pi', version: '0.86.1', installed: true, readiness: 'ready', required: true,
+    models: { state: 'unknown', models: [] }, authenticated: true, authType: 'oauth',
+    modelIdPresent: false, probedAt: 1_234, probeExitCode: 0, source: 'pi-auth-check',
+  });
+  assert.equal(JSON.stringify(view).includes('provider'), false);
+  assert.equal(JSON.stringify(view).includes('account'), false);
+});
+
 test('a run view exposes the workspace binding it was admitted under, sanitized', () => {
   const view = toRunView(
     run({

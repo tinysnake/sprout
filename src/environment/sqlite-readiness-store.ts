@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type { ProbeResultFact } from './readiness.ts';
-import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-store.ts';
+import type { EnvironmentReadinessStore, ObservedReadiness, ReadinessWriteGuard } from './readiness-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
@@ -50,7 +50,12 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
     `);
   }
 
-  async saveReadiness(environmentInstanceId: string, observed: ObservedReadiness): Promise<void> {
+  async saveReadiness(
+    environmentInstanceId: string,
+    observed: ObservedReadiness,
+    guard: ReadinessWriteGuard = {},
+  ): Promise<boolean> {
+    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
     this.#db
       .prepare(
         `INSERT INTO environment_readiness (environment_instance_id, document, updated_at)
@@ -60,6 +65,7 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
            updated_at = excluded.updated_at`,
       )
       .run(environmentInstanceId, JSON.stringify(observed), Date.now());
+    return true;
   }
 
   async getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined> {
@@ -69,7 +75,12 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
     return row ? (JSON.parse(row.document) as ObservedReadiness) : undefined;
   }
 
-  async appendProbe(environmentInstanceId: string, probe: ProbeResultFact): Promise<void> {
+  async appendProbe(
+    environmentInstanceId: string,
+    probe: ProbeResultFact,
+    guard: ReadinessWriteGuard = {},
+  ): Promise<boolean> {
+    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
     const next = this.#db
       .prepare(
         'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?',
@@ -81,6 +92,7 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
          VALUES (?, ?, ?, ?)`,
       )
       .run(environmentInstanceId, probe.at, next.sequence + 1, JSON.stringify(probe));
+    return true;
   }
 
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {

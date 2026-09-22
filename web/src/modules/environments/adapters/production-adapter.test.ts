@@ -78,6 +78,23 @@ test('the bridge projects the backend summary as the traffic-light authority', a
   assert.equal(env.capabilityPermissions['fileReadWrite'], false);
 });
 
+test('the bridge renders Worker source, version, observation time, auth, and model facts without inventing them', async () => {
+  const facts = enrollmentFacts();
+  facts.readiness = {
+    ...facts.readiness,
+    engines: [{
+      engine: 'pi', version: '0.86.1', installed: true, readiness: 'ready', required: true,
+      models: { state: 'unknown', models: [] }, authenticated: true, authType: 'oauth',
+      modelIdPresent: false, probedAt: 1_234, probeExitCode: 0, source: 'pi-auth-check',
+    }],
+  };
+  const environment = await new ProductionEnvironmentService(adapter(facts)).getEnvironment('enroll-1');
+  assert.deepEqual(environment?.engineDetails?.pi, {
+    version: '0.86.1', authStatus: 'ready', modelAvailability: 'unknown',
+    notes: 'Source: pi-auth-check · Observed: 1970-01-01T00:00:01.234Z',
+  });
+});
+
 test('an unknown environment returns undefined instead of an invented row', async () => {
   const failing = adapter(enrollmentFacts());
   failing.environmentFacts = async () => {

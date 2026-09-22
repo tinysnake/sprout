@@ -19,10 +19,10 @@ test('Codex and Pi readiness use only the #114 non-inference contract and keep m
     async run(binary, args) {
       calls.push({ binary, args });
       if (args[0] === '--version') return { stdout: binary.endsWith('codex') ? 'codex-cli 0.154.0' : 'pi 0.86.1', exitCode: 0 };
-      return { stdout: JSON.stringify({ status: 'ready', authType: 'oauth' }), exitCode: 0 };
+      return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
     },
     async accountRead() {
-      return { stdout: JSON.stringify({ account: { type: 'chatgpt', email: 'must-not-survive' }, planType: 'must-not-survive' }), exitCode: 0 };
+      return { stdout: JSON.stringify({ account: { type: 'chatgpt', email: 'must-not-survive' }, requiresOpenaiAuth: true, planType: 'must-not-survive' }), exitCode: 0 };
     },
   };
   const result = await probeEnvironmentReadiness(configurations, { commandRunner: runner, clock: () => 1000 });
@@ -35,7 +35,7 @@ test('Codex and Pi readiness use only the #114 non-inference contract and keep m
   assert.equal(result.readiness.engines[0]?.authMode, 'chatgpt');
   assert.equal(result.readiness.engines[0]?.modelAvailability, 'unknown');
   assert.equal(result.readiness.engines[0]?.version, '0.154.0');
-  assert.equal(result.readiness.engines[1]?.authType, 'chatgpt');
+  assert.equal(result.readiness.engines[1]?.authType, 'oauth');
   assert.equal(result.readiness.engines[1]?.modelAvailability, 'unknown');
   assert.equal(JSON.stringify(result).includes('must-not-survive'), false);
   assert.equal(result.probe.source, 'worker');
@@ -74,6 +74,58 @@ test('a version outside the pinned #114 contract stays unknown without trying a 
   const result = await probeEnvironmentReadiness([configurations[1]!], { commandRunner: runner, clock: () => 3000 });
   assert.equal(result.readiness.engines[0]?.readiness, 'unknown');
   assert.deepEqual(calls, [['--version']]);
+});
+
+test('malformed pinned auth schemas fail closed for both engines', async () => {
+  const malformedPi = [
+    {},
+    { status: 'ready' },
+    { status: 'ready', provider: 'other-provider', authType: 'oauth' },
+    { status: 'ready', provider: 'openai-codex', authType: 'chatgpt' },
+  ];
+  for (const response of malformedPi) {
+    const result = await probeEnvironmentReadiness([configurations[1]!], {
+      commandRunner: {
+        async run(_binary, args) {
+          return args[0] === '--version'
+            ? { stdout: 'pi 0.86.1', exitCode: 0 }
+            : { stdout: JSON.stringify(response), exitCode: 0 };
+        },
+      },
+    });
+    assert.equal(result.readiness.engines[0]?.readiness, 'unknown', JSON.stringify(response));
+  }
+
+  for (const response of [{}, { account: {} }, { account: false }, { account: { type: 'chatgpt' } }]) {
+    const result = await probeEnvironmentReadiness([configurations[0]!], {
+      commandRunner: {
+        async run() { return { stdout: 'codex-cli 0.154.0', exitCode: 0 }; },
+        async accountRead() { return { stdout: JSON.stringify(response), exitCode: 0 }; },
+      },
+    });
+    assert.equal(result.readiness.engines[0]?.readiness, 'unknown', JSON.stringify(response));
+  }
+});
+
+test('a nonzero or malformed version result never reaches an auth probe', async () => {
+  for (const configuration of configurations) {
+    let authCalls = 0;
+    const result = await probeEnvironmentReadiness([configuration], {
+      commandRunner: {
+        async run(_binary, args) {
+          if (args[0] === '--version') return { stdout: configuration.engine === 'codex' ? 'codex-cli 0.154.0' : 'pi 0.86.1', exitCode: 1 };
+          authCalls++;
+          return { stdout: '{}', exitCode: 0 };
+        },
+        async accountRead() {
+          authCalls++;
+          return { stdout: '{}', exitCode: 0 };
+        },
+      },
+    });
+    assert.equal(result.readiness.engines[0]?.readiness, 'unknown');
+    assert.equal(authCalls, 0, `${configuration.engine} auth probe must not run`);
+  }
 });
 
 test('explicit readiness probes execute on the Worker channel and cannot accept browser facts', async (t) => {

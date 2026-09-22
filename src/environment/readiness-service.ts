@@ -103,10 +103,18 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
     const observed = observedEngines.get(engine);
     return {
       engine,
+      ...(observed?.version !== undefined ? { version: observed.version } : {}),
       installed: observed?.installed ?? false,
       readiness: observed?.readiness ?? 'unknown',
       required: requiredEngines.has(engine),
       models: observed?.models ?? { state: 'unknown', models: [] },
+      ...(observed?.authenticated !== undefined ? { authenticated: observed.authenticated } : {}),
+      ...(observed?.authMode !== undefined ? { authMode: observed.authMode } : {}),
+      ...(observed?.authType !== undefined ? { authType: observed.authType } : {}),
+      ...(observed?.modelIdPresent !== undefined ? { modelIdPresent: observed.modelIdPresent } : {}),
+      ...(observed?.probedAt !== undefined ? { probedAt: observed.probedAt } : {}),
+      ...(observed?.probeExitCode !== undefined ? { probeExitCode: observed.probeExitCode } : {}),
+      ...(observed?.source !== undefined ? { source: observed.source } : {}),
     };
   });
 

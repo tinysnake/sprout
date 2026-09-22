@@ -33,6 +33,13 @@ import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier
 import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
 
+function sanitizeEngineVersion(value: string): string | undefined {
+  // Version is a structured semver fact, not free-form Worker output.  Generic
+  // identifier redaction quite correctly treats dotted unknown text as a host;
+  // accept only the pinned CLI-version shape here.
+  return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(value) ? value : undefined;
+}
+
 /**
  * The caller-facing Environment enrollment and readiness capability (#87).
  *
@@ -51,15 +58,10 @@ export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, ma
 function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
-    ...(observed.enrollmentId !== undefined
-      ? {
-          enrollmentId: sanitizeIdentifier(observed.enrollmentId, {
-            fallback: '',
-            maxLength: 200,
-            kind: 'generic',
-          }),
-        }
-      : {}),
+    // Enrollment ids are core-issued opaque authority keys, never Worker text.
+    // Preserve them exactly so an epoch-bound observation can be compared with
+    // its enrollment; they are not exposed in the readiness browser view.
+    ...(observed.enrollmentId !== undefined ? { enrollmentId: observed.enrollmentId } : {}),
     ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0
       ? { connectionEpoch: observed.connectionEpoch }
       : {}),
@@ -79,7 +81,7 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
     engines: observed.engines.map((engine) => ({
       engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
       ...(engine.version !== undefined
-        ? { version: sanitizeIdentifier(engine.version, { fallback: 'unknown-version', kind: 'generic' }) }
+        ? { version: sanitizeEngineVersion(engine.version) ?? 'unknown-version' }
         : {}),
       installed: engine.installed,
       readiness: engine.readiness,
@@ -104,7 +106,14 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
 function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
   return {
     ...probe,
-    ...(probe.version !== undefined ? { version: sanitizeIdentifier(probe.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
+    // This is assigned from the locally resolved enrollment in recordProbe,
+    // rather than accepted from Worker output, and remains internal to probe
+    // history. It must stay exact for authority comparison.
+    ...(probe.enrollmentId !== undefined ? { enrollmentId: probe.enrollmentId } : {}),
+    ...(Number.isSafeInteger(probe.connectionEpoch) && (probe.connectionEpoch ?? 0) > 0
+      ? { connectionEpoch: probe.connectionEpoch }
+      : {}),
+    ...(probe.version !== undefined ? { version: sanitizeEngineVersion(probe.version) ?? 'unknown-version' } : {}),
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
   };
 }
@@ -422,11 +431,31 @@ export class EnvironmentEnrollmentService {
   }
 
   /** Append one readiness-probe result; prior probes are preserved. */
-  async recordProbe(enrollmentId: string, probe: ProbeResultFact): Promise<ProbeResultFact> {
+  async recordProbe(
+    enrollmentId: string,
+    probe: ProbeResultFact,
+    options: {
+      /** The accepted Worker epoch which produced this probe. */
+      readonly connectionEpoch?: number;
+      /** Evaluated by the store immediately before append. */
+      readonly isCurrent?: () => boolean;
+    } = {},
+  ): Promise<ProbeResultFact | undefined> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const sanitized = sanitizeProbe(probe);
-    await this.#readiness.appendProbe(enrollment.environmentInstanceId, sanitized);
-    return sanitized;
+    if (options.isCurrent !== undefined && !options.isCurrent()) return undefined;
+    const sanitized = sanitizeProbe({
+      ...probe,
+      ...(options.connectionEpoch !== undefined
+        ? { enrollmentId: enrollment.id, connectionEpoch: options.connectionEpoch }
+        : {}),
+    });
+    const guard = options.isCurrent === undefined ? {} : { isCurrent: options.isCurrent };
+    const appended = await this.#readiness.appendProbe(
+      enrollment.environmentInstanceId,
+      sanitized,
+      guard,
+    );
+    return appended ? sanitized : undefined;
   }
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
@@ -489,6 +518,15 @@ export class EnvironmentEnrollmentService {
     readiness: {
       readonly protocolVersion: string;
       readonly observedAt?: number;
+      readonly probe?: {
+        readonly at: number;
+        readonly latencyMs: number;
+        readonly protocolOk: boolean;
+        readonly enginesOk: boolean;
+        readonly source: 'worker';
+        readonly version: string;
+        readonly summary: string;
+      };
       readonly engines: readonly {
         readonly engine: string;
         readonly installed: boolean;
@@ -511,26 +549,35 @@ export class EnvironmentEnrollmentService {
       /** Refuses a stale observation immediately before it becomes durable. */
       readonly isCurrent?: () => boolean;
     } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     // The runtime supplies the gateway authority check for inbound observations.
     // A late request from a disconnected/replaced channel must not overwrite the
     // current epoch's facts. Callers without an epoch retain the old additive
     // readiness seam, but the catalog treats those legacy facts as non-authoritative.
-    if (options.isCurrent !== undefined && !options.isCurrent()) return;
+    if (options.isCurrent !== undefined && !options.isCurrent()) return false;
     const observed = observedFactsFromWorkerReadiness({
       ...readiness,
       at: this.#clock(),
       supported: this.#supportedProtocol,
     });
-    await this.#readiness.saveReadiness(
+    const guard = options.isCurrent === undefined ? {} : { isCurrent: options.isCurrent };
+    const saved = await this.#readiness.saveReadiness(
       enrollment.environmentInstanceId,
       sanitizeObservedReadiness({
         ...observed,
         enrollmentId: enrollment.id,
         ...(options.connectionEpoch !== undefined ? { connectionEpoch: options.connectionEpoch } : {}),
       }),
+      guard,
     );
+    if (!saved) return false;
+    if (readiness.probe === undefined) return true;
+    // Startup and explicit probes share this exact append path.  The epoch is
+    // bound before persistence and the store repeats the authority check at
+    // its own mutation boundary, so a disconnected/replaced Worker leaves no
+    // later probe history behind.
+    return (await this.recordProbe(enrollmentId, readiness.probe, options)) !== undefined;
   }
 
   /** Assemble the independent facts plus the deterministic summary. */

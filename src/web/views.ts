@@ -497,7 +497,9 @@ export function toEnvironmentReadinessView(input: {
     })),
     engines: readiness.engines.map((engine) => ({
       engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
-      ...(engine.version !== undefined ? { version: sanitizeIdentifier(engine.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
+      ...(engine.version !== undefined
+        ? { version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(engine.version) ? engine.version : 'unknown-version' }
+        : {}),
       installed: engine.installed,
       readiness: engine.readiness,
       required: engine.required,
@@ -524,7 +526,9 @@ export function toEnvironmentReadinessView(input: {
             enginesOk: readiness.probe.enginesOk,
             summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
             ...(readiness.probe.source !== undefined ? { source: readiness.probe.source } : {}),
-            ...(readiness.probe.version !== undefined ? { version: sanitizeIdentifier(readiness.probe.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
+            ...(readiness.probe.version !== undefined
+              ? { version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(readiness.probe.version) ? readiness.probe.version : 'unknown-version' }
+              : {}),
           },
         }
       : {}),

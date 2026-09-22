@@ -57,6 +57,10 @@ export interface EngineReadinessFact {
 }
 /** One recorded readiness probe, append-only in the durable observation history. */
 export interface ProbeResultFact {
+  /** The enrollment authority that accepted the Worker which made this observation. */
+  readonly enrollmentId?: string;
+  /** The accepted Worker connection epoch which made this observation. */
+  readonly connectionEpoch?: number;
   readonly at: number;
   readonly latencyMs: number;
   readonly protocolOk: boolean;

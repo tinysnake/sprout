@@ -105,18 +105,61 @@ export function piAuthCheckArgs(provider: string): readonly string[] {
   return ['auth', 'check', '--json', '--no-refresh', '--provider', provider];
 }
 
-function safeVersion(output: string): string | undefined {
-  const match = /\b(?:v)?\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.-]+)?\b/.exec(output);
-  return match?.[0];
+function pinnedVersionFromOutput(engine: 'codex' | 'pi', output: string): string | undefined {
+  // Do not extract a pin from arbitrary diagnostics: a failed/malformed version
+  // command is not evidence that this executable implements the pinned schema.
+  const text = output.trim();
+  const match = engine === 'codex'
+    ? /^codex-cli\s+v?(\d+\.\d+\.\d+)$/.exec(text)
+    : /^(?:pi\s+)?v?(\d+\.\d+\.\d+)$/.exec(text);
+  return match?.[1];
 }
 
-function safeAuthMode(value: unknown): string | undefined {
+function safeCodexAuthMode(value: unknown): 'chatgpt' | 'api_key' | 'workload_identity' | 'other' | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.toLowerCase();
   if (normalized.includes('chatgpt') || normalized.includes('oauth')) return 'chatgpt';
   if (normalized.includes('api')) return 'api_key';
   if (normalized.includes('workload')) return 'workload_identity';
   return 'other';
+}
+
+function safePiAuthType(value: unknown): 'oauth' | 'api_key' | undefined {
+  // Pi's documented authType is already the privacy-reduced fact.  In
+  // particular, oauth is not a provider name and must never be rewritten into
+  // one (for example, "chatgpt").
+  return value === 'oauth' || value === 'api_key' ? value : undefined;
+}
+
+function piAuthResponse(
+  value: unknown,
+  provider: string,
+): { readonly status: 'ready' | 'not_ready'; readonly authType?: 'oauth' | 'api_key' } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.status !== 'ready' && record.status !== 'not_ready') return undefined;
+  // Provider is validated at the Worker boundary but deliberately discarded:
+  // it is a routing input, not a persisted readiness identity fact.
+  if (record.provider !== provider) return undefined;
+  const authType = record.authType === undefined ? undefined : safePiAuthType(record.authType);
+  if (record.authType !== undefined && authType === undefined) return undefined;
+  // The pinned ready shape includes a supported auth type. A missing one cannot
+  // be promoted to authenticated; logged-out responses legitimately omit it.
+  if (record.status === 'ready' && authType === undefined) return undefined;
+  return { status: record.status, ...(authType !== undefined ? { authType } : {}) };
+}
+
+function codexAccountResponse(
+  value: unknown,
+): { readonly authenticated: boolean; readonly authMode?: 'chatgpt' | 'api_key' | 'workload_identity' | 'other' } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  // `requiresOpenaiAuth` is part of the pinned account/read response schema.
+  if (typeof record.requiresOpenaiAuth !== 'boolean' || !Object.hasOwn(record, 'account')) return undefined;
+  if (record.account === null) return { authenticated: false };
+  if (typeof record.account !== 'object' || Array.isArray(record.account)) return undefined;
+  const type = safeCodexAuthMode((record.account as Record<string, unknown>).type);
+  return type === undefined ? undefined : { authenticated: true, authMode: type };
 }
 
 function prohibitedCredentialText(value: string): boolean {
@@ -153,8 +196,8 @@ async function probePi(
 ): Promise<WorkerEngineReadinessFact> {
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
-  const version = safeVersion(versionResult.stdout);
-  if (versionResult.exitCode === 127 || version !== SUPPORTED_READINESS_VERSIONS.pi) {
+  const version = pinnedVersionFromOutput('pi', versionResult.stdout);
+  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.pi) {
     return unknownFact('pi', version, at, 'pi-auth-check', versionResult.exitCode);
   }
   const auth = await options.commandRunner.run(
@@ -164,10 +207,9 @@ async function probePi(
   );
   // A non-JSON or argument error is an unknown probe result, never a login
   // success and never a retry without --no-refresh.
-  let parsed: { readonly status?: unknown; readonly authType?: unknown } | undefined;
+  let parsed: ReturnType<typeof piAuthResponse>;
   try {
-    const candidate: unknown = JSON.parse(auth.stdout.trim());
-    if (typeof candidate === 'object' && candidate !== null) parsed = candidate as typeof parsed;
+    parsed = piAuthResponse(JSON.parse(auth.stdout.trim()), options.piProvider ?? 'openai-codex');
   } catch {
     parsed = undefined;
   }
@@ -177,11 +219,11 @@ async function probePi(
   const ready = parsed.status === 'ready' && auth.exitCode === 0;
   const notReady = parsed.status === 'not_ready' && auth.exitCode === 1;
   if (!ready && !notReady) return unknownFact('pi', version, at, 'pi-auth-check', auth.exitCode || 1);
-  const authType = ready && typeof parsed.authType === 'string' ? safeAuthMode(parsed.authType) : undefined;
+  const authType = ready ? parsed.authType : undefined;
   return {
     engine: 'pi',
     ...(version !== undefined ? { version } : {}),
-    installed: versionResult.exitCode !== 127,
+    installed: true,
     readiness: ready ? 'ready' : 'login-required',
     modelAvailability: 'unknown',
     models: [],
@@ -199,8 +241,8 @@ async function probeCodex(
 ): Promise<WorkerEngineReadinessFact> {
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
-  const version = safeVersion(versionResult.stdout);
-  if (versionResult.exitCode === 127 || version !== SUPPORTED_READINESS_VERSIONS.codex) {
+  const version = pinnedVersionFromOutput('codex', versionResult.stdout);
+  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.codex) {
     return unknownFact('codex', version, at, 'codex-account-read', versionResult.exitCode);
   }
   const account = await (options.commandRunner.accountRead ?? defaultCommandRunner.accountRead!)
@@ -208,37 +250,25 @@ async function probeCodex(
   if (prohibitedCredentialText(account.stdout)) {
     return unknownFact('codex', version, at, 'codex-account-read', account.exitCode || 1);
   }
-  let parsed: { readonly account?: unknown; readonly type?: unknown } | undefined;
+  let parsed: ReturnType<typeof codexAccountResponse>;
   try {
-    const candidate: unknown = JSON.parse(account.stdout.trim());
-    if (typeof candidate === 'object' && candidate !== null) parsed = candidate as typeof parsed;
+    parsed = codexAccountResponse(JSON.parse(account.stdout.trim()));
   } catch {
     parsed = undefined;
   }
   if (account.exitCode !== 0 || parsed === undefined) {
     return unknownFact('codex', version, at, 'codex-account-read', account.exitCode || 1);
   }
-  if (!Object.prototype.hasOwnProperty.call(parsed, 'account')) {
-    return unknownFact('codex', version, at, 'codex-account-read', account.exitCode || 1);
-  }
-  const accountValue = parsed.account;
-  // #114 defines account/read as the authority: an account object means
-  // authenticated, and an explicit null means login-required. Do not accept a
-  // looser `authenticated` flag from an unrelated response shape.
-  const ready = accountValue !== null;
-  const accountType = typeof accountValue === 'object' && accountValue !== null
-    ? (accountValue as { readonly type?: unknown }).type
-    : parsed.type;
-  const authMode = ready ? safeAuthMode(accountType) : undefined;
+  const ready = parsed.authenticated;
   return {
     engine: 'codex',
     ...(version !== undefined ? { version } : {}),
-    installed: versionResult.exitCode !== 127,
+    installed: true,
     readiness: ready ? 'ready' : 'login-required',
     modelAvailability: 'unknown',
     models: [],
     authenticated: ready,
-    ...(authMode !== undefined ? { authMode } : {}),
+    ...(parsed.authMode !== undefined ? { authMode: parsed.authMode } : {}),
     probedAt: at,
     probeExitCode: account.exitCode,
     source: 'codex-account-read',
@@ -268,22 +298,24 @@ export async function probeEnvironmentReadiness(
   const at = clock();
   const version = engines.map((engine) => engine.version).filter((value): value is string => value !== undefined).join(', ');
   const enginesOk = engines.length > 0 && engines.every((engine) => engine.installed && engine.readiness === 'ready');
+  const probe = {
+    at,
+    latencyMs: Math.max(0, at - started),
+    protocolOk: true,
+    enginesOk,
+    source: 'worker' as const,
+    version: version || 'unknown',
+    summary: enginesOk
+      ? 'Worker non-inference readiness probe completed.'
+      : 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
+  };
   return {
     readiness: {
       protocolVersion: '2',
       observedAt: at,
       engines,
+      probe,
     },
-    probe: {
-      at,
-      latencyMs: Math.max(0, at - started),
-      protocolOk: true,
-      enginesOk,
-      source: 'worker',
-      version: version || 'unknown',
-      summary: enginesOk
-        ? 'Worker non-inference readiness probe completed.'
-        : 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
-    },
+    probe,
   };
 }

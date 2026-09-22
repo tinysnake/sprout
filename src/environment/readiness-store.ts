@@ -33,11 +33,30 @@ export interface ObservedReadiness {
   readonly engines: readonly EngineReadinessFact[];
 }
 
+/**
+ * A live authority fence evaluated by the store immediately before mutation.
+ *
+ * Checking before an asynchronous store call is insufficient: a replacement
+ * Worker can be accepted while that call is suspended.  The store owns this
+ * final check so a stale epoch cannot cross the check/write boundary.
+ */
+export interface ReadinessWriteGuard {
+  readonly isCurrent?: () => boolean;
+}
+
 export interface EnvironmentReadinessStore {
-  saveReadiness(environmentInstanceId: string, observed: ObservedReadiness): Promise<void>;
+  saveReadiness(
+    environmentInstanceId: string,
+    observed: ObservedReadiness,
+    guard?: ReadinessWriteGuard,
+  ): Promise<boolean>;
   getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined>;
   /** Append one probe result, preserving every prior observation. */
-  appendProbe(environmentInstanceId: string, probe: ProbeResultFact): Promise<void>;
+  appendProbe(
+    environmentInstanceId: string,
+    probe: ProbeResultFact,
+    guard?: ReadinessWriteGuard,
+  ): Promise<boolean>;
   listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]>;
 }
 
@@ -45,18 +64,30 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   readonly #readiness = new Map<string, ObservedReadiness>();
   readonly #probes = new Map<string, ProbeResultFact[]>();
 
-  async saveReadiness(environmentInstanceId: string, observed: ObservedReadiness): Promise<void> {
+  async saveReadiness(
+    environmentInstanceId: string,
+    observed: ObservedReadiness,
+    guard: ReadinessWriteGuard = {},
+  ): Promise<boolean> {
+    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
     this.#readiness.set(environmentInstanceId, observed);
+    return true;
   }
 
   async getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined> {
     return this.#readiness.get(environmentInstanceId);
   }
 
-  async appendProbe(environmentInstanceId: string, probe: ProbeResultFact): Promise<void> {
+  async appendProbe(
+    environmentInstanceId: string,
+    probe: ProbeResultFact,
+    guard: ReadinessWriteGuard = {},
+  ): Promise<boolean> {
+    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
     const history = this.#probes.get(environmentInstanceId) ?? [];
     history.push(probe);
     this.#probes.set(environmentInstanceId, history);
+    return true;
   }
 
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {
