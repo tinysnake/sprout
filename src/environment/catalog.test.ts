@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   ADMISSION_CAPABILITY,
@@ -71,6 +72,7 @@ function observed(overrides: {
   readonly protocolVersion?: string;
   readonly engineReadiness?: 'ready' | 'unknown' | 'missing' | 'login-required';
   readonly models?: 'available' | 'unknown' | 'none';
+  readonly connectionEpoch?: number;
 } = {}): ObservedReadiness {
   const engines: EngineReadinessFact[] = [
     {
@@ -82,6 +84,7 @@ function observed(overrides: {
     },
   ];
   return {
+    connectionEpoch: overrides.connectionEpoch ?? 1,
     connection: { state: overrides.connection ?? 'online', lastConfirmedAt: NOW },
     compatibility: {
       state: overrides.compatibility ?? 'compatible',
@@ -182,10 +185,80 @@ test('the catalog is keyed by instance id and updates dynamically', () => {
   assert.deepEqual(catalog.instanceIds(), ['mac-enrolled-1'], 'offline never deletes the entry');
   assert.deepEqual(catalog.eligibleInstanceIds(), []);
 
-  // A newer epoch restores eligibility without a process restart.
+  // A new epoch is not allowed to reuse facts from the disconnected epoch.
   catalog.setEpoch('enroll-1', 2);
-  assert.deepEqual(catalog.eligibleInstanceIds(), ['mac-enrolled-1']);
+  assert.deepEqual(catalog.eligibleInstanceIds(), []);
   assert.equal(catalog.entry('mac-enrolled-1')?.currentEpoch, 2);
+});
+
+test('readiness is authoritative only for its current Worker connection epoch', () => {
+  const catalog = new EnvironmentCatalog();
+  catalog.update([input({ currentEpoch: 1, observed: observed({ connectionEpoch: 1 }) })]);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, true, 'epoch one facts admit epoch one only');
+
+  // Disconnect/reconnect and a duplicate/replacement both produce a newer
+  // authority epoch. Neither may inherit the prior connection's ready facts.
+  catalog.setEpoch('enroll-1', undefined);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, false);
+  catalog.setEpoch('enroll-1', 2);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, false, 'reconnect needs new facts');
+
+  // A late old observation stays explicitly non-authoritative for epoch two.
+  catalog.update([input({ currentEpoch: 2, observed: observed({ connectionEpoch: 1 }) })]);
+  const stale = catalog.entry('mac-enrolled-1')!;
+  assert.equal(stale.eligible, false);
+  const refusal = admissionRefusal(stale);
+  assert.equal(refusal.ok, false);
+  if (!refusal.ok) assert.equal(refusal.reason, 'not-current-epoch');
+
+  catalog.update([input({ currentEpoch: 2, observed: observed({ connectionEpoch: 2 }) })]);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, true, 'only fresh epoch two facts restore admission');
+});
+
+test('an unknown Worker platform remains explicit and cannot admit or resolve as macOS', () => {
+  const known = enrollment();
+  const entry = projectCatalogEntry(input({
+    enrollment: { ...known, worker: { ...known.worker, platform: 'future-os' } },
+  }));
+  assert.equal(entry.definition.platform, 'unknown');
+  assert.equal(entry.instance.definitionId, 'enrolled-unknown');
+  assert.equal(entry.eligible, false);
+  const refusal = admissionRefusal(entry);
+  assert.equal(refusal.ok, false);
+  if (!refusal.ok) assert.equal(refusal.reason, 'unsupported-platform');
+
+  const pool = new EnvironmentPool({
+    definitions: [entry.definition],
+    instances: [entry.instance],
+    eligibleInstanceIds: [],
+  });
+  assert.equal(pool.requiresLease(entry.instanceId, ADMISSION_CAPABILITY), undefined);
+  assert.equal(pool.instance(entry.instanceId)?.definitionId, 'enrolled-unknown');
+});
+
+test('an unknown platform survives durable catalog reopen as an ineligible fact', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-catalog-unknown-platform-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'sprout.db');
+  const known = enrollment();
+  const entry = projectCatalogEntry(input({
+    enrollment: { ...known, worker: { ...known.worker, platform: 'unsupported-platform' } },
+  }));
+  const writer = new SqliteEnvironmentCatalogStore({ filename });
+  await writer.save({
+    instanceId: entry.instanceId,
+    enrollmentId: entry.enrollmentId,
+    definition: entry.definition,
+    instance: entry.instance,
+    updatedAt: NOW,
+  });
+  writer.close();
+
+  const reader = new SqliteEnvironmentCatalogStore({ filename });
+  const record = await reader.get(entry.instanceId);
+  reader.close();
+  assert.equal(record?.definition.platform, 'unknown');
+  assert.equal(record?.instance.definitionId, 'enrolled-unknown');
 });
 
 test('multi-instance catalog keeps every instance independent', () => {
@@ -208,7 +281,7 @@ test('an eligible enrollment is preferred over a superseded sibling for one inst
   const catalog = new EnvironmentCatalog();
   catalog.update([
     input({ enrollment: pending, observed: undefined, currentEpoch: undefined }),
-    input({ enrollment: approved, currentEpoch: 3 }),
+    input({ enrollment: approved, currentEpoch: 3, observed: observed({ connectionEpoch: 3 }) }),
   ]);
   const entry = catalog.entry('host-a');
   assert.equal(entry?.enrollmentId, 'enroll-new');
@@ -314,4 +387,68 @@ test('the SQLite catalog record survives reopen with no live connection', async 
     definitionId: 'enrolled-macos',
   });
   reader.close();
+});
+
+test('catalog stores persist only portable facts and sanitize historical records', async (t) => {
+  const unsafe = {
+    instanceId: 'portable-instance',
+    enrollmentId: 'portable-enrollment',
+    definition: {
+      id: 'portable-definition',
+      platform: 'macos',
+      capabilities: [{ name: 'agent-run', requiresLease: true }],
+      host: 'internal-host.example',
+      diagnostic: 'raw stderr token=synthetic-secret',
+    },
+    instance: {
+      id: 'portable-instance',
+      definitionId: 'portable-definition',
+      workingDirectory: '/host-data/private-workspace',
+      privateKey: 'synthetic-private-key',
+      browserSecret: 'synthetic-browser-secret',
+      engineCredential: 'synthetic-engine-credential',
+      address: '198.51.100.9',
+    },
+    updatedAt: NOW,
+  } as unknown as import('./catalog-store.ts').EnvironmentCatalogRecord;
+
+  const memory = new InMemoryEnvironmentCatalogStore();
+  await memory.save(unsafe);
+  const memorySerialized = JSON.stringify(await memory.get('portable-instance'));
+  for (const forbidden of ['workingDirectory', 'privateKey', 'browserSecret', 'engineCredential', '198.51', 'synthetic-secret']) {
+    assert.equal(memorySerialized.includes(forbidden), false, `memory excludes ${forbidden}`);
+  }
+
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-catalog-privacy-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'sprout.db');
+  // Seed a v11 row as an earlier E2 build could have persisted it, then let the
+  // v11->v12 durable-store migration erase unapproved historical fields.
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`
+    PRAGMA user_version = 11;
+    CREATE TABLE environment_catalog (
+      instance_id TEXT PRIMARY KEY, enrollment_id TEXT NOT NULL,
+      document TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+  `);
+  legacy.prepare('INSERT INTO environment_catalog VALUES (?, ?, ?, ?)').run(
+    unsafe.instanceId,
+    unsafe.enrollmentId,
+    JSON.stringify({ definition: unsafe.definition, instance: unsafe.instance }),
+    unsafe.updatedAt,
+  );
+  legacy.close();
+
+  const store = new SqliteEnvironmentCatalogStore({ filename });
+  const record = await store.get('portable-instance');
+  assert.equal(record?.instance.workingDirectory, undefined);
+  store.close();
+  const reopened = new DatabaseSync(filename);
+  const row = reopened.prepare('SELECT document FROM environment_catalog WHERE instance_id = ?')
+    .get('portable-instance') as { readonly document: string };
+  reopened.close();
+  for (const forbidden of ['workingDirectory', 'privateKey', 'browserSecret', 'engineCredential', '198.51', 'synthetic-secret']) {
+    assert.equal(row.document.includes(forbidden), false, `historical SQLite row excludes ${forbidden}`);
+  }
 });

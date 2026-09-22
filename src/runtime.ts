@@ -77,7 +77,7 @@ import {
   selectEnvironmentWorker,
   type EnvironmentWorkerConfiguration,
 } from './worker/environment-worker.ts';
-import { WorkerGateway } from './worker/gateway.ts';
+import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
@@ -907,7 +907,12 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // The catalog refresh and its pool publication are defined here, after the
     // enrollment service and epoch registry exist, and re-invoked whenever an
     // accepted connection appears or a channel is lost.
+    // Refreshes read several independently durable sources. A slow older read
+    // must never publish after a newer epoch/readiness observation: doing so
+    // would turn a current fact back into a stale catalog projection.
+    let catalogProjectionRevision = 0;
     const refreshEnvironmentCatalog = async (): Promise<readonly EnvironmentCatalogEntry[]> => {
+      const revision = ++catalogProjectionRevision;
       const all = await openedStoresForCatalog.enrollments.list();
       const persisted = await openedStoresForCatalog.environmentCatalog.list();
       const persistedInstances = new Map(persisted.map((record) => [record.instanceId, record]));
@@ -949,6 +954,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           });
         }
       }
+      if (revision !== catalogProjectionRevision) return environmentCatalog.entries();
       environmentCatalog.update(inputs);
       publishCatalogMembership();
       return environmentCatalog.entries();
@@ -1003,16 +1009,22 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // offline again. Neither path creates a catalog entry: only a durable
     // enrollment does. Each re-projects the catalog and republishes eligibility.
     workerGateway.onAccept((acceptance) => {
+      // Invalidate an in-flight source snapshot before publishing the accepted
+      // epoch synchronously. Only a later refresh may replace this projection.
+      catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
       publishCatalogMembership();
       // The Worker's own `worker/info` readiness is observed over the accepted
       // inbound channel (never by dialing one), so the catalog can reach
-      // eligibility once the required facts are established. This is deferred
-      // past the handshake barrier: `worker/listening` must reach the Worker
-      // before any JSON-RPC request is read from the same socket.
-      setImmediate(() => {
-        void observeAcceptedWorkerReadiness(acceptance.enrollment.id);
-      });
+      // eligibility once the required facts are established. The short defer
+      // lets the Worker consume `worker/listening`, dispose its enrollment-frame
+      // reader, and install the neutral JSON-RPC server before `worker/info`
+      // crosses the same socket. Without it an RPC request can be discarded as
+      // an unexpected final handshake frame.
+      const timer = setTimeout(() => {
+        void observeAcceptedWorkerReadiness(acceptance);
+      }, 10);
+      timer.unref();
     });
     workerGateway.onConnectionClosed(() => {
       void refreshEnvironmentCatalog();
@@ -1025,20 +1037,55 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
      * enrollment, or a Worker that declares no readiness, leaves the catalog
      * unchanged and the instance ineligible rather than inventing facts.
      */
-    const observeAcceptedWorkerReadiness = async (enrollmentId: string): Promise<void> => {
+    const observeAcceptedWorkerReadiness = async (
+      acceptance: WorkerGatewayAcceptance,
+      attempt = 0,
+    ): Promise<void> => {
       if (runtimeEnvironment.info === undefined) return;
-      const enrollment = await enrollments.get(enrollmentId);
-      if (enrollment === undefined || enrollment.status !== 'approved') return;
+      const { enrollment, epoch } = acceptance;
+      // Both sides of the asynchronous `worker/info` request must still name
+      // this precise connection. A reconnect/replacement is not proof that the
+      // earlier channel's facts apply to the newer epoch.
+      const isCurrent = (): boolean =>
+        workerEpochs.isCurrent(enrollment.id, epoch.connectionId) &&
+        workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === epoch.connectionId;
+      const retryAfterWorkerStarts = (): void => {
+        // The gateway's `worker/listening` barrier confirms transport ordering,
+        // not that the host has finished constructing its JSON-RPC server. A
+        // Worker can therefore be accepted just before it starts serving
+        // `worker/info`. Retry only on this exact current epoch; the timer is
+        // unreferenced and ends naturally on channel loss/replacement.
+        if (!isCurrent() || attempt >= 2_000) return;
+        const timer = setTimeout(() => {
+          void observeAcceptedWorkerReadiness(acceptance, attempt + 1);
+        }, 10);
+        timer.unref();
+      };
+      if (!isCurrent()) return;
+      const currentEnrollment = await enrollments.get(enrollment.id);
+      if (currentEnrollment === undefined || currentEnrollment.status !== 'approved' || !isCurrent()) return;
       let info: WorkerInfo | undefined;
       try {
         info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
       } catch {
         // A channel that cannot identify itself is already offline; the close
-        // listener re-projects, so no fact is fabricated here.
+        // listener re-projects. A just-accepted Worker may also still be
+        // starting its JSON-RPC server, so retry against this epoch only.
+        retryAfterWorkerStarts();
         return;
       }
-      if (info === undefined || info.readiness === undefined) return;
-      await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
+      if (info === undefined || info.readiness === undefined) {
+        retryAfterWorkerStarts();
+        return;
+      }
+      if (!isCurrent()) return;
+      await enrollments.observeWorkerReadiness(enrollment.id, info.readiness, {
+        connectionEpoch: epoch.epoch,
+        // The service repeats this check immediately before durable storage. If
+        // a custom asynchronous store still races replacement, the old epoch
+        // stays explicitly non-authoritative to the catalog.
+        isCurrent,
+      });
       await refreshEnvironmentCatalog();
     };
     await refreshEnvironmentCatalog();
@@ -1194,7 +1241,22 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
        * enrollment; the mapping stays honest by recording only what the Worker
        * actually declared on `worker/info`. */
       async observeWorkerReadiness(enrollmentId: string): Promise<void> {
-        await observeAcceptedWorkerReadiness(enrollmentId);
+        const enrollment = await enrollments.get(enrollmentId);
+        if (enrollment === undefined) return;
+        const live = workerGateway.liveFor(enrollment.environmentInstanceId);
+        if (live === undefined) {
+          // The configured/test-development carrier predates connection epochs.
+          // Preserve its additive #87 observation seam without allowing the
+          // enrollment production path to infer a live Worker from a lookup.
+          if (environmentSource === 'enrollment' || runtimeEnvironment.info === undefined || enrollment.status !== 'approved') return;
+          const info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
+          if (info?.readiness === undefined) return;
+          await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
+          await refreshEnvironmentCatalog();
+          return;
+        }
+        if (live.enrollment.id !== enrollmentId) return;
+        await observeAcceptedWorkerReadiness(live);
       },
 
       startupReport(boundPort: number): string {

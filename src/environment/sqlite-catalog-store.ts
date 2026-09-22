@@ -2,16 +2,18 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { EnvironmentDefinition, EnvironmentInstance } from './model.ts';
 import type { EnvironmentCatalogRecord, EnvironmentCatalogStore } from './catalog-store.ts';
+import { sanitizeEnvironmentCatalogRecord } from './catalog-privacy.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite adapter for the durable Environment catalog (E2, #116).
  *
- * One JSON document keyed by environment instance id, holding the portable
- * definition and instance record. The document is pure identity: no credential,
- * private key, host address, or absolute path has a column here. A record is
- * retained whatever the current connectivity or authority status, so an offline
- * or revoked instance is still inspectable after a restart.
+ * One JSON document keyed by environment instance id, holding only selected
+ * portable definition and instance facts. The store boundary discards
+ * credentials, private keys, host/network details, absolute paths, and raw
+ * diagnostics before writing. A record is retained whatever the current
+ * connectivity or authority status, so an offline or revoked instance is still
+ * inspectable after a restart.
  */
 export class SqliteEnvironmentCatalogStore implements EnvironmentCatalogStore {
   readonly #db: DatabaseSync;
@@ -46,9 +48,10 @@ export class SqliteEnvironmentCatalogStore implements EnvironmentCatalogStore {
   }
 
   async save(record: EnvironmentCatalogRecord): Promise<void> {
+    const safe = sanitizeEnvironmentCatalogRecord(record);
     const document = JSON.stringify({
-      definition: record.definition,
-      instance: record.instance,
+      definition: safe.definition,
+      instance: safe.instance,
     });
     this.#db
       .prepare(
@@ -59,7 +62,7 @@ export class SqliteEnvironmentCatalogStore implements EnvironmentCatalogStore {
            document = excluded.document,
            updated_at = excluded.updated_at`,
       )
-      .run(record.instanceId, record.enrollmentId, document, record.updatedAt);
+      .run(safe.instanceId, safe.enrollmentId, document, safe.updatedAt);
   }
 
   async get(instanceId: string): Promise<EnvironmentCatalogRecord | undefined> {
@@ -92,15 +95,22 @@ function toRecord(
   instanceId: string,
   row: { readonly enrollment_id: string; readonly document: string; readonly updated_at: number },
 ): EnvironmentCatalogRecord {
-  const parsed = JSON.parse(row.document) as {
-    readonly definition: EnvironmentDefinition;
-    readonly instance: EnvironmentInstance;
-  };
-  return {
+  let parsed: { readonly definition?: EnvironmentDefinition; readonly instance?: EnvironmentInstance };
+  try {
+    parsed = JSON.parse(row.document) as {
+      readonly definition?: EnvironmentDefinition;
+      readonly instance?: EnvironmentInstance;
+    };
+  } catch {
+    // A damaged legacy document remains an inspectable, explicitly unknown
+    // record rather than allowing raw bytes to escape or crashing catalog load.
+    parsed = {};
+  }
+  return sanitizeEnvironmentCatalogRecord({
     instanceId,
     enrollmentId: row.enrollment_id,
     definition: parsed.definition,
     instance: parsed.instance,
     updatedAt: row.updated_at,
-  };
+  });
 }

@@ -58,6 +58,8 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   /** Accepted connections awaiting identification or already identified. */
   readonly #accepted = new Map<string, WorkerGatewayAcceptance>();
   readonly #identified = new Map<string, CachedConnection>();
+  /** One in-flight `worker/info` request per accepted instance/epoch. */
+  readonly #identifying = new Map<string, Promise<WorkerConnection | undefined>>();
   #closed = false;
 
   constructor(options: EnrollmentWorkerPortOptions) {
@@ -105,6 +107,20 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
    * Worker JSON-RPC starts flowing over the authenticated channel.
    */
   async #connection(instanceId: string): Promise<WorkerConnection | undefined> {
+    const existing = this.#identified.get(instanceId);
+    if (existing !== undefined && existing.connection.alive) return existing.connection;
+    const inFlight = this.#identifying.get(instanceId);
+    if (inFlight !== undefined) return inFlight;
+    const identifying = this.#connect(instanceId);
+    this.#identifying.set(instanceId, identifying);
+    try {
+      return await identifying;
+    } finally {
+      if (this.#identifying.get(instanceId) === identifying) this.#identifying.delete(instanceId);
+    }
+  }
+
+  async #connect(instanceId: string): Promise<WorkerConnection | undefined> {
     const existing = this.#identified.get(instanceId);
     if (existing !== undefined && existing.connection.alive) return existing.connection;
 

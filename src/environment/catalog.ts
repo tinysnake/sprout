@@ -60,6 +60,7 @@ export type EnvironmentAdmissionRefusal =
   | 'archived'
   | 'not-approved'
   | 'permission-incomplete'
+  | 'unsupported-platform'
   | 'not-current-epoch'
   | 'work-unsafe'
   | 'readiness-unknown';
@@ -125,7 +126,7 @@ export function enrolledDefinitionId(platform: EnvironmentPlatform): string {
 
 /** Narrow a Worker-reported platform to a durable Environment platform. */
 function asEnvironmentPlatform(value: string): EnvironmentPlatform {
-  return value === 'macos' || value === 'container' || value === 'windows' ? value : 'macos';
+  return value === 'macos' || value === 'container' || value === 'windows' ? value : 'unknown';
 }
 
 /**
@@ -180,6 +181,11 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
   const workSafe = workSafety === 'clear' || workSafety === 'held';
   const connectionReady = readiness.readiness.connection.state === 'online';
   const protocolCompatible = readiness.readiness.compatibility.state === 'compatible';
+  // Connection/readiness observations are authority-scoped facts, not durable
+  // properties of an instance. A reconnect/replacement must re-establish them:
+  // an observation from a prior epoch is inspectable but non-authoritative.
+  const currentEpochReadiness =
+    input.currentEpoch !== undefined && input.observed?.connectionEpoch === input.currentEpoch;
   // Every *required* engine must have established (non-unknown) readiness and
   // an available model. An unrequired engine stays an honestly non-blocking
   // fact. Strict probe-driven admission for the remaining dimensions arrives
@@ -194,8 +200,10 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     );
   const eligible =
     enrollment.status === 'approved' &&
+    platform !== 'unknown' &&
     permissionSatisfied &&
     input.currentEpoch !== undefined &&
+    currentEpochReadiness &&
     workSafe &&
     connectionReady &&
     protocolCompatible &&
@@ -244,6 +252,13 @@ export function admissionRefusal(entry: EnvironmentCatalogEntry): EnvironmentAdm
       `Required capability "${ADMISSION_CAPABILITY}" is not permitted.`,
     );
   }
+  if (entry.definition.platform === 'unknown') {
+    return refusal(
+      entry,
+      'unsupported-platform',
+      'The Worker platform is unknown or unsupported; Sprout cannot safely admit work.',
+    );
+  }
   if (entry.readiness.readiness.workSafety.state === 'recovery') {
     return refusal(entry, 'work-unsafe', entry.readiness.summary.reason);
   }
@@ -252,6 +267,13 @@ export function admissionRefusal(entry: EnvironmentCatalogEntry): EnvironmentAdm
   }
   if (entry.currentEpoch === undefined) {
     return refusal(entry, 'not-current-epoch', 'No current Worker connection epoch is accepted.');
+  }
+  if (entry.observed?.connectionEpoch !== entry.currentEpoch) {
+    return refusal(
+      entry,
+      'not-current-epoch',
+      'Readiness facts were not established by the current Worker connection epoch.',
+    );
   }
   if (entry.readiness.readiness.compatibility.state !== 'compatible') {
     return refusal(entry, 'readiness-unknown', entry.readiness.summary.reason);

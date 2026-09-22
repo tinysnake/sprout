@@ -6,7 +6,14 @@
  * systems that satisfy a definition.
  */
 
-export type EnvironmentPlatform = 'macos' | 'container' | 'windows';
+/**
+ * `unknown` is a durable, explicit fact rather than a fallback platform.
+ *
+ * A Worker can be newer than this core or a historical record can be corrupt.
+ * Keeping that fact prevents catalog/admission code from fabricating a macOS
+ * definition for a system it cannot safely describe.
+ */
+export type EnvironmentPlatform = 'macos' | 'container' | 'windows' | 'unknown';
 
 export interface EnvironmentCapability {
   readonly name: string;

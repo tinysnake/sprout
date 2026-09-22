@@ -51,7 +51,15 @@ export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, ma
 function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
-    ...observed,
+    ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0
+      ? { connectionEpoch: observed.connectionEpoch }
+      : {}),
+    connection: {
+      state: observed.connection.state,
+      ...(observed.connection.lastConfirmedAt !== undefined
+        ? { lastConfirmedAt: observed.connection.lastConfirmedAt }
+        : {}),
+    },
     compatibility: {
       state: observed.compatibility.state,
       ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
@@ -458,8 +466,19 @@ export class EnvironmentEnrollmentService {
         readonly models: readonly string[];
       }[];
     },
+    options: {
+      /** The accepted connection epoch that supplied this Worker observation. */
+      readonly connectionEpoch?: number;
+      /** Refuses a stale observation immediately before it becomes durable. */
+      readonly isCurrent?: () => boolean;
+    } = {},
   ): Promise<void> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
+    // The runtime supplies the gateway authority check for inbound observations.
+    // A late request from a disconnected/replaced channel must not overwrite the
+    // current epoch's facts. Callers without an epoch retain the old additive
+    // readiness seam, but the catalog treats those legacy facts as non-authoritative.
+    if (options.isCurrent !== undefined && !options.isCurrent()) return;
     const observed = observedFactsFromWorkerReadiness({
       ...readiness,
       at: this.#clock(),
@@ -467,7 +486,10 @@ export class EnvironmentEnrollmentService {
     });
     await this.#readiness.saveReadiness(
       enrollment.environmentInstanceId,
-      sanitizeObservedReadiness(observed),
+      sanitizeObservedReadiness({
+        ...observed,
+        ...(options.connectionEpoch !== undefined ? { connectionEpoch: options.connectionEpoch } : {}),
+      }),
     );
   }
 

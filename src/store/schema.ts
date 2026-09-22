@@ -5,6 +5,7 @@ import {
   BROWSER_SESSION_ABSOLUTE_LIFETIME_MS,
   BROWSER_SESSION_IDLE_LIFETIME_MS,
 } from '../auth/session-policy.ts';
+import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy.ts';
 
 /**
  * Sprout database schema versioning, safety copy, and forward migration (#83, ADR-0009).
@@ -23,13 +24,13 @@ import {
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 11;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 11;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 12;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -568,6 +569,61 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           updated_at INTEGER NOT NULL
         );
       `);
+    },
+  },
+  {
+    fromVersion: 11,
+    toVersion: 12,
+    name: 'sanitize_environment_catalog_records',
+    migrate: (db) => {
+      // v11 documented portable catalog records but did not enforce that
+      // boundary in its store adapter. Rewrite every historical document from
+      // selected safe fields inside the same transactional migration, removing
+      // host paths, credentials, keys, network details, and raw diagnostics.
+      const table = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'environment_catalog'",
+      ).get();
+      if (table === undefined) return;
+      const rows = db.prepare(
+        'SELECT instance_id, enrollment_id, document, updated_at FROM environment_catalog',
+      ).all() as unknown as readonly {
+        readonly instance_id: string;
+        readonly enrollment_id: string;
+        readonly document: string;
+        readonly updated_at: number;
+      }[];
+      const update = db.prepare(
+        `UPDATE environment_catalog
+            SET instance_id = ?, enrollment_id = ?, document = ?, updated_at = ?
+          WHERE instance_id = ?`,
+      );
+      for (const row of rows) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.document);
+        } catch {
+          parsed = {};
+        }
+        const document = parsed !== null && typeof parsed === 'object'
+          ? parsed as { readonly definition?: unknown; readonly instance?: unknown }
+          : {};
+        const safe = sanitizeEnvironmentCatalogRecord({
+          instanceId: row.instance_id,
+          enrollmentId: row.enrollment_id,
+          definition: document.definition,
+          instance: document.instance,
+          updatedAt: row.updated_at,
+        });
+        // The primary key is derived from the existing key, so the update keeps
+        // historical attribution stable while stripping every unapproved field.
+        update.run(
+          safe.instanceId,
+          safe.enrollmentId,
+          JSON.stringify({ definition: safe.definition, instance: safe.instance }),
+          safe.updatedAt,
+          row.instance_id,
+        );
+      }
     },
   },
 ];

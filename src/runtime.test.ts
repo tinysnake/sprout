@@ -608,7 +608,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 12; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 13; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -1503,7 +1503,7 @@ test('production starts with zero Environments and admits an enrolled instance w
       ],
     });
     // The instance is a durable catalog entry even before any connection, and
-    // the durable record is written so it survives a reopen.
+    // a legacy/unscoped readiness record cannot make it eligible.
     await runtime.refreshEnvironmentCatalog();
     const entry = runtime.environmentCatalog.entry('enrolled-host-1');
     assert.ok(entry !== undefined);
@@ -1513,9 +1513,17 @@ test('production starts with zero Environments and admits an enrolled instance w
       enrollmentId,
     );
 
-    // A current, authenticated connection epoch (accepted by the gateway) is the
-    // remaining fact; production admits it without a restart.
-    runtime.workerEpochs.accept(enrollmentId);
+    // A current, authenticated connection and facts from that exact epoch are
+    // required; production admits it without a restart.
+    const epoch = runtime.workerEpochs.accept(enrollmentId);
+    await runtime.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: epoch.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+      ],
+    });
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, true);
     await runtime.refreshEnvironmentCatalog();
@@ -1542,14 +1550,15 @@ async function enrollEligibleInstance(
   await runtime.enrollments.approve(enrollmentId, {
     capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
   });
+  const epoch = runtime.workerEpochs.accept(enrollmentId);
   await runtime.enrollments.observeReadiness(enrollmentId, {
+    connectionEpoch: epoch.epoch,
     connection: { state: 'online', lastConfirmedAt: Date.now() },
     compatibility: { state: 'compatible', workerProtocolVersion: '2' },
     engines: [
       { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
     ],
   });
-  runtime.workerEpochs.accept(enrollmentId);
   await runtime.refreshEnvironmentCatalog();
   return enrollmentId;
 }
@@ -1584,12 +1593,13 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // A current epoch with no required readiness is still ineligible.
-    runtime.workerEpochs.accept(enrollmentId);
+    const emptyEpoch = runtime.workerEpochs.accept(enrollmentId);
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // Establishing the required readiness fact makes it eligible dynamically.
     await runtime.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: emptyEpoch.epoch,
       connection: { state: 'online', lastConfirmedAt: Date.now() },
       compatibility: { state: 'compatible', workerProtocolVersion: '2' },
       engines: [
@@ -1684,11 +1694,83 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     assert.equal(runtime.pool.requiresLease('host-a', ADMISSION_CAPABILITY), undefined);
     if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
 
-    // A newer epoch restores eligibility; the lease is still intact.
-    runtime.workerEpochs.accept(enrollmentId);
+    // A newer epoch cannot reuse old readiness. It becomes eligible only after
+    // fresh facts for that replacement epoch are stored; the lease is intact.
+    const replacement = runtime.workerEpochs.accept(enrollmentId);
+    await runtime.refreshEnvironmentCatalog();
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
+    await runtime.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: replacement.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+      ],
+    });
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
     if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('E2: replacement and stale readiness ordering never re-admit a prior epoch in a multi-instance pool', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-epoch-order-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    const enrollmentA = await enrollEligibleInstance(runtime, 'host-a', 'key-a');
+    await enrollEligibleInstance(runtime, 'host-b', 'key-b');
+    const lease = runtime.pool.acquireLease({
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scout', runId: 'run-a', ttlMs: 60_000,
+    });
+    assert.equal(lease.ok, true);
+    const first = runtime.workerEpochs.current(enrollmentA)!;
+
+    // Loss followed by a replacement leaves host-b independently eligible but
+    // removes host-a until the replacement itself supplies readiness.
+    runtime.workerEpochs.invalidate(enrollmentA, first.connectionId);
+    const replacement = runtime.workerEpochs.accept(enrollmentA);
+    await runtime.refreshEnvironmentCatalog();
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
+    assert.equal(runtime.environmentCatalog.entry('host-b')?.eligible, true);
+    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
+
+    // A delayed old-epoch observation is persisted as non-authoritative and
+    // cannot make the new connection eligible or release/conflict-bypass lease.
+    await runtime.enrollments.observeReadiness(enrollmentA, {
+      connectionEpoch: first.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } }],
+    });
+    await runtime.refreshEnvironmentCatalog();
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
+    const blocked = runtime.pool.acquireLease({
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scribe', runId: 'run-stale', ttlMs: 60_000,
+    });
+    assert.equal(blocked.ok, false);
+
+    await runtime.enrollments.observeReadiness(enrollmentA, {
+      connectionEpoch: replacement.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } }],
+    });
+    await runtime.refreshEnvironmentCatalog();
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
+    const conflict = runtime.pool.acquireLease({
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scribe', runId: 'run-conflict', ttlMs: 60_000,
+    });
+    assert.equal(conflict.ok, false);
+    if (!conflict.ok) assert.equal(conflict.reason, 'conflict');
   } finally {
     await runtime.close();
   }
@@ -1906,7 +1988,10 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
 
 /** Poll a predicate with a bounded deadline, so an async observer can settle. */
 async function waitFor(predicate: () => boolean, description: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  // The complete suite exercises browser builds alongside this real WS
+  // composition. Keep the assertion bounded, but leave enough scheduler room
+  // for the Worker to install its JSON-RPC server after the accepted transport.
+  const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1942,8 +2027,9 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
       engineFacts: [],
     });
     const enrollmentId = requested.enrollment.id;
-    runtime.workerEpochs.accept(enrollmentId);
+    const epoch = runtime.workerEpochs.accept(enrollmentId);
     await runtime.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: epoch.epoch,
       connection: { state: 'online', lastConfirmedAt: Date.now() },
       compatibility: { state: 'compatible', workerProtocolVersion: '2' },
       engines: [
