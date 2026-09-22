@@ -434,3 +434,27 @@ test('a Worker-declared provider/account identity never reaches the durable read
   assert.equal(stored?.engines[0]?.authType, undefined);
   assert.equal(stored?.engines[0]?.source, undefined);
 });
+
+test('direct service observations discard every non-worker probe source before durable storage (R118-BOUNDARY-003)', async () => {
+  for (const source of ['provider-account', 'openai-codex', 'unknown']) {
+    const { service, store } = await enrolled();
+    const readiness = {
+      ...startupReadiness(),
+      probe: { ...startupReadiness().probe, source },
+    };
+    const recorded = await service.observeWorkerReadiness(
+      'enroll-1',
+      // Deliberately cross the runtime boundary with a value TypeScript's
+      // `worker` literal cannot represent. The service, not the type system,
+      // owns the durable privacy reduction.
+      readiness as never,
+      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+    );
+    assert.equal(recorded, true);
+    const durable = await store.listProbes('env-1');
+    assert.equal(durable.length, 1);
+    assert.equal(durable[0]?.source, undefined, `${source} must not become durable provenance`);
+    assert.equal((await service.readiness('enroll-1')).readiness.probe?.source, undefined);
+    assert.equal((await service.listProbes('enroll-1'))[0]?.source, undefined);
+  }
+});

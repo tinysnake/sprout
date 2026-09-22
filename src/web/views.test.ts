@@ -379,12 +379,17 @@ test('the readiness wire view drops a Worker-supplied provider/account identity 
         // not leak through the wire projection.
         authMode: 'provider-account', authType: 'openai-codex', source: 'openai-codex',
       }],
+      probe: {
+        at: 1_234, latencyMs: 12, protocolOk: true, enginesOk: true,
+        source: 'provider-account', version: '0.86.1', summary: 'safe summary',
+      } as never,
       workSafety: { state: 'clear' },
     },
   });
   assert.equal(view.engines[0]?.authMode, undefined);
   assert.equal(view.engines[0]?.authType, undefined);
   assert.equal(view.engines[0]?.source, undefined);
+  assert.equal(view.probe?.source, undefined, 'embedded readiness uses the same exact-worker wire allowlist');
   assert.doesNotMatch(JSON.stringify(view), /openai-codex|provider-account/);
 });
 

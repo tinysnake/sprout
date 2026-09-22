@@ -509,6 +509,7 @@ export function toEnvironmentReadinessView(input: {
   readonly summary: EnvironmentReadinessSummary;
 }): EnvironmentReadinessView {
   const { readiness, summary } = input;
+  const probe = toProbeResultView(readiness.probe);
   // The view is the last boundary before the wire. The service sanitizes the
   // stored facts, but a caller that hands this projection a raw readiness
   // document (a repair tool, a test, a future adapter) still must not leak a
@@ -571,21 +572,7 @@ export function toEnvironmentReadinessView(input: {
         ...(source !== undefined ? { source } : {}),
       };
     }),
-    ...(readiness.probe !== undefined
-      ? {
-          probe: {
-            at: readiness.probe.at,
-            latencyMs: readiness.probe.latencyMs,
-            protocolOk: readiness.probe.protocolOk,
-            enginesOk: readiness.probe.enginesOk,
-            summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
-            ...(readiness.probe.source !== undefined ? { source: readiness.probe.source } : {}),
-            ...(readiness.probe.version !== undefined
-              ? { version: probeVersionOrUnknown(readiness.probe.version) }
-              : {}),
-          },
-        }
-      : {}),
+    ...(probe !== undefined ? { probe } : {}),
     workSafety: { state: readiness.workSafety.state },
   };
 }

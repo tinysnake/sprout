@@ -110,6 +110,10 @@ export function validAuthority(
     readiness.connectionEpoch === authority.connectionEpoch &&
     (probe === undefined || (
       probe.enrollmentId === authority.enrollmentId &&
-      probe.connectionEpoch === authority.connectionEpoch
+      probe.connectionEpoch === authority.connectionEpoch &&
+      // Store adapters are the last durable boundary. A raw/bypassing caller
+      // may omit provenance, but no runtime value other than exact `worker`
+      // may ever become durable probe source text (R118-BOUNDARY-003).
+      (probe.source === undefined || probe.source === 'worker')
     ));
 }

@@ -130,14 +130,15 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
 
 function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
   return {
-    ...probe,
     // This is assigned from the locally resolved enrollment in recordProbe,
     // rather than accepted from Worker output, and remains internal to probe
     // history. It must stay exact for authority comparison.
-    ...(probe.enrollmentId !== undefined ? { enrollmentId: probe.enrollmentId } : {}),
-    ...(Number.isSafeInteger(probe.connectionEpoch) && (probe.connectionEpoch ?? 0) > 0
-      ? { connectionEpoch: probe.connectionEpoch }
-      : {}),
+    enrollmentId: probe.enrollmentId,
+    connectionEpoch: probe.connectionEpoch,
+    at: probe.at,
+    latencyMs: probe.latencyMs,
+    protocolOk: probe.protocolOk,
+    enginesOk: probe.enginesOk,
     ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) ?? 'unknown-version' } : {}),
     // Probe provenance is a closed-world fact just like engine provenance.
     // JSON-RPC is runtime input, so its TypeScript union cannot prevent a

@@ -80,6 +80,7 @@ import {
 import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { createWorkerProbeRequester } from './worker/readiness-requester.ts';
+import { isCompleteWorkerReadinessProbeResult } from './worker/readiness-ingress.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
@@ -1114,6 +1115,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           ? undefined
           : await runtimeEnvironment.probeReadiness(enrollment.environmentInstanceId);
         if (probe !== undefined) {
+          // The automatic/startup path crosses the same untrusted JSON-RPC
+          // guard as an explicit POST. A typed transport result is not runtime
+          // proof, and no part of an incomplete or internally inconsistent
+          // observation may reach the durable commit below (R118-API-002).
+          if (!isCompleteWorkerReadinessProbeResult(probe)) return;
           readiness = probe.readiness;
         } else {
           const info = await runtimeEnvironment.info?.(enrollment.environmentInstanceId);

@@ -317,31 +317,43 @@ test('missing or mismatched JSON-RPC probe facts are never committed or returned
   }
 });
 
-test('a provider/account probe source from real JSON-RPC is never persisted or projected (R118-BOUNDARY-003)', async (t) => {
-  const h = await harness();
-  const key = tmpKey();
-  t.after(async () => { key.cleanup(); await h.close(); });
-  await enrollAndApprove(h, key.path);
-  await h.connect(key.path, async () => ({
-    readiness: {
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      engines: [],
+test('provider, account, and unknown probe sources from real JSON-RPC never reach GET or POST (R118-BOUNDARY-003)', async (t) => {
+  for (const source of ['provider-account', 'openai-codex', 'unknown']) {
+    const h = await harness();
+    const key = tmpKey();
+    t.after(async () => { key.cleanup(); await h.close(); });
+    await enrollAndApprove(h, key.path);
+    await h.connect(key.path, async () => ({
+      readiness: {
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [],
+        probe: {
+          at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
+          source, version: '0.86.1', summary: 'safe summary',
+        },
+      },
       probe: {
         at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
-        source: 'provider-account', version: '0.86.1', summary: 'provider-account',
+        source, version: '0.86.1', summary: 'safe summary',
       },
-    },
-    probe: {
-      at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
-      source: 'provider-account', version: '0.86.1', summary: 'provider-account',
-    },
-  }) as unknown as WorkerReadinessProbeResult);
-  await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
-  const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
-  assert.notEqual(response.status, 201);
-  assert.equal((await response.text()).includes('provider-account'), false);
-  const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
-  assert.equal((await readiness.text()).includes('provider-account'), false);
+    }) as unknown as WorkerReadinessProbeResult);
+    await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
+    const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
+    assert.notEqual(response.status, 201);
+    const responseText = await response.text();
+    assert.equal((JSON.parse(responseText) as { probe?: unknown }).probe, undefined);
+    if (source !== 'unknown') assert.equal(responseText.includes(source), false);
+    const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
+    const readinessText = await readiness.text();
+    const readinessBody = JSON.parse(readinessText) as {
+      readonly readiness: { readonly probe?: { readonly source?: string } };
+      readonly probes: readonly { readonly source?: string }[];
+    };
+    assert.equal(readinessBody.readiness.probe?.source, undefined);
+    assert.deepEqual(readinessBody.probes.map((probe) => probe.source), []);
+    if (source !== 'unknown') assert.equal(readinessText.includes(source), false);
+    assert.deepEqual(await h.enrollments.listProbes('enroll-1'), []);
+  }
 });
 
 test('revoke closes the real channel and no GET/POST fact survives the lifecycle (R118-API-002)', async (t) => {
