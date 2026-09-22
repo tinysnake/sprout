@@ -209,16 +209,20 @@ function isTerminalRefusalState(state: WorkerConnectionState): state is Terminal
  *
  * The projection rules, in order:
  *
- * 1. An unenrolled host is `not-enrolled`; an unreadable configuration or an
+ * 1. A live runtime whose ownership evidence is unavailable is always a
+ *    `local-configuration-failure`, even when configuration is absent or the
+ *    last recorded label is `stopped`. This is the same fail-closed fact that
+ *    fences start/reset and must not be hidden by a lower-priority state.
+ * 2. An unenrolled host is `not-enrolled`; an unreadable configuration or an
  *    invalid identity key is a `local-configuration-failure`.
- * 2. A runtime record whose full host-local process binding is verified is
+ * 3. A runtime record whose full host-local process binding is verified is
  *    trusted as the live state (`connecting`, `connected`, or a terminal refusal).
- * 3. A runtime record whose process is gone — or whose pid was reused by a non-owner
+ * 4. A runtime record whose process is gone — or whose pid was reused by a non-owner
  *    process — preserves a last recorded terminal refusal fact so a refused
  *    Worker is never reported as a healthy `stopped`; it clears `connecting`
  *    and `connected` to `stopped`, because those facts only exist while a
  *    process is actually serving.
- * 4. No runtime record at all is `stopped`.
+ * 5. No runtime record at all is `stopped`.
  *
  * The identity check compares an owner token and OS start marker, so a reused
  * pid can never make a dead, foreign, or other-environment Worker look connected.
@@ -233,6 +237,18 @@ export function projectStatus(input: {
   readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean | 'unknown';
   readonly serviceInstalled: boolean;
 }): WorkerStatus {
+  const runtime = input.runtime;
+  const identityCheck = input.processMatchesRuntime ?? ((_process: WorkerProcessIdentity) => true);
+  const processAlive = runtime !== undefined && input.processAlive(runtime.pid);
+  const identityResult = processAlive && runtime !== undefined ? identityCheck(runtime.process) : false;
+  if (runtime !== undefined && processAlive && identityResult === 'unknown') {
+    return {
+      state: 'local-configuration-failure',
+      serviceInstalled: input.serviceInstalled,
+      ...(input.config !== undefined ? { protocolVersion: input.config.protocolVersion } : {}),
+      detail: 'the Worker process ownership evidence is unavailable; start and reset are fenced',
+    };
+  }
   if (!input.enrolled) {
     return { state: 'not-enrolled', serviceInstalled: input.serviceInstalled };
   }
@@ -247,17 +263,6 @@ export function projectStatus(input: {
     serviceInstalled: input.serviceInstalled,
     protocolVersion: input.config.protocolVersion,
   };
-  const runtime = input.runtime;
-  const identityCheck = input.processMatchesRuntime ?? ((_process: WorkerProcessIdentity) => true);
-  const processAlive = runtime !== undefined && input.processAlive(runtime.pid);
-  const identityResult = processAlive && runtime !== undefined ? identityCheck(runtime.process) : false;
-  if (runtime !== undefined && runtime.state !== 'stopped' && processAlive && identityResult === 'unknown') {
-    return {
-      state: 'local-configuration-failure',
-      ...base,
-      detail: 'the Worker process ownership evidence is unavailable; start and reset are fenced',
-    };
-  }
   const trusted = runtime !== undefined && processAlive && identityResult === true;
   if (runtime === undefined || !trusted) {
     if (runtime !== undefined && isTerminalRefusalState(runtime.state)) {
@@ -294,15 +299,31 @@ export function projectStatus(input: {
  * one-use claim secret deliberately has no argument form.
  */
 export function parseEndpoint(value: string): { readonly host: string; readonly port: number } {
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `ws://${value}`;
+  const schemeMatch = value.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  const scheme = schemeMatch?.[1]?.toLowerCase();
+  if (scheme !== undefined && !['ws', 'wss', 'http', 'https'].includes(scheme)) {
+    throw new WorkerHostStateError('invalid', 'the endpoint scheme must be ws, wss, http, or https');
+  }
+  const authority = schemeMatch === null ? value : value.slice(schemeMatch[0].length);
+  // Enforce an authority grammar before URL parsing. URL would otherwise
+  // accept and silently discard userinfo, paths, queries, and fragments — all
+  // of which can carry credentials or private network facts in process argv.
+  if (/[\s/?#@]/.test(authority)) {
+    throw new WorkerHostStateError(
+      'invalid',
+      'the endpoint must contain only a public host and explicit port; URL components are not allowed',
+    );
+  }
+  const authorityMatch = authority.match(/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+):(\d+)$/i);
+  if (authorityMatch === null) {
+    throw new WorkerHostStateError('invalid', 'the endpoint must include only a host and an explicit port');
+  }
+  const withScheme = `${scheme ?? 'ws'}://${authority}`;
   let url: URL;
   try {
     url = new URL(withScheme);
   } catch {
     throw new WorkerHostStateError('invalid', 'the endpoint is not a valid host:port');
-  }
-  if (!['ws:', 'wss:', 'http:', 'https:'].includes(url.protocol)) {
-    throw new WorkerHostStateError('invalid', 'the endpoint scheme must be ws, wss, http, or https');
   }
   if (url.hostname === '' || url.port === '') {
     throw new WorkerHostStateError('invalid', 'the endpoint must include a host and an explicit port');

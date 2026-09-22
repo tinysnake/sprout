@@ -78,13 +78,23 @@ appears in service metadata. Exit statuses are documented in
 `3` not enrolled, `4` refused, `5` awaiting Human approval, `6` service failure,
 `7` already running. `status` validates the configuration and identity-key
 permissions and preserves a recorded refusal (`revoked`/`incompatible`/
-`pending-approval`) even after the Worker process exits. `reset` and
+`pending-approval`) even after the Worker process exits. Live process evidence
+that the host cannot inspect takes precedence over `not-enrolled` and `stopped`
+and reports `local-configuration-failure`, matching the fail-closed start/reset
+fence. The enrollment endpoint argument is strictly a host plus explicit port,
+optionally prefixed by `ws://`, `wss://`, `http://`, or `https://`; URL userinfo,
+paths, queries, and fragments are rejected rather than normalized into process
+arguments. `reset` and
 `uninstall-service` fail closed: they refuse while a foreground Worker holds the
 lock, and they leave host-local state untouched when the LaunchAgent cannot be
 proven unloaded. Runtime and lock ownership use an owner-only, per-start opaque
 token plus the OS process-start identity (never command-line matching), so PID
 reuse, another environment's Worker, and an in-progress reset cannot inherit or
-release the Worker state.
+release the Worker state. Pending ownership records are staged, flushed, and
+atomically published; an interrupted staging record has no ownership authority,
+while complete pending/owner records with unavailable evidence are never
+reclaimed. Worker logs and JSON-RPC failures use product-owned categories rather
+than endpoint, path, network, provider, or raw stderr text.
 
 ## O7 game workspace
 

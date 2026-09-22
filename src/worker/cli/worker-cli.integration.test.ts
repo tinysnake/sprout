@@ -94,7 +94,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       readClaimSecret: async () => secret,
       platform: 'darwin',
       uid: 501,
-    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async () => undefined,
     });
@@ -126,7 +126,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       stderr: (line) => err.push(line),
       platform: 'darwin',
       uid: 501,
-    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
       run: () => '',
       serve: async ({ connection, environmentInstanceId }) => {
         const engines = new Map<string, never>();
@@ -176,7 +176,11 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
       stderr: (line) => err.push(line),
       platform: 'darwin',
       uid: 501,
-    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      // `start` used a synthetic binding in this test process, but its
+      // foreground lifetime has ended. Model positive dead evidence so this
+      // checks normal terminal semantics, not unavailable-live precedence.
+      processProbe: () => ({ state: 'dead' }),
       run: () => '',
     });
     assert.equal(await statusCli.run(['status']), WORKER_EXIT.ok);

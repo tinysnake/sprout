@@ -13,6 +13,7 @@ import { SqliteStore } from '../store/db.ts';
 import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 import { EndpointCarrier } from './carrier.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 /**
  * These cases use a separate Worker process and its real filesystem root.  The
@@ -40,11 +41,14 @@ test('a Worker persists Project workspaces, refreshes Task context, and safely r
 
   await assert.rejects(
     first.contexts.recycle({ projectId: 'project-1', taskId: 'task-1', environmentInstanceId: 'env-1', environmentLeaseId: 'wrong-lease' }),
-    /does not match/,
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
   );
   assert.equal(existsSync(context), true, 'a mismatched manifest never authorizes deletion');
   writeFileSync(join(context, 'foreign.txt'), 'do not delete\n');
-  await assert.rejects(first.contexts.recycle(recycle()), /foreign file/);
+  await assert.rejects(
+    first.contexts.recycle(recycle()),
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
+  );
   assert.equal(existsSync(join(context, 'foreign.txt')), true, 'foreign context content is retained');
   await rm(join(context, 'foreign.txt'));
   await first.contexts.recycle(recycle());
@@ -72,7 +76,7 @@ test('cleanup can retry through a replacement Worker after a transient failure',
   // a retry against the restarted Worker uses the durable manifest and succeeds.
   await assert.rejects(
     replacement.contexts.recycle({ ...recycle(), environmentLeaseId: 'not-the-lease' }),
-    /refusing cleanup/,
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
   );
   assert.equal(existsSync(context), true);
   await replacement.contexts.recycle(recycle());
@@ -93,14 +97,20 @@ test('a planted Project symlink cannot escape the Worker root during prepare, cw
   const connection = await worker(root);
   t.after(() => connection.close());
 
-  await assert.rejects(connection.contexts.prepare(materialization()), /outside Worker root/);
+  await assert.rejects(
+    connection.contexts.prepare(materialization()),
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
+  );
   const adapter = connection.adapters.get('scripted');
   assert.ok(adapter);
   await assert.rejects(
     adapter.startSession({ agentId: 'pi', workingDirectory: 'ignored', projectWorkspaceId: 'project-1' }),
-    /outside Worker root/,
+    new RegExp(WORKER_DIAGNOSTICS.sessionStartFailed, 'i'),
   );
-  await assert.rejects(connection.contexts.recycle(recycle()), /outside Worker root/);
+  await assert.rejects(
+    connection.contexts.recycle(recycle()),
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
+  );
   assert.equal(existsSync(join(outside, '.sprout')), false, 'the Worker never writes or deletes through the planted symlink');
 });
 
@@ -117,13 +127,19 @@ test('cleanup authenticates its Sprout manifest and verifies the Project sentine
   // Matching binding fields alone are not ownership: the exact version marker
   // is required before cleanup can remove anything.
   writeFileSync(join(context, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
-  await assert.rejects(connection.contexts.recycle(recycle()), /ownership marker/);
+  await assert.rejects(
+    connection.contexts.recycle(recycle()),
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
+  );
   assert.equal(existsSync(context), true, 'a forged manifest never authorizes deletion');
 
   writeFileSync(join(context, 'manifest.json'), `${JSON.stringify({ sprout: 'sprout-task-context-v1', ...manifest })}\n`);
   await connection.contexts.prepare(materialization());
   rmSync(join(workspace, '.sprout', 'workspace-sentinel.json'));
-  await assert.rejects(connection.contexts.recycle(recycle()), /sentinel/);
+  await assert.rejects(
+    connection.contexts.recycle(recycle()),
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
+  );
   assert.equal(existsSync(context), true, 'a missing Project sentinel preserves retryable Task context');
   await connection.contexts.prepare(materialization());
   await connection.contexts.recycle(recycle());
@@ -308,7 +324,7 @@ test('the Worker refuses to validate an escaping or absolute relative selection'
       kind: 'relative',
       path: '../outside',
     }),
-    /relative/,
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
   );
   await assert.rejects(
     connection.contexts.validateWorkspace({
@@ -317,7 +333,7 @@ test('the Worker refuses to validate an escaping or absolute relative selection'
       kind: 'relative',
       path: '/absolute/path',
     }),
-    /relative/,
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
   );
   assert.equal(existsSync(join(root, '..', 'outside')), false);
 });
@@ -341,7 +357,7 @@ test('a planted symlink cannot make workspace validation escape the Worker root'
       kind: 'relative',
       path: 'repos/planted',
     }),
-    /outside Worker root/,
+    new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),
   );
   assert.equal(existsSync(join(outside, '.sprout')), false);
 });

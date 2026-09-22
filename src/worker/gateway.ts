@@ -41,6 +41,7 @@ import {
   type WorkerGatewayClientFrame,
   type WorkerGatewayServerFrame,
 } from './gateway-protocol.ts';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 /** The default handshake deadline: a stalled Worker cannot hold a socket open. */
 export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
@@ -482,11 +483,22 @@ function safeWrite(stream: Duplex, frame: WorkerGatewayServerFrame): void {
 }
 
 function sanitizeReason(error: unknown): string {
-  if (error instanceof EnrollmentError) return error.message;
-  if (error instanceof WorkerProofError) {
-    return `the Worker identity proof is not valid: ${error.message}`;
+  if (error instanceof EnrollmentError) {
+    switch (error.code) {
+      case 'unknown-enrollment':
+        return WORKER_DIAGNOSTICS.enrollmentUnavailable;
+      case 'revoked-enrollment':
+        return WORKER_DIAGNOSTICS.enrollmentRevoked;
+      case 'invalid-claim':
+        return WORKER_DIAGNOSTICS.enrollmentClaimRefused;
+      case 'invalid-proof':
+        return WORKER_DIAGNOSTICS.identityProofRefused;
+      default:
+        return WORKER_DIAGNOSTICS.enrollmentRefused;
+    }
   }
-  return error instanceof Error ? error.message : 'the Worker connection was refused';
+  if (error instanceof WorkerProofError) return WORKER_DIAGNOSTICS.identityProofRefused;
+  return WORKER_DIAGNOSTICS.connectionRefused;
 }
 
 /** A machine route refusal is a precondition problem, not a server fault. */

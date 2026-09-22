@@ -2,7 +2,6 @@ import type { Readable, Writable } from 'node:stream';
 
 import type {
   AgentRunEvent,
-  ContractDelivery,
   EngineAdapter,
   EngineSession,
   EngineTurnResult,
@@ -30,6 +29,12 @@ import {
   type WorkerReadinessFacts,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import {
+  contractDeliveryDiagnostic,
+  sanitizeEngineTurnResult,
+  WORKER_DIAGNOSTICS,
+  type WorkerDiagnostic,
+} from './diagnostics.ts';
 
 /**
  * The worker: the part of Sprout that runs *inside* an environment.
@@ -51,7 +56,7 @@ export interface EnvironmentWorkerOptions {
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   readonly input: Readable;
   readonly output: Writable;
-  readonly onLog?: (line: string) => void;
+  readonly onLog?: (line: WorkerDiagnostic) => void;
   /** Root owned by this Worker for persistent Project workspaces. */
   readonly workspaceRoot?: string;
   /**
@@ -63,14 +68,12 @@ export interface EnvironmentWorkerOptions {
    */
   readonly readiness?: () => WorkerReadinessFacts;
 }
-
 interface LiveSession {
   readonly engine: string;
   readonly session: EngineSession;
   readonly events: EventSink;
   turnId: string | undefined;
 }
-
 /**
  * The honest fallback when a Worker has no readiness source: it knows which
  * engines it hosts, but not their installation or login, so it says `unknown`
@@ -157,7 +160,7 @@ export class EnvironmentWorker {
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
           return;
         default:
-          this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
+          this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);
       }
     } catch (error) {
       // An engine's rejected resume is a classifyable failure, not a generic
@@ -165,13 +168,15 @@ export class EnvironmentWorker {
       // "the engine refused this key" from "this worker failed". Everything else
       // is reported as an ordinary worker error and is never retried.
       if (error instanceof EngineResumeRefusedError) {
-        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, error.message);
+        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, WORKER_DIAGNOSTICS.resumeRefused);
         return;
       }
       this.#transport.respondError(
         id,
         -32_603,
-        error instanceof Error ? error.message : String(error),
+        method === WORKER_METHODS.startSession
+          ? WORKER_DIAGNOSTICS.sessionStartFailed
+          : WORKER_DIAGNOSTICS.requestFailed,
       );
     }
   }
@@ -223,8 +228,7 @@ export class EnvironmentWorker {
     // or "not delivered" (C21-002).
     const delivery = session.contractDelivery;
     if (delivery !== undefined) {
-      const line = describeDelivery(params.agentId, params.workingDirectory, delivery);
-      this.#options.onLog?.(line);
+      this.#options.onLog?.(contractDeliveryDiagnostic(delivery));
     }
     this.#sessions.set(sessionId, {
       engine: params.engine,
@@ -295,11 +299,15 @@ export class EnvironmentWorker {
         } catch {
           // The completion below carries the real terminal result.
         }
-        live.events.settled(turnId, await turn.completion, live.session.engineSessionKey);
-      } catch (error) {
+        live.events.settled(
+          turnId,
+          sanitizeEngineTurnResult(await turn.completion),
+          live.session.engineSessionKey,
+        );
+      } catch {
         live.events.settled(turnId, {
           status: 'failed',
-          message: error instanceof Error ? error.message : String(error),
+          message: WORKER_DIAGNOSTICS.turnFailed,
         });
       } finally {
         if (live.turnId === turnId) live.turnId = undefined;
@@ -340,60 +348,5 @@ export class EnvironmentWorker {
       this.#sessions.delete(sessionId);
       await live.session.close().catch(() => undefined);
     }
-  }
-}
-
-/**
- * The line to log for a contract delivery.
- *
- * **Every mechanism a run can report is logged.** A delivery outcome is not
- * internal bookkeeping: it is how an operator confirms that the project contract
- * did or did not reach the engine, and the two "obvious" successes are exactly
- * the ones whose absence would be hardest to distinguish from a run that was
- * never given a contract at all (C21-002). Reporting is deliberately uniform —
- * one line per delivered contract, naming the mechanism and where it went — so
- * there is no outcome that is observable only by its silence.
- */
-function describeDelivery(
-  agentId: string,
-  workingDirectory: string,
-  delivery: ContractDelivery,
-): string {
-  const where =
-    delivery.path !== undefined
-      ? ` (${delivery.path})`
-      : ` (${workingDirectory})`;
-  switch (delivery.mechanism) {
-    case 'agents.md':
-      return (
-        `project contract for agent ${agentId} was delivered to the engine's own ` +
-        `AGENTS.md${where}`
-      );
-    case 'sprout-contract-file':
-      return (
-        `project contract for agent ${agentId} was delivered to Sprout's own ` +
-        `file${where}, registered with the engine's instruction list because the ` +
-        `engine does not discover that name`
-      );
-    case 'engine-hook':
-      return (
-        `project contract for agent ${agentId} was delivered through the engine's ` +
-        `config hook${where}`
-      );
-    case 'skipped-user-owned':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `a user-owned file in ${workingDirectory} was left intact`
-      );
-    case 'skipped-unreadable':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `an existing file in ${workingDirectory} could not be read and was left intact`
-      );
-    case 'unavailable':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `${delivery.reason ?? `no writable location in ${workingDirectory}`}`
-      );
   }
 }

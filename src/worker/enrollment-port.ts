@@ -27,6 +27,7 @@ import type {
   ValidateWorkspaceResult,
   WorkerInfo,
 } from './protocol.ts';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 interface CachedConnection {
   readonly connectionId: string;
@@ -138,16 +139,14 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
         clients: [...connected.adapters.values()],
       });
       this.#onLog?.(
-        `enrollment worker identified: ${instanceId} epoch ${acceptance.epoch.epoch}`,
+        WORKER_DIAGNOSTICS.identificationSucceeded,
       );
       return connection;
-    } catch (error) {
+    } catch {
       // A connection that fails to identify itself is closed rather than cached,
       // so the next attempt can start cleanly.
       this.#onLog?.(
-        `enrollment worker failed to identify: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        WORKER_DIAGNOSTICS.identificationFailed,
       );
       this.#accepted.delete(instanceId);
       acceptance.close();
@@ -158,9 +157,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   async adapters(environmentInstanceId: string): Promise<ReadonlyMap<string, EngineAdapter>> {
     const connection = await this.#connection(environmentInstanceId);
     if (connection === undefined) {
-      throw new Error(
-        `environment instance ${environmentInstanceId} has no accepted enrollment-backed Worker connection`,
-      );
+      throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     }
     return connection.adapters;
   }
@@ -168,9 +165,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   async contexts(environmentInstanceId: string): Promise<WorkerContextClient> {
     const connection = await this.#connection(environmentInstanceId);
     if (connection === undefined) {
-      throw new Error(
-        `environment instance ${environmentInstanceId} has no accepted enrollment-backed Worker connection`,
-      );
+      throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     }
     return connection.contexts;
   }
@@ -181,9 +176,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   ): Promise<ValidateWorkspaceResult> {
     const connection = await this.#connection(environmentInstanceId);
     if (connection === undefined) {
-      throw new Error(
-        `environment instance ${environmentInstanceId} has no accepted enrollment-backed Worker connection`,
-      );
+      throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     }
     return connection.contexts.validateWorkspace(input);
   }

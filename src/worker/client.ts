@@ -26,6 +26,7 @@ import {
   type ValidateWorkspaceResult,
   type WorkerInfo,
 } from './protocol.ts';
+import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 /**
  * The core-side handle on one environment's worker.
@@ -69,7 +70,7 @@ export class WorkerClient implements EngineAdapter {
     const engine = options.engines.find((candidate) => candidate.id === engineId);
     if (!engine) {
       throw new Error(
-        `worker for ${options.environmentInstanceId} does not host engine: ${engineId}`,
+        WORKER_DIAGNOSTICS.sessionStartFailed,
       );
     }
     this.id = engine.id;
@@ -90,7 +91,12 @@ export class WorkerClient implements EngineAdapter {
   static async connect(
     transport: JsonRpcTransport,
   ): Promise<{ readonly info: WorkerInfo; readonly adapters: ReadonlyMap<string, WorkerClient> }> {
-    const info = await transport.request<WorkerInfo>(WORKER_METHODS.info);
+    let info: WorkerInfo;
+    try {
+      info = await transport.request<WorkerInfo>(WORKER_METHODS.info);
+    } catch {
+      throw new Error(WORKER_DIAGNOSTICS.requestFailed);
+    }
     const options: WorkerClientOptions = {
       transport,
       environmentInstanceId: info.environmentInstanceId,
@@ -147,9 +153,9 @@ export class WorkerClient implements EngineAdapter {
         error.code === WORKER_ERROR_CODES.resumeRefused &&
         request.resumeSessionKey !== undefined
       ) {
-        throw new EngineResumeRefusedError(request.resumeSessionKey, error.message);
+        throw new EngineResumeRefusedError(request.resumeSessionKey, WORKER_DIAGNOSTICS.resumeRefused);
       }
-      throw error;
+      throw new Error(WORKER_DIAGNOSTICS.sessionStartFailed);
     }
 
     return new WorkerEngineSession(
@@ -180,15 +186,15 @@ export class WorkerContextClient {
   }
 
   prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
-    return this.#transport.request(WORKER_METHODS.prepareTaskContext, input);
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.prepareTaskContext, input));
   }
 
   recycle(input: RecycleTaskContextParams): Promise<void> {
-    return this.#transport.request(WORKER_METHODS.recycleTaskContext, input);
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.recycleTaskContext, input));
   }
 
   validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
-    return this.#transport.request(WORKER_METHODS.validateWorkspace, input);
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.validateWorkspace, input));
   }
 }
 
@@ -257,20 +263,20 @@ class WorkerEngineSession implements EngineSession {
       if (params.engineSessionKey !== undefined) {
         this.engineSessionKey = params.engineSessionKey;
       }
-      finish(params.result);
+      finish(sanitizeEngineTurnResult(params.result));
     });
     // A dead channel must fail the turn: the worker can never report on it again,
     // so waiting for a settlement that cannot arrive would hang the run.
-    const offClosed = this.#watchChannel((reason) => {
-      finish({ status: 'failed', message: `environment worker channel closed: ${reason}` });
+    const offClosed = this.#watchChannel(() => {
+      finish({ status: 'failed', message: WORKER_DIAGNOSTICS.channelClosed });
     });
 
     void this.#transport
       .request<RunResult>(WORKER_METHODS.run, { sessionId: this.sessionId, prompt })
-      .catch((error: unknown) => {
+      .catch(() => {
         finish({
           status: 'failed',
-          message: error instanceof Error ? error.message : String(error),
+          message: WORKER_DIAGNOSTICS.requestFailed,
         });
       });
 
@@ -309,5 +315,13 @@ class WorkerEngineSession implements EngineSession {
     await this.#transport
       .request(WORKER_METHODS.close, { sessionId: this.sessionId })
       .catch(() => undefined);
+  }
+}
+
+async function sanitizedRequest<T>(request: Promise<T>): Promise<T> {
+  try {
+    return await request;
+  } catch {
+    throw new Error(WORKER_DIAGNOSTICS.requestFailed);
   }
 }

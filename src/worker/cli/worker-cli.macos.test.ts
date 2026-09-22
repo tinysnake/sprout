@@ -103,6 +103,46 @@ test('sprout worker enroll refuses to take the secret from argv', { skip: !onMac
   }
 });
 
+test('the packaged enroll command rejects credential-bearing endpoint arguments without echoing them', { skip: !onMac }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-exec-endpoint-'));
+  try {
+    const privateEndpoint = 'wss://operator:credential@private.example:7443/path?secret=value#network';
+    const result = spawnSync(
+      sproutExecutable,
+      ['worker', 'enroll', privateEndpoint, 'enroll-e3'],
+      { encoding: 'utf8', env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: join(root, 'state') } },
+    );
+    assert.equal(result.status, 2);
+    assert.doesNotMatch(result.stdout + result.stderr, /operator|credential|private\.example|secret=value|network/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a live packaged enrollment process keeps the one-use secret out of process arguments', { skip: !onMac }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-exec-process-privacy-'));
+  const child = spawn(
+    sproutExecutable,
+    ['worker', 'enroll', '127.0.0.1:5174', 'enroll-e3-process-privacy'],
+    {
+      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: join(root, 'state') },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const command = execFileSync('/bin/ps', ['-p', String(child.pid), '-o', 'command='], { encoding: 'utf8' });
+    assert.match(command, /worker enroll 127\.0\.0\.1:5174 enroll-e3-process-privacy/);
+    assert.doesNotMatch(command, /one-use-process-secret|@|\?|#/);
+    child.stdin.end('one-use-process-secret\n');
+  } finally {
+    child.kill('SIGKILL');
+    await exited;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the rendered LaunchAgent is a valid property list according to plutil', { skip: !onMac }, () => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-worker-plist-'));
   try {

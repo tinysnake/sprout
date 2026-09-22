@@ -26,6 +26,7 @@ import {
   type WorkerHostConfig,
   type WorkerProcessIdentity,
   type WorkerProcessProbe,
+  type WorkerLockTransition,
 } from './host-state.ts';
 import {
   launchAgentPlistPath,
@@ -414,7 +415,7 @@ test('a releasing marker recovers after a crash between owner retirement and dir
     const identity = processIdentity(50_002, 'r');
     const held = acquireWorkerLock(paths, identity, probe(identity));
     const ownerPath = join(held.path, `owner-${identity.ownerToken}`);
-    const marker = `${held.path}.releasing-${identity.ownerToken}-crash`;
+    const marker = `${held.path}.releasing-${identity.ownerToken}-0000000000000001`;
     renameSync(ownerPath, marker);
     rmdirSync(held.path);
     const recovered = acquireWorkerLock(paths, processIdentity(50_003, 's'), () => ({ state: 'dead' }));
@@ -440,6 +441,127 @@ test('a pending marker recovers after a crash before canonical lock creation', (
     assert.equal(existsSync(marker), false);
   } finally {
     cleanup();
+  }
+});
+
+test('a truncated unpublished staging record cannot permanently wedge lock recovery', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const interrupted = processIdentity(50_006, 't');
+    const lockPath = join(paths.stateDirectory, 'worker.lock');
+    // `.preparing` is the protocol's explicitly non-owning staging state. A
+    // hard crash may leave any prefix of the record here; it must never be
+    // confused with a published pending owner record.
+    const staged = `${lockPath}.pending-${interrupted.ownerToken}-0000000000000002.preparing`;
+    writeFileSync(staged, '{"version":1,"kind":"worker","proc', { mode: 0o600 });
+
+    const recovered = acquireWorkerLock(
+      paths,
+      processIdentity(50_007, 'w'),
+      // Unknown evidence remains fail-closed for an owned/published record;
+      // this incomplete, unpublished transition has no ownership authority.
+      () => ({ state: 'unknown' }),
+    );
+    assert.ok(existsSync(recovered.path));
+    recovered.release();
+    assert.equal(existsSync(staged), false, 'recovery cleans the incomplete transition');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a truncated pending marker from the pre-atomic protocol recovers without reclaiming owned evidence', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const interrupted = processIdentity(50_010, 'j');
+    const lockPath = join(paths.stateDirectory, 'worker.lock');
+    const legacyPending = `${lockPath}.pending-${interrupted.ownerToken}`;
+    // Commit 975754d wrote directly to this final name. A crash could leave a
+    // JSON prefix here before any canonical owner entry existed.
+    writeFileSync(legacyPending, '{"version":1,"kind":"worker","proc', { mode: 0o600 });
+
+    const recovered = acquireWorkerLock(
+      paths,
+      processIdentity(50_011, 'l'),
+      () => ({ state: 'unknown' }),
+    );
+    assert.ok(existsSync(recovered.path));
+    recovered.release();
+    assert.equal(existsSync(legacyPending), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a complete published pending record with unknown owner evidence remains fail-closed', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const identity = processIdentity(50_008, 'x');
+    const lockPath = join(paths.stateDirectory, 'worker.lock');
+    const marker = `${lockPath}.pending-${identity.ownerToken}-0000000000000003`;
+    writeFileSync(
+      marker,
+      `${JSON.stringify({ version: 1, kind: 'worker', process: identity })}\n`,
+      { mode: 0o600 },
+    );
+    assert.throws(
+      () => acquireWorkerLock(paths, processIdentity(50_009, 'y'), () => ({ state: 'unknown' })),
+      DuplicateWorkerProcessError,
+    );
+    assert.ok(existsSync(marker), 'published unknown evidence is never reclaimed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a malformed atomically published pending record remains unknown evidence', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const identity = processIdentity(50_012, 'o');
+    const lockPath = join(paths.stateDirectory, 'worker.lock');
+    const marker = `${lockPath}.pending-${identity.ownerToken}-0000000000000004`;
+    writeFileSync(marker, '{malformed after atomic publication}', { mode: 0o600 });
+    assert.throws(
+      () => acquireWorkerLock(paths, processIdentity(50_013, 'b'), () => ({ state: 'dead' })),
+      DuplicateWorkerProcessError,
+    );
+    assert.ok(existsSync(marker), 'malformed published evidence is not reclassified as staging');
+  } finally {
+    cleanup();
+  }
+});
+
+test('the lock recovers from a hard crash after every durable ownership transition', { skip: process.platform === 'win32' }, async () => {
+  const transitions: readonly WorkerLockTransition[] = [
+    'pending-stage-created',
+    'pending-stage-synced',
+    'pending-published',
+    'canonical-created',
+    'owner-published',
+    'owner-retired',
+    'canonical-removed',
+    'release-complete',
+  ];
+  for (const transition of transitions) {
+    const { paths, cleanup } = tempPaths();
+    try {
+      ensureStateDirectory(paths);
+      const child = spawnCrashTransitionRunner(paths, transition);
+      assert.equal(await onceExit(child), 86, `child crashed at ${transition}`);
+      const recovered = acquireWorkerLock(
+        paths,
+        processIdentity(50_100 + transitions.indexOf(transition), 'z'),
+        () => ({ state: 'dead' }),
+      );
+      assert.ok(existsSync(recovered.path), `${transition} does not wedge the next start/reset fence`);
+      recovered.release();
+    } finally {
+      cleanup();
+    }
   }
 });
 
@@ -516,6 +638,42 @@ function spawnChildLockRunner(
   );
   void args;
   return child;
+}
+
+function spawnCrashTransitionRunner(
+  paths: ReturnType<typeof workerHostPaths>,
+  transition: WorkerLockTransition,
+): ChildProcess {
+  return spawn(
+    process.execPath,
+    ['--input-type=module', '-e', crashTransitionRunnerScript()],
+    {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: {
+        ...process.env,
+        SPROUT_WORKER_HOME: paths.stateDirectory,
+        SPROUT_LAUNCH_AGENTS_DIR: paths.launchAgentsDirectory,
+        SPROUT_CLI_PATH: paths.executablePath,
+        SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
+        SPROUT_TEST_TRANSITION: transition,
+      },
+    },
+  );
+}
+
+function crashTransitionRunnerScript(): string {
+  return [
+    "const { acquireWorkerLock, workerHostPaths } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
+    "const token = 'k'.repeat(43);",
+    "const identity = { pid: process.pid, startIdentity: 'crash-test-process', ownerToken: token };",
+    'const paths = workerHostPaths();',
+    'const transition = process.env.SPROUT_TEST_TRANSITION;',
+    'const lock = acquireWorkerLock(paths, identity, () => ({ state: \'alive\', process: identity }), \'worker\', {',
+    '  onTransition: (observed) => { if (observed === transition) process.exit(86); },',
+    '});',
+    'lock.release();',
+    'process.exit(0);',
+  ].join('\n');
 }
 
 function childLockRunnerScript(): string {

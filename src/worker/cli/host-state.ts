@@ -24,6 +24,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -36,7 +37,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import {
@@ -686,7 +687,20 @@ interface WorkerLockRecord {
 export interface WorkerLockOptions {
   /** Called after a release has observed the pathname, before its atomic take. */
   readonly onReleaseObserved?: () => void;
+  /** Test-only crash point after each ownership transition reaches the filesystem. */
+  readonly onTransition?: (transition: WorkerLockTransition) => void;
 }
+
+/** Durable lock transitions used by the crash-at-each-transition tests. */
+export type WorkerLockTransition =
+  | 'pending-stage-created'
+  | 'pending-stage-synced'
+  | 'pending-published'
+  | 'canonical-created'
+  | 'owner-published'
+  | 'owner-retired'
+  | 'canonical-removed'
+  | 'release-complete';
 
 type WorkerLockClassification = 'duplicate' | 'stale' | 'unknown';
 
@@ -719,19 +733,116 @@ function classifyLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockCl
 
 /** A durable lifecycle marker outside the canonical lock directory. */
 function lifecyclePath(lockPath: string, phase: 'pending' | 'releasing', processIdentity: WorkerProcessIdentity): string {
-  const suffix = phase === 'pending' ? '' : `-${randomBytes(8).toString('hex')}`;
-  return `${lockPath}.${phase}-${processIdentity.ownerToken}${suffix}`;
+  return `${lockPath}.${phase}-${processIdentity.ownerToken}-${randomBytes(8).toString('hex')}`;
 }
 
 function lifecycleEntries(lockPath: string): string[] {
   const parent = dirname(lockPath);
-  const prefix = `${lockPath}.`;
+  const lockName = escapeRegularExpression(basename(lockPath));
+  // The suffix-free pending shape is retained only so a complete marker from
+  // the previous protocol revision remains recoverable after upgrade. New
+  // markers always carry a nonce; `.preparing` records are intentionally not
+  // lifecycle evidence and are handled separately below.
+  const lifecycleName = new RegExp(
+    `^${lockName}\\.(?:pending-[A-Za-z0-9_-]{43}(?:-[0-9a-f]{16})?|releasing-[A-Za-z0-9_-]{43}-[0-9a-f]{16})$`,
+  );
   try {
     return readdirSync(parent)
-      .filter((entry) => entry.startsWith(prefix.slice(parent.length + 1)))
+      .filter((entry) => lifecycleName.test(entry))
       .map((entry) => join(parent, entry));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Flush one directory entry update before calling the transition durable. */
+function syncDirectory(directory: string): void {
+  const descriptor = openSync(directory, 'r');
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/**
+ * Discard records that were never atomically published as ownership evidence.
+ *
+ * A `.preparing` file is a staging inode by grammar, not a lock claim. It may
+ * contain zero bytes, a truncated JSON prefix, or a complete record if the
+ * process died immediately before rename. None acquired the canonical lock,
+ * so removing it cannot steal a Worker or reset fence. Published pending,
+ * releasing, and canonical owner records remain subject to process evidence
+ * and continue to fail closed when that evidence is unknown.
+ */
+function recoverIncompleteLockTransitions(lockPath: string): void {
+  const parent = dirname(lockPath);
+  const lockName = escapeRegularExpression(basename(lockPath));
+  const preparingName = new RegExp(
+    `^${lockName}\\.pending-[A-Za-z0-9_-]{43}-[0-9a-f]{16}\\.preparing$`,
+  );
+  let entries: string[];
+  try {
+    entries = readdirSync(parent);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!preparingName.test(entry)) continue;
+    const staged = join(parent, entry);
+    try {
+      if (lstatSync(staged).isFile()) unlinkSync(staged);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // A preparation has no authority and therefore must not wedge start or
+        // reset merely because unrelated cleanup failed. It remains ignored by
+        // lifecycle parsing and can be removed by later host maintenance.
+      }
+    }
+  }
+}
+
+/** Publish one complete pending record; the final name can never be truncated. */
+function publishPendingLock(
+  lockPath: string,
+  kind: WorkerLockKind,
+  processIdentity: WorkerProcessIdentity,
+  options: WorkerLockOptions,
+): string {
+  const pendingPath = lifecyclePath(lockPath, 'pending', processIdentity);
+  const stagedPath = `${pendingPath}.preparing`;
+  let descriptor: number | undefined;
+  let published = false;
+  try {
+    descriptor = openSync(stagedPath, 'wx', PRIVATE_FILE_MODE);
+    options.onTransition?.('pending-stage-created');
+    writeFileSync(
+      descriptor,
+      `${JSON.stringify({ version: 1, kind, process: processIdentity } satisfies WorkerLockRecord)}\n`,
+      'utf8',
+    );
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    options.onTransition?.('pending-stage-synced');
+    renameSync(stagedPath, pendingPath);
+    published = true;
+    syncDirectory(dirname(lockPath));
+    options.onTransition?.('pending-published');
+    return pendingPath;
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* preserve the publication error */ }
+    }
+    if (!published) {
+      try { unlinkSync(stagedPath); } catch { /* crash recovery ignores unpublished staging */ }
+    }
     throw error;
   }
 }
@@ -749,6 +860,41 @@ function readLockRecordFile(filePath: string): WorkerLockRecord | undefined {
 }
 
 /**
+ * Recognize the pre-atomic pending name written by the immediately preceding
+ * E3 revision. Only that suffix-free pending phase may be classified as an
+ * interrupted publication when its record is truncated. New nonce-bearing
+ * pending markers are atomically complete, so malformed content there (or in
+ * any owner/releasing record) remains unknown evidence and is never reclaimed.
+ */
+function isLegacyPendingPath(lockPath: string, marker: string): boolean {
+  const lockName = escapeRegularExpression(basename(lockPath));
+  return new RegExp(`^${lockName}\\.pending-[A-Za-z0-9_-]{43}$`).test(basename(marker));
+}
+
+function recoverLegacyIncompletePending(lockPath: string, marker: string): WorkerLockClassification | undefined {
+  if (!isLegacyPendingPath(lockPath, marker)) return 'unknown';
+  if (existsSync(lockPath)) {
+    try {
+      if (readdirSync(lockPath).length !== 0) {
+        // The malformed legacy pending record never became ownership evidence;
+        // leave the complete canonical owner to ordinary classification.
+        unlinkSync(marker);
+        return undefined;
+      }
+      rmdirSync(lockPath);
+    } catch {
+      return 'unknown';
+    }
+  }
+  try {
+    unlinkSync(marker);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'unknown';
+  }
+  return 'stale';
+}
+
+/**
  * Recover a lifecycle marker without treating missing process evidence as death.
  * The canonical directory is removed before its marker, so a crash cannot leave
  * an empty canonical lock with no durable recovery evidence.
@@ -760,7 +906,7 @@ function recoverLockLifecycle(lockPath: string, probe: WorkerProcessProbe): Work
   const marker = markers[0];
   if (marker === undefined) return 'unknown';
   const record = readLockRecordFile(marker);
-  if (record === undefined) return 'unknown';
+  if (record === undefined) return recoverLegacyIncompletePending(lockPath, marker);
   // Releasing markers still carry process evidence: an interrupted cleanup
   // must not turn an unreadable owner into automatic reclaim, even if the
   // canonical directory was already removed.
@@ -798,6 +944,8 @@ function retireWorkerLock(lockPath: string, processIdentity: WorkerProcessIdenti
   const marker = lifecyclePath(lockPath, 'releasing', processIdentity);
   try {
     renameSync(workerLockOwnerPath(lockPath, processIdentity), marker);
+    syncDirectory(lockPath);
+    syncDirectory(dirname(lockPath));
     return marker;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -841,6 +989,7 @@ function releaseWorkerLock(
   }
   const marker = retireWorkerLock(lockPath, processIdentity);
   if (marker === undefined) return;
+  options.onTransition?.('owner-retired');
   try {
     rmdirSync(lockPath);
   } catch (error) {
@@ -849,9 +998,13 @@ function releaseWorkerLock(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error;
     return;
   }
+  syncDirectory(dirname(lockPath));
+  options.onTransition?.('canonical-removed');
   try { unlinkSync(marker); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
+  syncDirectory(dirname(lockPath));
+  options.onTransition?.('release-complete');
 }
 
 /**
@@ -877,18 +1030,21 @@ export function acquireWorkerLock(
   }
   ensureStateDirectory(paths);
   const lockPath = workerLockPath(paths);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const lifecycle = recoverLockLifecycle(lockPath, probe);
     if (lifecycle === 'unknown' || lifecycle === 'duplicate') {
       throw new DuplicateWorkerProcessError(readWorkerLock(lockPath)?.process.pid);
     }
-    const pendingPath = lifecyclePath(lockPath, 'pending', processIdentity);
-    let pendingDescriptor: number | undefined;
+    let pendingPath: string;
     try {
-      pendingDescriptor = openSync(pendingPath, 'wx', PRIVATE_FILE_MODE);
-      writeFileSync(pendingDescriptor, `${JSON.stringify({ version: 1, kind, process: processIdentity } satisfies WorkerLockRecord)}\n`, 'utf8');
-    } finally {
-      if (pendingDescriptor !== undefined) closeSync(pendingDescriptor);
+      pendingPath = publishPendingLock(lockPath, kind, processIdentity, options);
+    } catch (error) {
+      // Another contender may have safely discarded our unpublished staging
+      // record before publication. Retry the protocol rather than surfacing a
+      // generic filesystem failure; exclusive canonical mkdir still chooses
+      // the only owner.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
     }
     try {
       mkdirSync(lockPath, { mode: PRIVATE_DIRECTORY_MODE });
@@ -905,16 +1061,25 @@ export function acquireWorkerLock(
       }
       continue;
     }
+    // Once mkdir succeeds, the complete pending marker must remain until it is
+    // renamed into the owner entry. A later fsync/hook failure therefore leaves
+    // recoverable evidence instead of an empty, permanently wedged directory.
+    syncDirectory(dirname(lockPath));
+    options.onTransition?.('canonical-created');
     const ownerPath = workerLockOwnerPath(lockPath, processIdentity);
     try {
       // The pending marker is prepared before mkdir. Renaming it into the
       // canonical directory makes an interrupted start recoverable instead of
       // wedging an empty lock directory forever.
       renameSync(pendingPath, ownerPath);
+      syncDirectory(dirname(lockPath));
+      syncDirectory(lockPath);
+      options.onTransition?.('owner-published');
     } catch (error) {
       try { rmdirSync(lockPath); } catch { /* preserve the original failure */ }
       throw error;
     }
+    recoverIncompleteLockTransitions(lockPath);
     return {
       path: lockPath,
       release: () => releaseWorkerLock(lockPath, processIdentity, options),

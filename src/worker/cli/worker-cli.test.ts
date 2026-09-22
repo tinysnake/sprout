@@ -262,6 +262,34 @@ test('enroll rejects a malformed endpoint and never accepts the secret as an arg
   }
 });
 
+test('enroll rejects private URL components before reading a secret or connecting', async () => {
+  let connected = false;
+  let readSecret = false;
+  const h = harness();
+  const cli = createWorkerCli({
+    paths: () => h.paths,
+    stdout: (line) => h.out.push(line),
+    stderr: (line) => h.err.push(line),
+    readClaimSecret: async () => {
+      readSecret = true;
+      return 'must-not-be-read';
+    },
+    connect: async () => {
+      connected = true;
+      throw new Error('must not connect');
+    },
+  });
+  try {
+    const privateEndpoint = 'wss://operator:credential@private.example:7443/path?secret=value#network';
+    assert.equal(await cli.run(['enroll', privateEndpoint, 'enroll-synthetic']), WORKER_EXIT.usage);
+    assert.equal(readSecret, false);
+    assert.equal(connected, false);
+    assert.doesNotMatch(h.out.join('\n') + h.err.join('\n'), /operator|credential|private\.example|secret=value|network/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('start refuses a duplicate live Worker for the same environment', async () => {
   const h = harness();
   const { connector } = acceptedConnector();
@@ -453,11 +481,24 @@ test('install-service is refused off macOS', async () => {
   }
 });
 
-test('endpoint parsing accepts host:port with or without a scheme and rejects a missing port', () => {
+test('endpoint parsing accepts only a public host/port authority', () => {
   assert.deepEqual(parseEndpoint('127.0.0.1:5174'), { host: '127.0.0.1', port: 5174 });
   assert.deepEqual(parseEndpoint('wss://sprout.internal:8443'), { host: 'sprout.internal', port: 8443 });
   assert.throws(() => parseEndpoint('127.0.0.1'), /port/);
   assert.throws(() => parseEndpoint('ftp://127.0.0.1:21'), /scheme/);
+  for (const endpoint of [
+    'wss://operator:credential@sprout.invalid:8443',
+    'wss://sprout.invalid:8443/api/worker/connect',
+    'wss://sprout.invalid:8443?credential=private',
+    'wss://sprout.invalid:8443#private-network-detail',
+    'sprout.invalid:8443/path',
+  ]) {
+    assert.throws(
+      () => parseEndpoint(endpoint),
+      /host.*port|components/i,
+      `non-authority endpoint component must be rejected: ${endpoint}`,
+    );
+  }
 });
 
 test('the status projection distinguishes every documented state', () => {
@@ -504,6 +545,45 @@ test('the status projection distinguishes every documented state', () => {
   assert.equal(
     projectStatus({ ...base, config: undefined, configError: 'invalid', runtime: undefined, processAlive: () => false }).state,
     'local-configuration-failure',
+  );
+});
+
+test('live unavailable process evidence outranks enrollment and recorded stopped state', () => {
+  const paths = workerHostPaths({ HOME: '/synthetic', SPROUT_WORKER_HOME: '/synthetic/state' });
+  const runtime = { pid: 1, process: processIdentity(1), state: 'stopped' as const, at: 0 };
+  const unavailable = {
+    paths,
+    runtime,
+    processAlive: () => true,
+    processMatchesRuntime: () => 'unknown' as const,
+    serviceInstalled: false,
+  };
+  assert.equal(
+    projectStatus({
+      ...unavailable,
+      enrolled: false,
+      config: undefined,
+      configError: 'not-enrolled',
+    }).state,
+    'local-configuration-failure',
+    'a missing config must not hide a live process whose owner evidence is unavailable',
+  );
+  assert.equal(
+    projectStatus({
+      ...unavailable,
+      enrolled: true,
+      config: {
+        version: 1,
+        enrollmentId: 'e',
+        environmentInstanceId: 'i',
+        protocolVersion: '2',
+        endpoint: { host: '127.0.0.1', port: 1 },
+        identityFileName: 'identity.pem',
+      },
+      configError: undefined,
+    }).state,
+    'local-configuration-failure',
+    'a recorded stopped label must not hide unavailable evidence for its live pid',
   );
 });
 
@@ -724,6 +804,60 @@ test('status reports unavailable live process evidence instead of stopped', asyn
     });
     const status = await cli.run(['status']);
     assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+    assert.doesNotMatch(h.out.join('\n'), /state: stopped/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status command gives live unavailable evidence precedence over missing config', async () => {
+  const h = harness();
+  try {
+    ensureStateDirectory(h.paths);
+    writeRuntimeState(h.paths, {
+      pid: process.pid,
+      process: processIdentity(process.pid, 'm'),
+      state: 'stopped',
+      at: 1,
+    });
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+      processProbe: () => ({ state: 'unknown' }),
+    });
+    assert.equal(await cli.run(['status']), WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+    assert.doesNotMatch(h.out.join('\n'), /state: not-enrolled|state: stopped/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status command gives live unavailable evidence precedence over a recorded stopped label', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writeRuntimeState(h.paths, {
+      pid: process.pid,
+      process: processIdentity(process.pid, 'n'),
+      state: 'stopped',
+      at: 1,
+    });
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+      processProbe: () => ({ state: 'unknown' }),
+    });
+    assert.equal(await cli.run(['status']), WORKER_EXIT.failure);
     assert.match(h.out.join('\n'), /state: local-configuration-failure/);
     assert.doesNotMatch(h.out.join('\n'), /state: stopped/);
   } finally {

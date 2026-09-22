@@ -318,9 +318,6 @@ export class OpenCodeSession implements EngineSession {
     turnProcess.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       stderrText += text;
-      if (text.trim() !== '' && this.#options.env?.['SPROUT_OPENCODE_VERBOSE'] === '1') {
-        process.stderr.write(`[opencode] ${text}`);
-      }
     });
 
     // The prompt travels on stdin, not argv.

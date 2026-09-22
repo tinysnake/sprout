@@ -15,6 +15,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { WORKER_METHODS } from './protocol.ts';
 import { EnvironmentWorker } from './server.ts';
 import { WorkerClient } from './client.ts';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 const definition: EnvironmentDefinition = {
   id: 'macos-workstation',
@@ -51,6 +52,8 @@ interface ConnectedWorker {
   readonly requests: readonly string[];
   /** Raw session-start payloads as serialized by the core-side WorkerClient. */
   readonly sessionStartParams: readonly Record<string, unknown>[];
+  /** Raw Worker-to-core JSON-RPC frames, for privacy-boundary assertions. */
+  readonly workerFrames: readonly string[];
   /** Lines the worker reported through `onLog`. */
   readonly logs: readonly string[];
   /** Simulates the carrier's channel dying. */
@@ -80,6 +83,7 @@ async function connectedWorker(options: {
   const workerToCore = new PassThrough();
   const requests: string[] = [];
   const sessionStartParams: Record<string, unknown>[] = [];
+  const workerFrames: string[] = [];
   const logs: string[] = [];
 
   const engine = new ScriptedEngineAdapter({
@@ -102,6 +106,7 @@ async function connectedWorker(options: {
     output: workerToCore,
     onLog: (line) => logs.push(line),
   });
+  workerToCore.on('data', (chunk: Buffer) => workerFrames.push(chunk.toString('utf8')));
 
   let adapters = new Map<string, WorkerClient>();
   const transport = new LineJsonRpcTransport({
@@ -137,6 +142,7 @@ async function connectedWorker(options: {
     worker,
     requests,
     sessionStartParams,
+    workerFrames,
     logs,
     killChannel: () => {
       workerToCore.destroy();
@@ -417,12 +423,13 @@ test('a worker refuses an engine it does not host', () => {
         },
         'nope',
       ),
-    /does not host engine/,
+    new RegExp(WORKER_DIAGNOSTICS.sessionStartFailed, 'i'),
   );
 });
 
 test('an engine that fails to start becomes a failed run through the worker', async (t) => {
-  const worker = await connectedWorker({ turns: [], failStart: 'codex binary missing' });
+  const rawFailure = 'engine stderr exposed /private/host/path and private.example:7443';
+  const worker = await connectedWorker({ turns: [], failStart: rawFailure });
   t.after(() => worker.killChannel());
 
   const { orchestrator, pool } = buildOrchestrator(worker.adapters);
@@ -430,7 +437,9 @@ test('an engine that fails to start becomes a failed run through the worker', as
   const run = await orchestrator.waitFor(id);
 
   assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /codex binary missing/);
+  assert.match(run.failure ?? '', /engine session could not be started/i);
+  assert.doesNotMatch(run.failure ?? '', /private\/host|private\.example|stderr exposed/);
+  assert.doesNotMatch(worker.workerFrames.join(''), /private\/host|private\.example|stderr exposed/);
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
 });
 
@@ -456,7 +465,7 @@ test('an unrelated start failure through the worker keeps the stored key and is 
   const run = await orchestrator.waitFor(id);
 
   assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /codex binary missing/);
+  assert.equal(run.failure, WORKER_DIAGNOSTICS.sessionStartFailed);
   assert.equal(worker.engine.requests.length, 1, 'the unrelated failure was not retried');
   assert.equal(worker.engine.requests[0]?.resumeSessionKey, 'a-valid-key');
   const stored = await sessionKeys.get({
@@ -548,7 +557,7 @@ test('an empty non-refusal turn failure through the worker keeps the stored key'
   // delete the key.
   const worker = await connectedWorker({
     turns: [
-      { events: [], result: { status: 'failed', message: 'provider authentication failed' } },
+      { events: [], result: { status: 'failed', message: 'provider stderr /private/host/key private.example:7443' } },
     ],
   });
   t.after(() => worker.killChannel());
@@ -568,7 +577,9 @@ test('an empty non-refusal turn failure through the worker keeps the stored key'
   const run = await orchestrator.waitFor(id);
 
   assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /provider authentication failed/);
+  assert.match(run.failure ?? '', /engine turn failed/i);
+  assert.doesNotMatch(run.failure ?? '', /private\/host|private\.example|provider stderr/);
+  assert.doesNotMatch(worker.workerFrames.join(''), /private\/host|private\.example|provider stderr/);
   assert.equal(worker.engine.requests.length, 1, 'an empty non-refusal turn is not retried');
   assert.equal(worker.engine.requests[0]?.resumeSessionKey, 'a-valid-key');
   const stored = await sessionKeys.get({
@@ -600,8 +611,8 @@ test('a fallback contract delivery is reported, not silent', async (t) => {
 
   const reported = worker.logs.find((line) => line.includes('project contract'));
   assert.ok(reported, 'the fallback delivery is reported');
-  assert.match(reported, /Sprout's own file/);
-  assert.match(reported, /SPROUT-PROJECT-CONTRACT\.md/);
+  assert.equal(reported, WORKER_DIAGNOSTICS.contractSproutFile);
+  assert.doesNotMatch(reported, /tmp|SPROUT-PROJECT-CONTRACT\.md/);
 });
 
 test('a skipped contract delivery is reported as not delivered', async (t) => {
@@ -616,8 +627,8 @@ test('a skipped contract delivery is reported as not delivered', async (t) => {
 
   const reported = worker.logs.find((line) => line.includes('project contract'));
   assert.ok(reported, 'the skip is reported');
-  assert.match(reported, /was not delivered/);
-  assert.match(reported, /could not be read/);
+  assert.match(reported, /not delivered/);
+  assert.doesNotMatch(reported, /tmp|AGENTS\.md/);
 });
 
 /**
@@ -630,10 +641,10 @@ test('a skipped contract delivery is reported as not delivered', async (t) => {
  * successes.
  */
 test('every contract delivery mechanism produces a distinct worker log line', async (t) => {
-  const cases: readonly { readonly mechanism: ContractDelivery; readonly expected: RegExp }[] = [
+  const cases: readonly { readonly mechanism: ContractDelivery; readonly expected: string }[] = [
     {
       mechanism: { mechanism: 'agents.md', path: '/tmp/work/AGENTS.md' },
-      expected: /delivered to the engine's own AGENTS\.md/,
+      expected: WORKER_DIAGNOSTICS.contractAgentsMd,
     },
     {
       mechanism: {
@@ -641,23 +652,23 @@ test('every contract delivery mechanism produces a distinct worker log line', as
         path: '/tmp/work/SPROUT-PROJECT-CONTRACT.md',
         agentsMdSkipped: 'user-owned',
       },
-      expected: /delivered to Sprout's own file/,
+      expected: WORKER_DIAGNOSTICS.contractSproutFile,
     },
     {
       mechanism: { mechanism: 'engine-hook', path: '/cfg/hooks.json' },
-      expected: /delivered through the engine's config hook/,
+      expected: WORKER_DIAGNOSTICS.contractEngineHook,
     },
     {
       mechanism: { mechanism: 'skipped-user-owned', path: '/tmp/work/AGENTS.md' },
-      expected: /not delivered/,
+      expected: WORKER_DIAGNOSTICS.contractUserOwned,
     },
     {
       mechanism: { mechanism: 'skipped-unreadable', path: '/tmp/work/AGENTS.md' },
-      expected: /not delivered/,
+      expected: WORKER_DIAGNOSTICS.contractUnreadable,
     },
     {
       mechanism: { mechanism: 'unavailable', reason: 'no writable location' },
-      expected: /not delivered/,
+      expected: WORKER_DIAGNOSTICS.contractUnavailable,
     },
   ];
 
@@ -675,7 +686,8 @@ test('every contract delivery mechanism produces a distinct worker log line', as
     worker.killChannel();
 
     assert.ok(reported, `${testCase.mechanism.mechanism} is reported, not silent`);
-    assert.match(reported, testCase.expected);
+    assert.equal(reported, testCase.expected);
+    assert.doesNotMatch(reported, /\/tmp|\/cfg|no writable location/);
     seen.add(testCase.mechanism.mechanism);
   }
   t.diagnostic(`reported mechanisms: ${[...seen].join(', ')}`);
