@@ -27,6 +27,8 @@ import {
   type ValidateWorkspaceResult,
   type WorkerInfo,
   type WorkerReadinessFacts,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import {
@@ -67,6 +69,10 @@ export interface EnvironmentWorkerOptions {
    * that cannot determine a fact reports `unknown` rather than inventing one.
    */
   readonly readiness?: () => WorkerReadinessFacts;
+  /** Executes on this host; it never accepts facts from the caller. */
+  readonly readinessProbe?: (
+    params: WorkerReadinessProbeParams,
+  ) => Promise<WorkerReadinessProbeResult>;
 }
 interface LiveSession {
   readonly engine: string;
@@ -107,6 +113,7 @@ export class EnvironmentWorker {
   readonly #workspace: WorkerWorkspace | undefined;
   #counter = 0;
   #closed = false;
+  #readiness: WorkerReadinessFacts | undefined;
 
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
@@ -137,6 +144,9 @@ export class EnvironmentWorker {
       switch (method) {
         case WORKER_METHODS.info:
           this.#transport.respond(id, this.#info());
+          return;
+        case WORKER_METHODS.readinessProbe:
+          this.#transport.respond(id, await this.#probeReadiness(params as WorkerReadinessProbeParams));
           return;
         case WORKER_METHODS.startSession:
           this.#transport.respond(id, await this.#startSession(params as StartSessionParams));
@@ -191,10 +201,29 @@ export class EnvironmentWorker {
         supportsInterrupt: engine.capabilities.supportsInterrupt,
         standingInstructions: engine.capabilities.standingInstructions,
       })),
-      ...(this.#options.readiness !== undefined
+      ...(this.#readiness !== undefined
+        ? { readiness: this.#readiness }
+        : this.#options.readiness !== undefined
         ? { readiness: this.#options.readiness() }
         : { readiness: defaultReadiness(this.#options.engines) }),
     };
+  }
+
+  async #probeReadiness(params: WorkerReadinessProbeParams): Promise<WorkerReadinessProbeResult> {
+    // Parameters are deliberately narrow. In particular, no browser-supplied
+    // status, latency, protocol result, credential, prompt, or model turn can
+    // enter this method. The only optional value is a list of model ids the
+    // core may ask the host to compare locally; the current strict contract
+    // still records account entitlement as unknown.
+    const requiredModels = params !== null && typeof params === 'object' && Array.isArray(params?.requiredModels)
+      ? params.requiredModels.filter((model): model is string => typeof model === 'string')
+      : [];
+    const result = await this.#options.readinessProbe?.({ requiredModels });
+    if (result === undefined) {
+      throw new Error('Worker has no non-inference readiness probe');
+    }
+    this.#readiness = result.readiness;
+    return result;
   }
 
   async #startSession(params: StartSessionParams): Promise<StartSessionResult> {

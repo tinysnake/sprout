@@ -104,6 +104,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
     recovery,
     clock: () => 10_000,
   });
+  let workerProbeAt = 1_000;
   const api = createRunApi({
     orchestrator,
     // The machine-authenticated Worker gateway (#115) is composed alongside the
@@ -113,7 +114,20 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
     auth,
-    routers: [createEnvironmentRouter({ enrollments, recovery, archive })],
+    routers: [createEnvironmentRouter({
+      enrollments,
+      recovery,
+      archive,
+      requestProbe: async (enrollmentId) => enrollments.recordProbe(enrollmentId, {
+        at: workerProbeAt++,
+        latencyMs: 7,
+        protocolOk: true,
+        enginesOk: false,
+        source: 'worker' as const,
+        version: '0.154.0',
+        summary: 'Worker non-inference readiness probe completed.',
+      }),
+    })],
   });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
@@ -478,7 +492,7 @@ test('no route response exposes a public key, private key, credential, hostname,
   }
 });
 
-test('a malformed probe body is refused and a valid probe is recorded append-only', async () => {
+test('a probe route ignores browser facts and returns only Worker-sourced observations', async () => {
   const runtime = await enrollmentApi();
   try {
     await command(runtime.base, '/api/environments/enrollments', runtime, {
@@ -489,37 +503,34 @@ test('a malformed probe body is refused and a valid probe is recorded append-onl
       capabilityRequests: ['agent-run'],
       engines: [],
     });
-    const invalid = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
-      at: 'not-a-number',
-    });
-    assert.equal(invalid.status, 400);
-
     const first = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
-      at: 1_000,
-      latencyMs: 10,
-      protocolOk: true,
+      at: 'forged',
+      latencyMs: 0,
+      protocolOk: false,
       enginesOk: true,
-      summary: 'all ready',
+      summary: 'forged browser result',
     });
     assert.equal(first.status, 201);
     const second = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
-      at: 2_000,
-      latencyMs: 12,
-      protocolOk: true,
+      at: 999_999,
+      latencyMs: 0,
+      protocolOk: false,
       enginesOk: true,
-      summary: 'touched /Users/example/private at 192.168.5.9',
+      summary: 'forged local path and private network address',
     });
     assert.equal(second.status, 201);
-    const secondBody = (await second.json()) as { readonly probe: { readonly summary: string } };
-    assert.equal(/\/Users\//.test(secondBody.probe.summary), false, 'the probe response drops the absolute path');
-    assert.equal(/192\.168/.test(secondBody.probe.summary), false, 'the probe response drops the private address');
+    const secondBody = (await second.json()) as {
+      readonly probe: { readonly summary: string; readonly latencyMs: number; readonly enginesOk: boolean };
+    };
+    assert.equal(secondBody.probe.latencyMs, 7, 'the browser latency was ignored');
+    assert.equal(secondBody.probe.enginesOk, false, 'the browser engine result was ignored');
+    assert.equal(secondBody.probe.summary, 'Worker non-inference readiness probe completed.');
 
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly probes: readonly { readonly at: number; readonly summary: string }[];
     };
-    assert.deepEqual(body.probes.map((probe) => probe.at), [1_000, 2_000]);
-    assert.equal(/\/Users\//.test(JSON.stringify(body.probes)), false, 'persisted probe history stays sanitized');
+    assert.deepEqual(body.probes.map((probe) => probe.at), [1_000, 1_001]);
   } finally {
     await runtime.api.close();
   }

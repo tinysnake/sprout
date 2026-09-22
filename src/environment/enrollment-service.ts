@@ -78,6 +78,9 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
     },
     engines: observed.engines.map((engine) => ({
       engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+      ...(engine.version !== undefined
+        ? { version: sanitizeIdentifier(engine.version, { fallback: 'unknown-version', kind: 'generic' }) }
+        : {}),
       installed: engine.installed,
       readiness: engine.readiness,
       required: engine.required,
@@ -87,6 +90,13 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
           sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
         ),
       },
+      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+      ...(engine.authMode !== undefined ? { authMode: sanitizeIdentifier(engine.authMode, { fallback: 'unknown', kind: 'generic' }) } : {}),
+      ...(engine.authType !== undefined ? { authType: sanitizeIdentifier(engine.authType, { fallback: 'unknown', kind: 'generic' }) } : {}),
+      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+      ...(engine.source !== undefined ? { source: sanitizeIdentifier(engine.source, { fallback: 'unknown', kind: 'generic' }) } : {}),
     })),
   };
 }
@@ -94,6 +104,7 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
 function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
   return {
     ...probe,
+    ...(probe.version !== undefined ? { version: sanitizeIdentifier(probe.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
   };
 }
@@ -477,12 +488,21 @@ export class EnvironmentEnrollmentService {
     enrollmentId: string,
     readiness: {
       readonly protocolVersion: string;
+      readonly observedAt?: number;
       readonly engines: readonly {
         readonly engine: string;
         readonly installed: boolean;
         readonly readiness: string;
         readonly modelAvailability: string;
         readonly models: readonly string[];
+        readonly version?: string;
+        readonly authenticated?: boolean;
+        readonly authMode?: string;
+        readonly authType?: string;
+        readonly modelIdPresent?: boolean;
+        readonly probedAt?: number;
+        readonly probeExitCode?: number;
+        readonly source?: string;
       }[];
     },
     options: {

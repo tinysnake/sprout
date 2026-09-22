@@ -40,11 +40,20 @@ export interface ModelAvailability {
 
 export interface EngineReadinessFact {
   readonly engine: string;
+  readonly version?: string;
   /** Whether the engine's executable was located on this Environment host. */
   readonly installed: boolean;
   readonly readiness: EngineReadiness;
   readonly required: boolean;
   readonly models: ModelAvailability;
+  /** Privacy-reduced, independently sourced probe facts. */
+  readonly authenticated?: boolean;
+  readonly authMode?: string;
+  readonly authType?: string;
+  readonly modelIdPresent?: boolean;
+  readonly probedAt?: number;
+  readonly probeExitCode?: number;
+  readonly source?: string;
 }
 /** One recorded readiness probe, append-only in the durable observation history. */
 export interface ProbeResultFact {
@@ -53,6 +62,8 @@ export interface ProbeResultFact {
   readonly protocolOk: boolean;
   readonly enginesOk: boolean;
   readonly summary: string;
+  readonly source?: 'worker';
+  readonly version?: string;
 }
 
 export interface ConnectionFact {
@@ -155,8 +166,17 @@ export function observedFactsFromWorkerReadiness(input: {
     readonly readiness: string;
     readonly modelAvailability: string;
     readonly models: readonly string[];
+    readonly version?: string;
+    readonly authenticated?: boolean;
+    readonly authMode?: string;
+    readonly authType?: string;
+    readonly modelIdPresent?: boolean;
+    readonly probedAt?: number;
+    readonly probeExitCode?: number;
+    readonly source?: string;
   }[];
   readonly at: number;
+  readonly observedAt?: number;
   readonly supported: ProtocolVersionRange;
 }): {
   readonly connection: ConnectionFact;
@@ -166,13 +186,14 @@ export function observedFactsFromWorkerReadiness(input: {
   const compatibility = protocolCompatibility(input.protocolVersion, input.supported);
   const protocolVersion = sanitizeProtocolVersion(input.protocolVersion);
   return {
-    connection: { state: 'online', lastConfirmedAt: input.at },
+    connection: { state: 'online', lastConfirmedAt: input.observedAt ?? input.at },
     compatibility: {
       ...compatibility,
       ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
     },
     engines: input.engines.map((engine) => ({
       engine: engine.engine,
+      ...(engine.version !== undefined ? { version: engine.version } : {}),
       installed: engine.installed === true,
       readiness: normalizeEngineReadiness(engine.readiness),
       required: false,
@@ -180,6 +201,13 @@ export function observedFactsFromWorkerReadiness(input: {
         state: normalizeModelAvailability(engine.modelAvailability),
         models: [...engine.models],
       },
+      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+      ...(engine.authMode !== undefined ? { authMode: engine.authMode } : {}),
+      ...(engine.authType !== undefined ? { authType: engine.authType } : {}),
+      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+      ...(engine.source !== undefined ? { source: engine.source } : {}),
     })),
   };
 }

@@ -53,6 +53,7 @@ function build(options: {
   turns?: ConstructorParameters<typeof ScriptedEngineAdapter>[0]['turns'];
   agent?: AgentDefinition;
   engineFacts?: (environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>;
+  strictAdmission?: boolean;
   /** Adapters for the ordered options' engines; `scripted` is always present. */
   extraEngines?: ReadonlyMap<string, ScriptedEngineAdapter>;
 } = {}) {
@@ -95,6 +96,7 @@ function build(options: {
     pool,
     store,
     ...(options.engineFacts !== undefined ? { engineFacts: options.engineFacts } : {}),
+    ...(options.strictAdmission !== undefined ? { strictAdmission: options.strictAdmission } : {}),
     leaseTtlMs: 60_000,
   });
   return { orchestrator, adapters, store };
@@ -162,6 +164,7 @@ test('an Environment with no observations yet admits the first option unchanged'
   const { orchestrator, adapters } = build({
     agent: orderedAgent,
     engineFacts: async () => [],
+    strictAdmission: false,
   });
   const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hi' });
   const run = await orchestrator.waitFor(id);
@@ -169,6 +172,19 @@ test('an Environment with no observations yet admits the first option unchanged'
   assert.equal(run.workOption?.engine, 'codex');
   assert.equal(adapters.get('codex')!.requests[0]!.model, 'gpt-5.2-codex');
   assert.equal(adapters.get('codex')!.requests[0]!.effort, 'high');
+});
+
+test('strict Worker admission blocks when required readiness facts are unknown', async () => {
+  const { orchestrator, adapters } = build({
+    agent: orderedAgent,
+    engineFacts: async () => [],
+    strictAdmission: true,
+  });
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hi' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /no compatible work option/);
+  assert.equal(adapters.get('codex')!.requests.length, 0, 'unknown facts block before engine acceptance');
 });
 
 test('a definition-era agent without options keeps its pre-#90 behaviour and attribution', async () => {

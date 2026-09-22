@@ -25,6 +25,8 @@ import {
   type ValidateWorkspaceParams,
   type ValidateWorkspaceResult,
   type WorkerInfo,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
@@ -174,6 +176,19 @@ export class WorkerClient implements EngineAdapter {
         return () => this.#live.delete(handler);
       },
     );
+  }
+}
+
+/** Core-side handle for a Worker-owned readiness probe. */
+export class WorkerReadinessClient {
+  readonly #transport: JsonRpcTransport;
+
+  constructor(transport: JsonRpcTransport) {
+    this.#transport = transport;
+  }
+
+  probe(params: WorkerReadinessProbeParams = {}): Promise<WorkerReadinessProbeResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.readinessProbe, params));
   }
 }
 

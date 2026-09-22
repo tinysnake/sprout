@@ -5000,17 +5000,6 @@ class StateManager {
       unresolvedFacts,
       risksAcknowledged: true,
     };
-    env.probeHistory = env.probeHistory || [];
-    env.probeHistory.unshift({
-      id: `pr-fr-${Date.now()}`,
-      timestamp: 'Just now',
-      latencyMs: 0,
-      protocolOk: true,
-      enginesOk: true,
-      capabilitiesOk: true,
-      summary: `EMERGENCY FORCE RELEASE authorized: ${reason}`,
-    });
-
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId && a.referenceId !== envId);
     this.closeInspector();
 

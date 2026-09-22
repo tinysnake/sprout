@@ -429,10 +429,18 @@ export interface EnvironmentReadinessView {
   readonly capabilities: readonly { readonly name: string; readonly permission: string; readonly required: boolean }[];
   readonly engines: readonly {
     readonly engine: string;
+    readonly version?: string;
     readonly installed: boolean;
     readonly readiness: string;
     readonly required: boolean;
     readonly models: { readonly state: string; readonly models: readonly string[] };
+    readonly authenticated?: boolean;
+    readonly authMode?: string;
+    readonly authType?: string;
+    readonly modelIdPresent?: boolean;
+    readonly probedAt?: number;
+    readonly probeExitCode?: number;
+    readonly source?: string;
   }[];
   readonly probe?: {
     readonly at: number;
@@ -440,6 +448,8 @@ export interface EnvironmentReadinessView {
     readonly protocolOk: boolean;
     readonly enginesOk: boolean;
     readonly summary: string;
+    readonly source?: 'worker';
+    readonly version?: string;
   };
   readonly workSafety: { readonly state: string };
 }
@@ -487,6 +497,7 @@ export function toEnvironmentReadinessView(input: {
     })),
     engines: readiness.engines.map((engine) => ({
       engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+      ...(engine.version !== undefined ? { version: sanitizeIdentifier(engine.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
       installed: engine.installed,
       readiness: engine.readiness,
       required: engine.required,
@@ -496,6 +507,13 @@ export function toEnvironmentReadinessView(input: {
           sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
         ),
       },
+      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+      ...(engine.authMode !== undefined ? { authMode: sanitizeIdentifier(engine.authMode, { fallback: 'unknown', kind: 'generic' }) } : {}),
+      ...(engine.authType !== undefined ? { authType: sanitizeIdentifier(engine.authType, { fallback: 'unknown', kind: 'generic' }) } : {}),
+      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+      ...(engine.source !== undefined ? { source: sanitizeIdentifier(engine.source, { fallback: 'unknown', kind: 'generic' }) } : {}),
     })),
     ...(readiness.probe !== undefined
       ? {
@@ -505,6 +523,8 @@ export function toEnvironmentReadinessView(input: {
             protocolOk: readiness.probe.protocolOk,
             enginesOk: readiness.probe.enginesOk,
             summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
+            ...(readiness.probe.source !== undefined ? { source: readiness.probe.source } : {}),
+            ...(readiness.probe.version !== undefined ? { version: sanitizeIdentifier(readiness.probe.version, { fallback: 'unknown-version', kind: 'generic' }) } : {}),
           },
         }
       : {}),

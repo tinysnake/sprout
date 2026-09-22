@@ -103,6 +103,8 @@ export interface RunOrchestratorOptions {
   readonly engineFacts?: (
     environmentInstanceId: string,
   ) => Promise<readonly AgentWorkOptionEngineFact[]>;
+  /** Enforce unknown-as-blocking for a production Worker graph. */
+  readonly strictAdmission?: boolean;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -199,6 +201,7 @@ export class RunOrchestrator {
   readonly #engineFacts:
     | ((environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>)
     | undefined;
+  readonly #strictAdmission: boolean;
   /** Reads the durable binding a run is admitted under (#93); optional. */
   readonly #workspaceBinding:
     | ((
@@ -227,6 +230,10 @@ export class RunOrchestrator {
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#engineFacts = options.engineFacts;
+    // Wiring the fact provider opts into strict unknown-as-blocking admission;
+    // an explicit false remains available only for legacy non-production
+    // graphs that intentionally preserve pre-readiness behavior.
+    this.#strictAdmission = options.strictAdmission ?? options.engineFacts !== undefined;
     this.#workspaceBinding = options.workspaceBinding;
   }
 
@@ -517,13 +524,12 @@ export class RunOrchestrator {
     const observed = this.#engineFacts
       ? await this.#engineFacts(environmentInstanceId)
       : undefined;
-    // Facts govern admission only when the Environment has actually reported
-    // some. An instance with no observation at all is not evidence of
-    // unreadiness (#87's rule that a missing Worker is not evidence), so
-    // admission takes the Agent's first option unchanged there — the pre-#90
-    // behaviour. Once any fact exists for the instance, the ordered evaluation
-    // is authoritative: an option must be verified, never assumed.
-    const admitted = observed === undefined || observed.length === 0
+    // Once the Environment fact seam is wired, absence is unknown—not an
+    // invitation to guess. This is the strict #114/#118 admission boundary:
+    // every required engine/model fact must be established before the first
+    // option is accepted. The only legacy escape hatch is an explicitly
+    // non-strict graph (or an orchestrator constructed without `engineFacts`).
+    const admitted = observed === undefined || (observed.length === 0 && !this.#strictAdmission)
       ? options[0]
       : selectAdmissibleWorkOption(options, observed);
     if (admitted === undefined) {

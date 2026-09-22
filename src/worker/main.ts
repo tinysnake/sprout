@@ -1,5 +1,6 @@
 import { parseWorkerConfiguration } from '../host-config.ts';
-import { createEnvironmentWorkerEngines, hostEngineFacts } from './engine-selection.ts';
+import { createEnvironmentWorkerEngines, describeEnvironmentWorkerEngines, hostEngineFacts } from './engine-selection.ts';
+import { probeEnvironmentReadiness } from './readiness.ts';
 import { EnvironmentWorker } from './server.ts';
 import { WORKER_PROTOCOL_VERSION, type WorkerReadinessFacts } from './protocol.ts';
 import { serveWorkerEndpoint, WORKER_READY_PREFIX } from './carrier.ts';
@@ -23,7 +24,9 @@ async function runWorker(): Promise<void> {
     readyFile: configuredReadyFile,
     enrollment: enrollmentTarget,
   } = configuration;
-  const engines = createEnvironmentWorkerEngines(hostEngineFacts(configuration));
+  const engineFacts = hostEngineFacts(configuration);
+  const engineConfigurations = describeEnvironmentWorkerEngines(engineFacts);
+  const engines = createEnvironmentWorkerEngines(engineFacts);
 
   if (engines.size === 0) {
     process.stderr.write(`sprout worker: ${WORKER_DIAGNOSTICS.noEngine}\n`);
@@ -35,16 +38,16 @@ async function runWorker(): Promise<void> {
     process.stderr.write(`[sprout-worker] ${category}\n`);
   };
 
-  const workerReadiness = (): WorkerReadinessFacts => ({
-    protocolVersion: WORKER_PROTOCOL_VERSION,
-    engines: [...engines.keys()].map((engine) => ({
-      engine,
-      installed: true,
-      readiness: 'unknown',
-      modelAvailability: 'unknown',
-      models: [],
-    })),
-  });
+  // Startup readiness is measured by the host Worker before it exposes its
+  // first `worker/info`. The browser can later request another probe, but it
+  // cannot submit or manufacture any of these facts.
+  const startupProbe = await probeEnvironmentReadiness(engineConfigurations);
+  let workerReadiness: WorkerReadinessFacts = startupProbe.readiness;
+  const runProbe = async () => {
+    const result = await probeEnvironmentReadiness(engineConfigurations);
+    workerReadiness = result.readiness;
+    return result;
+  };
 
   if (enrollmentTarget !== undefined) {
     const { connectWorkerEnrollment } = await import('./enrollment-connector.ts');
@@ -76,7 +79,8 @@ async function runWorker(): Promise<void> {
       output: connection.stream,
       onLog: log,
       workspaceRoot,
-      readiness: workerReadiness,
+      readiness: () => workerReadiness,
+      readinessProbe: () => runProbe(),
     });
     connection.stream.on('close', () => {
       void worker.shutdown().then(() => process.exit(0));
@@ -92,7 +96,8 @@ async function runWorker(): Promise<void> {
       output: process.stdout,
       onLog: log,
       workspaceRoot,
-      readiness: workerReadiness,
+      readiness: () => workerReadiness,
+      readinessProbe: () => runProbe(),
     });
     process.stdin.on('error', () => undefined);
     process.stdin.on('close', () => {
@@ -113,7 +118,8 @@ async function runWorker(): Promise<void> {
         output: socket,
         onLog: log,
         workspaceRoot,
-        readiness: workerReadiness,
+        readiness: () => workerReadiness,
+        readinessProbe: () => runProbe(),
       });
       socket.on('error', () => undefined);
       socket.on('close', () => {

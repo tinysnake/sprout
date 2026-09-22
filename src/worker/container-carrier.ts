@@ -4,7 +4,7 @@ import type { ChildProcess } from 'node:child_process';
 
 import type { ContainerRuntime } from '../environment/container.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
-import { WorkerClient, WorkerContextClient } from './client.ts';
+import { WorkerClient, WorkerContextClient, WorkerReadinessClient } from './client.ts';
 import type { WorkerInfo } from './protocol.ts';
 import type { WorkerConnection } from './carrier.ts';
 
@@ -123,6 +123,7 @@ export class ContainerCarrier {
       info: connection.info as WorkerInfo,
       adapters: connection.adapters,
       contexts: new WorkerContextClient(transport),
+      readiness: new WorkerReadinessClient(transport),
       get alive() {
         return alive;
       },

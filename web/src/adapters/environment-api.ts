@@ -49,10 +49,18 @@ export interface EnvironmentReadinessView {
   }[];
   readonly engines: readonly {
     readonly engine: string;
+    readonly version?: string;
     readonly installed: boolean;
     readonly readiness: string;
     readonly required: boolean;
     readonly models: { readonly state: string; readonly models: readonly string[] };
+    readonly authenticated?: boolean;
+    readonly authMode?: string;
+    readonly authType?: string;
+    readonly modelIdPresent?: boolean;
+    readonly probedAt?: number;
+    readonly probeExitCode?: number;
+    readonly source?: string;
   }[];
   readonly probe?: {
     readonly at: number;
@@ -60,6 +68,8 @@ export interface EnvironmentReadinessView {
     readonly protocolOk: boolean;
     readonly enginesOk: boolean;
     readonly summary: string;
+    readonly source?: 'worker';
+    readonly version?: string;
   };
   readonly workSafety: { readonly state: string };
 }
@@ -70,6 +80,8 @@ export interface ProbeResultView {
   readonly protocolOk: boolean;
   readonly enginesOk: boolean;
   readonly summary: string;
+  readonly source?: 'worker';
+  readonly version?: string;
 }
 
 export interface WorkerIdentityProofView {
@@ -192,7 +204,8 @@ export interface EnvironmentEnrollmentBrowserAdapter {
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
   readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[] }>;
-  recordProbe(id: string, probe: ProbeResultView): Promise<ProbeResultView>;
+  /** Ask the authenticated Worker to execute a probe; the browser supplies no facts. */
+  requestProbe(id: string): Promise<ProbeResultView>;
   /**
    * The open recovery record plus the permanent Force Release history for one
    * Environment (#88). No mutation: a reconnect alone never proves safety.
@@ -318,10 +331,10 @@ export function createEnvironmentEnrollmentBrowserAdapter(
     },
     readiness: (id) =>
       transport.request(`/api/environments/enrollments/${encodeURIComponent(id)}/readiness`),
-    async recordProbe(id, probe) {
+    async requestProbe(id) {
       const response = await transport.request<{ readonly probe: ProbeResultView }>(
         `/api/environments/enrollments/${encodeURIComponent(id)}/probes`,
-        jsonCommand(probe),
+        jsonCommand({}),
       );
       return response.probe;
     },

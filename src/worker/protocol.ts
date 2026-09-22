@@ -17,6 +17,8 @@ import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, Stre
 export const WORKER_METHODS = {
   /** Identify the worker and the engines it can host. */
   info: 'worker/info',
+  /** Execute the Worker-owned, non-inference readiness probe. */
+  readinessProbe: 'worker/readiness-probe',
   /** Create an engine session for one run. */
   startSession: 'session/start',
   /** Begin one turn on an existing session. */
@@ -57,11 +59,21 @@ export const WORKER_PROTOCOL_VERSION = '2';
  */
 export interface WorkerEngineReadinessFact {
   readonly engine: string;
+  /** The executable version observed on the Worker host. */
+  readonly version?: string;
   /** Whether the engine's executable was located on this Environment host. */
   readonly installed: boolean;
   readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown';
   readonly modelAvailability: 'available' | 'none' | 'unknown';
   readonly models: readonly string[];
+  /** Independent, privacy-reduced probe facts. */
+  readonly authenticated?: boolean;
+  readonly authMode?: string;
+  readonly authType?: string;
+  readonly modelIdPresent?: boolean;
+  readonly probedAt?: number;
+  readonly probeExitCode?: number;
+  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'unknown';
 }
 
 /**
@@ -74,6 +86,26 @@ export interface WorkerEngineReadinessFact {
 export interface WorkerReadinessFacts {
   readonly protocolVersion: string;
   readonly engines: readonly WorkerEngineReadinessFact[];
+  /** Observation time is supplied by the Worker, never by the browser. */
+  readonly observedAt?: number;
+}
+
+export interface WorkerReadinessProbeParams {
+  /** Deliberately empty today; the browser cannot submit readiness facts. */
+  readonly requiredModels?: readonly string[];
+}
+
+export interface WorkerReadinessProbeResult {
+  readonly readiness: WorkerReadinessFacts;
+  readonly probe: {
+    readonly at: number;
+    readonly latencyMs: number;
+    readonly protocolOk: boolean;
+    readonly enginesOk: boolean;
+    readonly source: 'worker';
+    readonly version: string;
+    readonly summary: string;
+  };
 }
 
 /**

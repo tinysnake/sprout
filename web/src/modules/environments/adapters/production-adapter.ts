@@ -278,14 +278,10 @@ export class ProductionEnvironmentService implements EnvironmentService {
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {
-    const { readiness } = await this.#adapter.environmentFacts(id);
-    const recorded = await this.#adapter.recordProbe(id, {
-      at: Date.now(),
-      latencyMs: 0,
-      protocolOk: readiness.compatibility.state === 'compatible',
-      enginesOk: readiness.engines.every((engine) => engine.readiness === 'ready'),
-      summary: 'Operator-requested readiness probe recorded from Web.',
-    });
+    // The browser can request a probe, but cannot provide its result. The
+    // authenticated Worker measures latency and derives each observation on
+    // the Environment host.
+    const recorded = await this.#adapter.requestProbe(id);
     return {
       timestamp: relativeTime(0),
       latencyMs: recorded.latencyMs,

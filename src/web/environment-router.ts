@@ -36,6 +36,8 @@ import { toEnrollmentView, toEnvironmentReadinessView, toEnvironmentRecoveryView
 
 export interface EnvironmentRouterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
+  /** Worker-hosted probe request. The browser never submits observation facts. */
+  readonly requestProbe?: (enrollmentId: string) => Promise<ProbeResultFact>;
   /**
    * The Environment reconciliation and recovery capability (#88).
    *
@@ -57,7 +59,7 @@ export interface EnvironmentRouterOptions {
 }
 
 export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiRouter {
-  const { enrollments, recovery, archive } = options;
+  const { enrollments, recovery, archive, requestProbe } = options;
 
   return {
     name: 'environment-enrollment',
@@ -312,7 +314,7 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
-      // POST /api/environments/enrollments/:id/probes — record a probe result.
+      // POST /api/environments/enrollments/:id/probes — request a Worker probe.
       if (
         method === 'POST' &&
         segments.length === 5 &&
@@ -321,14 +323,14 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         segments[2] === 'enrollments' &&
         segments[4] === 'probes'
       ) {
-        const body = await context.readBody();
-        const probe = parseProbe(body);
-        if (probe === 'invalid') {
-          return json(context, 400, { error: 'probe fields are invalid' });
-        }
         try {
-          const recorded = await enrollments.recordProbe(segments[3] ?? '', probe);
-          return json(context, 201, { probe: recorded });
+          if (requestProbe !== undefined) {
+            // Ignore the body entirely. A client can request a probe, but only
+            // the authenticated Worker may supply its measured observations.
+            const recorded = await requestProbe(segments[3] ?? '');
+            return json(context, 201, { probe: recorded });
+          }
+          return json(context, 503, { error: 'the Environment Worker probe is unavailable' });
         } catch (error) {
           return enrollmentFailure(context, error);
         }
@@ -757,20 +759,6 @@ function parseWorkerProof(value: unknown): WorkerIdentityProof | 'invalid' {
   if (typeof publicKey !== 'string' || publicKey === '') return 'invalid';
   if (typeof signature !== 'string' || signature === '') return 'invalid';
   return { challengeId, publicKey, signature };
-}
-
-function parseProbe(value: Record<string, unknown>): ProbeResultFact | 'invalid' {
-  const { at, latencyMs, protocolOk, enginesOk, summary } = value;
-  if (
-    typeof at !== 'number' ||
-    typeof latencyMs !== 'number' ||
-    typeof protocolOk !== 'boolean' ||
-    typeof enginesOk !== 'boolean' ||
-    typeof summary !== 'string'
-  ) {
-    return 'invalid';
-  }
-  return { at, latencyMs, protocolOk, enginesOk, summary };
 }
 
 /** Re-exported so a caller can build the durable observation from parsed facts. */

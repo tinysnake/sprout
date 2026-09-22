@@ -25,7 +25,7 @@
  * reached through this registry.
  */
 
-import { WorkerClient, WorkerContextClient } from './client.ts';
+import { WorkerClient, WorkerContextClient, WorkerReadinessClient } from './client.ts';
 import type { WorkerConnection } from './carrier.ts';
 import type { WorkerGateway, WorkerGatewayAcceptance } from './gateway.ts';
 import type { RuntimeEnvironment } from '../runtime.ts';
@@ -34,6 +34,7 @@ import type {
   ValidateWorkspaceParams,
   ValidateWorkspaceResult,
   WorkerInfo,
+  WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
@@ -149,6 +150,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
         info: connected.info,
         adapters: connected.adapters,
         contexts: new WorkerContextClient(acceptance.transport),
+        readiness: new WorkerReadinessClient(acceptance.transport),
         get alive() {
           for (const adapter of connected.adapters.values()) {
             if ((adapter as { alive?: boolean }).alive === false) return false;
@@ -215,6 +217,14 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     if (this.#closed) return undefined;
     const connection = await this.#connection(environmentInstanceId);
     return connection?.info;
+  }
+
+  /** Request a probe from the already accepted Worker; never accepts browser facts. */
+  async probeReadiness(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined> {
+    if (this.#closed) return undefined;
+    const connection = await this.#connection(environmentInstanceId);
+    if (connection === undefined || !connection.alive) return undefined;
+    return connection.readiness?.probe({});
   }
 
   async close(): Promise<void> {

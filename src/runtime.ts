@@ -65,7 +65,7 @@ import {
 import { TaskService } from './task/service.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
-import type { WorkerInfo } from './worker/protocol.ts';
+import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -182,6 +182,8 @@ export interface RuntimeEnvironment {
    * when it is connected (optional: readiness is an additive observation #87).
    */
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
+  /** Execute a non-inference probe on an already accepted Worker. */
+  probeReadiness?(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined>;
   /** End the port and fail anything still in flight. */
   close(): Promise<void>;
 }
@@ -764,6 +766,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           models: engine.models,
         }));
       },
+      strictAdmission: environmentSource === 'enrollment',
       // The durable access record a run is admitted under (#93): the binding
       // facts are captured once, persisted with the run, and used for the
       // Worker start, so a workspace change or restart afterwards cannot
@@ -1124,6 +1127,28 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(first.instanceId),
       };
     };
+    const requestWorkerProbe = async (enrollmentId: string) => {
+      const enrollment = await enrollments.get(enrollmentId);
+      if (enrollment === undefined) throw new Error('unknown enrollment');
+      const live = workerGateway.liveFor(enrollment.environmentInstanceId);
+      if (live === undefined) throw new Error('the Environment Worker is offline');
+      const result = await enrollmentEnvironment.probeReadiness(enrollment.environmentInstanceId);
+      if (result === undefined) throw new Error('the Environment Worker is offline');
+      const isCurrent = (): boolean =>
+        workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
+        workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
+      await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
+        connectionEpoch: live.epoch.epoch,
+        isCurrent,
+      });
+      if (!isCurrent()) {
+        throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+      }
+      await enrollments.recordProbe(enrollmentId, result.probe);
+      await refreshEnvironmentCatalog();
+      return result.probe;
+    };
+
     const api = createRunApi({
       orchestrator,
       agents,
@@ -1146,7 +1171,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // (#88) are composed through the same seam and delegate every safety rule
       // to the recovery service.
       routers: [
-        createEnvironmentRouter({ enrollments, recovery, archive }),
+        createEnvironmentRouter({ enrollments, recovery, archive, requestProbe: requestWorkerProbe }),
         // Durable Project, template-snapshot, and membership authority (#92),
         // composed through the same #85 additive seam. Only the authenticated
         // Human reaches these routes, so create/edit/membership/archive are
@@ -1452,6 +1477,13 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
   info(environmentInstanceId: string): Promise<WorkerInfo | undefined> {
     const target = this.#require();
     return target.info === undefined ? Promise.resolve(undefined) : target.info(environmentInstanceId);
+  }
+
+  probeReadiness(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined> {
+    const target = this.#require();
+    return target.probeReadiness === undefined
+      ? Promise.resolve(undefined)
+      : target.probeReadiness(environmentInstanceId);
   }
 
   async close(): Promise<void> {
