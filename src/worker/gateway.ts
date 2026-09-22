@@ -135,6 +135,8 @@ export class WorkerGateway {
     string,
     { readonly enrollmentId: string; readonly environmentInstanceId: string; readonly stream: Duplex }
   >();
+  /** Connection ids whose close notification was already emitted by a lifecycle fence. */
+  readonly #closedNotified = new Set<string>();
   readonly #acceptListeners = new Set<(acceptance: WorkerGatewayAcceptance) => void>();
   /**
    * Channel-loss listeners, fired once whenever a live connection ends.
@@ -173,7 +175,44 @@ export class WorkerGateway {
 
   /** The live accepted connection for one environment instance, if any. */
   liveFor(environmentInstanceId: string): WorkerGatewayAcceptance | undefined {
-    return this.#byInstance.get(environmentInstanceId);
+    const live = this.#byInstance.get(environmentInstanceId);
+    if (live === undefined || !this.#epochs.isCurrent(live.enrollment.id, live.epoch.connectionId)) {
+      return undefined;
+    }
+    return live;
+  }
+
+  /**
+   * Synchronously revoke the transport authority for an enrollment.
+   *
+   * This is called before the durable revoke/reset decision is saved. It fences
+   * the epoch before any delayed probe or readiness commit can reach storage,
+   * removes the live projection immediately, and closes both accepted and
+   * post-acceptance barrier connections.
+   */
+  invalidateEnrollment(enrollmentId: string): void {
+    const current = this.#epochs.current(enrollmentId);
+    if (current === undefined) return;
+    const live = this.#live.get(enrollmentId);
+    const environmentInstanceId = live?.environmentInstanceId ??
+      [...this.#inFlight.values()].find((connection) => connection.enrollmentId === enrollmentId)?.environmentInstanceId;
+    this.#epochs.invalidate(enrollmentId, current.connectionId);
+    this.#live.delete(enrollmentId);
+    if (environmentInstanceId !== undefined) {
+      const instanceLive = this.#byInstance.get(environmentInstanceId);
+      if (instanceLive?.epoch.connectionId === current.connectionId) this.#byInstance.delete(environmentInstanceId);
+      const authority = this.#instanceAuthority.get(environmentInstanceId);
+      if (authority?.connectionId === current.connectionId) this.#instanceAuthority.delete(environmentInstanceId);
+    }
+    for (const [connectionId, inFlight] of this.#inFlight) {
+      if (inFlight.enrollmentId !== enrollmentId) continue;
+      this.#inFlight.delete(connectionId);
+      inFlight.stream.destroy();
+    }
+    live?.transport.close();
+    if (environmentInstanceId !== undefined) {
+      this.#emitConnectionClosed({ enrollmentId, environmentInstanceId, epoch: current });
+    }
   }
 
   /**
@@ -318,6 +357,15 @@ export class WorkerGateway {
     // Accept: a newer epoch owns this Environment instance exclusively. The
     // regular path has one durable enrollment per instance; this also fences a
     // legacy duplicate before it can leave two transports live.
+    // Re-read the lifecycle immediately before minting transport authority. A
+    // revoke/reset may have raced the identity reconciliation above; such a
+    // result must remain pre-epoch identity history, never become accepted.
+    const currentEnrollment = await this.#enrollments.get(enrollmentId);
+    if (currentEnrollment === undefined || currentEnrollment.status !== 'approved') {
+      reader.dispose();
+      stream.end();
+      return { accepted: false, reason: 'the Worker identity is not approved for work' };
+    }
     const epoch = this.#epochs.accept(enrollmentId);
     this.#supersedePriorForInstance(outcome.enrollment.environmentInstanceId);
     this.#instanceAuthority.set(outcome.enrollment.environmentInstanceId, {
@@ -383,13 +431,11 @@ export class WorkerGateway {
         }
         for (const listener of channelClosedListeners) listener();
         channelClosedListeners.clear();
-        for (const listener of this.#closeListeners) {
-          listener({
-            enrollmentId,
-            environmentInstanceId: outcome.enrollment.environmentInstanceId,
-            epoch,
-          });
-        }
+        this.#emitConnectionClosed({
+          enrollmentId,
+          environmentInstanceId: outcome.enrollment.environmentInstanceId,
+          epoch,
+        });
       },
     });
     this.#live.set(enrollmentId, {
@@ -418,6 +464,12 @@ export class WorkerGateway {
     safeWrite(stream, { type: 'worker/listening', epoch: epoch.epoch });
     for (const listener of this.#acceptListeners) listener(acceptance);
     return acceptance;
+  }
+
+  #emitConnectionClosed(closed: WorkerGatewayConnectionClosed): void {
+    if (this.#closedNotified.has(closed.epoch.connectionId)) return;
+    this.#closedNotified.add(closed.epoch.connectionId);
+    for (const listener of this.#closeListeners) listener(closed);
   }
 
   /** Invalidate every live connection, used on runtime shutdown. */

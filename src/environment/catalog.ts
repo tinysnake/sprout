@@ -150,10 +150,19 @@ export function enrolledEnvironmentDefinition(platform: EnvironmentPlatform): En
 /** Build the catalog entry for one input, computing eligibility once. */
 export function projectCatalogEntry(input: EnvironmentCatalogInput): EnvironmentCatalogEntry {
   const enrollment = normalizeEnrollment(input.enrollment);
+  const currentEpochReadiness =
+    enrollment.status === 'approved' &&
+    input.currentEpoch !== undefined &&
+    input.observed?.enrollmentId === enrollment.id &&
+    input.observed.connectionEpoch === input.currentEpoch;
+  // A pending/revoked/reset enrollment may have inspectable durable history,
+  // but it has no current fact projection. Keep lifecycle authority and Worker
+  // epoch as one boundary here as well as in the enrollment service/API.
+  const authoritativeObserved = currentEpochReadiness ? input.observed : undefined;
   const platform = asEnvironmentPlatform(enrollment.worker.platform);
   const readiness = assembleEnvironmentReadiness({
     enrollment,
-    observed: input.observed,
+    observed: authoritativeObserved,
     // The work-safety fact is supplied by the runtime from the lease registry
     // and the open recovery records. It is projected back into the independent
     // readiness assembly through the same narrow facts, so the summary and the
@@ -184,10 +193,6 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
   // Connection/readiness observations are authority-scoped facts, not durable
   // properties of an instance. A reconnect/replacement must re-establish them:
   // an observation from a prior epoch is inspectable but non-authoritative.
-  const currentEpochReadiness =
-    input.currentEpoch !== undefined &&
-    input.observed?.enrollmentId === enrollment.id &&
-    input.observed.connectionEpoch === input.currentEpoch;
   // Every *required* engine must have established (non-unknown) readiness and
   // an available model. An unrequired engine stays an honestly non-blocking
   // fact. Strict probe-driven admission for the remaining dimensions arrives

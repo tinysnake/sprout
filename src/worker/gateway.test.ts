@@ -46,9 +46,12 @@ async function harness(): Promise<Harness> {
     enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    onAuthorityLost: (enrollmentId) => invalidateAuthority(enrollmentId),
     idFactory: () => 'enroll-1',
   });
   const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });
+  let invalidateAuthority: (enrollmentId: string) => void = () => undefined;
+  invalidateAuthority = (enrollmentId) => gateway.invalidateEnrollment(enrollmentId);
   const port_ = new EnrollmentWorkerPort({ gateway });
   const api = createRunApi({
     orchestrator: { subscribe: () => () => undefined, load: async () => undefined } as never,
@@ -166,6 +169,26 @@ test('an approved Worker is accepted with a monotonic epoch and its identity is 
     const live = h.gateway.liveFor('mac-mini-1');
     assert.notEqual(live, undefined);
     connection.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('revocation synchronously closes the accepted channel and invalidates its epoch', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const claim = await requestPending(h);
+    await claimProveApprove(h, key.path, claim);
+    const connection = await connect(h, '', key.path);
+    assert.ok(h.gateway.liveFor('mac-mini-1'));
+    assert.equal(h.gateway.epochs.current('enroll-1')?.connectionId, connection.connectionId);
+
+    await h.enrollments.revoke('enroll-1', 'retired');
+
+    assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
+    assert.equal(h.gateway.epochs.current('enroll-1'), undefined);
   } finally {
     key.cleanup();
     await h.close();

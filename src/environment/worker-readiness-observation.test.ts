@@ -113,6 +113,34 @@ test('startup Worker readiness persists one epoch-bound probe and its independen
   }]);
 });
 
+test('a pending enrollment cannot write readiness even when an epoch resolver returns one', async () => {
+  const store = new InMemoryEnvironmentReadinessStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: new InMemoryEnrollmentStore(),
+    readiness: store,
+    currentConnectionEpoch: () => 7,
+    idFactory: () => 'enroll-pending',
+  });
+  await service.requestEnrollment({
+    environmentInstanceId: 'env-pending',
+    displayName: 'Pending Environment',
+    publicKey: 'worker-public-key',
+    platform: 'macos',
+    capabilityRequests: ['agent-run'],
+    engineFacts: [],
+  });
+  const recorded = await service.observeWorkerReadiness('enroll-pending', startupReadiness(), {
+    enrollmentId: 'enroll-pending',
+    connectionEpoch: 7,
+    isCurrent: () => true,
+  });
+  assert.equal(recorded, false);
+  assert.equal(await store.getReadiness('env-pending'), undefined);
+  assert.deepEqual(await store.listProbes('env-pending'), []);
+  assert.equal((await service.readiness('enroll-pending')).readiness.connection.state, 'never-connected');
+  assert.deepEqual(await service.listProbes('enroll-pending'), []);
+});
+
 test('a stale epoch is rejected before either readiness or probe persistence', async () => {
   const { service } = await enrolled();
   const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), {
@@ -168,6 +196,28 @@ test('disconnect while an atomic readiness/probe commit is waiting leaves neithe
   store.continueCommit();
   assert.equal(await recording, false);
   assert.equal(await store.getReadiness('env-1'), undefined);
+  assert.deepEqual(await service.listProbes('enroll-1'), []);
+});
+
+test('revoke fences a delayed accepted-epoch commit before durable lifecycle save', async () => {
+  const store = new DelayedReadinessStore();
+  let current = true;
+  const { service } = await enrolled(store, () => current ? 7 : undefined);
+  const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
+    enrollmentId: 'enroll-1',
+    connectionEpoch: 7,
+    isCurrent: () => current,
+  });
+  await store.commitStarted;
+  await service.revoke('enroll-1', 'retired');
+  current = false;
+  store.continueCommit();
+  assert.equal(await recording, false);
+  assert.equal(await store.getReadiness('env-1'), undefined);
+  assert.deepEqual(await store.listProbes('env-1'), []);
+  const projected = await service.readiness('enroll-1');
+  assert.equal(projected.enrollment.status, 'revoked');
+  assert.equal(projected.readiness.connection.state, 'never-connected');
   assert.deepEqual(await service.listProbes('enroll-1'), []);
 });
 

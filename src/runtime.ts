@@ -15,6 +15,7 @@ import {
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
+import { EnrollmentError } from './environment/enrollment.ts';
 import {
   EnvironmentCatalog,
   projectCatalogEntry,
@@ -892,10 +893,16 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // Environment enrollment and readiness (#87). It reads the durable enrollment
     // and observed-readiness stores and projects work safety from the same lease
     // registry the run and Task domains use, so the facts never diverge.
+    let invalidateWorkerAuthority: (enrollmentId: string) => void = () => undefined;
     const enrollmentOptions: EnvironmentEnrollmentServiceOptions = {
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
       currentConnectionEpoch: (enrollmentId) => workerEpochs.current(enrollmentId)?.epoch,
+      // Revoke/reset fences the accepted transport before its durable lifecycle
+      // decision is published. The assignment is completed before any caller
+      // can invoke a lifecycle mutation; the indirection keeps composition's
+      // gateway/service construction order explicit.
+      onAuthorityLost: (enrollmentId) => invalidateWorkerAuthority(enrollmentId),
       leases: () => pool.leases(),
       // Recovery records are authoritative over the lease projection, so the
       // summary can distinguish `reconciling` from `recovery` and a reconnect
@@ -1006,6 +1013,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // monotonic connection epoch. The gateway owns exactly one registry shared
     // with the runtime, so the catalog sees the same epoch the gateway accepted.
     const workerGateway = new WorkerGateway({ enrollments, epochs: workerEpochs });
+    invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1131,14 +1139,19 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     };
     const requestWorkerProbe = async (enrollmentId: string) => {
       const enrollment = await enrollments.get(enrollmentId);
-      if (enrollment === undefined) throw new Error('unknown enrollment');
+      if (enrollment === undefined) throw new EnrollmentError('unknown-enrollment', 'Unknown enrollment.');
+      if (enrollment.status !== 'approved') {
+        throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
+      }
       const live = workerGateway.liveFor(enrollment.environmentInstanceId);
       if (live === undefined) throw new Error('the Environment Worker is offline');
-      const result = await enrollmentEnvironment.probeReadiness(enrollment.environmentInstanceId);
-      if (result === undefined) throw new Error('the Environment Worker is offline');
       const isCurrent = (): boolean =>
+        enrollment.status === 'approved' &&
         workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
         workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
+      if (!isCurrent()) throw new Error('the Environment Worker is offline');
+      const result = await enrollmentEnvironment.probeReadiness(enrollment.environmentInstanceId);
+      if (result === undefined) throw new Error('the Environment Worker is offline');
       const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
         enrollmentId,
         connectionEpoch: live.epoch.epoch,

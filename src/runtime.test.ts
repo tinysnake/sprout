@@ -2252,6 +2252,8 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     });
     const enrollmentId = requested.enrollment.id;
     const epoch = runtime.workerEpochs.accept(enrollmentId);
+    // A pending enrollment may have an accepted-looking resolver epoch, but it
+    // has no fact-write authority until Human approval.
     await runtime.enrollments.observeReadiness(enrollmentId, {
       connectionEpoch: epoch.epoch,
       connection: { state: 'online', lastConfirmedAt: Date.now() },
@@ -2262,11 +2264,22 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
     // Still pending: no admission.
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible ?? false, false);
+    assert.equal(await runtime.stores.environmentReadiness.getReadiness('host-a'), undefined);
 
-    // Approval alone (no manual refresh) makes it eligible on this process.
+    // Approval is necessary but not sufficient; only a post-approval Worker
+    // observation can restore readiness authority.
     await runtime.enrollments.approve(enrollmentId, {
       capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
     });
+    await runtime.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: epoch.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+      ],
+    }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    await runtime.refreshEnvironmentCatalog();
     await waitFor(
       () => runtime.environmentCatalog.entry('host-a')?.eligible === true,
       'approval to re-project eligibility',

@@ -345,7 +345,11 @@ test('a refused connection never produces or overwrites readiness facts', async 
     });
     assembled = await enrollments.readiness('enroll-1');
     assert.equal(assembled.readiness.enrollmentStatus, 'revoked');
-    assert.equal(assembled.readiness.compatibility.workerProtocolVersion, '2.1', 'the revoked reconnect does not replace the observed protocol');
+    assert.equal(
+      assembled.readiness.compatibility.workerProtocolVersion,
+      undefined,
+      'revocation removes the old epoch from the current readiness projection',
+    );
     assert.equal(assembled.summary.level, 'red');
     first.close();
   } finally {

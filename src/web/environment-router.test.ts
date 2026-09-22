@@ -12,6 +12,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import { EnrollmentError } from '../environment/enrollment.ts';
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
 import { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
@@ -120,6 +121,10 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
       recovery,
       archive,
       requestProbe: async (enrollmentId) => {
+        const enrollment = await enrollments.get(enrollmentId);
+        if (enrollment?.status !== 'approved') {
+          throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
+        }
         const at = workerProbeAt++;
         const probe = {
           at,
@@ -519,6 +524,13 @@ test('a probe route ignores browser facts and returns only Worker-sourced observ
       capabilityRequests: ['agent-run'],
       engines: [],
     });
+    const pendingProbe = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
+      forged: true,
+    });
+    assert.equal(pendingProbe.status, 409, 'pending enrollment has no probe authority');
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+    });
     const first = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
       at: 'forged',
       latencyMs: 0,
@@ -547,6 +559,36 @@ test('a probe route ignores browser facts and returns only Worker-sourced observ
       readonly probes: readonly { readonly at: number; readonly summary: string }[];
     };
     assert.deepEqual(body.probes.map((probe) => probe.at), [1_000, 1_001]);
+
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/revoke', runtime, { reason: 'retired' });
+    const revokedReadiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const revokedBody = (await revokedReadiness.json()) as {
+      readonly readiness: { readonly enrollmentStatus: string; readonly compatibility: { readonly state: string; readonly workerProtocolVersion?: string } };
+      readonly probes: readonly unknown[];
+    };
+    assert.equal(revokedBody.readiness.enrollmentStatus, 'revoked');
+    assert.deepEqual(revokedBody.readiness.compatibility, { state: 'unknown' }, 'revoked current facts are not exposed');
+    assert.deepEqual(revokedBody.probes, [], 'revoked probe history is not projected as current facts');
+    assert.equal(
+      (await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {})).status,
+      409,
+      'probe requests after revoke are refused',
+    );
+
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/reset', runtime, { reason: 'rotate' });
+    const resetReadiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const resetBody = (await resetReadiness.json()) as {
+      readonly readiness: { readonly enrollmentStatus: string; readonly compatibility: { readonly state: string; readonly workerProtocolVersion?: string } };
+      readonly probes: readonly unknown[];
+    };
+    assert.equal(resetBody.readiness.enrollmentStatus, 'pending');
+    assert.deepEqual(resetBody.readiness.compatibility, { state: 'unknown' }, 'reset current facts are not exposed');
+    assert.deepEqual(resetBody.probes, [], 'reset probe history is not projected as current facts');
+    assert.equal(
+      (await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {})).status,
+      409,
+      'probe requests after reset are refused',
+    );
   } finally {
     await runtime.api.close();
   }

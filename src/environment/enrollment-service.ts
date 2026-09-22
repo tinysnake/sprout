@@ -133,6 +133,8 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly readiness: EnvironmentReadinessStore;
   /** Current accepted epoch, or undefined while the enrollment is offline. */
   readonly currentConnectionEpoch: (enrollmentId: string) => number | undefined;
+  /** Fence the accepted Worker before revoke/reset is durably published. */
+  readonly onAuthorityLost?: (enrollmentId: string) => void;
   /** The leases that decide work safety. Optional: an Environment with no work. */
   readonly leases?: () => Promise<readonly LeaseSafetyFact[]> | readonly LeaseSafetyFact[];
   /**
@@ -214,11 +216,15 @@ export class EnvironmentEnrollmentService {
   readonly #claimTtlMs: number;
   readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
   readonly #currentConnectionEpoch: (enrollmentId: string) => number | undefined;
+  readonly #onAuthorityLost: ((enrollmentId: string) => void) | undefined;
+  /** Local lifecycle generation checked at the store mutation boundary. */
+  readonly #authorityGenerations = new Map<string, number>();
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
     this.#readiness = options.readiness;
     this.#currentConnectionEpoch = options.currentConnectionEpoch;
+    this.#onAuthorityLost = options.onAuthorityLost;
     this.#leases = options.leases;
     this.#recoveryRecords = options.recoveryRecords;
     this.#requiredEngines = options.requiredEngines ?? [];
@@ -431,7 +437,7 @@ export class EnvironmentEnrollmentService {
     probe?: Omit<ProbeResultFact, 'enrollmentId' | 'connectionEpoch'>,
   ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const accepted = this.#acceptedAuthority(enrollment.id, authority);
+    const accepted = this.#acceptedAuthority(enrollment, authority);
     if (accepted === undefined) return false;
     const readiness = sanitizeObservedReadiness({
       ...observed,
@@ -454,7 +460,15 @@ export class EnvironmentEnrollmentService {
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    return (await this.#readiness.listProbes(enrollment.environmentInstanceId)).map(sanitizeProbe);
+    // Historical rows remain durable for audit, but a pending/revoked/reset
+    // enrollment has no current Worker authority. Do not present those rows as
+    // current facts through the API projection.
+    if (enrollment.status !== 'approved') return [];
+    const probes = await this.#readiness.listProbes(enrollment.environmentInstanceId);
+    // Re-check lifecycle after the asynchronous history read: revoke/reset may
+    // have crossed the API read while the store was busy.
+    const current = await this.#requireEnrollment(enrollmentId);
+    return current.status === 'approved' ? probes.map(sanitizeProbe) : [];
   }
 
   async approve(
@@ -474,6 +488,7 @@ export class EnvironmentEnrollmentService {
 
   async revoke(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
+    this.#loseAuthority(enrollment.id);
     const revoked = revokeEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(revoked);
     this.#announce(revoked);
@@ -482,6 +497,7 @@ export class EnvironmentEnrollmentService {
 
   async reset(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
+    this.#loseAuthority(enrollment.id);
     const reset = resetEnrollment(enrollment, this.#clock(), reason);
     await this.#enrollments.save(reset);
     this.#announce(reset);
@@ -540,7 +556,7 @@ export class EnvironmentEnrollmentService {
     authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const accepted = this.#acceptedAuthority(enrollment.id, authority);
+    const accepted = this.#acceptedAuthority(enrollment, authority);
     if (accepted === undefined) return false;
     const observed = observedFactsFromWorkerReadiness({
       ...readiness,
@@ -581,21 +597,24 @@ export class EnvironmentEnrollmentService {
     // Sanitize on the way out as well as on the way in: a document written by an
     // earlier build (or by an adapter that bypassed this service) must not leak
     // free text through the readiness projection either.
-    const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
+    // Re-read after the durable reads. This closes the API projection race in
+    // which revoke/reset completes while the readiness store is being read.
+    const currentEnrollment = await this.#requireEnrollment(enrollmentId);
+    const currentEpoch = this.#currentConnectionEpoch(currentEnrollment.id);
     // Durable history remains inspectable, but only facts bound to the live
     // accepted epoch may look current in the readiness/API projection.
-    const observed = rawObserved !== undefined &&
-      rawObserved.enrollmentId === enrollment.id &&
+    const observed = currentEnrollment.status === 'approved' && rawObserved !== undefined &&
+      rawObserved.enrollmentId === currentEnrollment.id &&
       rawObserved.connectionEpoch === currentEpoch
       ? sanitizeObservedReadiness(rawObserved)
       : undefined;
     const probes = rawProbes.map(sanitizeProbe);
-    const currentProbes = probes.filter((probe) =>
-      probe.enrollmentId === enrollment.id && probe.connectionEpoch === currentEpoch,
-    );
+    const currentProbes = currentEnrollment.status === 'approved' ? probes.filter((probe) =>
+      probe.enrollmentId === currentEnrollment.id && probe.connectionEpoch === currentEpoch,
+    ) : [];
     const latestProbe = currentProbes.length > 0 ? currentProbes[currentProbes.length - 1] : undefined;
     const assembled = assembleEnvironmentReadiness({
-      enrollment,
+      enrollment: currentEnrollment,
       observed,
       leases,
       ...(recoveryRecords !== undefined ? { recoveryRecords } : {}),
@@ -604,7 +623,7 @@ export class EnvironmentEnrollmentService {
       supportedProtocol: this.#supportedProtocol,
       now: this.#clock(),
     });
-    return { ...assembled, enrollment };
+    return { ...assembled, enrollment: currentEnrollment };
   }
 
   async #currentLeases(): Promise<readonly LeaseSafetyFact[]> {
@@ -630,19 +649,34 @@ export class EnvironmentEnrollmentService {
 
   /** Combine the caller's connection token with the service's live resolver. */
   #acceptedAuthority(
-    enrollmentId: string,
+    enrollment: EnvironmentEnrollment,
     authority: ReadinessWriteAuthority,
   ): ReadinessWriteAuthority | undefined {
+    const enrollmentId = enrollment.id;
+    const generation = this.#authorityGenerations.get(enrollmentId) ?? 0;
     if (
+      // An epoch resolver alone is not enrollment authority. In particular, a
+      // pending enrollment must never write merely because it has a number.
+      enrollment.status !== 'approved' ||
       authority.enrollmentId !== enrollmentId ||
       !Number.isSafeInteger(authority.connectionEpoch) ||
       authority.connectionEpoch <= 0
     ) return undefined;
     const isCurrent = (): boolean =>
+      (this.#authorityGenerations.get(enrollmentId) ?? 0) === generation &&
       authority.isCurrent() &&
       this.#currentConnectionEpoch(enrollmentId) === authority.connectionEpoch;
     return isCurrent()
       ? { enrollmentId, connectionEpoch: authority.connectionEpoch, isCurrent }
       : undefined;
+  }
+
+  /** Fence local lifecycle authority before the durable decision is published. */
+  #loseAuthority(enrollmentId: string): void {
+    this.#authorityGenerations.set(
+      enrollmentId,
+      (this.#authorityGenerations.get(enrollmentId) ?? 0) + 1,
+    );
+    this.#onAuthorityLost?.(enrollmentId);
   }
 }
