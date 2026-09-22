@@ -281,6 +281,13 @@ export const DEFAULT_RESTORE_REASON =
 export const DEFAULT_COMPATIBILITY_DETAIL = 'The Worker protocol compatibility detail was withheld.';
 export const DEFAULT_PROBE_SUMMARY = 'Test summary withheld.';
 
+/** Canonical privacy reduction for one Worker probe's aggregate CLI version. */
+export function sanitizeProbeVersion(value: string): string {
+  return /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(value)
+    ? value
+    : 'unknown-version';
+}
+
 /**
  * The fallback for the readiness summary reason.
  *

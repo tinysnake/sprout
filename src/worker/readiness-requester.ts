@@ -20,7 +20,7 @@ import type { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
 import type { RuntimeEnvironment } from '../runtime.ts';
 import type { WorkerGateway } from './gateway.ts';
 import type { WorkerReadinessProbeResult } from './protocol.ts';
-import { isCompleteWorkerReadinessProbeResult } from './readiness-ingress.ts';
+import { validateWorkerReadinessProbeResult } from './readiness-ingress.ts';
 
 export interface WorkerProbeRequesterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
@@ -58,9 +58,10 @@ export function createWorkerProbeRequester(
       workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
       workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
     if (!isCurrent()) throw new Error('the Environment Worker is offline');
-    const result = await environment.probeReadiness?.(enrollment.environmentInstanceId);
-    if (result === undefined) throw new Error('the Environment Worker is offline');
-    if (!isCompleteWorkerReadinessProbeResult(result)) {
+    const rawResult = await environment.probeReadiness?.(enrollment.environmentInstanceId);
+    if (rawResult === undefined) throw new Error('the Environment Worker is offline');
+    const result = validateWorkerReadinessProbeResult(rawResult);
+    if (result === undefined) {
       throw new Error('the Environment Worker returned an invalid readiness probe result');
     }
     const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {

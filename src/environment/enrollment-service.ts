@@ -36,25 +36,20 @@ import type {
   ProbeResultFact,
   ProtocolVersionRange,
 } from './readiness.ts';
-import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProtocolVersion } from './privacy.ts';
+import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProbeVersion, sanitizeProtocolVersion } from './privacy.ts';
 import type {
   EnvironmentReadinessStore,
   ObservedReadiness,
   ReadinessWriteAuthority,
 } from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
+import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 
 function sanitizeEngineVersion(value: string): string | undefined {
   // Version is a structured semver fact, not free-form Worker output.  Generic
   // identifier redaction quite correctly treats dotted unknown text as a host;
   // accept only the pinned CLI-version shape here.
   return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(value) ? value : undefined;
-}
-
-function sanitizeProbeVersion(value: string): string | undefined {
-  return /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(value)
-    ? value
-    : undefined;
 }
 
 /**
@@ -139,7 +134,7 @@ function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
     latencyMs: probe.latencyMs,
     protocolOk: probe.protocolOk,
     enginesOk: probe.enginesOk,
-    ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) ?? 'unknown-version' } : {}),
+    ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) } : {}),
     // Probe provenance is a closed-world fact just like engine provenance.
     // JSON-RPC is runtime input, so its TypeScript union cannot prevent a
     // proven but malicious Worker from attempting to retain an account or
@@ -612,8 +607,16 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const accepted = this.#acceptedAuthority(enrollment, authority);
     if (accepted === undefined) return false;
+    // This service is the final authenticated Worker boundary before storage.
+    // Runtime callers validate the complete result earlier so they can reject a
+    // missing returned probe; repeat the same closed-shape validation here for
+    // every embedded probe so no future authenticated caller can bypass it.
+    const validatedReadiness = readiness.probe === undefined
+      ? readiness
+      : validateWorkerReadinessProbeResult({ readiness, probe: readiness.probe })?.readiness;
+    if (validatedReadiness === undefined) return false;
     const observed = observedFactsFromWorkerReadiness({
-      ...readiness,
+      ...validatedReadiness,
       at: this.#clock(),
       supported: this.#supportedProtocol,
     });
@@ -622,10 +625,10 @@ export class EnvironmentEnrollmentService {
       enrollmentId: enrollment.id,
       connectionEpoch: accepted.connectionEpoch,
     });
-    const probe = readiness.probe === undefined
+    const probe = validatedReadiness.probe === undefined
       ? undefined
       : sanitizeProbe({
-          ...readiness.probe,
+          ...validatedReadiness.probe,
           enrollmentId: enrollment.id,
           connectionEpoch: accepted.connectionEpoch,
         });

@@ -128,6 +128,18 @@ function project(): Project {
   };
 }
 
+function startupWorkerProbe() {
+  return {
+    at: 1_000,
+    latencyMs: 1,
+    protocolOk: true,
+    enginesOk: true,
+    source: 'worker' as const,
+    version: '1.0.0',
+    summary: 'Worker non-inference readiness probe completed.',
+  };
+}
+
 /** All six per-domain in-memory stores behind one closable handle. */
 interface MemoryStores extends RuntimeStores {
   readonly runsStore: InMemoryRunStore;
@@ -1976,6 +1988,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       // states what it verified so the catalog can reach eligibility.
       readiness: () => ({
         protocolVersion: WORKER_PROTOCOL_VERSION,
+        probe: startupWorkerProbe(),
         engines: [
           {
             engine: 'scripted',
@@ -2062,6 +2075,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       workspaceRoot,
       readiness: () => ({
         protocolVersion: WORKER_PROTOCOL_VERSION,
+        probe: startupWorkerProbe(),
         engines: [{
           engine: 'scripted', installed: true, readiness: 'ready',
           modelAvailability: 'available', models: ['scripted-model'],
@@ -2137,6 +2151,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       output: firstConnection.stream,
       readiness: () => ({
         protocolVersion: WORKER_PROTOCOL_VERSION,
+        probe: startupWorkerProbe(),
         engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
       }),
     });
@@ -2194,6 +2209,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       output: secondConnection.stream,
       readiness: () => ({
         protocolVersion: WORKER_PROTOCOL_VERSION,
+        probe: startupWorkerProbe(),
         engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
       }),
     });
@@ -2210,7 +2226,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
   }
 });
 
-test('real Gateway startup rejects missing, mismatched, and non-worker probe records before durable commit (R118-API-002, R118-BOUNDARY-003)', async () => {
+test('real Gateway startup rejects invalid target probes and empty-target worker/info probes before durable commit (R118-API-002, R118-BOUNDARY-003)', async () => {
   const { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } = await import(
     './worker/enrollment-connector.ts'
   );
@@ -2221,15 +2237,17 @@ test('real Gateway startup rejects missing, mismatched, and non-worker probe rec
     at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
     source: 'worker', version: '0.154.0', summary: 'safe startup probe',
   };
-  const invalidResults: readonly { readonly name: string; readonly value: unknown }[] = [
+  const invalidResults: readonly { readonly name: string; readonly source: 'probe-result' | 'worker-info'; readonly value: unknown }[] = [
     {
       name: 'missing returned probe',
+      source: 'probe-result',
       value: {
         readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
       },
     },
     {
       name: 'mismatched embedded and returned probes',
+      source: 'probe-result',
       value: {
         readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
         probe: { ...validProbe, summary: 'different returned probe' },
@@ -2237,6 +2255,7 @@ test('real Gateway startup rejects missing, mismatched, and non-worker probe rec
     },
     {
       name: 'provider/account probe source',
+      source: 'probe-result',
       value: {
         readiness: {
           protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -2244,6 +2263,20 @@ test('real Gateway startup rejects missing, mismatched, and non-worker probe rec
           probe: { ...validProbe, source: 'provider-account' },
         },
         probe: { ...validProbe, source: 'provider-account' },
+      },
+    },
+    {
+      name: 'empty-target worker/info missing embedded probe',
+      source: 'worker-info',
+      value: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [] },
+    },
+    {
+      name: 'empty-target worker/info malformed embedded probe',
+      source: 'worker-info',
+      value: {
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [],
+        probe: { ...validProbe, unexpected: 'not part of the closed shape' },
       },
     },
   ];
@@ -2256,13 +2289,13 @@ test('real Gateway startup rejects missing, mismatched, and non-worker probe rec
       configuration: hostConfiguration({
         databasePath: join(directory, 'sprout.db'),
         environmentSource: 'enrollment',
-        runtimeConfiguration: {
+        ...(fixture.source === 'probe-result' ? { runtimeConfiguration: {
           agents: [
             { ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' },
             agent('scribe'),
           ],
           project: project(),
-        },
+        } } : {}),
       }),
       projectRoot: '/synthetic/project-root',
     });
@@ -2312,10 +2345,19 @@ test('real Gateway startup rejects missing, mismatched, and non-worker probe rec
         engines: new Map(),
         input: connection.stream,
         output: connection.stream,
-        readinessProbe: async () => {
-          calls += 1;
-          return fixture.value as never;
-        },
+        ...(fixture.source === 'probe-result'
+          ? {
+              readinessProbe: async () => {
+                calls += 1;
+                return fixture.value as never;
+              },
+            }
+          : {
+              readiness: () => {
+                calls += 1;
+                return fixture.value as never;
+              },
+            }),
       });
 
       // Invoke the same automatic observer that acceptance schedules, but await

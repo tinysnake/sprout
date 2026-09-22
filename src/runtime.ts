@@ -80,7 +80,7 @@ import {
 import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { createWorkerProbeRequester } from './worker/readiness-requester.ts';
-import { isCompleteWorkerReadinessProbeResult } from './worker/readiness-ingress.ts';
+import { validateWorkerReadinessProbeResult } from './worker/readiness-ingress.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
@@ -1111,19 +1111,33 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       if (currentEnrollment === undefined || currentEnrollment.status !== 'approved' || !isCurrent()) return;
       let readiness: WorkerReadinessFacts | undefined;
       try {
-        const probe = acceptance.requiredModels.length === 0 || runtimeEnvironment.probeReadiness === undefined
-          ? undefined
-          : await runtimeEnvironment.probeReadiness(enrollment.environmentInstanceId);
-        if (probe !== undefined) {
+        const requestTargetProbe = acceptance.requiredModels.length > 0 && runtimeEnvironment.probeReadiness !== undefined;
+        if (requestTargetProbe) {
+          const rawProbe = await runtimeEnvironment.probeReadiness!(enrollment.environmentInstanceId);
           // The automatic/startup path crosses the same untrusted JSON-RPC
           // guard as an explicit POST. A typed transport result is not runtime
           // proof, and no part of an incomplete or internally inconsistent
           // observation may reach the durable commit below (R118-API-002).
-          if (!isCompleteWorkerReadinessProbeResult(probe)) return;
+          const probe = validateWorkerReadinessProbeResult(rawProbe);
+          if (probe === undefined) return;
           readiness = probe.readiness;
         } else {
           const info = await runtimeEnvironment.info?.(enrollment.environmentInstanceId);
-          readiness = info?.readiness;
+          if (info?.readiness === undefined) {
+            retryAfterWorkerStarts();
+            return;
+          }
+          // With no configured target model the startup observation comes from
+          // the authenticated `worker/info` fallback. Reconstruct its complete
+          // probe result from the embedded fact so it crosses the exact same
+          // closed-shape validator and sanitizer as an explicit POST. Missing
+          // or malformed embedded probes never reach the service/store.
+          const probe = validateWorkerReadinessProbeResult({
+            readiness: info.readiness,
+            probe: info.readiness.probe,
+          });
+          if (probe === undefined) return;
+          readiness = probe.readiness;
         }
       } catch {
         // A channel that cannot identify itself is already offline; the close

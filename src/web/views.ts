@@ -30,6 +30,7 @@ import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environme
 import {
   sanitizeIdentifier,
   sanitizeOperatorText,
+  sanitizeProbeVersion,
   sanitizeProtocolVersion,
   DEFAULT_COMPATIBILITY_DETAIL,
   DEFAULT_DECISION_REASON,
@@ -484,23 +485,9 @@ export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeRe
     // Worker text.
     ...(probe.source === 'worker' ? { source: 'worker' as const } : {}),
     ...(probe.version !== undefined
-      ? { version: probeVersionOrUnknown(probe.version) }
+      ? { version: sanitizeProbeVersion(probe.version) }
       : {}),
   };
-}
-
-/**
- * The one probe-version sanitizer for both probe history and GET readiness.
- *
- * A Worker that reports multiple engines produces an aggregate version like
- * `0.154.0, 0.86.1`. Both projections must accept that legal shape identically,
- * or the same observation would be degraded to `unknown-version` in one place
- * and preserved in the other (R118-PROVENANCE-005).
- */
-export function probeVersionOrUnknown(version: string): string {
-  return /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(version)
-    ? version
-    : 'unknown-version';
 }
 
 export function toEnvironmentReadinessView(input: {

@@ -265,6 +265,41 @@ test('a real accepted Worker probe crosses the gateway epoch and GET returns coh
   assert.deepEqual(readinessBody.probes.map((p) => p.version), ['0.86.1']);
 });
 
+test('POST returns the committed sanitized probe when the Worker version is unknown (R118-API-002)', async (t) => {
+  const h = await harness();
+  const key = tmpKey();
+  t.after(async () => { key.cleanup(); await h.close(); });
+  await enrollAndApprove(h, key.path);
+  await h.connect(key.path, async () => {
+    const probe = {
+      at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
+      source: 'worker' as const, version: 'unknown', summary: 'Worker probe version unavailable.',
+    };
+    return {
+      readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe },
+      probe,
+    };
+  });
+  await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
+
+  const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
+  const responseText = await response.text();
+  assert.equal(response.status, 201, responseText);
+  const returned = JSON.parse(responseText) as { probe: { version?: string } };
+  assert.equal(returned.probe.version, 'unknown-version');
+  const committed = await h.enrollments.listProbes('enroll-1');
+  assert.equal(committed.at(-1)?.version, 'unknown-version');
+  assert.deepEqual(returned.probe, {
+    at: committed.at(-1)?.at,
+    latencyMs: committed.at(-1)?.latencyMs,
+    protocolOk: committed.at(-1)?.protocolOk,
+    enginesOk: committed.at(-1)?.enginesOk,
+    source: committed.at(-1)?.source,
+    version: committed.at(-1)?.version,
+    summary: committed.at(-1)?.summary,
+  });
+});
+
 test('the authenticated JSON-RPC probe receives only core-configured target models (R118-MODEL-004)', async (t) => {
   const h = await harness();
   const key = tmpKey();

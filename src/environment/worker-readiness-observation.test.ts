@@ -435,7 +435,7 @@ test('a Worker-declared provider/account identity never reaches the durable read
   assert.equal(stored?.engines[0]?.source, undefined);
 });
 
-test('direct service observations discard every non-worker probe source before durable storage (R118-BOUNDARY-003)', async () => {
+test('direct service observations reject every non-worker probe source before durable storage (R118-BOUNDARY-003)', async () => {
   for (const source of ['provider-account', 'openai-codex', 'unknown']) {
     const { service, store } = await enrolled();
     const readiness = {
@@ -450,11 +450,10 @@ test('direct service observations discard every non-worker probe source before d
       readiness as never,
       { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
     );
-    assert.equal(recorded, true);
+    assert.equal(recorded, false);
     const durable = await store.listProbes('env-1');
-    assert.equal(durable.length, 1);
-    assert.equal(durable[0]?.source, undefined, `${source} must not become durable provenance`);
+    assert.equal(durable.length, 0, `${source} must not become durable provenance`);
     assert.equal((await service.readiness('enroll-1')).readiness.probe?.source, undefined);
-    assert.equal((await service.listProbes('enroll-1'))[0]?.source, undefined);
+    assert.deepEqual(await service.listProbes('enroll-1'), []);
   }
 });

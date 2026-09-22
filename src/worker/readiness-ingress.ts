@@ -1,4 +1,5 @@
-import type { WorkerReadinessProbeResult } from './protocol.ts';
+import { DEFAULT_PROBE_SUMMARY, sanitizeOperatorText, sanitizeProbeVersion } from '../environment/privacy.ts';
+import type { WorkerProbeFact, WorkerReadinessProbeResult } from './protocol.ts';
 
 /**
  * Validate one authenticated Worker's readiness-probe JSON-RPC result.
@@ -8,20 +9,48 @@ import type { WorkerReadinessProbeResult } from './protocol.ts';
  * durable write, including the requirement that the embedded and returned
  * probe records describe exactly the same Worker observation.
  */
-export function isCompleteWorkerReadinessProbeResult(
+export function validateWorkerReadinessProbeResult(
   value: unknown,
-): value is WorkerReadinessProbeResult {
+): WorkerReadinessProbeResult | undefined {
   if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe']) || !isWorkerProbe(value.probe)) {
-    return false;
+    return undefined;
   }
   const readiness = value.readiness;
   if (!isRecord(readiness) || !hasOnlyKeys(readiness, ['protocolVersion', 'observedAt', 'engines', 'probe'])) {
-    return false;
+    return undefined;
   }
-  if (typeof readiness.protocolVersion !== 'string' || readiness.protocolVersion === '') return false;
-  if (readiness.observedAt !== undefined && !isNonNegativeInteger(readiness.observedAt)) return false;
-  if (!Array.isArray(readiness.engines) || !readiness.engines.every(isWorkerEngine)) return false;
-  return isWorkerProbe(readiness.probe) && sameWorkerProbe(readiness.probe, value.probe);
+  if (typeof readiness.protocolVersion !== 'string' || readiness.protocolVersion === '') return undefined;
+  if (readiness.observedAt !== undefined && !isNonNegativeInteger(readiness.observedAt)) return undefined;
+  if (!Array.isArray(readiness.engines) || !readiness.engines.every(isWorkerEngine)) return undefined;
+  if (!isWorkerProbe(readiness.probe) || !sameWorkerProbe(readiness.probe, value.probe)) return undefined;
+
+  // Normalize only after the closed raw records have compared equal. This
+  // keeps a mismatch from becoming equal merely because two hostile values
+  // collapse to the same fallback, while ensuring the requester, durable
+  // sanitizer, and readback all compare the same privacy-reduced fact.
+  const probe = sanitizeWorkerProbe(value.probe);
+  return {
+    readiness: {
+      protocolVersion: readiness.protocolVersion,
+      ...(readiness.observedAt !== undefined ? { observedAt: readiness.observedAt } : {}),
+      engines: readiness.engines,
+      probe,
+    },
+    probe,
+  };
+}
+
+/** The canonical privacy reduction for an authenticated Worker probe payload. */
+export function sanitizeWorkerProbe(probe: WorkerProbeFact): WorkerProbeFact {
+  return {
+    at: probe.at,
+    latencyMs: probe.latencyMs,
+    protocolOk: probe.protocolOk,
+    enginesOk: probe.enginesOk,
+    source: 'worker',
+    version: sanitizeProbeVersion(probe.version),
+    summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
+  };
 }
 
 function isWorkerEngine(value: unknown): boolean {
