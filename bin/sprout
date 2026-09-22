@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+/**
+ * The `sprout` command entry point (#117).
+ *
+ * The only subcommand tree today is `sprout worker <command>`, which owns the
+ * macOS Worker enrollment and signed-in-user LaunchAgent lifecycle. This file is
+ * deliberately a thin dispatcher: the Worker CLI holds the behaviour and its own
+ * process entry point, so no command logic lives here.
+ */
+
+import { main as workerMain } from '../src/worker/cli/worker-cli.ts';
+import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
+
+const [, , command, ...rest] = process.argv;
+
+switch (command) {
+  case 'worker':
+    // Darwin's process inspection reports the environment supplied at exec,
+    // not variables added later by Node. Re-exec `start` once with its opaque
+    // local owner token so status/locks can bind the daemon to an actual OS
+    // process incarnation without putting identity material in argv.
+    if ((rest[0] === 'start' || rest[0] === 'reset') && process.env['SPROUT_WORKER_OWNER_TOKEN'] === undefined) {
+      const child = spawn(process.execPath, process.argv.slice(1), {
+        env: { ...process.env, SPROUT_WORKER_OWNER_TOKEN: randomBytes(32).toString('base64url') },
+        stdio: 'inherit',
+      });
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code) => resolve(code ?? 1));
+      });
+      process.exit(exitCode);
+    }
+    process.exit(await workerMain(rest));
+    break;
+  case undefined:
+  case 'help':
+  case '--help':
+  case '-h':
+    process.stdout.write('Usage: sprout <command>\n\nCommands:\n  worker   Manage the macOS Environment Worker\n');
+    process.exit(command === undefined ? 2 : 0);
+    break;
+  default:
+    process.stderr.write(`sprout: unknown command "${command}"\n`);
+    process.exit(2);
+}

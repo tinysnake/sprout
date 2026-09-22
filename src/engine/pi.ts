@@ -203,12 +203,8 @@ export class PiSession implements EngineSession {
 
     // Pi's diagnostics explain a failure; forward them rather than letting them
     // fill a pipe nobody reads.
-    turnProcess.stderr.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      if (text.trim() !== '' && this.#options.env?.['SPROUT_PI_VERBOSE'] === '1') {
-        process.stderr.write(`[pi] ${text}`);
-      }
-    });
+  // Drain without forwarding raw engine diagnostics across the Worker log boundary.
+  turnProcess.stderr.on('data', () => undefined);
 
     return { events: queue, completion };
   }

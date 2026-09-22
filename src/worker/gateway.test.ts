@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -76,6 +76,19 @@ function tmpKey(): { readonly path: string; readonly cleanup: () => void } {
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
   };
 }
+
+test('reusing a Worker identity requires exact owner-only mode and valid key content', () => {
+  const key = tmpKey();
+  try {
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /valid Ed25519 private key/);
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    chmodSync(key.path, 0o644);
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /invalid permissions/);
+  } finally {
+    key.cleanup();
+  }
+});
 
 function target(port: number, claimSecret: string, keyPath: string): WorkerEnrollmentTarget {
   return { enrollmentId: 'enroll-1', host: '127.0.0.1', port, claimSecret, identityKeyPath: keyPath };
@@ -469,7 +482,12 @@ test('channel loss invalidates the epoch, and a reconnect receives a newer one',
  */
 
 /** A raw WS handshake whose readiness barrier the test drives frame by frame. */
-async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
+async function openRawWorker(
+  h: Harness,
+  keyPath: string,
+  claimSecret: string,
+  protocolVersion: unknown = WORKER_PROTOCOL_VERSION,
+) {
   const { WebSocket, createWebSocketStream } = await import('ws');
   const identity = loadOrCreateWorkerIdentity(keyPath);
   const publicKey = workerPublicKey(identity.privateKey);
@@ -515,7 +533,7 @@ async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
           signature: signWorkerChallenge(identity.privateKey, challenge),
         },
         platform: 'macos',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
+        protocolVersion,
         engineFacts: [],
       });
       continue;
@@ -523,6 +541,97 @@ async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
     return { socket, stream, frame, next, write, close: () => socket.close() };
   }
 }
+
+test('a real gateway refusal never echoes malformed protocol evidence to the stream or diagnostics', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  const privacyMarker = 'SPROUT_SYNTHETIC_PROTOCOL_SENTINEL_7d6c0d34c9174db09f9cd0c860fc92a1';
+  const privatePath = `/synthetic-private/${privacyMarker}/worker.sock`;
+  const networkEndpoint = `${privacyMarker.toLowerCase()}.invalid:61947`;
+  const hostileProtocol = `1;marker=${privacyMarker};path=${privatePath};endpoint=${networkEndpoint}`;
+  const fixedReason = 'the Worker protocol is incompatible with this Sprout build';
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+
+    const raw = await openRawWorker(h, key.path, '', hostileProtocol);
+    assert.deepEqual(raw.frame, {
+      type: 'worker/refused',
+      reason: fixedReason,
+      code: 'incompatible',
+    });
+    raw.close();
+
+    const logs: string[] = [];
+    let refusalMessage = '';
+    await assert.rejects(
+      () => connectWorkerEnrollment({
+        target: target(h.port, '', key.path),
+        protocolVersion: hostileProtocol,
+        engineFacts: [],
+        log: (line) => logs.push(line),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        refusalMessage = error.message;
+        assert.equal(refusalMessage, fixedReason);
+        return true;
+      },
+    );
+
+    const durable = await h.enrollments.readiness('enroll-1');
+    assert.deepEqual(durable.readiness.compatibility, {
+      state: 'incompatible',
+      detail: fixedReason,
+    });
+    const exposed = JSON.stringify({ refusal: raw.frame, reason: refusalMessage, connectorLogs: logs, readiness: durable });
+    for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
+      assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through an exposed surface: ${sentinel}`);
+    }
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('a real gateway refuses every present non-string protocol version without retaining its value', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  const privacyMarker = 'SPROUT_SYNTHETIC_NONSTRING_SENTINEL_2d606e03b65a4f95a839063bbd8179bd';
+  const fixedRefusal = {
+    type: 'worker/refused',
+    reason: 'the Worker protocol is incompatible with this Sprout build',
+    code: 'incompatible',
+  };
+  const malformedVersions: readonly { readonly kind: string; readonly value: unknown }[] = [
+    { kind: 'number', value: 2 },
+    { kind: 'object', value: { marker: privacyMarker, path: `/synthetic-private/${privacyMarker}/worker.sock` } },
+    { kind: 'array', value: [privacyMarker, `${privacyMarker.toLowerCase()}.invalid:61947`] },
+    { kind: 'null', value: null },
+  ];
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+
+    for (const malformed of malformedVersions) {
+      const raw = await openRawWorker(h, key.path, '', malformed.value);
+      assert.deepEqual(raw.frame, fixedRefusal, `${malformed.kind} protocolVersion must fail closed`);
+      raw.close();
+
+      const readiness = await h.enrollments.readiness('enroll-1');
+      assert.deepEqual(readiness.readiness.compatibility, {
+        state: 'incompatible',
+        detail: fixedRefusal.reason,
+      });
+      const exposed = JSON.stringify({ refusal: raw.frame, reason: fixedRefusal.reason, readiness });
+      assert.equal(exposed.includes(privacyMarker), false, `${malformed.kind} protocolVersion entered diagnostics`);
+      assert.equal(h.gateway.liveFor('mac-mini-1'), undefined, `${malformed.kind} protocolVersion was accepted`);
+    }
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
 
 test('concurrent claims with the same secret over HTTP yield exactly one success', async () => {
   const h = await harness();

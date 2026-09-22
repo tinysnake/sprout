@@ -156,6 +156,33 @@ test('protocol compatibility is derived from the reported major version, not gue
   assert.equal(protocolMajor('nonsense'), undefined);
 });
 
+test('malformed protocol evidence is incompatible without entering readiness diagnostics', () => {
+  const privacyMarker = 'SPROUT_SYNTHETIC_READINESS_SENTINEL_3f97bb53d5ac42c89dc598d04cc88f52';
+  const privatePath = `/synthetic-private/${privacyMarker}/worker.sock`;
+  const networkEndpoint = `${privacyMarker.toLowerCase()}.invalid:61947`;
+  const hostileProtocol = `1;marker=${privacyMarker};path=${privatePath};endpoint=${networkEndpoint}`;
+  const supported = { minMajor: 2, maxMajor: 2 };
+  assert.deepEqual(protocolCompatibility(hostileProtocol, supported), {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+
+  const observed = observedFactsFromWorkerReadiness({
+    protocolVersion: hostileProtocol,
+    engines: [],
+    at: 5_000,
+    supported,
+  });
+  assert.deepEqual(observed.compatibility, {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+  const exposed = JSON.stringify(observed);
+  for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
+    assert.equal(exposed.includes(sentinel), false, `protocol evidence entered readiness: ${sentinel}`);
+  }
+});
+
 test('work safety is projected from the lease registry without collapsing other facts', () => {
   assert.equal(
     workSafetyFromLeases([{ instanceId: 'env-1', state: 'active' }], 'env-1'),

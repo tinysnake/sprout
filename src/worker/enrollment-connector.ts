@@ -19,12 +19,13 @@
  */
 
 import { createPrivateKey, createPublicKey } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
 
-import { generateWorkerIdentity, signWorkerChallenge } from '../environment/worker-proof.ts';
+import { generateWorkerIdentity, signWorkerChallenge, validateWorkerIdentityPrivateKey } from '../environment/worker-proof.ts';
 import { isLoopbackAddress } from '../environment/worker-transport.ts';
 import type { WorkerEnrollmentTarget } from '../host-config.ts';
+import { PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
 import {
   encodeGatewayFrame,
   type WorkerGatewayClientFrame,
@@ -63,6 +64,35 @@ export interface WorkerEnrollmentConnection {
 /** Raised when the core refuses the enrollment connection. */
 export class WorkerEnrollmentRefusedError extends Error {
   override readonly name = 'WorkerEnrollmentRefusedError';
+  /** The core's neutral refusal category, when it named one. */
+  readonly code: 'refused' | 'incompatible' | 'revoked';
+
+  constructor(message: string, code: 'refused' | 'incompatible' | 'revoked' = 'refused') {
+    super(message);
+    this.code = code;
+  }
+}
+
+/**
+ * Raised when the identity is proven but a Human has not approved it yet.
+ *
+ * This is deliberately distinct from a refusal: the enrollment succeeded and the
+ * host-local identity is now bound, so the CLI persists its configuration and a
+ * later `start` reconnects once a Human approves. Treating it as a refusal would
+ * tell an operator their enrollment failed when it did not (#117).
+ */
+export class WorkerEnrollmentPendingError extends Error {
+  override readonly name = 'WorkerEnrollmentPendingError';
+  /** The core's outcome code (`identity-claimed`, `duplicate-same-key`, …). */
+  readonly outcome: string;
+  /** The environment instance the proven identity belongs to, when disclosed. */
+  readonly environmentInstanceId: string | undefined;
+
+  constructor(outcome: string, environmentInstanceId?: string) {
+    super(`the Sprout instance proved the Worker identity and is awaiting Human approval (${outcome})`);
+    this.outcome = outcome;
+    this.environmentInstanceId = environmentInstanceId;
+  }
 }
 
 /**
@@ -71,7 +101,8 @@ export class WorkerEnrollmentRefusedError extends Error {
  * The private key is written with owner-only permissions and is never read by
  * Sprout. This is the host's credential, not a portable record: a key file that
  * exists but is unreadable is an error rather than a reason to silently rotate
- * identity and orphan the approved enrollment.
+ * identity and orphan the approved enrollment. Only an absent file generates a
+ * new identity; every other read failure is propagated.
  */
 export function loadOrCreateWorkerIdentity(keyPath: string): {
   readonly privateKey: string;
@@ -79,12 +110,23 @@ export function loadOrCreateWorkerIdentity(keyPath: string): {
 } {
   let privateKey: string;
   try {
+    const stat = lstatSync(keyPath);
+    if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+      throw new Error('the host-local Worker identity key has invalid permissions');
+    }
     privateKey = readFileSync(keyPath, 'utf8');
-  } catch {
-    const generated = generateWorkerIdentity();
-    writeFileSync(keyPath, generated.privateKey, { mode: 0o600 });
-    return { privateKey: generated.privateKey, generated: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const generated = generateWorkerIdentity();
+      // Owner-only, staged and renamed, so a key is never readable by other users
+      // and is never observed half-written (#117).
+      writePrivateFile(keyPath, generated.privateKey);
+      return { privateKey: generated.privateKey, generated: true };
+    }
+    if (error instanceof Error && error.message.startsWith('the host-local')) throw error;
+    throw new Error('the host-local Worker identity key could not be read');
   }
+  validateWorkerIdentityPrivateKey(privateKey);
   return { privateKey, generated: false };
 }
 
@@ -128,7 +170,7 @@ export async function connectWorkerEnrollment(
     socket.on('error', (error: Error) => reject(error));
   });  options.log?.(
     identity.generated
-      ? `generated a host-local Worker identity at ${options.target.identityKeyPath}`
+      ? 'generated a host-local Worker identity'
       : 'loaded the host-local Worker identity',
   );
 
@@ -188,14 +230,16 @@ export async function connectWorkerEnrollment(
           close: () => socket.close(),
         };
       }
-      // `worker/pending` and `worker/refused` are both terminal for this attempt.
+      // `worker/pending` is terminal for this attempt but not a refusal: the
+      // identity is bound and only Human approval remains (#117).
       if (frame.type === 'worker/pending') {
         socket.close();
-        throw new WorkerEnrollmentRefusedError(`awaiting Human approval (${frame.outcome})`);
+        throw new WorkerEnrollmentPendingError(frame.outcome, frame.environmentInstanceId);
       }
       const reason = frame.type === 'worker/refused' ? frame.reason : 'the Sprout instance refused the connection';
+      const code = frame.type === 'worker/refused' ? (frame.code ?? 'refused') : 'refused';
       socket.close();
-      throw new WorkerEnrollmentRefusedError(reason);
+      throw new WorkerEnrollmentRefusedError(reason, code);
     }
   } catch (error) {
     reader.dispose();

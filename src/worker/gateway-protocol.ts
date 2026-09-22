@@ -37,7 +37,15 @@ export interface WorkerGatewayProve {
   readonly type: 'worker/prove';
   readonly proof: WorkerIdentityProof;
   readonly platform: string;
-  readonly protocolVersion?: string;
+  /**
+   * Untrusted JSON evidence retained with its original type.
+   *
+   * The decoder must distinguish an omitted version from a present value of
+   * the wrong JSON type so the gateway can fail the latter closed. Consumers
+   * may validate a string token, but must never repeat the raw value in an
+   * operator-visible or durable diagnostic.
+   */
+  readonly protocolVersion?: unknown;
   readonly capabilityRequests?: readonly string[];
   readonly engineFacts?: readonly EnrollmentEngineFact[];
 }
@@ -96,12 +104,27 @@ export interface WorkerGatewayPending {
   readonly type: 'worker/pending';
   readonly enrollmentId: string;
   readonly outcome: string;
+  /**
+   * The environment instance the proven identity belongs to, when known.
+   *
+   * The Worker CLI persists it so a later `start` and its LaunchAgent can be
+   * installed before a Human approves, without inventing a host identity (#117).
+   */
+  readonly environmentInstanceId?: string;
 }
 
 /** The core refused the connection before any Worker command was accepted. */
 export interface WorkerGatewayRefused {
   readonly type: 'worker/refused';
   readonly reason: string;
+  /**
+   * A neutral, machine-readable refusal category (#117).
+   *
+   * The Worker CLI uses it to distinguish an `incompatible` protocol from a
+   * `revoked` identity so `status` can report the right state instead of a bare
+   * `stopped`. It carries no host or credential detail.
+   */
+  readonly code?: 'refused' | 'incompatible' | 'revoked';
 }
 
 export type WorkerGatewayServerFrame =
@@ -158,7 +181,12 @@ export function decodeGatewayFrame(line: string): WorkerGatewayClientFrame | und
         signature: proof.signature,
       },
       platform: typeof frame.platform === 'string' ? frame.platform : '',
-      ...(typeof frame.protocolVersion === 'string' ? { protocolVersion: frame.protocolVersion } : {}),
+      // Preserve both presence and JSON type. Dropping a present non-string to
+      // `undefined` would make malformed evidence look like an older Worker
+      // that simply did not report a version, allowing it through admission.
+      ...(Object.prototype.hasOwnProperty.call(frame, 'protocolVersion')
+        ? { protocolVersion: frame.protocolVersion }
+        : {}),
       ...(Array.isArray(frame.capabilityRequests)
         ? { capabilityRequests: frame.capabilityRequests.filter((value): value is string => typeof value === 'string') }
         : {}),

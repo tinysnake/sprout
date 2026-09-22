@@ -35,12 +35,14 @@ import type { WorkerConnectionEpoch } from '../environment/worker-epoch.ts';
 import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
 import { protocolCompatibility, type ProtocolVersionRange } from '../environment/readiness.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
+import { sanitizeProtocolVersion } from '../environment/privacy.ts';
 import {
   encodeGatewayFrame,
   decodeGatewayFrame,
   type WorkerGatewayClientFrame,
   type WorkerGatewayServerFrame,
 } from './gateway-protocol.ts';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
 /** The default handshake deadline: a stalled Worker cannot hold a socket open. */
 export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
@@ -202,7 +204,7 @@ export class WorkerGateway {
   async handle(stream: Duplex, facts: WorkerTransportFacts): Promise<WorkerGatewayOutcome> {
     const decision = decideWorkerTransport(facts);
     if (!decision.allowed) {
-      safeWrite(stream, { type: 'worker/refused', reason: decision.reason });
+      safeWrite(stream, { type: 'worker/refused', reason: decision.reason, code: 'refused' });
       stream.destroy();
       return { accepted: false, reason: decision.reason };
     }
@@ -258,6 +260,12 @@ export class WorkerGateway {
     // Step 4: refuse a protocol mismatch before acceptance, so a Worker the core
     // cannot speak to never receives an epoch or carries a command.
     const compatibility = protocolCompatibility(prove.protocolVersion, this.#supportedProtocol);
+    // Only a string token can enter readiness. A present non-string remains
+    // incompatible above, but its raw JSON value dies at this boundary rather
+    // than reaching refusal JSON, logs, CLI state, or durable diagnostics.
+    const protocolVersion = typeof prove.protocolVersion === 'string'
+      ? sanitizeProtocolVersion(prove.protocolVersion)
+      : undefined;
     if (compatibility.state === 'incompatible') {
       // Record the observation (the enrollment is preserved) but do not accept.
       await this.#enrollments.connectWorker({
@@ -266,12 +274,12 @@ export class WorkerGateway {
         connection: { state: 'reconnecting' },
         compatibility: {
           ...compatibility,
-          ...(prove.protocolVersion !== undefined ? { workerProtocolVersion: prove.protocolVersion } : {}),
+          ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
         },
         engines: [],
       });
-      const reason = compatibility.detail ?? 'the Worker protocol is incompatible with this Sprout build';
-      safeWrite(stream, { type: 'worker/refused', reason });
+      const reason = WORKER_DIAGNOSTICS.protocolIncompatible;
+      safeWrite(stream, { type: 'worker/refused', reason, code: 'incompatible' });
       reader.dispose();
       stream.end();
       return { accepted: false, reason };
@@ -285,7 +293,7 @@ export class WorkerGateway {
         // The Worker's own declared version decides compatibility, so a protocol
         // mismatch blocks admission instead of being assumed compatible.
         ...compatibility,
-        ...(prove.protocolVersion !== undefined ? { workerProtocolVersion: prove.protocolVersion } : {}),
+        ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
       },
       engines: [],
     });
@@ -295,8 +303,8 @@ export class WorkerGateway {
     if (outcome.outcome !== 'reconnected') {
       const pending = awaitingApproval(outcome.requiresHumanApproval, outcome.outcome);
       safeWrite(stream, pending
-        ? { type: 'worker/pending', enrollmentId, outcome: outcome.outcome }
-        : { type: 'worker/refused', reason: 'the Worker identity is not approved for work' });
+        ? { type: 'worker/pending', enrollmentId, outcome: outcome.outcome, environmentInstanceId: outcome.enrollment.environmentInstanceId }
+        : { type: 'worker/refused', reason: 'the Worker identity is not approved for work', code: 'revoked' });
       reader.dispose();
       stream.end();
       return {
@@ -554,11 +562,22 @@ function safeWrite(stream: Duplex, frame: WorkerGatewayServerFrame): void {
 }
 
 function sanitizeReason(error: unknown): string {
-  if (error instanceof EnrollmentError) return error.message;
-  if (error instanceof WorkerProofError) {
-    return `the Worker identity proof is not valid: ${error.message}`;
+  if (error instanceof EnrollmentError) {
+    switch (error.code) {
+      case 'unknown-enrollment':
+        return WORKER_DIAGNOSTICS.enrollmentUnavailable;
+      case 'revoked-enrollment':
+        return WORKER_DIAGNOSTICS.enrollmentRevoked;
+      case 'invalid-claim':
+        return WORKER_DIAGNOSTICS.enrollmentClaimRefused;
+      case 'invalid-proof':
+        return WORKER_DIAGNOSTICS.identityProofRefused;
+      default:
+        return WORKER_DIAGNOSTICS.enrollmentRefused;
+    }
   }
-  return error instanceof Error ? error.message : 'the Worker connection was refused';
+  if (error instanceof WorkerProofError) return WORKER_DIAGNOSTICS.identityProofRefused;
+  return WORKER_DIAGNOSTICS.connectionRefused;
 }
 
 /** A machine route refusal is a precondition problem, not a server fault. */
