@@ -660,6 +660,50 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           high_water INTEGER NOT NULL CHECK (high_water > 0)
         );
       `);
+      const readinessTables = db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('environment_enrollments', 'environment_readiness')
+      `).all() as unknown as readonly { readonly name: string }[];
+      if (readinessTables.length !== 2) return;
+      // A v12 readiness document may already name an authority epoch. Seed
+      // every enrollment's allocator from that durable evidence before any
+      // post-upgrade connection can call `next()`: otherwise its first epoch
+      // could reuse (for example) epoch 1 and make stale facts authoritative.
+      //
+      // Readiness is keyed by Environment instance while epochs are keyed by
+      // enrollment, so join through the durable enrollment mapping. If legacy
+      // data has several enrollment rows for one instance, conservatively seed
+      // each of them. The UPSERT also retains a greater existing high-water if
+      // this migration is ever applied to a partially prepared store.
+      const rows = db.prepare(`
+        SELECT e.id AS enrollment_id, r.document AS readiness_document
+        FROM environment_enrollments AS e
+        INNER JOIN environment_readiness AS r
+          ON r.environment_instance_id = e.environment_instance_id
+        ORDER BY e.id
+      `).all() as unknown as readonly {
+        readonly enrollment_id: string;
+        readonly readiness_document: string;
+      }[];
+      const seed = db.prepare(`
+        INSERT INTO worker_connection_epochs (enrollment_id, high_water)
+        VALUES (?, ?)
+        ON CONFLICT(enrollment_id) DO UPDATE SET
+          high_water = MAX(worker_connection_epochs.high_water, excluded.high_water)
+      `);
+      for (const row of rows) {
+        let readiness: unknown;
+        try {
+          readiness = JSON.parse(row.readiness_document);
+        } catch {
+          continue;
+        }
+        const epoch = readiness !== null && typeof readiness === 'object'
+          ? (readiness as { readonly connectionEpoch?: unknown }).connectionEpoch
+          : undefined;
+        if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch <= 0) continue;
+        seed.run(row.enrollment_id, epoch);
+      }
     },
   },
 ];

@@ -26,6 +26,10 @@ import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
 import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from '../auth/session-policy.ts';
+import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
+import { ADMISSION_CAPABILITY, projectCatalogEntry } from '../environment/catalog.ts';
+import { createPendingEnrollment } from '../environment/enrollment.ts';
+import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-schema-test-'));
@@ -87,6 +91,97 @@ test('empty in-memory store initializes schema at current version', () => {
   assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
   assert.equal(getSchemaVersion(store.db), CURRENT_SCHEMA_VERSION);
   store.close();
+});
+
+test('v12-to-v13 seeds each enrollment epoch high-water from persisted readiness before reconnect', async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, 'sprout.db');
+    const staleReadiness = {
+      connectionEpoch: 7,
+      connection: { state: 'online' as const, lastConfirmedAt: 1 },
+      compatibility: { state: 'compatible' as const, workerProtocolVersion: '2' },
+      engines: [{
+        engine: 'scripted',
+        installed: true,
+        readiness: 'ready' as const,
+        required: true,
+        models: { state: 'available' as const, models: ['scripted-model'] },
+      }],
+    };
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      PRAGMA user_version = 12;
+      CREATE TABLE environment_enrollments (
+        id TEXT PRIMARY KEY,
+        environment_instance_id TEXT NOT NULL,
+        document TEXT NOT NULL
+      );
+      CREATE TABLE environment_readiness (
+        environment_instance_id TEXT PRIMARY KEY,
+        document TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    legacy.prepare(
+      'INSERT INTO environment_enrollments (id, environment_instance_id, document) VALUES (?, ?, ?)',
+    ).run('enrollment-a', 'instance-a', '{}');
+    legacy.prepare(
+      'INSERT INTO environment_readiness (environment_instance_id, document, updated_at) VALUES (?, ?, ?)',
+    ).run('instance-a', JSON.stringify(staleReadiness), 1);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: dbPath });
+    assert.equal(store.schemaVersion, 13);
+    const seeded = store.db.prepare(
+      'SELECT high_water FROM worker_connection_epochs WHERE enrollment_id = ?',
+    ).get('enrollment-a') as { readonly high_water: number } | undefined;
+    assert.equal(seeded?.high_water, 7, 'migration carries forward persisted epoch evidence');
+
+    const workerEpochs = new WorkerConnectionRegistry({
+      store: store.workerConnectionEpochs,
+      idFactory: () => 'connection-after-upgrade',
+    });
+    const firstPostUpgrade = workerEpochs.accept('enrollment-a');
+    assert.equal(firstPostUpgrade.epoch, 8, 'the first post-upgrade epoch is strictly newer');
+    assert.notEqual(firstPostUpgrade.epoch, 7, 'persisted readiness can never match the new connection');
+
+    const enrollment = {
+      ...createPendingEnrollment({
+        id: 'enrollment-a',
+        environmentInstanceId: 'instance-a',
+        displayName: 'Environment A',
+        identityDigest: 'identity-a',
+        platform: 'macos',
+        capabilityRequests: [ADMISSION_CAPABILITY],
+        engineFacts: [],
+        at: 1,
+      }),
+      status: 'approved' as const,
+      everApproved: true,
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    };
+    const persistedReadiness = await store.environmentReadiness.getReadiness('instance-a');
+    assert.ok(persistedReadiness !== undefined);
+    assert.equal(projectCatalogEntry({
+      enrollment,
+      observed: persistedReadiness,
+      currentEpoch: firstPostUpgrade.epoch,
+      workSafety: 'clear',
+      requiredEngines: ['scripted'],
+      supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+      now: 1,
+    }).eligible, false, 'stale v12 readiness cannot admit the new connection');
+    assert.equal(projectCatalogEntry({
+      enrollment,
+      observed: { ...staleReadiness, connectionEpoch: firstPostUpgrade.epoch },
+      currentEpoch: firstPostUpgrade.epoch,
+      workSafety: 'clear',
+      requiredEngines: ['scripted'],
+      supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+      now: 1,
+    }).eligible, true, 'only fresh readiness from the post-upgrade connection can admit');
+    store.close();
+  });
 });
 
 test('non-empty store receives pre-migration safety copy before forward migration', async () => {
