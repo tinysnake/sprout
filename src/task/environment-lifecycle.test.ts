@@ -9,7 +9,7 @@ import { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
 import { EnvironmentPool } from '../environment/pool.ts';
 import { ProjectRegistry } from '../project/registry.ts';
-import { SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import type { AgentRun } from '../run/model.ts';
 import { InMemoryTaskStore } from './store.ts';
 import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
@@ -77,7 +77,7 @@ function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void 
     import { AgentRegistry } from './src/agent/registry.ts';
     import { EnvironmentPool } from './src/environment/pool.ts';
     import { ProjectRegistry } from './src/project/registry.ts';
-    import { SqliteStore } from './src/run/sqlite-store.ts';
+    import { SqliteStore } from './src/store/db.ts';
     import { TaskEnvironmentLifecycle } from './src/task/environment-lifecycle.ts';
 
     const store = new SqliteStore({ filename: ${JSON.stringify(filename)} });

@@ -39,7 +39,7 @@ import { EnvironmentPool } from '../environment/pool.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
-import { SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { EndpointCarrier, type WorkerConnection } from '../worker/carrier.ts';
 import { CollaborationCoordinator } from './coordinator.ts';
 import type { SqliteCollaborationStore } from './sqlite-store.ts';

@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from './model.ts';
-import { SqliteRunStore, SqliteLeaseStore, SqliteStore } from './sqlite-store.ts';
+import { SqliteRunStore } from './sqlite-store.ts';
+import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -156,6 +159,11 @@ test('a run written before the project and hand-off columns existed still reads 
     (id, agent_id, prompt, environment_instance_id, status, events, created_at)
     VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
 
+  // A shared-handle domain adapter receives a schema-coordinated connection.
+  // Run the versioned migration explicitly rather than relying on its
+  // constructor to issue an unversioned ALTER TABLE.
+  migrateOrInitializeDatabase(db, { filename: ':memory:' });
+
   const store = new SqliteRunStore({ db });
   const restored = await store.get('legacy-1');
   assert.equal(restored?.environmentInstanceId, 'mac-mini-1');
@@ -180,6 +188,26 @@ test('listing runs returns them newest first', async () => {
     ['newer', 'older'],
   );
   store.close();
+});
+
+test('replay snapshots retain durable write order across equal timestamps and restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-replay-order-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ id: 'run-b', createdAt: 1_000 }));
+  await writer.save(sampleRun({ id: 'run-a', createdAt: 1_000 }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const snapshots = await reader.replaySnapshots();
+  reader.close();
+
+  assert.deepEqual(
+    snapshots.map((snapshot) => snapshot.run.id),
+    ['run-b', 'run-a'],
+    'store write order, not id order, is the restart replay order',
+  );
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.sequence), [1, 2]);
 });
 
 test('an unknown run is undefined rather than an error', async () => {
@@ -274,5 +302,66 @@ test('SqliteStore manages runs, leases, and session keys over one SQLite connect
   assert.equal(restoredLease?.runId, 'run-unified');
   assert.equal(restoredKey?.key, 'sess-unified');
 
+  store.close();
+});
+
+test('a run records the workspace binding it was admitted under, and it survives a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-run-binding-'));
+  const dbPath = join(dir, 'sprout.db');
+  const workspaceBinding = {
+    bindingId: 'binding-7',
+    workspaceId: 'c'.repeat(24),
+    kind: 'relative',
+    path: 'repos/sprout',
+  } as const;
+  const writer = new SqliteRunStore({ filename: dbPath });
+  await writer.save(sampleRun({ projectId: 'project-sprout', workspaceBinding }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+
+  assert.deepEqual(restored?.workspaceBinding, workspaceBinding);
+});
+
+test('a run with no workspace binding round-trips without inventing one', async () => {
+  const store = new SqliteRunStore({ filename: ':memory:' });
+  await store.save(sampleRun({ projectId: 'project-sprout' }));
+  const restored = await store.get('run-1');
+  store.close();
+  assert.equal('workspaceBinding' in (restored ?? {}), false);
+});
+
+test('a run written before the workspace binding column existed still reads back', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      events TEXT NOT NULL,
+      lease_id TEXT,
+      failure TEXT,
+      result TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+  `);
+  db.exec(`INSERT INTO agent_runs
+    (id, agent_id, prompt, environment_instance_id, status, events, created_at)
+    VALUES ('legacy-1', 'agent-scout', 'hi', 'mac-mini-1', 'completed', '[]', 1)`);
+
+  migrateOrInitializeDatabase(db, { filename: ':memory:' });
+
+  const store = new SqliteRunStore({ db });
+  const restored = await store.get('legacy-1');
+  assert.equal('workspaceBinding' in (restored ?? {}), false);
+
+  await store.save(sampleRun({ id: 'after-migration', workspaceBinding: { workspaceId: 'd'.repeat(24), kind: 'default' } }));
+  const migrated = await store.get('after-migration');
+  assert.equal(migrated?.workspaceBinding?.workspaceId, 'd'.repeat(24));
   store.close();
 });

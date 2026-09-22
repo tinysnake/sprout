@@ -20,6 +20,11 @@ export class ProjectRegistry {
     this.#projects.set(project.id, project);
   }
 
+  /** Remove one routable projection while retaining its durable owner elsewhere. */
+  remove(projectId: string): void {
+    this.#projects.delete(projectId);
+  }
+
   get(projectId: string): Project | undefined {
     return this.#projects.get(projectId);
   }

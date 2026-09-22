@@ -1,29 +1,36 @@
 <script setup lang="ts">
-import { useRouter } from 'vue-router';
+/**
+ * The phone drill-down header for a detail record.
+ *
+ * It replaces the destination header while one record is open, giving the
+ * operator a labelled return control and the record's own identity and status.
+ * The destination chooses the label and target, so the same component serves
+ * every master/detail destination without knowing their domain.
+ */
+import { useRouter, type RouteLocationRaw } from 'vue-router';
 import StatusDot from '../primitives/StatusDot.vue';
 import Icon from '../primitives/Icon.vue';
 
 export interface MobileDetailHeaderProps {
   title: string;
-  trafficLight?: 'green' | 'yellow' | 'red';
-  backTo?: string;
+  backTo: RouteLocationRaw;
+  backLabel?: string;
+  backControlId?: string;
+  trafficLight?: 'green' | 'yellow' | 'red' | 'neutral';
   class?: string;
 }
 
 const props = withDefaults(defineProps<MobileDetailHeaderProps>(), {
-  trafficLight: 'neutral' as any,
-  backTo: '/manage/environments',
+  backLabel: 'Back',
+  backControlId: 'btn-mobile-detail-back',
+  trafficLight: 'neutral',
   class: '',
 });
 
 const router = useRouter();
 
 function handleBack() {
-  if (props.backTo) {
-    router.push(props.backTo);
-  } else {
-    router.back();
-  }
+  router.push(props.backTo);
 }
 </script>
 
@@ -33,21 +40,19 @@ function handleBack() {
     :class="props.class"
   >
     <button
-      id="btn-back-to-envs"
+      :id="backControlId"
       type="button"
-      class="back-to-envs-btn flex items-center gap-1 px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs font-semibold text-[var(--text-primary)] cursor-pointer min-h-[36px] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
-      title="Back to Environments"
-      aria-label="Back to environments list"
+      class="back-to-list-btn flex items-center gap-1 px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs font-semibold text-[var(--text-primary)] cursor-pointer min-h-[44px] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+      :title="backLabel"
+      :aria-label="backLabel"
       @click="handleBack"
-      @keydown.enter="handleBack"
-      @keydown.space.prevent="handleBack"
     >
       <Icon name="chevron-left" :size="14" />
-      <span class="back-btn-text">Back</span>
+      <span class="back-btn-text">{{ backLabel }}</span>
     </button>
 
-    <div class="mobile-detail-title-wrap flex items-center gap-2 max-w-[200px] truncate">
-      <StatusDot v-if="trafficLight" :status="trafficLight" size="sm" />
+    <div class="mobile-detail-title-wrap flex items-center gap-2 max-w-[60%] truncate">
+      <StatusDot :status="trafficLight" size="sm" />
       <span class="mobile-detail-title-text text-xs font-bold text-[var(--text-primary)] truncate">
         {{ title }}
       </span>

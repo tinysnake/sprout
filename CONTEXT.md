@@ -228,9 +228,21 @@ _Avoid_: Environment definition, workspace
 The Human-approved binding between one Environment instance, one Sprout instance, and a Worker identity whose private key remains on the Environment host. Enrollment is independent of current connectivity, protocol compatibility, engine readiness, and Project access.
 _Avoid_: Engine login, transport reachability, Project Environment access
 
+**Environment catalog**:
+The Sprout-owned directory of enrolled Environment instances and their definitions from which current work-admission eligibility is projected. An instance remains in the catalog while offline, incompatible, archived, or recovering so its identity and history remain intact.
+_Avoid_: Online Worker list, Environment pool
+
 **Environment worker**:
 The Sprout-owned process inside one environment instance that starts and supervises engine sessions on behalf of agent runs. It supervises an engine CLI; it does not implement an agent runtime.
 _Avoid_: Agent, daemon, backend
+
+**Worker connection epoch**:
+The monotonic authority generation of one authenticated Environment worker connection. Only the current epoch may report Worker facts or run events; a replaced epoch has no authority even if its transport remains open.
+_Avoid_: Session key, reconnect count
+
+**Environment readiness probe**:
+A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
+_Avoid_: Heartbeat, smoke run, hidden model call
 
 **Environment lease**:
 A time-bounded right to use an environment instance's lease-requiring capabilities, held either by a durable Task or by a one-round agent run. Uncommitted working files remain with the lease until preserved or discarded.

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
 import { EnvironmentPool } from '../environment/pool.ts';
-import { SqliteProjectStore, SqliteStore } from '../run/sqlite-store.ts';
+import { SqliteStore } from '../store/db.ts';
+import { SqliteProjectStore } from './sqlite-store.ts';
 import type { Project } from './model.ts';
 import { ProjectRegistry } from './registry.ts';
 import { resolveEnvironmentInstance } from './resolve.ts';

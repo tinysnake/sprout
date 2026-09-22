@@ -61,7 +61,13 @@ export interface TaskStore {
     },
   ): Promise<boolean>;
 
-  /** Commit a Task's beginning intent and its Task lease together. */
+  /**
+   * Commit a Task's beginning intent and its Task lease together.
+   *
+   * One shared transaction: the Task row and the lease row commit or roll back
+   * as one state. The lease statements belong to the environment domain and are
+   * reached through its `TaskLeaseBinding` port, not issued here.
+   */
   saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void>;
 
   /** Commit a terminal Task state and release its Task lease together. */

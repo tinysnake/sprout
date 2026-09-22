@@ -1,13 +1,38 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { TLSSocket } from 'node:tls';
+import { createHash } from 'node:crypto';
+
+import { WebSocketServer } from 'ws';
+import { createWebSocketStream } from 'ws';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
-import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
-import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
-import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
+import type { TaskStatus } from '../task/model.ts';
+import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
+import { composeApiRouters, type ApiRouter } from './router.ts';
+import type { WorkerGateway } from '../worker/gateway.ts';
+import {
+  summarizeRunHistory,
+  toMessageView,
+  toProjectView,
+  toRunView,
+  toTaskView,
+  toTaskWithRunsView,
+  toWakeView,
+} from './views.ts';
+
+/**
+ * `views.ts` owns the wire contract. Re-exported here so the M1 transport's
+ * existing importers keep working; new callers (M2 routers, browser adapters)
+ * import from `views.ts` directly.
+ */
+export * from './views.ts';
+
+/** The single machine-authenticated Worker upgrade path (ADR-0012). */
+export const WORKER_CONNECT_PATH = '/api/worker/connect';
 
 /**
  * The Web seam for M1.
@@ -48,11 +73,26 @@ export interface RunApiOptions {
    * service so the Task lifecycle has exactly one implementation.
    */
   readonly tasks?: TaskService;
+  /**
+   * M2's one-Operator browser boundary. Omitted only for the preserved M1
+   * transport seam and its direct contract tests; runtime composition supplies
+   * it and then every API read/write is session-authenticated.
+   */
+  readonly auth?: OperatorSessionService;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
   /** Interval for SSE keep-alive comments. Exposed so tests need not wait. */
   readonly keepAliveMs?: number;
+  /** Additive M2 domain routers, run after transport authorization. */
+  readonly routers?: readonly ApiRouter[];
+  /**
+   * The enrollment-backed outbound Worker gateway (#115). When present, the
+   * transport accepts the machine-authenticated WS/WSS upgrade at
+   * `/api/worker/connect`; it is deliberately independent of the Human browser
+   * session and CSRF boundary.
+   */
+  readonly workerGateway?: WorkerGateway;
 }
 
 export interface RunApi {
@@ -62,29 +102,180 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents, collaboration, projects, tasks } = options;
+  const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
+  const additiveRouters = composeApiRouters(options.routers ?? []);
+  const eventLog = new SseEventLog();
+  // One subscription fans out through the cursor log. This avoids one
+  // orchestrator subscription per browser and gives reconnects a stable replay
+  // boundary without changing the durable Run/event contract.
+  const unsubscribeRunEvents = orchestrator.subscribe((run, replaySequence) =>
+    eventLog.publish(toRunView(run), replaySequence),
+  );
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
       sendJson(response, 500, {
-        error: error instanceof Error ? error.message : String(error),
+        error: responseError(error, auth !== undefined),
       });
     });
   });
 
+  // The machine-authentication boundary (#115). A Worker initiates this upgrade
+  // off-loopback only over WSS; loopback may use WS. It is handled before the
+  // browser `request` path and never reads a cookie, CSRF token, or Human actor.
+  if (options.workerGateway !== undefined) {
+    const gateway = options.workerGateway;
+    const wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (request, socket, head) => {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      if (url.pathname !== WORKER_CONNECT_PATH) {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        const encrypted = (request.socket as TLSSocket).encrypted === true;
+        const remoteAddress = request.socket.remoteAddress ?? undefined;
+        void (async () => {
+          const stream = createWebSocketStream(ws);
+          const outcome = await gateway.handle(stream, {
+            secure: encrypted,
+            remoteAddress,
+          });
+          // After acceptance the stream *is* the Worker JSON-RPC channel. The
+          // gateway notifies its accept listeners (the enrollment worker port),
+          // which owns the core-side handle from here.
+          if (!outcome.accepted) ws.close();
+        })();
+      });
+    });
+    server.on('close', () => {
+      wss.close();
+      gateway.close();
+    });
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const segments = url.pathname.split('/').filter((part) => part !== '');
+    // A request stream is one-shot. Routers and preserved routes share this
+    // memoized reader so an exploratory router cannot consume another route's
+    // command payload.
+    const readBody = memoizedJsonReader(request);
+    let browserSession: AuthenticatedBrowserSession | undefined;
+
+    // The machine-authentication boundary (#115) runs *before* the Human browser
+    // boundary and never reads a cookie, CSRF token, or Human actor. A Worker
+    // proves identity with its host-local key and a one-use claim, not with a
+    // browser session.
+    if (
+      options.workerGateway !== undefined &&
+      (await options.workerGateway.handleHttpRequest({
+        method: request.method,
+        pathname: url.pathname,
+        segments,
+        readBody,
+        json: (status, body) => sendJson(response, status, body),
+      }))
+    ) {
+      return;
+    }
+
+    // Credential exchange is the only anonymous API operation. The credential
+    // is sent in a POST body (never a URL) and succeeds by setting an HTTP-only
+    // browser cookie; the response exposes only the separate CSRF value.
+    if (auth && request.method === 'POST' && url.pathname === '/api/auth/session') {
+      if (!(await auth.isConfigured())) {
+        sendJson(response, 503, { error: 'operator access is unavailable; initialize it on the host' });
+        return;
+      }
+      const body = await readBody();
+      const credential = typeof body.credential === 'string' ? body.credential : '';
+      const signedIn = await auth.signIn(credential);
+      if (!signedIn) {
+        sendJson(response, 401, { error: 'authentication failed' });
+        return;
+      }
+      response.setHeader('set-cookie', sessionCookie(signedIn.bearerToken, signedIn.expiresAt, isTransportSecure(request)));
+      sendJson(response, 201, { csrfToken: signedIn.csrfToken });
+      return;
+    }
+
+    if (auth && url.pathname.startsWith('/api/')) {
+      const authentication = await auth.authenticate(readCookie(request, 'sprout_session'));
+      if (!authentication.authenticated) {
+        sendJson(response, 401, { error: 'authentication required' });
+        return;
+      }
+      browserSession = authentication.session;
+      // A successful request renews the rolling idle cookie only up to the
+      // persisted absolute lifetime. The server independently enforces both.
+      response.setHeader('set-cookie', sessionCookie(readCookie(request, 'sprout_session')!, browserSession.expiresAt, isTransportSecure(request)));
+      if (!isSafeMethod(request.method) && !(await auth.verifyRequestForgery(browserSession.id, headerValue(request, 'x-sprout-csrf')))) {
+        sendJson(response, 403, { error: 'request-forgery protection failed' });
+        return;
+      }
+    }
+
+    if (auth && request.method === 'GET' && url.pathname === '/api/auth/sessions') {
+      sendJson(response, 200, { sessions: await auth.listSessions(browserSession!.id) });
+      return;
+    }
+
+    if (auth && request.method === 'DELETE' && url.pathname === '/api/auth/session') {
+      await auth.revokeCurrentSession(browserSession!.id);
+      response.setHeader('set-cookie', expiredSessionCookie(isTransportSecure(request)));
+      sendJson(response, 200, { signedOut: true });
+      return;
+    }
+
+    if (auth && request.method === 'POST' && url.pathname === '/api/auth/sessions/revoke-others') {
+      sendJson(response, 200, { revoked: await auth.revokeOtherSessions(browserSession!.id) });
+      return;
+    }
+
+    if (
+      auth &&
+      request.method === 'POST' &&
+      segments.length === 5 &&
+      segments[0] === 'api' &&
+      segments[1] === 'auth' &&
+      segments[2] === 'sessions' &&
+      segments[4] === 'revoke'
+    ) {
+      const id = segments[3] ?? '';
+      const revoked = await auth.revokeSession(id);
+      if (!revoked) {
+        sendJson(response, 404, { error: 'session is unavailable' });
+        return;
+      }
+      if (id === browserSession!.id) response.setHeader('set-cookie', expiredSessionCookie(isTransportSecure(request)));
+      sendJson(response, 200, { revoked: true });
+      return;
+    }
+
+    if (
+      await additiveRouters.handle({
+        method: request.method,
+        response,
+        pathname: url.pathname,
+        searchParams: url.searchParams,
+        segments,
+        ...(browserSession !== undefined ? { operatorSessionId: browserSession.id } : {}),
+        readBody,
+      })
+    ) {
+      return;
+    }
 
     // POST /api/messages — deliver one Message to a project channel and wake
     // whoever the M1 wake contract addresses.
     if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const channel = body.channel;
-      const authorId = typeof body.authorId === 'string' ? body.authorId : '';
-      const authorKind = body.authorKind === 'agent' ? 'agent' : 'human';
+      const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
+      const authorKind = auth ? 'human' : body.authorKind === 'agent' ? 'agent' : 'human';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
@@ -98,6 +289,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 400, {
           error: 'projectId, channel, authorId, body, and deliveryKey are required',
         });
+        return;
+      }
+      // An authenticated browser is the only source of Human authority. In the
+      // protected runtime an Agent/Worker cannot select an authority kind or a
+      // different Human id through request JSON.
+      if (auth && (body.authorKind === 'agent' || body.authorKind === 'worker')) {
+        sendJson(response, 403, { error: 'browser commands are Human-only' });
         return;
       }
       if (
@@ -172,7 +370,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // POST /api/tasks — create a durable multi-run Task (#28).
     if (request.method === 'POST' && url.pathname === '/api/tasks' && tasks) {
-      const body = await readJson(request);
+      const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const title = typeof body.title === 'string' ? body.title : '';
       const goal = typeof body.goal === 'string' ? body.goal : '';
@@ -242,7 +440,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : undefined;
       const prompt = typeof body.prompt === 'string' ? body.prompt : undefined;
       try {
@@ -258,7 +456,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         // The Task exists, so a refusal here is a lifecycle conflict (terminal or
         // unassigned), not a missing resource.
         sendJson(response, 409, {
-          error: error instanceof Error ? error.message : String(error),
+          error: responseError(error, auth !== undefined),
         });
       }
       return;
@@ -268,7 +466,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
       try {
@@ -276,7 +474,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
           ...(typeof body.agentId === 'string' ? { agentId: body.agentId } : {}),
           ...(selection !== undefined ? { selection } : {}),
         })) });
-      } catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      } catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -285,7 +483,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.end(taskId)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -293,10 +491,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'recovery' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      const body = await readJson(request);
+      const body = await readBody();
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -305,7 +503,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.awaitHumanValidation(taskId)) }); }
-      catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
 
@@ -340,7 +538,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      const body = await readJson(request);
+      const body = await readBody();
       const status = parseTaskStatus(body.status);
       if (status === 'invalid') {
         sendJson(response, 400, { error: `unknown task status: ${String(body.status)}` });
@@ -382,14 +580,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
       });
       sendJson(response, 200, { task: toTaskView(updated) });
       } catch (error) {
-        sendJson(response, 409, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(response, 409, { error: responseError(error, auth !== undefined) });
       }
       return;
     }
 
     // POST /api/runs — submit a request to an agent.
     if (request.method === 'POST' && url.pathname === '/api/runs') {
-      const body = await readJson(request);
+      const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
       if (agentId === '' || prompt === '') {
@@ -410,7 +608,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       segments[3] === 'stop'
     ) {
       const run = await orchestrator.stop(segments[2] ?? '');
-      sendJson(response, 200, toView(run));
+      sendJson(response, 200, toRunView(run));
       return;
     }
 
@@ -437,7 +635,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 409, { error: 'run lease is not recovering' });
         return;
       }
-      sendJson(response, 200, { run: toView(run), released: true });
+      sendJson(response, 200, { run: toRunView(run), released: true });
       return;
     }
 
@@ -453,7 +651,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown run: ${segments[2]}` });
         return;
       }
-      sendJson(response, 200, toView(run));
+      sendJson(response, 200, toRunView(run));
       return;
     }
 
@@ -471,7 +669,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/runs — list runs.
     if (request.method === 'GET' && url.pathname === '/api/runs') {
-      const runs = (await orchestrator.list()).map(toView);
+      const runs = (await orchestrator.list()).map(toRunView);
       sendJson(response, 200, { runs, totals: summarizeRunHistory(runs) });
       return;
     }
@@ -501,7 +699,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/events — every run's progress, pushed as it changes.
     if (request.method === 'GET' && url.pathname === '/api/events') {
-      openEventStream(request, response);
+      await openEventStream(request, response);
       return;
     }
 
@@ -517,13 +715,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     sendJson(response, 404, { error: 'not found' });
   }
 
-  async function listRuns(): Promise<readonly AgentRun[]> {
-    // The orchestrator merges live state with persisted runs, so a restarted
-    // process shows previous work instead of an empty history.
-    return orchestrator.list();
-  }
-
-  function openEventStream(request: IncomingMessage, response: ServerResponse): void {
+  async function openEventStream(request: IncomingMessage, response: ServerResponse): Promise<void> {
     response.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -535,13 +727,24 @@ export function createRunApi(options: RunApiOptions): RunApi {
     response.flushHeaders();
     streams.add(response);
 
-    const unsubscribe = orchestrator.subscribe((run) => {
-      writeEvent(response, 'run', toView(run));
-    });
-
-    void listRuns().then((runs) => {
-      for (const run of runs) writeEvent(response, 'run', toView(run));
-    });
+    // Hydrate before interpreting the cursor. The cursor identifies a durable
+    // projection, not this API process, so it remains meaningful after a
+    // restart and can retain its replay boundary.
+    // HTTP history remains newest-first. SSE uses the store's monotonic write
+    // positions instead: observer arrival and restart hydration therefore share
+    // one forward order even when timestamps tie or ids sort against arrival.
+    for (const snapshot of await orchestrator.replaySnapshots()) {
+      eventLog.publish(toRunView(snapshot.run), snapshot.sequence);
+    }
+    const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
+    const send = (record: SseRecord) => {
+      if (response.writableEnded) return;
+      writeEvent(response, record.event, record.data, record.cursor);
+    };
+    // Replay before attaching a listener. Both operations are synchronous, so
+    // there is no missed interval between the cursor snapshot and subscription.
+    for (const record of eventLog.after(cursor)) send(record);
+    const unsubscribe = eventLog.subscribe(send);
 
     const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
@@ -571,296 +774,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
         // connections, and an SSE stream never ends by itself.
         for (const stream of streams) stream.end();
         streams.clear();
+        unsubscribeRunEvents();
         server.closeAllConnections?.();
+        // A transport that never listened (construction refused, or the caller
+        // closed before opening the surface) has nothing to stop.
+        if (!server.listening) return resolve();
         server.close((error) => (error ? reject(error) : resolve()));
       }),
-  };
-}
-
-/**
- * The client-facing shape of a run.
- *
- * Status, progress, and the terminal result only: lease ids, engine internals,
- * and adapter details stay inside the server, so the Web client cannot come to
- * depend on them.
- */
-export interface RunView {
-  readonly id: string;
-  readonly agentId: string;
-  readonly prompt: string;
-  readonly status: string;
-  readonly events: readonly { readonly type: string; readonly [key: string]: unknown }[];
-  /**
-   * The durable Task this run advances, when it is a Task run (#28).
-   *
-   * Absent for a one-round run. Exposing the link lets a client place a run in
-   * its Task without giving the client any Task domain logic.
-   */
-  readonly taskId?: string;
-  /**
-   * Whether a cross-environment hand-off was attached to this run's input.
-   *
-   * A boolean rather than the text: the fact is useful to the client (so it can
-   * see that context was re-presented after a move), while the summary itself and
-   * the environment identity stay server-side like the other run internals.
-   */
-  readonly handOffAttached: boolean;
-  readonly failure?: string;
-  readonly result?: unknown;
-  readonly tokenUsage?: TokenUsage;
-  readonly createdAt: number;
-  readonly completedAt?: number;
-}
-
-/** Cumulative, observable consumption across the returned durable history. */
-export interface RunHistoryTotals {
-  /** Sum of terminal run elapsed time; active runs are not estimated. */
-  readonly durationMs: number;
-  readonly tokenUsage: TokenUsage;
-  readonly completedRunCount: number;
-  /** Runs whose provider supplied usage, so an absent metric is never hidden. */
-  readonly runsWithTokenUsage: number;
-}
-
-export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals {
-  let durationMs = 0;
-  let completedRunCount = 0;
-  let runsWithTokenUsage = 0;
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let totalTokens = 0;
-  for (const run of runs) {
-    if (run.completedAt !== undefined) {
-      completedRunCount += 1;
-      durationMs += Math.max(0, run.completedAt - run.createdAt);
-    }
-    if (run.tokenUsage !== undefined) {
-      runsWithTokenUsage += 1;
-      promptTokens += run.tokenUsage.promptTokens;
-      completionTokens += run.tokenUsage.completionTokens;
-      totalTokens += run.tokenUsage.totalTokens;
-    }
-  }
-  return {
-    durationMs,
-    tokenUsage: { promptTokens, completionTokens, totalTokens },
-    completedRunCount,
-    runsWithTokenUsage,
-  };
-}
-
-function toView(run: AgentRun): RunView {
-  return {
-    id: run.id,
-    agentId: run.agentId,
-    prompt: run.prompt,
-    status: run.status,
-    events: run.events,
-    ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
-    handOffAttached: run.handOff !== undefined,
-    ...(run.failure !== undefined ? { failure: run.failure } : {}),
-    ...(run.result !== undefined ? { result: run.result } : {}),
-    ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
-    createdAt: run.createdAt,
-    ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
-  };
-}
-
-/**
- * The client-facing shape of one Message.
- *
- * The conversation unit only: author, body, reply link, and ordering. A reply's
- * body is already the run's final assistant text, so tool calls, tool output, and
- * raw reasoning have no path into this view — they were never stored as a
- * Message in the first place.
- */
-export interface MessageView {
-  readonly id: string;
-  readonly projectId: string;
-  readonly channel: string;
-  readonly authorId: string;
-  readonly authorKind: string;
-  readonly body: string;
-  readonly recipients: readonly string[];
-  readonly inReplyTo?: string;
-  readonly createdAt: number;
-}
-
-function toMessageView(message: Message): MessageView {
-  return {
-    id: message.id,
-    projectId: message.projectId,
-    channel: message.channel,
-    authorId: message.author.id,
-    authorKind: message.author.kind,
-    body: message.body,
-    recipients: message.recipients,
-    ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
-    createdAt: message.createdAt,
-  };
-}
-
-/**
- * The client-facing shape of one wake request (#27).
- *
- * Every field the operator needs to answer "did this Message start a run, and
- * why?": the target Agent, the deterministic or modelled reason, the durable
- * status, and the linked run when one was admitted. Run internals stay out, so
- * the client still cannot depend on leases or engines.
- */
-export interface WakeView {
-  readonly agentId: string;
-  readonly reason: string;
-  readonly status: string;
-  readonly runId?: string;
-}
-
-function toWakeView(wake: WakeRequest): WakeView {
-  return {
-    agentId: wake.agentId,
-    reason: wake.reason,
-    status: wake.status,
-    ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
-  };
-}
-
-/**
- * The client-facing shape of one project the composer may address (#27).
- *
- * The member ids are what the composer offers as `@agent` mentions and direct
- * recipients; nothing else about the project (environment access, rules) is
- * needed to write a Message.
- */
-export interface ProjectView {
-  readonly id: string;
-  readonly goal: string;
-  readonly memberIds: readonly string[];
-}
-
-function toProjectView(project: {
-  readonly id: string;
-  readonly goal: string;
-  readonly memberships: readonly { readonly agentId: string }[];
-}): ProjectView {
-  return {
-    id: project.id,
-    goal: project.goal,
-    memberIds: project.memberships.map((membership) => membership.agentId),
-  };
-}
-
-/**
- * The client-facing shape of one durable Task (#28).
- *
- * The whole Task record is safe to expose: it holds no lease, engine, or worker
- * detail. `environmentPreference` is included so a human can see which environment
- * was requested, and the run links (below) show what the Task actually did.
- */
-export interface TaskView {
-  readonly id: string;
-  readonly projectId: string;
-  readonly title: string;
-  readonly goal: string;
-  readonly constraints: readonly string[];
-  readonly status: string;
-  readonly assignedAgentId?: string;
-  readonly environmentPreference?: { readonly kind: string; readonly id: string };
-  readonly blockerReason?: string;
-  readonly environmentInstanceId?: string;
-  readonly environmentLeaseId?: string;
-  readonly environmentLifecycleState?: string;
-  /** A safe, operator-facing projection of the Worker-owned Task context. */
-  readonly taskContextState: string;
-  readonly recoveryState?: string;
-  readonly activeRunId?: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly completedAt?: number;
-}
-
-function toTaskView(task: Task): TaskView {
-  return {
-    id: task.id,
-    projectId: task.projectId,
-    title: task.title,
-    goal: task.goal,
-    constraints: task.constraints,
-    status: task.status,
-    ...(task.assignedAgentId !== undefined ? { assignedAgentId: task.assignedAgentId } : {}),
-    ...(task.environmentPreference !== undefined
-      ? { environmentPreference: task.environmentPreference }
-      : {}),
-    ...(task.blockerReason !== undefined ? { blockerReason: task.blockerReason } : {}),
-    ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
-    ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
-    ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
-    taskContextState: toTaskContextState(task),
-    ...(task.recoveryState !== undefined ? { recoveryState: task.recoveryState } : {}),
-    ...(task.activeRunId !== undefined ? { activeRunId: task.activeRunId } : {}),
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    ...(task.completedAt !== undefined ? { completedAt: task.completedAt } : {}),
-  };
-}
-
-/**
- * The Worker owns the filesystem facts; this is only the lifecycle projection
- * a human needs to decide whether cleanup is pending, retryable, or complete.
- */
-function toTaskContextState(task: Task): string {
-  switch (task.environmentLifecycleState) {
-    case undefined: return 'not-created';
-    case 'beginning': return 'preparing';
-    case 'idle':
-    case 'running':
-    case 'blocked':
-    case 'awaiting-validation': return 'ready';
-    case 'ending': return 'cleanup-in-progress';
-    case 'recovery': return task.recoveryState === 'ending' ? 'cleanup-needs-recovery' : 'recovery-retained';
-    case 'ended':
-    case 'discarded': return 'recycled';
-    default: return 'unknown';
-  }
-}
-
-/** One Task plus its ordered run links, for `GET /api/tasks/:id`. */
-export interface TaskWithRunsView {
-  readonly task: TaskView;
-  readonly runs: readonly TaskRunLinkView[];
-}
-
-/** One linked run. `summary` is absent until the run settles. */
-export interface TaskRunLinkView {
-  readonly runId: string;
-  readonly agentId: string;
-  readonly sequence: number;
-  readonly linkedAt: number;
-  readonly summary?: {
-    readonly status: string;
-    readonly summary: string;
-    readonly recordedAt: number;
-  };
-}
-
-function toTaskWithRunsView(found: TaskWithRuns): TaskWithRunsView {
-  return { task: toTaskView(found.task), runs: found.runs.map(toTaskRunLinkView) };
-}
-
-function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
-  return {
-    runId: link.runId,
-    agentId: link.agentId,
-    sequence: link.sequence,
-    linkedAt: link.linkedAt,
-    ...(link.summary !== undefined
-      ? {
-          summary: {
-            status: link.summary.status,
-            summary: link.summary.summary,
-            recordedAt: link.summary.recordedAt,
-          },
-        }
-      : {}),
   };
 }
 
@@ -901,8 +821,82 @@ function parseStringArray(value: unknown): readonly string[] | undefined {
   return value as readonly string[];
 }
 
-function writeEvent(response: ServerResponse, event: string, data: unknown): void {
-  response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+function writeEvent(response: ServerResponse, event: string, data: unknown, cursor?: string): void {
+  response.write(`${cursor === undefined ? '' : `id: ${cursor}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+interface SseRecord {
+  readonly cursor: string;
+  readonly event: 'run';
+  readonly data: ReturnType<typeof toRunView>;
+  readonly replaySequence: number;
+}
+
+/**
+ * A transport replay log over immutable Web projections.
+ *
+ * Run events remain durable in the Run store; this log does not create another
+ * domain event source. It assigns each distinct durable snapshot a stable,
+ * opaque cursor. A restart rebuilds its baseline from the durable Run store,
+ * preserving a cursor whose snapshot remains in that baseline.
+ */
+class SseEventLog {
+  readonly #records: SseRecord[] = [];
+  readonly #fingerprints = new Set<string>();
+  readonly #listeners = new Set<(record: SseRecord) => void>();
+
+  publish(data: ReturnType<typeof toRunView>, replaySequence: number): void {
+    const fingerprint = JSON.stringify(data);
+    if (this.#fingerprints.has(fingerprint)) return;
+    this.#fingerprints.add(fingerprint);
+    const record: SseRecord = {
+      cursor: durableEventCursor(fingerprint, replaySequence),
+      event: 'run',
+      data,
+      replaySequence,
+    };
+    this.#records.push(record);
+    for (const listener of this.#listeners) listener(record);
+  }
+
+  after(cursor: string | undefined): readonly SseRecord[] {
+    if (cursor === undefined) {
+      return this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence);
+    }
+    const boundary = this.#records.find((record) => record.cursor === cursor);
+    // An unknown but well-formed cursor is outside this replay log. Rehydrate
+    // from its safe boundary rather than treating it as a future position and
+    // suppressing every current or later durable snapshot.
+    return boundary === undefined
+      ? this.#records.toSorted((left, right) => left.replaySequence - right.replaySequence)
+      : this.#records
+          .filter((record) => record.replaySequence > boundary.replaySequence)
+          .toSorted((left, right) => left.replaySequence - right.replaySequence);
+  }
+
+  subscribe(listener: (record: SseRecord) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+}
+
+function durableEventCursor(fingerprint: string, replaySequence: number): string {
+  return `v2:${replaySequence}:${createHash('sha256').update(fingerprint).digest('hex')}`;
+}
+
+function parseEventCursor(value: string | undefined): string | undefined {
+  return value !== undefined && /^(?:v1:[a-f0-9]{64}|v2:[1-9][0-9]*:[a-f0-9]{64})$/.test(value)
+    ? value
+    : undefined;
+}
+
+function memoizedJsonReader(request: IncomingMessage): () => Promise<Record<string, unknown>> {
+  let body: Promise<Record<string, unknown>> | undefined;
+  return () => {
+    body ??= readJson(request);
+    return body;
+  };
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -923,6 +917,52 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
     'content-length': Buffer.byteLength(payload),
   });
   response.end(payload);
+}
+
+/** API reads have no state-changing effect; every other method needs CSRF proof. */
+function isSafeMethod(method: string | undefined): boolean {
+  return method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+}
+
+function readCookie(request: IncomingMessage, name: string): string | undefined {
+  const header = request.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) continue;
+    const key = part.slice(0, separator).trim();
+    if (key === name) return part.slice(separator + 1).trim();
+  }
+  return undefined;
+}
+
+function headerValue(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Protected-browser responses never serialize a domain/host exception. */
+function responseError(error: unknown, protectedApi: boolean): string {
+  if (protectedApi) return 'request could not be completed';
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * `Secure` is mandatory on a TLS socket. Loopback HTTP deliberately omits it:
+ * browsers otherwise refuse the cookie entirely, while HttpOnly + SameSite
+ * Strict still protect the supported host-local HTTP mode.
+ */
+function sessionCookie(token: string, expiresAt: number, secure: boolean): string {
+  const maxAge = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1_000));
+  return `sprout_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}; Expires=${new Date(expiresAt).toUTCString()}${secure ? '; Secure' : ''}`;
+}
+
+function expiredSessionCookie(secure: boolean): string {
+  return `sprout_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? '; Secure' : ''}`;
+}
+
+function isTransportSecure(request: IncomingMessage): boolean {
+  return (request.socket as TLSSocket).encrypted === true;
 }
 
 const CONTENT_TYPES: Record<string, string> = {

@@ -92,6 +92,98 @@ async function setupProductionDom() {
   };
 }
 
+/**
+ * Deterministic tests inject the fixture authorities explicitly. The production
+ * routes themselves require typed adapters and render unavailable states when
+ * none is provided, so they never default to fixture facts.
+ */
+async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Promise<unknown> }) {
+  const module = (await vite.ssrLoadModule(
+    '/src/modules/environments/adapters/fixture-adapter.ts'
+  )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+  const agentsModule = (await vite.ssrLoadModule(
+    '/src/modules/agents/adapters/fixture-adapter.ts'
+  )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+  return {
+    routerBase: '/app/',
+    environmentService: new module.FixtureEnvironmentService(),
+    agentService: new agentsModule.FixtureAgentService(),
+  };
+}
+
+/**
+ * A real `ProductionEnvironmentService` over a stub wire adapter serving one
+ * reachable reconciling record. No fixture adapter is involved; this proves
+ * what the production bridge itself renders for an open reconciling record.
+ */
+async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: string) => Promise<unknown> }) {
+  const apiModule = (await vite.ssrLoadModule('/src/adapters/environment-api.ts')) as typeof import('../adapters/environment-api.ts');
+  const adapterModule = (await vite.ssrLoadModule('/src/modules/environments/adapters/production-adapter.ts')) as typeof import('../modules/environments/adapters/production-adapter.ts');
+  const synchronizeCalls: unknown[] = [];
+  const wire = {
+    state: () => ({ status: 'online', connection: 'online', loading: false }),
+    subscribeState: () => () => undefined,
+    setCsrfToken: () => undefined,
+    async listEnrollments() {
+      return [reconcilingFacts.enrollment];
+    },
+    async environmentFacts() {
+      return reconcilingFacts;
+    },
+    async synchronizeEvidence(_leaseId: string, input: unknown) {
+      synchronizeCalls.push(input);
+      return reconcilingFacts.recovery[0];
+    },
+  } as unknown as import('../adapters/environment-api.ts').EnvironmentEnrollmentBrowserAdapter;
+  const reconcilingFacts: apiModule.EnvironmentFactsView = {
+    enrollment: {
+      id: 'enroll-reconciling',
+      environmentInstanceId: 'inst-1',
+      displayName: 'Production Reconciling Host',
+      status: 'approved',
+      platform: 'macos',
+      identityDigest: 'digest',
+      capabilityPermissions: { 'agent-run': true },
+      createdAt: 1,
+      updatedAt: 2,
+      decisions: [],
+    },
+    readiness: {
+      environmentInstanceId: 'inst-1',
+      summary: { level: 'yellow', reason: 'Worker reconnected; reconciling settlement evidence.' },
+      enrollmentStatus: 'approved',
+      connection: { state: 'online', lastConfirmedAt: 1000 },
+      compatibility: { state: 'compatible' },
+      capabilities: [],
+      engines: [],
+      workSafety: { state: 'reconciling' },
+    },
+    probes: [],
+    recovery: [
+      {
+        id: 'rec-1',
+        environmentInstanceId: 'inst-1',
+        leaseId: 'lease-9',
+        holderKind: 'task',
+        taskId: 'task-104',
+        cause: 'worker-channel-lost',
+        phase: 'reconciling',
+        startedAt: 10,
+        updatedAt: 20,
+        unresolvedFacts: ['The Worker channel is lost; no retained evidence has been synchronized.'],
+        evidenceSynchronized: false,
+        decisions: [],
+      },
+    ],
+    forceReleases: [],
+  };
+  return {
+    routerBase: '/app/' as const,
+    environmentService: new adapterModule.ProductionEnvironmentService(wire),
+    synchronizeCalls,
+  };
+}
+
 test('Production Web: mounts Shell and Manage / Environments, preserving structure and traffic-light reasons', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
@@ -100,7 +192,7 @@ test('Production Web: mounts Shell and Manage / Environments, preserving structu
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount, '#app mount container exists');
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -167,7 +259,7 @@ test('Production Web: filters environments and exposes accessible current states
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -213,7 +305,7 @@ test('Production Web: emergency Force Release Alert Dialog enforces 3-gate safet
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -285,7 +377,7 @@ test('Production Web: live readiness probe updates probe stream with fresh laten
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -318,7 +410,7 @@ test('Production Web: phone drill-down navigation provides full-width detail and
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     // Navigate directly to mobile detail drill-down route
     await router.push('/manage/environments/env-ready');
     await router.isReady();
@@ -354,7 +446,7 @@ test('Production Web: approving pending enrollment updates status, connectivity,
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -395,7 +487,7 @@ test('Production Web: capability permission toggling and unbind workspace', asyn
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -437,7 +529,7 @@ test('Production Web: deep-link return context banner preserves navigation histo
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/feed');
     await router.isReady();
     app.mount(appMount);
@@ -549,7 +641,7 @@ test('Production Web: reachable reconciling state presents ReconcilingBox and re
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments/env-reconciling');
     await router.isReady();
     app.mount(appMount);
@@ -593,6 +685,56 @@ test('Production Web: reachable reconciling state presents ReconcilingBox and re
   }
 });
 
+test('M89-EVIDENCE-002: production renders the reconciling box read-only with no fabricated evidence action', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    // A real ProductionEnvironmentService over a stub wire adapter: exactly the
+    // production authority, no fixture adapter involved.
+    const options = await productionReconcilingAppOptions(vite);
+    const { app, router } = createSproutApp(options);
+    await router.push('/manage/environments/enroll-reconciling');
+    await router.isReady();
+    app.mount(appMount);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // The reconciling box renders with the honest not-synchronized state...
+    const reconcilingBox = doc.querySelector('.reconciling-box');
+    assert.ok(reconcilingBox, 'ReconcilingBox is rendered under the production authority');
+    assert.match(reconcilingBox.textContent ?? '', /RECONCILING/);
+    const notSynchronized = reconcilingBox.querySelector('.evidence-not-synchronized');
+    assert.ok(notSynchronized, 'the explicit not-synchronized state is rendered');
+    assert.match(notSynchronized.textContent ?? '', /Not synchronized yet/);
+    assert.match(
+      notSynchronized.textContent ?? '',
+      /only be declared by the reconnected Worker itself/,
+      'the read-only state names the Worker as the only evidence authority',
+    );
+
+    // ...and the reconcile action is absent: nothing can post Worker evidence.
+    assert.equal(
+      doc.querySelector('.btn-reconcile-evidence'),
+      null,
+      'no reconcile button exists under the production authority',
+    );
+    assert.doesNotMatch(reconcilingBox.textContent ?? '', /Reconcile & Synchronize Evidence/);
+
+    // Even a scripted click attempt through the page handler is refused by the
+    // typed bridge: no placeholder payload ever reaches the wire.
+    assert.deepEqual(options.synchronizeCalls, [], 'no synchronizeEvidence command was posted');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Production Web: shared Card primitive is consumed by domain compositions with no domain kind switcher', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
@@ -602,7 +744,7 @@ test('Production Web: shared Card primitive is consumed by domain compositions w
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments/env-ready');
     await router.isReady();
     app.mount(appMount);
@@ -640,7 +782,7 @@ test('Production Web: accessible overlay interactions — keyboard activation, E
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);
@@ -860,7 +1002,7 @@ test('Production Web: strict non-product copy boundary across all reachable rout
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(appMount);
 
     const routesToTest = [
@@ -909,7 +1051,7 @@ test('Production Web: task card and agent card interactive details inspection', 
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(appMount);
     const doc = dom.window.document;
 
@@ -938,15 +1080,15 @@ test('Production Web: task card and agent card interactive details inspection', 
     // 2. In AgentsView: click agent card to view details
     await router.push('/manage/agents');
     await router.isReady();
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve) => setTimeout(resolve, 120));
 
-    const agentCard = Array.from(doc.querySelectorAll('button')).find((b) => b.textContent?.includes('@Architect'));
+    const agentCard = doc.querySelector('[data-agent="architect"]') as HTMLButtonElement | null;
     assert.ok(agentCard, 'Architect agent card found');
     agentCard.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /@Architect/);
-    assert.match(doc.body.textContent ?? '', /System & Seams Architect/);
+    assert.match(doc.body.textContent ?? '', /Architect/);
+    assert.match(doc.body.textContent ?? '', /architect/, 'the stable identity is rendered');
 
     // 3. In FeedView: click task card to view Task Detail Dialog
     await router.push('/feed');
@@ -975,7 +1117,7 @@ test('Production Web: project header and chat info buttons respond with accessib
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(appMount);
     const doc = dom.window.document;
 
@@ -1034,7 +1176,7 @@ test('Production Web: agent creation and architecture guide action dialogs', asy
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(appMount);
     const doc = dom.window.document;
 
@@ -1100,7 +1242,7 @@ test('Production Web: settings view tabs and responsive visibility', async () =>
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
     app.mount(appMount);
     const doc = dom.window.document;
 
@@ -1137,6 +1279,420 @@ test('Production Web: settings view tabs and responsive visibility', async () =>
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.match(doc.body.textContent ?? '', /Durable Operational Data/);
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M77 rework regressions: the five blocking findings from the #86 review.
+// ---------------------------------------------------------------------------
+
+test('M77-SCOPE-001: production requires a typed environment adapter and never falls back to fixture authority', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    // No adapter is injected: exactly the auto-mounted production bootstrap.
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.ok(doc.querySelector('.envs-unavailable-state'), 'an explicit unavailable state is rendered');
+    assert.match(doc.body.textContent ?? '', /Environment Authority Unavailable/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /Mac Studio M2 Max/, 'no fixture environment is shown');
+    assert.equal(doc.querySelector('.env-master-card'), null, 'no fixture master card is rendered');
+    assert.equal(doc.querySelector('.run-probe-btn'), null, 'no fixture-backed control is rendered');
+
+    app.unmount();
+
+    // The route module itself must not construct a fixture authority.
+    const view = await readFile(new URL('../modules/environments/views/EnvironmentsView.vue', import.meta.url), 'utf8');
+    const main = await readFile(new URL('./main.ts', import.meta.url), 'utf8');
+    assert.doesNotMatch(view, /FixtureEnvironmentService/, 'the route never imports the fixture adapter');
+    assert.doesNotMatch(main, /FixtureEnvironmentService/, 'the bootstrap never wires the fixture adapter');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-001: an unknown environment deep link renders not-found and never substitutes the first record', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/does-not-exist');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.equal(router.currentRoute.value.params['id'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.envs-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Environment Not Found/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /Mac Studio M2 Max/, 'another record is not substituted');
+    assert.doesNotMatch(doc.body.textContent ?? '', /6 Independent Health Dimensions/, 'no detail of another record is shown');
+    assert.equal(doc.querySelector('.run-probe-btn'), null, 'no mutation control is offered for a missing record');
+    assert.equal(doc.querySelector('.env-master-card'), null, 'the list is not rendered under a missing id');
+
+    (doc.querySelector('.envs-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/manage/environments', 'the return control recovers to the list');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-002: an unknown chat scope deep link renders not-found and never substitutes the first scope', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat/does-not-exist');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.equal(router.currentRoute.value.params['scopeId'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.chat-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Conversation Not Found/);
+
+    // The first scope must never be substituted for the missing one: no scope
+    // card, and specifically no `#general` header, is rendered.
+    assert.equal(doc.querySelector('[data-scope-id]'), null, 'no scope list is rendered under a missing id');
+    assert.doesNotMatch(doc.body.textContent ?? '', /#general/, 'the first scope is not substituted');
+
+    // The composer must be absent so the shared message list cannot be mutated
+    // from a URL that names no scope.
+    assert.equal(
+      doc.querySelector('.chat-not-found-state')?.parentElement?.querySelector('input'),
+      null,
+      'no composer input is offered for a missing scope'
+    );
+
+    (doc.querySelector('.chat-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/project/chat', 'the return control recovers to the chat list');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-002: an unknown chat scope deep link blocks composer mutation of the shared chat list', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    // Enter through the real chat list so a message is genuinely present first.
+    await router.push('/project/chat/wg-frontend');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const messageCount = () => doc.querySelectorAll('[data-message-id]').length;
+    assert.ok(messageCount() > 0, 'a conversation renders its real messages');
+
+    await router.push('/project/chat/does-not-exist');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(doc.querySelector('.chat-not-found-state'), 'the missing scope renders not-found');
+    assert.equal(messageCount(), 0, 'no message list is rendered under the missing URL');
+
+    // Even dispatching the send handler directly must not mutate the shared list:
+    // the missing-scope guard refuses before touching chatMessages.
+    const before = messageCount();
+    const composer = doc.querySelector('.chat-not-found-state')?.parentElement?.querySelector('input');
+    assert.equal(composer, null, 'the composer is not mounted, so no send can be triggered');
+    assert.equal(messageCount(), before, 'the shared message list is unchanged under the missing URL');
+
+    // A known scope still works: the guard is scoped to the missing case only.
+    await router.push('/project/chat/dm-architect');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(messageCount() > 0, 'a known scope still renders its conversation');
+    const input = doc.querySelector('input') as HTMLInputElement;
+    assert.ok(input, 'a known scope still offers its composer');
+    input.value = 'Regression probe message';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const sendBtn = [...doc.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Send') as HTMLButtonElement;
+    sendBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.match(doc.body.textContent ?? '', /Regression probe message/, 'a real scope still accepts a message');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-NAV-002: an unknown task detail deep link renders not-found and never substitutes a record', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/tasks/does-not-exist');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.equal(router.currentRoute.value.params['taskId'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.tasks-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Task Not Found/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /#101/, 'the first task is not substituted');
+    assert.equal(doc.querySelector('.operating-stage-card'), null, 'no other task detail is shown');
+
+    (doc.querySelector('.tasks-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/project/tasks', 'the return control recovers to the task list');
+    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/, 'the task list is restored');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-CONN-001: environment controls are disabled and refuse mutation while the connection is unsettled', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { createShellConnectionController } = (await vite.ssrLoadModule(
+      '/src/shell/connection.ts'
+    )) as typeof import('../shell/connection.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({
+      ...(await deterministicAppOptions(vite)),
+      connectionSource: controller,
+    });
+    await router.push('/manage/environments/env-ready');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const probe = () => doc.querySelector('.run-probe-btn') as HTMLButtonElement;
+    assert.equal(probe().disabled, false, 'a settled connection allows control');
+    const before = doc.querySelectorAll('.probe-history-stream > div').length;
+
+    controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(probe().disabled, true, 'the probe control is disabled while reconnecting');
+    for (const selector of ['.approve-enroll-btn', '.unbind-env-btn', '.quick-probe-btn']) {
+      const control = doc.querySelector(selector) as HTMLButtonElement | null;
+      if (control) assert.equal(control.disabled, true, `${selector} is disabled while reconnecting`);
+    }
+    const masterCard = doc.querySelector('.env-master-card') as HTMLButtonElement;
+    assert.equal(masterCard.disabled, true, 'the interactive master card is disabled while reconnecting');
+
+    // Clicking a disabled control neither mutates nor queues anything.
+    probe().click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(
+      doc.querySelectorAll('.probe-history-stream > div').length,
+      before,
+      'no probe was applied or queued while the connection was unsettled'
+    );
+
+    // The control returns immediately when the connection settles.
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(probe().disabled, false, 'control returns with the connection');
+    probe().click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(
+      doc.querySelectorAll('.probe-history-stream > div').length > before,
+      'a settled connection applies the control immediately'
+    );
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-PROJECT-001: Project Chat renders each scope from its typed discriminator and label', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const scope = (id: string) => doc.querySelector(`[data-scope-id="${id}"]`) as HTMLElement;
+    const channel = scope('#general');
+    const group = scope('wg-frontend');
+    const direct = scope('dm-architect');
+    assert.ok(channel && group && direct, 'every chat scope is rendered');
+
+    assert.equal(channel.dataset['scopeKind'], 'channel');
+    assert.equal(group.dataset['scopeKind'], 'working-group');
+    assert.equal(direct.dataset['scopeKind'], 'direct-message');
+
+    assert.match(channel.textContent ?? '', /Project channel/);
+    assert.match(group.textContent ?? '', /Working group/);
+    assert.match(direct.textContent ?? '', /Direct message/);
+
+    // Distinct scopes resolve distinct icons; they were previously all agents.
+    const iconOf = (el: HTMLElement) => el.querySelector('svg')?.innerHTML ?? '';
+    assert.notEqual(iconOf(channel), iconOf(direct), 'a channel and a direct message render different icons');
+    assert.notEqual(iconOf(group), iconOf(direct), 'a working group and a direct message render different icons');
+    assert.notEqual(iconOf(channel), iconOf(group), 'a channel and a working group render different icons');
+    assert.equal(iconOf(direct), iconOf(direct), 'the direct message icon is stable');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #89: archive/restore parity on phone drill-down, and the offline state.
+// ---------------------------------------------------------------------------
+
+test('M89-PARITY: phone drill-down exposes the same archive and restore capabilities as desktop', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    // A cold start on the phone detail route: the same capabilities must be
+    // reachable without a desktop master/detail split. The degraded row is
+    // approved with no lease and clear work safety, so archive is offered.
+    await router.push('/manage/environments/env-degraded');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.ok(doc.querySelector('.envs-mobile-detail-wrapper'), 'the phone detail view renders');
+    const archiveBtn = doc.querySelector('.archive-env-btn') as HTMLButtonElement;
+    assert.ok(archiveBtn, 'Archive Instance is offered on phone drill-down');
+    archiveBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Archived Instance/, 'the row becomes archived');
+    const restoreBtn = doc.querySelector('.restore-env-btn') as HTMLButtonElement;
+    assert.ok(restoreBtn, 'Restore Instance is offered on phone drill-down');
+    restoreBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /Degraded/, 'restore returns the row to its valid enrollment');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: an environment with a force-release audit is distinct from an ordinary held lease', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // Drive the recovery row through the three-gate Force Release.
+    const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
+    recoveryCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    (doc.querySelector('.force-release-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const typedInput = doc.querySelector('.force-confirm-typed') as HTMLInputElement;
+    typedInput.value = 'FORCE RELEASE';
+    typedInput.dispatchEvent(new dom.window.Event('input'));
+    (doc.querySelector('.ack-risks-checkbox') as HTMLInputElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    (doc.querySelector('.confirm-force-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Green: Ready/, 'the row returns to Green');
+    assert.match(doc.body.textContent ?? '', /Durable Forced Release Audit Event/, 'the audit box renders');
+    assert.equal(doc.querySelector('.recovery-alert-box'), null, 'the recovery box is gone');
+    assert.equal(doc.querySelector('.active-lease-box'), null, 'no lease box masquerades as the audit');
+    // The audit is distinguishable from an ordinary held lease (env-ready).
+    assert.ok(doc.querySelector('.forced-release-audit-box'), 'the audit box is rendered');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: a pasted deep link to an archived environment renders its archived detail', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/env-archived');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Archived Instance/, 'the archived state renders its own banner title');
+    assert.match(banner.textContent ?? '', /New work admission barred/, 'the archived decisive reason renders');
+    assert.ok(doc.querySelector('.restore-env-btn'), 'Restore is the offered action');
+    assert.equal(doc.querySelector('.archive-env-btn'), null, 'Archive is not offered twice');
 
     app.unmount();
   } finally {

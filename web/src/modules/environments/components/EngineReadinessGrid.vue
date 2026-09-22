@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { EngineDetailInfo, EngineReadiness, EngineStatus } from '../types.js';
 import StatusPill from '../../../primitives/StatusPill.vue';
 
-defineProps<{
+const props = defineProps<{
   readiness: EngineReadiness;
   details?: Record<string, EngineDetailInfo>;
 }>();
@@ -13,6 +14,29 @@ function getStatusPill(status: EngineStatus): 'green' | 'yellow' | 'red' | 'neut
   if (status === 'missing') return 'red';
   return 'neutral';
 }
+
+function engineLabel(engine: string): string {
+  if (engine === 'codex') return 'Codex';
+  if (engine === 'pi') return 'Pi';
+  return engine;
+}
+
+/**
+ * The rows the page renders, in the prototype's representative order when the
+ * canonical engines are present, then any further engine the Worker declared.
+ * The quadrant layout is a presentation choice; the rows themselves are the
+ * Worker's declared facts, never a fixed schema.
+ */
+const engineRows = computed(() => {
+  const canonical = ['codex', 'pi', 'agy', 'opencode'].filter((engine) => engine in props.readiness);
+  const declared = Object.keys(props.readiness).filter((engine) => !canonical.includes(engine));
+  return [...canonical, ...declared].map((engine) => ({
+    engine,
+    label: engineLabel(engine),
+    status: props.readiness[engine] ?? 'unknown',
+    detail: props.details?.[engine],
+  }));
+});
 </script>
 
 <template>
@@ -25,83 +49,27 @@ function getStatusPill(status: EngineStatus): 'green' | 'yellow' | 'red' | 'neut
     </div>
 
     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
-      <!-- Codex -->
-      <div class="engine-card p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
+      <div
+        v-for="row in engineRows"
+        :key="row.engine"
+        class="engine-card p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1"
+        :data-engine="row.engine"
+      >
         <div class="flex items-center justify-between">
-          <strong class="text-xs font-bold text-[var(--text-primary)]">Codex</strong>
-          <StatusPill :status="getStatusPill(readiness.codex)" class="text-[9px]">
-            {{ readiness.codex.toUpperCase() }}
+          <strong class="text-xs font-bold text-[var(--text-primary)]">{{ row.label }}</strong>
+          <StatusPill :status="getStatusPill(row.status)" class="text-[9px]">
+            {{ row.status.toUpperCase() }}
           </StatusPill>
         </div>
         <div class="text-[10px] text-[var(--text-muted)] flex justify-between">
-          <span>{{ details?.codex?.version ?? 'installed' }}</span>
-          <span>{{ details?.codex?.authStatus ?? 'active' }}</span>
+          <span>{{ row.detail?.version ?? 'installed' }}</span>
+          <span>{{ row.detail?.authStatus ?? row.status }}</span>
         </div>
-        <div v-if="details?.codex?.modelAvailability" class="text-[10px] text-[var(--text-secondary)] font-mono truncate">
-          {{ details.codex.modelAvailability }}
+        <div v-if="row.detail?.modelAvailability" class="text-[10px] text-[var(--text-secondary)] font-mono truncate">
+          {{ row.detail.modelAvailability }}
         </div>
-        <div v-if="details?.codex?.notes" class="text-[10px] text-[var(--yellow-attention)] mt-0.5">
-          {{ details.codex.notes }}
-        </div>
-      </div>
-
-      <!-- Pi -->
-      <div class="engine-card p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
-        <div class="flex items-center justify-between">
-          <strong class="text-xs font-bold text-[var(--text-primary)]">Pi</strong>
-          <StatusPill :status="getStatusPill(readiness.pi)" class="text-[9px]">
-            {{ readiness.pi.toUpperCase() }}
-          </StatusPill>
-        </div>
-        <div class="text-[10px] text-[var(--text-muted)] flex justify-between">
-          <span>{{ details?.pi?.version ?? 'installed' }}</span>
-          <span>{{ details?.pi?.authStatus ?? 'active' }}</span>
-        </div>
-        <div v-if="details?.pi?.modelAvailability" class="text-[10px] text-[var(--text-secondary)] font-mono truncate">
-          {{ details.pi.modelAvailability }}
-        </div>
-        <div v-if="details?.pi?.notes" class="text-[10px] text-[var(--yellow-attention)] mt-0.5">
-          {{ details.pi.notes }}
-        </div>
-      </div>
-
-      <!-- agy -->
-      <div class="engine-card p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
-        <div class="flex items-center justify-between">
-          <strong class="text-xs font-bold text-[var(--text-primary)]">agy</strong>
-          <StatusPill :status="getStatusPill(readiness.agy)" class="text-[9px]">
-            {{ readiness.agy.toUpperCase() }}
-          </StatusPill>
-        </div>
-        <div class="text-[10px] text-[var(--text-muted)] flex justify-between">
-          <span>{{ details?.agy?.version ?? 'installed' }}</span>
-          <span>{{ details?.agy?.authStatus ?? 'active' }}</span>
-        </div>
-        <div v-if="details?.agy?.modelAvailability" class="text-[10px] text-[var(--text-secondary)] font-mono truncate">
-          {{ details.agy.modelAvailability }}
-        </div>
-        <div v-if="details?.agy?.notes" class="text-[10px] text-[var(--yellow-attention)] mt-0.5">
-          {{ details.agy.notes }}
-        </div>
-      </div>
-
-      <!-- opencode -->
-      <div class="engine-card p-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-1">
-        <div class="flex items-center justify-between">
-          <strong class="text-xs font-bold text-[var(--text-primary)]">opencode</strong>
-          <StatusPill :status="getStatusPill(readiness.opencode)" class="text-[9px]">
-            {{ readiness.opencode.toUpperCase() }}
-          </StatusPill>
-        </div>
-        <div class="text-[10px] text-[var(--text-muted)] flex justify-between">
-          <span>{{ details?.opencode?.version ?? 'installed' }}</span>
-          <span>{{ details?.opencode?.authStatus ?? 'active' }}</span>
-        </div>
-        <div v-if="details?.opencode?.modelAvailability" class="text-[10px] text-[var(--text-secondary)] font-mono truncate">
-          {{ details.opencode.modelAvailability }}
-        </div>
-        <div v-if="details?.opencode?.notes" class="text-[10px] text-[var(--yellow-attention)] mt-0.5">
-          {{ details.opencode.notes }}
+        <div v-if="row.detail?.notes" class="text-[10px] text-[var(--yellow-attention)] mt-0.5">
+          {{ row.detail.notes }}
         </div>
       </div>
     </div>

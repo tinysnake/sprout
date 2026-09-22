@@ -13,6 +13,7 @@ import {
   WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
+  WORKER_PROTOCOL_VERSION,
   type CloseParams,
   type InterruptParams,
   type InterruptResult,
@@ -23,7 +24,10 @@ import {
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
   type TaskContextMaterialization,
+  type ValidateWorkspaceParams,
+  type ValidateWorkspaceResult,
   type WorkerInfo,
+  type WorkerReadinessFacts,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
 
@@ -50,6 +54,14 @@ export interface EnvironmentWorkerOptions {
   readonly onLog?: (line: string) => void;
   /** Root owned by this Worker for persistent Project workspaces. */
   readonly workspaceRoot?: string;
+  /**
+   * Neutral readiness facts this Worker reports on `worker/info`, when known.
+   *
+   * It is a provider rather than a value because readiness is Environment-local
+   * and may change after the Worker starts (an engine login can expire). A Worker
+   * that cannot determine a fact reports `unknown` rather than inventing one.
+   */
+  readonly readiness?: () => WorkerReadinessFacts;
 }
 
 interface LiveSession {
@@ -57,6 +69,26 @@ interface LiveSession {
   readonly session: EngineSession;
   readonly events: EventSink;
   turnId: string | undefined;
+}
+
+/**
+ * The honest fallback when a Worker has no readiness source: it knows which
+ * engines it hosts, but not their installation or login, so it says `unknown`
+ * rather than claiming readiness it did not verify.
+ */
+function defaultReadiness(engines: ReadonlyMap<string, EngineAdapter>): WorkerReadinessFacts {
+  return {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engines: [...engines.keys()].map((engine) => ({
+      engine,
+      // An adapter whose CLI the Worker located is installed by definition; its
+      // login and models remain unverified, so they are honestly `unknown`.
+      installed: true,
+      readiness: 'unknown',
+      modelAvailability: 'unknown',
+      models: [],
+    })),
+  };
 }
 
 /** Where a session's run events go. Swappable so the worker is testable. */
@@ -121,6 +153,9 @@ export class EnvironmentWorker {
         case WORKER_METHODS.recycleTaskContext:
           this.#transport.respond(id, await this.#recycleTaskContext(params as RecycleTaskContextParams));
           return;
+        case WORKER_METHODS.validateWorkspace:
+          this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
+          return;
         default:
           this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
       }
@@ -151,6 +186,9 @@ export class EnvironmentWorker {
         supportsInterrupt: engine.capabilities.supportsInterrupt,
         standingInstructions: engine.capabilities.standingInstructions,
       })),
+      ...(this.#options.readiness !== undefined
+        ? { readiness: this.#options.readiness() }
+        : { readiness: defaultReadiness(this.#options.engines) }),
     };
   }
 
@@ -167,6 +205,7 @@ export class EnvironmentWorker {
         : await this.#requireWorkspace().projectWorkingDirectory(
           params.projectWorkspaceId,
           params.projectWorkspacePath,
+          params.projectWorkspaceKind,
         ),
       ...(params.model !== undefined ? { model: params.model } : {}),
       ...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -221,6 +260,10 @@ export class EnvironmentWorker {
 
   #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
     return this.#requireWorkspace().recycle(params);
+  }
+
+  #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    return this.#requireWorkspace().validateWorkspace(params);
   }
 
   #requireWorkspace(): WorkerWorkspace {

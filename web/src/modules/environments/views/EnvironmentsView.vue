@@ -2,8 +2,13 @@
 import { ref, computed, onMounted, watch, inject } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { EnvironmentFilter, EnvironmentInstance, ForceReleaseParams } from '../types.js';
-import type { EnvironmentService } from '../ports.js';
-import { FixtureEnvironmentService } from '../adapters/fixture-adapter.js';
+import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../ports.js';
+import {
+  createEnvironmentControlBoundary,
+  EnvironmentControlRefused,
+} from '../control-boundary.js';
+import { useShellConnection } from '../../../shell/use-shell-connection.js';
+import { useAnnouncer } from '../../../primitives/announcer.js';
 import FilterPillGroup from '../../../primitives/FilterPillGroup.vue';
 import FilterPill from '../../../primitives/FilterPill.vue';
 import Button from '../../../primitives/Button.vue';
@@ -16,15 +21,48 @@ import BootstrapGuideDialog from '../components/BootstrapGuideDialog.vue';
 import RegisterHostDialog from '../components/RegisterHostDialog.vue';
 import MobileDetailHeader from '../../../shell/MobileDetailHeader.vue';
 
+/**
+ * The page's authority is injected by the bootstrap and, in deterministic tests
+ * only, passed explicitly. A missing authority is an explicit unavailable state;
+ * the route never constructs a fixture adapter of its own.
+ */
 const props = defineProps<{
   service?: EnvironmentService;
 }>();
 
-const injectedService = inject<EnvironmentService | undefined>('environmentService', undefined);
-const activeService = computed(() => props.service ?? injectedService ?? new FixtureEnvironmentService());
+const injectedService = inject<EnvironmentService | undefined>(ENVIRONMENT_SERVICE, undefined);
+const activeService = computed(() => props.service ?? injectedService);
+const hasAuthority = computed(() => activeService.value !== undefined);
 
 const route = useRoute();
 const router = useRouter();
+const announcer = useAnnouncer();
+
+// The Shell owns the connection fact; the page reads the same typed port so a
+// control action is refused while the connection is unsettled rather than queued.
+const presentation = useShellConnection().presentation;
+const controlAvailable = computed(() => presentation.value.controlAvailable);
+/** True while an authority exists but the connection cannot carry a control action. */
+const controlsDisabled = computed(() => hasAuthority.value && !controlAvailable.value);
+
+const controlBoundary = createEnvironmentControlBoundary({
+  service: () => activeService.value,
+  presentation: () => presentation.value,
+});
+
+/** Runs a control action, or refuses it immediately through the typed boundary. */
+async function runControl<T>(action: (service: EnvironmentService) => Promise<T>): Promise<void> {
+  try {
+    await controlBoundary.run(action);
+    await loadData();
+  } catch (error) {
+    if (error instanceof EnvironmentControlRefused) {
+      announcer.announce(error.message);
+      return;
+    }
+    throw error;
+  }
+}
 
 const environments = ref<EnvironmentInstance[]>([]);
 const activeFilter = ref<EnvironmentFilter>('all');
@@ -36,8 +74,14 @@ const isGuideOpen = ref(false);
 const isRegisterOpen = ref(false);
 
 async function loadData() {
+  const service = activeService.value;
+  if (service === undefined) {
+    environments.value = [];
+    isLoading.value = false;
+    return;
+  }
   isLoading.value = true;
-  environments.value = await activeService.value.listEnvironments();
+  environments.value = await service.listEnvironments();
   if (route.params.id && typeof route.params.id === 'string') {
     selectedId.value = route.params.id;
   } else if (!selectedId.value || !environments.value.some((e) => e.id === selectedId.value)) {
@@ -86,7 +130,24 @@ const filteredEnvironments = computed(() => {
   });
 });
 
+/** The record the URL names, or '' when the destination itself is addressed. */
+const deepLinkId = computed(() =>
+  typeof route.params['id'] === 'string' ? (route.params['id'] as string) : ''
+);
+
+/**
+ * A deep link to an id that does not exist. It is never satisfied by another
+ * record: the page renders an explicit not-found state instead of substituting
+ * the first environment and risking a mutation against the wrong record.
+ */
+const deepLinkMissing = computed(
+  () => deepLinkId.value !== '' && !environments.value.some((e) => e.id === deepLinkId.value)
+);
+
 const selectedEnv = computed(() => {
+  if (deepLinkId.value !== '') {
+    return environments.value.find((e) => e.id === deepLinkId.value);
+  }
   return (
     environments.value.find((e) => e.id === selectedId.value) ??
     filteredEnvironments.value[0] ??
@@ -99,45 +160,38 @@ const isMobileDetailRoute = computed(() => !!route.params.id);
 
 function handleSelectEnvironment(id: string) {
   selectedId.value = id;
-  // Push route so mobile view drills down and URL is addressable
-  router.push(`/manage/environments/${id}`);
+  // Push route so phone drills down and the record is URL-addressable.
+  router.push({ name: 'environment-detail', params: { id } });
 }
 
 async function handleApprove(id: string) {
-  await activeService.value.approveEnrollment(id);
-  await loadData();
+  await runControl((service) => service.approveEnrollment(id));
 }
 
 async function handleProbe(id: string) {
-  await activeService.value.triggerProbe(id);
-  await loadData();
+  await runControl((service) => service.triggerProbe(id));
 }
 
 async function handleTogglePermission(cap: any) {
-  if (selectedEnv.value) {
-    await activeService.value.togglePermission(selectedEnv.value.id, cap);
-    await loadData();
-  }
+  const env = selectedEnv.value;
+  if (!env) return;
+  await runControl((service) => service.togglePermission(env.id, cap));
 }
 
 async function handleUnbindWorkspace(payload: { projectId: string; envId: string }) {
-  await activeService.value.unbindWorkspace(payload.projectId, payload.envId);
-  await loadData();
+  await runControl((service) => service.unbindWorkspace(payload.projectId, payload.envId));
 }
 
 async function handleReconcile(id: string) {
-  await activeService.value.reconcileEvidence(id);
-  await loadData();
+  await runControl((service) => service.reconcileEvidence(id));
 }
 
 async function handleResume(taskId: string) {
-  await activeService.value.resumeRecovery(taskId);
-  await loadData();
+  await runControl((service) => service.resumeRecovery(taskId));
 }
 
 async function handleDiscard(taskId: string) {
-  await activeService.value.discardRecovery(taskId);
-  await loadData();
+  await runControl((service) => service.discardRecovery(taskId));
 }
 
 function handleOpenForceRelease(_id: string) {
@@ -145,27 +199,44 @@ function handleOpenForceRelease(_id: string) {
 }
 
 async function handleConfirmForceRelease(params: ForceReleaseParams) {
-  await activeService.value.forceRelease(params);
+  try {
+    await controlBoundary.run((service) => service.forceRelease(params));
+  } catch (error) {
+    if (error instanceof EnvironmentControlRefused) {
+      isForceReleaseOpen.value = false;
+      announcer.announce(error.message);
+      return;
+    }
+    throw error;
+  }
   isForceReleaseOpen.value = false;
   await loadData();
 }
 
 async function handleArchive(id: string) {
-  await activeService.value.archiveEnvironment(id);
-  await loadData();
+  await runControl((service) => service.archiveEnvironment(id));
 }
 
 async function handleRestore(id: string) {
-  await activeService.value.restoreEnvironment(id);
-  await loadData();
+  await runControl((service) => service.restoreEnvironment(id));
 }
 
 async function handleUnenroll(id: string) {
-  if (confirm(`Revoke identity key for ${selectedEnv.value?.displayName}? Worker will be barred from reconnecting.`)) {
-    await activeService.value.unenrollEnvironment(id);
-    await loadData();
+  if (
+    controlAvailable.value &&
+    confirm(`Revoke identity key for ${selectedEnv.value?.displayName}? Worker will be barred from reconnecting.`)
+  ) {
+    await runControl((service) => service.unenrollEnvironment(id));
   }
 }
+
+/**
+ * Retained settlement evidence is a Worker fact (ADR-0009). The page offers the
+ * reconcile action only when the injected authority really reaches a Worker
+ * evidence port; production never does, so its reconciling box renders
+ * read-only with an explicit not-synchronized state instead of a button.
+ */
+const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenceReconciliation === true);
 </script>
 
 <template>
@@ -175,7 +246,9 @@ async function handleUnenroll(id: string) {
       v-if="isMobileDetailRoute && selectedEnv"
       :title="selectedEnv.displayName"
       :traffic-light="selectedEnv.trafficLight"
-      back-to="/manage/environments"
+      :back-to="{ name: 'environments' }"
+      back-control-id="btn-back-to-envs"
+      back-label="Back to Environments"
     />
 
     <!-- Standard Header & Filter Bar (always shown on desktop, shown on mobile when not drilled down) -->
@@ -189,7 +262,7 @@ async function handleUnenroll(id: string) {
           <span>Environments & Host Infrastructure</span>
         </h2>
 
-        <div class="flex items-center gap-2 shrink-0">
+        <div v-if="hasAuthority" class="flex items-center gap-2 shrink-0">
           <Button
             id="btn-register-host"
             variant="primary"
@@ -263,11 +336,39 @@ async function handleUnenroll(id: string) {
 
     <!-- Layout: Desktop 2-Column Split vs Mobile Drill-down -->
     <div class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
+      <!-- No authority: the production route requires a typed adapter and never
+           substitutes fixture facts for missing production wiring. -->
+      <div v-if="!hasAuthority" class="envs-unavailable-state flex items-center justify-center p-8 h-full">
+        <EmptyState
+          icon="environments"
+          title="Environment Authority Unavailable"
+          description="This page has no environment service configured, so it cannot show or change live host facts."
+        />
+      </div>
+
       <!-- Loading State -->
-      <div v-if="isLoading" class="envs-loading-state flex flex-col items-center justify-center p-12 text-center h-64 gap-3">
+      <div v-else-if="isLoading" class="envs-loading-state flex flex-col items-center justify-center p-12 text-center h-64 gap-3">
         <Icon name="refresh" class="animate-spin text-[var(--accent-primary)]" :size="28" />
         <span class="text-sm font-semibold text-[var(--text-primary)]">Loading Environments & Host States</span>
         <span class="text-xs text-[var(--text-muted)]">Querying local daemons and carrier overlay status...</span>
+      </div>
+
+      <!-- Missing deep link: never substitute another record for the requested id. -->
+      <div v-else-if="deepLinkMissing" class="envs-not-found-state flex items-center justify-center p-8 h-full">
+        <EmptyState
+          icon="alert"
+          title="Environment Not Found"
+          description="No environment matches this URL. Choose an environment from the list instead."
+        >
+          <Button
+            variant="primary"
+            size="sm"
+            class="envs-not-found-return text-xs"
+            @click="router.push({ name: 'environments' })"
+          >
+            <span>Back to Environments</span>
+          </Button>
+        </EmptyState>
       </div>
 
       <!-- Empty State: No environments enrolled at all -->
@@ -277,7 +378,7 @@ async function handleUnenroll(id: string) {
           title="No Environments Enrolled"
           description="No host environments are currently enrolled. Connect a worker or register a new host to begin dispatching agent tasks."
         >
-          <Button variant="primary" size="sm" class="mt-3" @click="isRegisterOpen = true">
+          <Button variant="primary" size="sm" class="mt-3" :disabled="controlsDisabled" @click="isRegisterOpen = true">
             <Icon name="plus" :size="13" />
             <span>Register New Host</span>
           </Button>
@@ -292,6 +393,8 @@ async function handleUnenroll(id: string) {
             <EnvironmentMasterList
               :environments="filteredEnvironments"
               :selected-id="selectedId"
+              :disabled="controlsDisabled"
+              :can-control="controlAvailable"
               @select="handleSelectEnvironment"
               @probe="handleProbe"
             />
@@ -302,6 +405,8 @@ async function handleUnenroll(id: string) {
             <EnvironmentDetail
               v-if="selectedEnv"
               :env="selectedEnv"
+              :disabled="controlsDisabled"
+              :can-reconcile="canReconcileEvidence"
               @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
@@ -326,6 +431,8 @@ async function handleUnenroll(id: string) {
           <div v-if="isMobileDetailRoute && selectedEnv" class="envs-mobile-detail-wrapper">
             <EnvironmentDetail
               :env="selectedEnv"
+              :disabled="controlsDisabled"
+              :can-reconcile="canReconcileEvidence"
               @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
@@ -345,6 +452,8 @@ async function handleUnenroll(id: string) {
             <EnvironmentMasterList
               :environments="filteredEnvironments"
               :selected-id="selectedId"
+              :disabled="controlsDisabled"
+              :can-control="controlAvailable"
               @select="handleSelectEnvironment"
               @probe="handleProbe"
             />
@@ -355,9 +464,10 @@ async function handleUnenroll(id: string) {
 
     <!-- Modals -->
     <ForceReleaseDialog
-      v-if="selectedEnv"
+      v-if="hasAuthority && selectedEnv"
       :open="isForceReleaseOpen"
       :env="selectedEnv"
+      :disabled="controlsDisabled"
       @update:open="isForceReleaseOpen = $event"
       @confirm="handleConfirmForceRelease"
     />

@@ -1,23 +1,39 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+/**
+ * The Project destination: Overview, Tasks, and Chat sub-views behind one
+ * URL-addressable route tree.
+ *
+ * The active sub-view and any open Task or Chat scope come from the route, so a
+ * deep link, a refresh, and browser Back/Forward all restore the same Project
+ * context. Local interaction state (an open dialog, an expanded foldable) stays
+ * local to this module; authoritative facts will arrive through typed module
+ * ports as those Tickets land.
+ */
+import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { useAnnouncer } from '../primitives/announcer.ts';
+import { setReturnToDestination } from './return-context.ts';
 import Icon from '../primitives/Icon.vue';
 import Button from '../primitives/Button.vue';
 import Badge from '../primitives/Badge.vue';
+import Card from '../primitives/Card.vue';
+import ClampedText from '../primitives/ClampedText.vue';
+import EmptyState from '../primitives/EmptyState.vue';
 import Dialog from '../primitives/Dialog.vue';
 
 const route = useRoute();
 const router = useRouter();
+const announcer = useAnnouncer();
 
 const selectedProjectId = ref('sprout-m2');
-const activeTab = ref<'overview' | 'tasks' | 'chat'>('overview');
-const activeChatChannel = ref('#general');
-const isMobileChatDetailOpen = ref(false);
+/**
+ * The scope shown for the unscoped `/project/chat` entry. An open scope always
+ * comes from the route instead, so this never shadows a deep-linked record.
+ */
+const defaultChatChannel = ref('#general');
 
 const selectedTask = ref<any>(null);
-const isTaskDetailOpen = ref(false);
 const activeTaskFilter = ref('all');
-const taskViewMode = ref<'list' | 'detail'>('list');
 const isLifecycleFoldExpanded = ref(true);
 
 const isProjectInfoOpen = ref(false);
@@ -29,12 +45,47 @@ const newProjName = ref('');
 const newProjDesc = ref('');
 const newProjPolicy = ref('explicit-only');
 
+/** The sub-view is the route's tab, not a component-owned mode flag. */
+const activeTab = computed<'overview' | 'tasks' | 'chat'>(() => {
+  const tab = route.meta['tab'];
+  return tab === 'tasks' || tab === 'chat' ? tab : 'overview';
+});
+
+/** An open Task record is route-addressed, so it survives refresh and Back. */
+const openTaskId = computed(() =>
+  typeof route.params['taskId'] === 'string' ? (route.params['taskId'] as string) : ''
+);
+
+/** An open Chat scope is route-addressed for the same reason. */
+const openChatScopeId = computed(() =>
+  typeof route.params['scopeId'] === 'string' ? (route.params['scopeId'] as string) : ''
+);
+
+watch(openChatScopeId, (scopeId) => {
+  // Only an existing scope may become the default against which the unscoped
+  // chat list resolves: an unknown route id must never be adopted as if it
+  // named a real conversation.
+  if (scopeId && chatScopes.some((scope) => scope.id === scopeId)) defaultChatChannel.value = scopeId;
+});
+
+watch(
+  () => route.meta['tab'],
+  () => {
+    announcer.announce(`Project ${activeTab.value} view.`);
+  },
+  // Immediate, because arriving from another destination mounts this component
+  // at the new tab rather than changing the tab of a mounted one. Without it a
+  // Feed-to-Project jump would land silently.
+  { immediate: true }
+);
+
 function handleCreateProject() {
   if (!newProjName.value.trim()) return;
-  const newId = `proj-${newProjName.value.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  const name = newProjName.value.trim();
+  const newId = `proj-${name.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
   projects.push({
     id: newId,
-    name: newProjName.value.trim(),
+    name,
     desc: newProjDesc.value.trim() || 'Multi-agent project collaboration workspace',
     status: 'Active',
   });
@@ -42,6 +93,7 @@ function handleCreateProject() {
   newProjName.value = '';
   newProjDesc.value = '';
   isNewProjectOpen.value = false;
+  announcer.announce(`Project ${name} created.`);
 }
 
 const newProposalTitle = ref('');
@@ -71,15 +123,16 @@ function handleProposeTask() {
   newProposalTitle.value = '';
   newProposalGoal.value = '';
   isProposeTaskOpen.value = false;
+  announcer.announce(`Task #${newId} proposed. It holds no lease and starts no run.`);
 }
 
-function openTaskDetail(task: any) {
-  selectedTask.value = task;
-  taskViewMode.value = 'detail';
+/** Opening a Task is a route change, so the record is deep-linkable. */
+function openTaskDetail(task: { id: string }) {
+  router.push({ name: 'project-task-detail', params: { taskId: task.id } });
 }
 
 function closeTaskDetail() {
-  taskViewMode.value = 'list';
+  router.push({ name: 'project-tasks' });
 }
 
 const selectedMember = ref<any>(null);
@@ -90,42 +143,21 @@ function openMemberDetail(member: any) {
   isMemberDetailOpen.value = true;
 }
 
-function navigateToTaskEnv() {
-  isTaskDetailOpen.value = false;
-  router.push('/manage/environments/env-ready');
+/**
+ * Leaving Project for another authoritative surface keeps the operator oriented:
+ * the return control names where they came from, so Project is never a dead end.
+ */
+function navigateToEnvironments() {
+  isMemberDetailOpen.value = false;
+  setReturnToDestination(router, { name: 'project-tasks' }, 'Back to Project Tasks');
+  router.push({ name: 'environments' });
 }
 
 function navigateToAgentsView() {
   isMemberDetailOpen.value = false;
-  router.push('/manage/agents');
+  setReturnToDestination(router, { name: 'project-overview' }, 'Back to Project');
+  router.push({ name: 'agents' });
 }
-
-function syncTabFromRoute() {
-  const tabParam = route.params.tab as string | undefined;
-  if (tabParam === 'tasks' || tabParam === 'chat' || tabParam === 'overview') {
-    activeTab.value = tabParam;
-  } else if (route.path.endsWith('/tasks')) {
-    activeTab.value = 'tasks';
-  } else if (route.path.endsWith('/chat')) {
-    activeTab.value = 'chat';
-  } else {
-    activeTab.value = 'overview';
-  }
-  if (activeTab.value !== 'chat') {
-    isMobileChatDetailOpen.value = false;
-  }
-}
-
-onMounted(() => {
-  syncTabFromRoute();
-});
-
-watch(
-  () => route.path,
-  () => {
-    syncTabFromRoute();
-  }
-);
 
 const projects = [
   { id: 'sprout-m2', name: 'Sprout M2 Operator', desc: 'Local multi-agent collaboration and environment-scheduling platform', status: 'Active' },
@@ -147,12 +179,35 @@ const boundWorkspaces = [
   { root: 'sprout-win-workspace', relPath: 'work/sprout', host: 'Windows Workstation 01', status: 'Lease Recovery' },
 ];
 
-const tasks = [
+interface ProjectTask {
+  id: string;
+  title: string;
+  stage: string;
+  stageVariant: 'secondary' | 'success' | 'warning' | 'danger';
+  lead: string;
+  host: string;
+  version: string;
+  lifecycleSentence: string;
+  agentRunLifecycle: string;
+  leaseLifecycle: string;
+  goal: string;
+  constraints: string[];
+  validationCriteria: string[];
+  completionClaim: {
+    outcomeSummary: string;
+    validationEvidence: string;
+    durableChanges: string[];
+    recommendedDisposition: string;
+  } | null;
+  runs: { id: string; agent: string; engine: string; model: string; duration: string; tokens: string; status: string }[];
+}
+
+const tasks: ProjectTask[] = [
   {
     id: '101',
     title: 'Continuous Integration & Host Verification Pipeline',
     stage: 'Validation',
-    stageVariant: 'warning' as const,
+    stageVariant: 'warning',
     lead: 'Programmer',
     host: 'Mac Studio M2 Max',
     version: 'v2',
@@ -183,7 +238,7 @@ const tasks = [
     id: '104',
     title: 'Distributed Agent Orchestration & Safety Validation',
     stage: 'Recovery',
-    stageVariant: 'danger' as const,
+    stageVariant: 'danger',
     lead: 'Architect',
     host: 'Windows Workstation 01',
     version: 'v1',
@@ -199,166 +254,176 @@ const tasks = [
       'Worker carrier reconnect produces reconciled settlement evidence.',
       'Force release audit record is durably preserved.',
     ],
+    completionClaim: null,
     runs: [
-      { id: 'run-206', agent: 'Architect', engine: 'Codex', model: 'gpt-5-codex', duration: '5m 12s', tokens: '145,000', status: 'Interrupted' },
+      { id: 'run-206', agent: 'Architect', engine: 'Codex', model: 'gpt-5-codex', duration: 'interrupted', tokens: 'n/a', status: 'Interrupted' },
     ],
   },
   {
     id: '107',
     title: 'Accessibility Verification & Operator Surface Diagnostics',
     stage: 'Active',
-    stageVariant: 'success' as const,
+    stageVariant: 'success',
     lead: 'Foreman',
     host: 'Local Worker',
-    version: 'v3',
-    lifecycleSentence: 'Task active · Agent running · Lease held (Local Worker)',
+    version: 'v1',
+    lifecycleSentence: 'Task active · Run running · Lease held (Local Worker)',
     agentRunLifecycle: 'running',
     leaseLifecycle: 'held',
-    goal: 'Verify operator control accessibility, focus trapping, Escape dismissal, and screen-reader semantics.',
-    constraints: [
-      'Follow Reka UI accessibility primitives for overlay focus trapping.',
-      'Ensure keyboard and mobile touch event parity.',
-    ],
-    validationCriteria: [
-      'All 14 production DOM tests pass including keyboard and touch assertion suites.',
-    ],
+    goal: 'Verify operator control accessibility, focus trapping, and screen-reader semantics.',
+    constraints: ['Touch targets stay at or above the 44px floor.'],
+    validationCriteria: ['Keyboard-only navigation completes every journey.'],
+    completionClaim: null,
     runs: [
-      { id: 'run-208', agent: 'Foreman', engine: 'Pi', model: 'claude-3-7-sonnet', duration: '3m 45s', tokens: '89,400', status: 'Running' },
-    ],
-  },
-  {
-    id: '110',
-    title: 'Multi-Platform Host Configuration & Capability Profiling',
-    stage: 'Proposed',
-    stageVariant: 'secondary' as const,
-    lead: 'Researcher',
-    host: 'Unassigned',
-    version: 'v1',
-    lifecycleSentence: 'Task proposed · Executes NO run · Holds NO lease',
-    agentRunLifecycle: 'none',
-    leaseLifecycle: 'clear',
-    goal: 'Profile host engine readiness and granular capability permissions across macOS, Windows, and container platforms.',
-    constraints: [
-      'Proposals execute zero runs and hold no host leases until explicit Human Begin authority.',
-    ],
-    validationCriteria: [
-      'Capability matrix matches host security profiles.',
-    ],
-    runs: [],
-  },
-  {
-    id: '98',
-    title: 'Durable Transactional Persistence & Event Store Verification',
-    stage: 'Completed',
-    stageVariant: 'info' as const,
-    lead: 'Architect',
-    host: 'Mac Studio M2 Max',
-    version: 'v4',
-    lifecycleSentence: 'Task completed · All verification runs green · Released lease',
-    agentRunLifecycle: 'completed',
-    leaseLifecycle: 'clear',
-    goal: 'Verify SQLite ACID transactional consistency across multi-agent turns and worker lease transitions.',
-    constraints: [
-      'Atomic transactions for lease acquisition and release.',
-    ],
-    validationCriteria: [
-      'WAL mode enabled and verification suite passes cleanly.',
-    ],
-    runs: [
-      { id: 'run-198', agent: 'Architect', engine: 'Codex', model: 'gpt-5-codex', duration: '22m 10s', tokens: '580,200', status: 'Completed' },
+      { id: 'run-207', agent: 'Foreman', engine: 'Pi', model: 'claude-3-7-sonnet', duration: 'running', tokens: 'streaming', status: 'Running' },
     ],
   },
 ];
 
+const TASK_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'proposed', label: 'Proposed' },
+  { key: 'active', label: 'Active' },
+  { key: 'validation', label: 'Awaiting Validation' },
+  { key: 'recovery', label: 'Recovery' },
+] as const;
+
 const filteredTasks = computed(() => {
   if (activeTaskFilter.value === 'all') return tasks;
-  return tasks.filter((t) => t.stage === activeTaskFilter.value);
+  return tasks.filter((t) => t.stage.toLowerCase() === activeTaskFilter.value);
 });
+
+/** The open record resolves from the route id, never from a parallel selection ref. */
+const routeTask = computed(() => (openTaskId.value ? tasks.find((t) => t.id === openTaskId.value) : undefined));
+
+/**
+ * A deep link to a Task id that does not exist. It is never satisfied by
+ * another record: the view renders an explicit not-found state instead of
+ * silently falling back to the list under a URL that names a missing Task.
+ */
+const missingTaskId = computed(() => openTaskId.value !== '' && routeTask.value === undefined);
+
+watch(
+  routeTask,
+  (task) => {
+    selectedTask.value = task ?? null;
+  },
+  { immediate: true }
+);
+
+/**
+ * A Chat scope's kind is a typed discriminator. The icon and the human label
+ * both resolve from it, so a channel, a working group, and a direct message can
+ * never be rendered with each other's semantics.
+ */
+type ChatScopeKind = 'channel' | 'working-group' | 'direct-message';
+
+const CHAT_SCOPE_ICONS: Record<ChatScopeKind, string> = {
+  channel: 'chat',
+  'working-group': 'project',
+  'direct-message': 'agents',
+};
 
 interface ChatScope {
   id: string;
   label: string;
-  kind: 'channel' | 'working-group' | 'dm';
+  kind: ChatScopeKind;
+  kindLabel: string;
   lastSnippet: string;
   lastTime: string;
   unread: number;
+  readOnlyReason: string;
 }
 
-const chatScopes = ref<ChatScope[]>([
+const chatScopes: ChatScope[] = [
   {
     id: '#general',
     label: '#general',
     kind: 'channel',
-    lastSnippet: 'All 8 Reka UI accessible dialog checks pass...',
+    kindLabel: 'Project channel',
+    lastSnippet: 'All accessible dialog checks pass on both viewports.',
     lastTime: '10:11 AM',
     unread: 0,
+    readOnlyReason: '',
   },
   {
     id: 'wg-frontend',
     label: 'wg-frontend',
     kind: 'working-group',
-    lastSnippet: 'Vue 3.5 + Tailwind 4 responsive chat layout...',
-    lastTime: '10:05 AM',
-    unread: 1,
-  },
-  {
-    id: 'wg-core',
-    label: 'wg-core',
-    kind: 'working-group',
-    lastSnippet: 'Carrier TLS stream reconnect latency ~14ms...',
+    kindLabel: 'Working group',
+    lastSnippet: 'Focus ring contrast measured at 5.1:1.',
     lastTime: '09:48 AM',
-    unread: 0,
+    unread: 2,
+    readOnlyReason: '',
   },
   {
-    id: '@Programmer',
-    label: '@Programmer',
-    kind: 'dm',
-    lastSnippet: 'Verified worker ports and host daemon checks.',
-    lastTime: '10:08 AM',
-    unread: 0,
-  },
-  {
-    id: '@Architect',
+    id: 'dm-architect',
     label: '@Architect',
-    kind: 'dm',
-    lastSnippet: 'Production workspace baseline confirmed.',
-    lastTime: '10:04 AM',
+    kind: 'direct-message',
+    kindLabel: 'Direct message',
+    lastSnippet: 'Lease recovery evidence attached.',
+    lastTime: '09:20 AM',
     unread: 0,
+    readOnlyReason: '',
   },
-]);
+];
+
+/** The scope the URL names, or undefined when that id does not exist. */
+const openChatScope = computed(() => chatScopes.find((s) => s.id === openChatScopeId.value));
+
+/**
+ * A deep link to a Chat scope that does not exist. It is never satisfied by
+ * another scope: the view renders an explicit not-found state instead of
+ * substituting the first scope and allowing a mutation under the wrong URL.
+ */
+const missingChatScope = computed(() => openChatScopeId.value !== '' && openChatScope.value === undefined);
+
+/**
+ * The scope whose conversation is rendered. When the route names a scope, only
+ * that record resolves; the `#general` fallback applies solely to the
+ * unscoped `/project/chat` entry, never to a missing nested detail deep link.
+ */
+const activeScope = computed(() => {
+  if (openChatScopeId.value !== '') return openChatScope.value;
+  return chatScopes.find((s) => s.id === defaultChatChannel.value) ?? chatScopes[0];
+});
+
+/** The scope id rendered in headers and the composer. Display-only. */
+const activeChatChannel = computed(() => activeScope.value?.id ?? defaultChatChannel.value);
 
 const chatMessages = ref([
   {
     id: 'msg-1',
-    author: 'Architect',
-    role: 'System Architect',
-    time: '10:04 AM',
-    content: 'Inspecting operator services and environment readiness. Remote state stays behind EnvironmentService port.',
+    author: 'Programmer',
+    role: 'Agent',
+    time: '10:11 AM',
+    content: 'Host verification pipeline is green across all enrolled workers.',
   },
   {
     id: 'msg-2',
-    author: 'Programmer',
-    role: 'Lead Implementer',
-    time: '10:08 AM',
-    content: 'Verified. Carrier connection stable and host daemons responsive.',
-  },
-  {
-    id: 'msg-3',
-    author: 'Foreman',
-    role: 'Coordinator',
-    time: '10:11 AM',
-    content: 'All host security policies active. Host-local keys verified and carrier stream encrypted.',
+    author: 'Operator',
+    role: 'Human Operator',
+    time: '10:12 AM',
+    content: 'Confirm the lease stays held through validation.',
   },
 ]);
 
 const newMessage = ref('');
 
+/** Opening a Chat scope is a route change, so the conversation is deep-linkable. */
 function selectChannel(channelId: string) {
-  activeChatChannel.value = channelId;
-  isMobileChatDetailOpen.value = true;
+  router.push({ name: 'project-chat-scope', params: { scopeId: channelId } });
+}
+
+function closeChatScope() {
+  router.push({ name: 'project-chat' });
 }
 
 function sendMessage() {
+  // The shared conversation may only be mutated from an existing scope. A URL
+  // naming a missing scope offers no composer, and this guard keeps the
+  // invariant even if a send is ever dispatched from another path.
+  if (missingChatScope.value) return;
   if (!newMessage.value.trim()) return;
   chatMessages.value.push({
     id: `msg-${Date.now()}`,
@@ -370,13 +435,12 @@ function sendMessage() {
   newMessage.value = '';
 }
 </script>
-
 <template>
   <div class="project-view flex flex-col h-full bg-[var(--bg-app)]">
     <!-- 1. Top Project Header & Selector -->
     <div
       class="px-3 sm:px-4 py-3 bg-[var(--bg-surface)] border-b border-[var(--border-subtle)] flex items-center justify-between gap-2 flex-nowrap"
-      :class="{ 'hidden md:flex': activeTab === 'chat' && isMobileChatDetailOpen }"
+      :class="{ 'hidden md:flex': activeTab === 'chat' && openChatScopeId }"
     >
       <div class="flex items-center gap-2.5 min-w-0 flex-1">
         <div class="p-1.5 sm:p-2 rounded bg-[var(--accent-bg)] text-[var(--accent-primary)] shrink-0">
@@ -507,8 +571,26 @@ function sendMessage() {
 
       <!-- 2. Tasks Tab (Prototype Operating Loop: List vs Dedicated Detail Drill-down) -->
       <div v-else-if="activeTab === 'tasks'" class="flex flex-col gap-4">
+        <!-- Missing Task deep link: never satisfied by the list or another record. -->
+        <div v-if="missingTaskId" class="tasks-not-found-state flex items-center justify-center p-8 h-full">
+          <EmptyState
+            icon="alert"
+            title="Task Not Found"
+            description="No task matches this URL. Choose a task from the list instead."
+          >
+            <Button
+              variant="primary"
+              size="sm"
+              class="tasks-not-found-return text-xs"
+              @click="closeTaskDetail"
+            >
+              <span>Back to Tasks List</span>
+            </Button>
+          </EmptyState>
+        </div>
+
         <!-- 2.1 Dedicated Task Detail View (Matching prototype renderTaskDetailPage) -->
-        <div v-if="taskViewMode === 'detail' && selectedTask" class="flex flex-col gap-4">
+        <div v-else-if="selectedTask" class="flex flex-col gap-4">
           <!-- Back Navigation Bar -->
           <div class="flex items-center justify-between gap-3 p-3 rounded-[var(--radius-sm)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex-wrap shadow-xs">
             <button
@@ -627,7 +709,7 @@ function sendMessage() {
 
             <!-- Stage Actions -->
             <div class="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)] flex-wrap">
-              <Button variant="secondary" size="sm" @click="navigateToTaskEnv">
+              <Button variant="secondary" size="sm" @click="navigateToEnvironments">
                 <Icon name="environments" :size="13" />
                 <span>Inspect Host Environment</span>
               </Button>
@@ -682,18 +764,20 @@ function sendMessage() {
             </div>
 
             <div class="flex items-center gap-2">
-              <select
-                v-model="activeTaskFilter"
-                class="px-2.5 py-1.5 rounded text-xs bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] cursor-pointer"
-                aria-label="Filter tasks by status"
-              >
-                <option value="all">All Tasks ({{ tasks.length }})</option>
-                <option value="Active">Active / Running</option>
-                <option value="Validation">Validation Claims</option>
-                <option value="Recovery">Recovery</option>
-                <option value="Proposed">Proposed</option>
-                <option value="Completed">Completed</option>
-              </select>
+              <div class="flex items-center gap-1.5 overflow-x-auto py-1" role="group" aria-label="Filter tasks by stage">
+                <button
+                  v-for="f in TASK_FILTERS"
+                  :key="f.key"
+                  type="button"
+                  class="task-filter-pill px-2.5 py-1.5 rounded-[var(--radius-sm)] border text-xs font-semibold cursor-pointer min-h-[36px] whitespace-nowrap focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+                  :class="activeTaskFilter === f.key ? 'bg-[var(--accent-bg)] border-[var(--accent-primary)] text-[var(--primary-text,var(--text-primary))] font-bold ring-1 ring-[var(--accent-primary)]' : 'bg-[var(--bg-surface-elevated)] border-[var(--border-subtle)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]'"
+                  :data-task-filter="f.key"
+                  :aria-pressed="activeTaskFilter === f.key"
+                  @click="activeTaskFilter = f.key"
+                >
+                  {{ f.label }}
+                </button>
+              </div>
 
               <Button variant="primary" size="sm" class="propose-task-btn" @click="isProposeTaskOpen = true">
                 <Icon name="plus" :size="14" />
@@ -737,10 +821,30 @@ function sendMessage() {
 
       <!-- 3. Chat Tab (Responsive: Wide screen side-by-side, narrow screen drill-down with back button) -->
       <div v-else-if="activeTab === 'chat'" class="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden flex flex-col md:flex-row h-[750px] shadow-xs">
+        <!-- Missing Chat scope deep link: never substitute another scope or offer
+             its composer, so no message can be written under the wrong URL. -->
+        <div v-if="missingChatScope" class="chat-not-found-state w-full flex items-center justify-center p-8 h-full">
+          <EmptyState
+            icon="alert"
+            title="Conversation Not Found"
+            description="No conversation matches this URL. Choose a conversation from the list instead."
+          >
+            <Button
+              variant="primary"
+              size="sm"
+              class="chat-not-found-return text-xs"
+              @click="closeChatScope"
+            >
+              <span>Back to Conversations</span>
+            </Button>
+          </EmptyState>
+        </div>
+
         <!-- Chat Channels Cards / List: Visible on Desktop, or on Mobile when NOT drilled down -->
+        <template v-else>
         <div
           class="w-full md:w-72 lg:w-80 bg-[var(--bg-surface-elevated)] md:border-r border-[var(--border-subtle)] p-3 flex flex-col gap-2 shrink-0 overflow-y-auto"
-          :class="isMobileChatDetailOpen ? 'hidden md:flex' : 'flex'"
+          :class="openChatScopeId ? 'hidden md:flex' : 'flex'"
         >
           <div class="flex items-center justify-between px-2 mb-1">
             <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] tracking-wider">Conversations & Groups</span>
@@ -753,6 +857,8 @@ function sendMessage() {
               v-for="scope in chatScopes"
               :key="scope.id"
               type="button"
+              :data-scope-id="scope.id"
+              :data-scope-kind="scope.kind"
               class="w-full text-left p-3 rounded-[var(--radius-sm)] border transition-all cursor-pointer select-none flex flex-col gap-1"
               :class="activeChatChannel === scope.id ? 'bg-[var(--bg-surface)] border-[var(--accent-primary)] shadow-xs ring-1 ring-[var(--accent-primary)]' : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]'"
               @click="selectChannel(scope.id)"
@@ -760,9 +866,10 @@ function sendMessage() {
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 truncate">
                   <div class="p-1 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
-                    <Icon :name="scope.kind === 'channel' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'" :size="14" />
+                    <Icon :name="CHAT_SCOPE_ICONS[scope.kind]" :size="14" />
                   </div>
                   <strong class="text-xs font-bold text-[var(--text-primary)] truncate">{{ scope.label }}</strong>
+                  <span class="text-[9px] uppercase tracking-wider text-[var(--text-muted)] shrink-0">{{ scope.kindLabel }}</span>
                 </div>
                 <span class="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{{ scope.lastTime }}</span>
               </div>
@@ -783,7 +890,7 @@ function sendMessage() {
         <!-- Chat Timeline & Composer: Visible on Desktop, or on Mobile when drilled down -->
         <div
           class="flex-1 flex flex-col justify-between h-full bg-[var(--bg-surface)] min-w-0"
-          :class="!isMobileChatDetailOpen ? 'hidden md:flex' : 'flex'"
+          :class="!openChatScopeId ? 'hidden md:flex' : 'flex'"
         >
           <!-- Mobile-only Chat Back Header (Hidden on md+) -->
           <div class="md:hidden px-3 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between gap-2">
@@ -792,15 +899,16 @@ function sendMessage() {
               class="flex items-center gap-1.5 text-xs font-semibold text-[var(--accent-primary)] hover:underline cursor-pointer py-1 px-2 rounded bg-[var(--accent-bg)] border border-[var(--accent-border)] min-h-[36px]"
               title="Return to Conversations List"
               aria-label="Return to Conversations List"
-              @click="isMobileChatDetailOpen = false"
+              @click="closeChatScope"
             >
               <Icon name="chevron-left" :size="16" />
               <span>Back to Chats</span>
             </button>
             <div class="flex items-center gap-2 truncate">
               <div class="flex items-center gap-1.5 truncate">
-                <Icon name="chat" :size="14" class="text-[var(--accent-primary)]" />
-                <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeChatChannel }}</strong>
+                <Icon :name="activeScope ? CHAT_SCOPE_ICONS[activeScope.kind] : 'chat'" :size="14" class="text-[var(--accent-primary)]" />
+                <strong class="text-xs text-[var(--text-primary)] truncate">{{ activeScope?.label ?? activeChatChannel }}</strong>
+                <span v-if="activeScope" class="text-[9px] uppercase tracking-wider text-[var(--text-muted)] shrink-0">{{ activeScope.kindLabel }}</span>
               </div>
               <Button
                 variant="secondary"
@@ -818,9 +926,9 @@ function sendMessage() {
           <!-- Standard Channel Header (Always visible on Desktop) -->
           <div class="hidden md:flex px-4 py-3 border-b border-[var(--border-subtle)] items-center justify-between bg-[var(--bg-surface)]">
             <div class="flex items-center gap-2">
-              <Icon name="chat" :size="16" class="text-[var(--accent-primary)]" />
-              <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeChatChannel }}</strong>
-              <span class="text-[10px] text-[var(--text-muted)]">Active multi-agent message timeline</span>
+              <Icon :name="activeScope ? CHAT_SCOPE_ICONS[activeScope.kind] : 'chat'" :size="16" class="text-[var(--accent-primary)]" />
+              <strong class="text-xs font-bold text-[var(--text-primary)]">{{ activeScope?.label ?? activeChatChannel }}</strong>
+              <span v-if="activeScope" class="text-[10px] text-[var(--text-muted)]">{{ activeScope.kindLabel }}</span>
             </div>
             <div class="flex items-center gap-2">
               <Badge variant="secondary">3 Members Online</Badge>
@@ -842,6 +950,7 @@ function sendMessage() {
             <div
               v-for="msg in chatMessages"
               :key="msg.id"
+              :data-message-id="msg.id"
               class="flex items-start gap-3"
             >
               <div class="w-8 h-8 rounded-full bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] font-bold flex items-center justify-center text-xs shrink-0">
@@ -874,6 +983,7 @@ function sendMessage() {
             </Button>
           </div>
         </div>
+        </template>
       </div>
     </div>
 
@@ -1081,11 +1191,10 @@ function sendMessage() {
       </template>
     </Dialog>
     <Dialog
-      v-if="selectedTask"
-      :open="isTaskDetailOpen"
-      :title="`Task #${selectedTask.id}: ${selectedTask.title}`"
-      :description="`Lifecycle stage: ${selectedTask.stage} · Lead: @${selectedTask.lead}`"
-      @update:open="isTaskDetailOpen = $event"
+      v-if="false"
+      :open="false"
+      title=""
+      @update:open="() => {}"
     >
       <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
         <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-2">
@@ -1119,10 +1228,10 @@ function sendMessage() {
       </div>
 
       <template #footer>
-        <Button variant="secondary" size="sm" @click="isTaskDetailOpen = false">
+        <Button variant="secondary" size="sm" @click="() => {}">
           Close
         </Button>
-        <Button variant="primary" size="sm" @click="navigateToTaskEnv">
+        <Button variant="primary" size="sm" @click="navigateToEnvironments">
           <Icon name="environments" :size="13" />
           <span>Inspect Host Environment</span>
         </Button>

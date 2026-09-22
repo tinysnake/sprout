@@ -22,6 +22,8 @@ import {
   type TaskContextMaterialization,
   type TurnEventParams,
   type TurnSettledParams,
+  type ValidateWorkspaceParams,
+  type ValidateWorkspaceResult,
   type WorkerInfo,
 } from './protocol.ts';
 
@@ -128,6 +130,7 @@ export class WorkerClient implements EngineAdapter {
           ...(request.model !== undefined ? { model: request.model } : {}),
           ...(request.effort !== undefined ? { effort: request.effort } : {}),
           ...(request.projectWorkspaceId !== undefined ? { projectWorkspaceId: request.projectWorkspaceId } : {}),
+          ...(request.projectWorkspaceKind !== undefined ? { projectWorkspaceKind: request.projectWorkspaceKind } : {}),
           ...(request.projectWorkspacePath !== undefined ? { projectWorkspacePath: request.projectWorkspacePath } : {}),
           ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
           ...(request.resumeSessionKey !== undefined
@@ -182,6 +185,10 @@ export class WorkerContextClient {
 
   recycle(input: RecycleTaskContextParams): Promise<void> {
     return this.#transport.request(WORKER_METHODS.recycleTaskContext, input);
+  }
+
+  validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    return this.#transport.request(WORKER_METHODS.validateWorkspace, input);
   }
 }
 
