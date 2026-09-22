@@ -8,6 +8,7 @@ import { join } from 'node:path';
 
 import { inspectLaunchAgent, installLaunchAgent, launchAgentPlistPath, renderLaunchAgent, restartLaunchAgent, uninstallLaunchAgent } from './launch-agent.ts';
 import { workerServiceLabel } from './host-state.ts';
+import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
 
 /**
  * macOS process-level integration for the `sprout worker` executable and the
@@ -69,7 +70,7 @@ test('the packaged start re-execs with an inspectable host-local process binding
       identityFileName: 'identity.pem',
     };
     writeFileSync(join(state, 'config.json'), JSON.stringify(config));
-    writeFileSync(join(state, 'identity.pem'), 'test-only-private-key');
+    writeFileSync(join(state, 'identity.pem'), generateWorkerIdentity().privateKey);
     chmodSync(join(state, 'config.json'), 0o600);
     chmodSync(join(state, 'identity.pem'), 0o600);
     const result = spawnSync(sproutExecutable, ['worker', 'start'], {

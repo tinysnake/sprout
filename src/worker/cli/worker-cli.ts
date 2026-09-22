@@ -71,10 +71,8 @@ import {
   installLaunchAgent,
   launchAgentPlistPath,
   inspectLaunchAgent,
-  loadedWorkerServiceLabels,
   renderLaunchAgent,
   restartLaunchAgent,
-  storedWorkerServiceLabels,
   uninstallLaunchAgent,
 } from './launch-agent.ts';
 
@@ -232,7 +230,7 @@ export function projectStatus(input: {
   readonly configError: 'not-enrolled' | 'invalid' | undefined;
   readonly runtime: WorkerRuntimeState | undefined;
   readonly processAlive: (pid: number) => boolean;
-  readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean;
+  readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean | 'unknown';
   readonly serviceInstalled: boolean;
 }): WorkerStatus {
   if (!input.enrolled) {
@@ -251,7 +249,16 @@ export function projectStatus(input: {
   };
   const runtime = input.runtime;
   const identityCheck = input.processMatchesRuntime ?? ((_process: WorkerProcessIdentity) => true);
-  const trusted = runtime !== undefined && input.processAlive(runtime.pid) && identityCheck(runtime.process);
+  const processAlive = runtime !== undefined && input.processAlive(runtime.pid);
+  const identityResult = processAlive && runtime !== undefined ? identityCheck(runtime.process) : false;
+  if (runtime !== undefined && runtime.state !== 'stopped' && processAlive && identityResult === 'unknown') {
+    return {
+      state: 'local-configuration-failure',
+      ...base,
+      detail: 'the Worker process ownership evidence is unavailable; start and reset are fenced',
+    };
+  }
+  const trusted = runtime !== undefined && processAlive && identityResult === true;
   if (runtime === undefined || !trusted) {
     if (runtime !== undefined && isTerminalRefusalState(runtime.state)) {
       // Preserve the durable refusal/pending fact even after the process
@@ -292,7 +299,7 @@ export function parseEndpoint(value: string): { readonly host: string; readonly 
   try {
     url = new URL(withScheme);
   } catch {
-    throw new WorkerHostStateError('invalid', `the endpoint "${value}" is not a valid host:port`);
+    throw new WorkerHostStateError('invalid', 'the endpoint is not a valid host:port');
   }
   if (!['ws:', 'wss:', 'http:', 'https:'].includes(url.protocol)) {
     throw new WorkerHostStateError('invalid', 'the endpoint scheme must be ws, wss, http, or https');
@@ -439,7 +446,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     try {
       endpoint = parseEndpoint(endpointArg);
     } catch (error) {
-      err(`sprout worker enroll: ${messageOf(error)}`);
+      err(`sprout worker enroll: ${diagnosticOf(error, 'the endpoint is invalid')}`);
       return WORKER_EXIT.usage;
     }
     if (enrollmentId === '') {
@@ -454,7 +461,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     try {
       secret = (await readClaimSecret('Sprout enrollment claim secret (input is hidden): ')).trim();
     } catch (error) {
-      err(`sprout worker enroll: ${messageOf(error)}`);
+      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment input could not be read')}`);
       return WORKER_EXIT.failure;
     }
     if (secret === '') {
@@ -471,7 +478,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         claimSecret: secret,
         identityKeyPath,
         engineFacts: engineFacts(engineIds),
-        log: (line) => err(`[sprout-worker] ${line}`),
+        log: () => err('[sprout-worker] host-local Worker operation completed'),
       });
       writeConfig(paths, {
         version: 1,
@@ -506,7 +513,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         removeFileIfPresent(paths.identityPath);
         removeFileIfPresent(paths.configPath);
       }
-      err(`sprout worker enroll: ${messageOf(error)}`);
+      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')}`);
       return error instanceof WorkerEnrollmentRefusedError ? WORKER_EXIT.refused : WORKER_EXIT.failure;
     }
   }
@@ -536,14 +543,14 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         err('sprout worker start: this host is not enrolled; run `sprout worker enroll` first');
         return WORKER_EXIT.notEnrolled;
       }
-      err(`sprout worker start: ${messageOf(error)}`);
+      err(`sprout worker start: ${diagnosticOf(error, 'host-local configuration could not be read')}`);
       return WORKER_EXIT.failure;
     }
     const identityPath = join(paths.stateDirectory, config.identityFileName);
     try {
       readIdentityKey({ ...paths, identityPath });
     } catch (error) {
-      err(`sprout worker start: ${messageOf(error)}`);
+      err(`sprout worker start: ${diagnosticOf(error, 'the host-local Worker identity key is invalid or unavailable')}`);
       return WORKER_EXIT.failure;
     }
 
@@ -558,7 +565,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       try {
         processIdentity = currentProcess(ownerToken);
       } catch (error) {
-        err(`sprout worker start: ${messageOf(error)}`);
+        err(`sprout worker start: ${diagnosticOf(error, 'host-local process identity could not be established')}`);
         return WORKER_EXIT.failure;
       }
 
@@ -570,7 +577,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           err(`sprout worker start: ${error.message}`);
           return WORKER_EXIT.alreadyRunning;
         }
-        err(`sprout worker start: ${messageOf(error)}`);
+        err(`sprout worker start: ${diagnosticOf(error, 'host-local Worker lock could not be acquired')}`);
         return WORKER_EXIT.failure;
       }
 
@@ -586,7 +593,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           claimSecret: undefined,
           identityKeyPath: identityPath,
           engineFacts: engineFacts(engineIds),
-          log: (line) => err(`[sprout-worker] ${line}`),
+          log: () => err('[sprout-worker] host-local Worker operation completed'),
         });
       } catch (error) {
         if (error instanceof WorkerEnrollmentPendingError) {
@@ -600,14 +607,14 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         }
         if (error instanceof WorkerEnrollmentRefusedError) {
           recordState(paths, {
-            pid: process.pid, process: processIdentity, state: error.code === 'incompatible' ? 'incompatible' : 'revoked', at: now(), detail: error.message,
+            pid: process.pid, process: processIdentity, state: error.code === 'incompatible' ? 'incompatible' : 'revoked', at: now(), detail: error.code === 'incompatible' ? 'the Worker protocol is incompatible' : 'the Worker identity or enrollment was refused',
           });
-          err(`sprout worker start: ${error.message}`);
+          err(`sprout worker start: ${diagnosticOf(error, 'the Worker connection was refused')}`);
           lock.release();
           return WORKER_EXIT.refused;
         }
-        recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: messageOf(error) });
-        err(`sprout worker start: ${messageOf(error)}`);
+        recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: 'the Worker connection could not be established' });
+        err(`sprout worker start: ${diagnosticOf(error, 'the Worker connection could not be established')}`);
         lock.release();
         return WORKER_EXIT.failure;
       }
@@ -653,7 +660,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       engines,
       input: connection.stream,
       output: connection.stream,
-      onLog: (line) => err(`[sprout-worker] ${line}`),
+      onLog: () => err('[sprout-worker] host-local Worker operation completed'),
       workspaceRoot: configuration.workspaceRoot,
       readiness: () => ({
         protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -744,11 +751,16 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         runtime,
         processAlive: (pid) => isProcessAlive(pid),
         processMatchesRuntime: (identity) => {
-          const observed = processProbe(identity.pid);
-          return observed.state === 'alive' &&
-            observed.process.pid === identity.pid &&
-            observed.process.startIdentity === identity.startIdentity &&
-            observed.process.ownerToken === identity.ownerToken;
+          try {
+            const observed = processProbe(identity.pid);
+            if (observed.state === 'unknown') return 'unknown';
+            return observed.state === 'alive' &&
+              observed.process.pid === identity.pid &&
+              observed.process.startIdentity === identity.startIdentity &&
+              observed.process.ownerToken === identity.ownerToken;
+          } catch {
+            return 'unknown';
+          }
         },
         serviceInstalled,
       });
@@ -793,7 +805,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         err(`sprout worker reset: a Worker or reset still owns this host-local state${error.pid === undefined ? '' : ` (pid ${error.pid})`}; nothing was removed`);
         return WORKER_EXIT.failure;
       }
-      err(`sprout worker reset: could not establish exclusive ownership; nothing was removed (${messageOf(error)})`);
+      err(`sprout worker reset: could not establish exclusive ownership; nothing was removed (${diagnosticOf(error, 'host-local ownership evidence is unavailable')})`);
       return WORKER_EXIT.failure;
     }
 
@@ -803,32 +815,22 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       // LaunchAgent would restart against a half-removed state.
       if (platform === 'darwin') {
         const command = runCommand ?? realCommandRunner();
-        let config: WorkerHostConfig | undefined;
+        let config: WorkerHostConfig;
         try {
+          // The persisted environment binding is the only authority for reset.
+          // Without it there is no safe way to prove a same-user Worker label
+          // belongs to this state root, so reset refuses rather than enumerates.
           config = readConfig(paths);
-        } catch {
-          // Do not let damaged metadata hide a loaded service. Labels are also
-          // discovered from the LaunchAgent directory and launchd's domain.
-          config = undefined;
-        }
-        let labels: readonly string[];
-        try {
-          labels = [...new Set([
-            ...(config === undefined ? [] : [workerServiceLabel(config.environmentInstanceId)]),
-            ...storedWorkerServiceLabels(paths.launchAgentsDirectory),
-            ...loadedWorkerServiceLabels(command, uid),
-          ])];
         } catch (error) {
-          err(`sprout worker reset: LaunchAgent state could not be inspected; host-local state was left untouched (${messageOf(error)})`);
+          err(`sprout worker reset: the current environment label could not be proven; host-local state was left untouched (${diagnosticOf(error, 'local configuration is unavailable')})`);
           return WORKER_EXIT.serviceFailure;
         }
-        for (const label of labels) {
-          try {
-            uninstallLaunchAgent({ label, plistPath: join(paths.launchAgentsDirectory, `${label}.plist`), uid, run: command });
-          } catch (error) {
-            err(`sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${messageOf(error)})`);
-            return WORKER_EXIT.serviceFailure;
-          }
+        const label = workerServiceLabel(config.environmentInstanceId);
+        try {
+          uninstallLaunchAgent({ label, plistPath: launchAgentPlistPath(paths, config.environmentInstanceId), uid, run: command });
+        } catch (error) {
+          err(`sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${diagnosticOf(error, 'the exact environment service could not be unloaded')})`);
+          return WORKER_EXIT.serviceFailure;
         }
       }
       try {
@@ -836,7 +838,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         // gone; its ownership-checked release happens in finally below.
         removeHostState(paths, { preserveLock: true });
       } catch (error) {
-        err(`sprout worker reset: host-local state could not be fully removed (${messageOf(error)})`);
+        err(`sprout worker reset: host-local state could not be fully removed (${diagnosticOf(error, 'host-local state could not be fully removed')})`);
         return WORKER_EXIT.failure;
       }
       out('Host-local Worker identity and configuration removed. The old identity can no longer reconnect.');
@@ -865,7 +867,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         err('sprout worker install-service: this host is not enrolled; run `sprout worker enroll` first');
         return WORKER_EXIT.notEnrolled;
       }
-      err(`sprout worker install-service: ${messageOf(error)}`);
+      err(`sprout worker install-service: ${diagnosticOf(error, 'host-local configuration could not be read')}`);
       return WORKER_EXIT.failure;
     }
     const label = workerServiceLabel(config.environmentInstanceId);
@@ -897,7 +899,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       out(`Installed LaunchAgent ${label}. It starts at sign-in and restarts after an unexpected exit.`);
       return WORKER_EXIT.ok;
     } catch (error) {
-      err(`sprout worker install-service: ${messageOf(error)}`);
+      err(`sprout worker install-service: ${diagnosticOf(error, 'the LaunchAgent could not be installed')}`);
       return WORKER_EXIT.serviceFailure;
     }
   }
@@ -934,7 +936,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       out(result.removed ? `Removed LaunchAgent ${label}.` : `LaunchAgent ${label} was not installed.`);
       return WORKER_EXIT.ok;
     } catch (error) {
-      err(`sprout worker uninstall-service: ${messageOf(error)}`);
+      err(`sprout worker uninstall-service: ${diagnosticOf(error, 'the LaunchAgent could not be removed')}`);
       return WORKER_EXIT.serviceFailure;
     }
   }
@@ -963,8 +965,11 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   return { run };
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function diagnosticOf(_error: unknown, fallback: string): string {
+  // Filesystem, launchd, transport, endpoint, and key errors can contain
+  // paths, host names, command output, or secret-adjacent material. The CLI
+  // boundary therefore emits only caller-supplied, sanitized categories.
+  return fallback;
 }
 
 /** The default process entry point: parse argv and exit with the returned code. */

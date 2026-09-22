@@ -19,13 +19,13 @@
  */
 
 import { createPrivateKey, createPublicKey } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
 
-import { generateWorkerIdentity, signWorkerChallenge } from '../environment/worker-proof.ts';
+import { generateWorkerIdentity, signWorkerChallenge, validateWorkerIdentityPrivateKey } from '../environment/worker-proof.ts';
 import { isLoopbackAddress } from '../environment/worker-transport.ts';
 import type { WorkerEnrollmentTarget } from '../host-config.ts';
-import { writePrivateFile } from './host-files.ts';
+import { PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
 import {
   encodeGatewayFrame,
   type WorkerGatewayClientFrame,
@@ -110,15 +110,23 @@ export function loadOrCreateWorkerIdentity(keyPath: string): {
 } {
   let privateKey: string;
   try {
+    const stat = lstatSync(keyPath);
+    if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+      throw new Error('the host-local Worker identity key has invalid permissions');
+    }
     privateKey = readFileSync(keyPath, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    const generated = generateWorkerIdentity();
-    // Owner-only, staged and renamed, so a key is never readable by other users
-    // and is never observed half-written (#117).
-    writePrivateFile(keyPath, generated.privateKey);
-    return { privateKey: generated.privateKey, generated: true };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const generated = generateWorkerIdentity();
+      // Owner-only, staged and renamed, so a key is never readable by other users
+      // and is never observed half-written (#117).
+      writePrivateFile(keyPath, generated.privateKey);
+      return { privateKey: generated.privateKey, generated: true };
+    }
+    if (error instanceof Error && error.message.startsWith('the host-local')) throw error;
+    throw new Error('the host-local Worker identity key could not be read');
   }
+  validateWorkerIdentityPrivateKey(privateKey);
   return { privateKey, generated: false };
 }
 

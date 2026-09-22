@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -31,6 +31,7 @@ import {
   type WorkerEnrollmentConnection,
 } from '../enrollment-connector.ts';
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
+import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
 
 /**
  * The `sprout worker` macOS CLI (#117).
@@ -286,7 +287,7 @@ test('start refuses a duplicate live Worker for the same environment', async () 
       endpoint: { host: '127.0.0.1', port: 5174 },
       identityFileName: 'identity.pem',
     }));
-    writePrivateFile(h.paths.identityPath, 'PRIVATE KEY MATERIAL');
+    writePrivateFile(h.paths.identityPath, generateWorkerIdentity().privateKey);
     // A live lock held by a distinct opaque owner binding refuses start.
     const held = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
     void held;
@@ -323,7 +324,7 @@ test('status reports not-enrolled before and stopped/connected after start', asy
       endpoint: { host: '127.0.0.1', port: 5174 },
       identityFileName: 'identity.pem',
     }));
-    writePrivateFile(h.paths.identityPath, 'PRIVATE KEY MATERIAL');
+    writePrivateFile(h.paths.identityPath, generateWorkerIdentity().privateKey);
     assert.equal(await cli.run(['start']), WORKER_EXIT.ok);
     const runtime = readRuntimeState(h.paths);
     // After `serve` returns, the recorded state is `stopped`, so status is a
@@ -363,7 +364,7 @@ test('reset requires explicit confirmation and removes host-local identity', asy
       endpoint: { host: '127.0.0.1', port: 5174 },
       identityFileName: 'identity.pem',
     }));
-    writePrivateFile(h.paths.identityPath, 'PRIVATE KEY MATERIAL');
+    writePrivateFile(h.paths.identityPath, generateWorkerIdentity().privateKey);
     // Without confirmation, nothing is removed.
     const declined = harness({ confirm: false });
     const declinedCli = createWorkerCli({
@@ -684,11 +685,47 @@ test('status reports a local configuration failure when the identity key is over
   const h = harness();
   try {
     seedEnrolledHost(h.paths);
-    const { chmodSync } = await import('node:fs');
     chmodSync(h.paths.identityPath, 0o644);
     const status = await h.run(['status']);
     assert.equal(status, WORKER_EXIT.failure);
     assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status reports a local configuration failure when the identity key content is malformed', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writePrivateFile(h.paths.identityPath, 'not a private key');
+    const status = await h.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+    assert.doesNotMatch(h.out.join('\n') + h.err.join('\n'), /not a private key|identity\.pem|sprout-worker-cli/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status reports unavailable live process evidence instead of stopped', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writeRuntimeState(h.paths, { pid: process.pid, process: processIdentity(process.pid, 'z'), state: 'connected', at: 1 });
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+      processProbe: () => ({ state: 'unknown' }),
+    });
+    const status = await cli.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+    assert.doesNotMatch(h.out.join('\n'), /state: stopped/);
   } finally {
     h.cleanup();
   }
@@ -843,6 +880,22 @@ test('reset succeeds when the service is not loaded and the plist is present', a
   }
 });
 
+test('reset removes only the LaunchAgent bound to the current environment state', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const current = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('env-synthetic')}.plist`);
+    const unrelated = join(h.paths.launchAgentsDirectory, `${workerServiceLabel('other-environment')}.plist`);
+    writePrivateFile(current, '<plist/>');
+    writePrivateFile(unrelated, '<plist/>');
+    assert.equal(await h.run(['reset', '--yes']), WORKER_EXIT.ok);
+    assert.equal(existsSync(current), false);
+    assert.equal(existsSync(unrelated), true, 'reset must not enumerate or remove another environment label');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('uninstall-service fails closed when bootout fails and keeps the plist', async () => {
   const h = harness();
   try {
@@ -903,6 +956,6 @@ function seedEnrolledHost(
     identityFileName: 'identity.pem',
   }));
   if (options.identity !== false) {
-    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
+    writePrivateFile(paths.identityPath, generateWorkerIdentity().privateKey);
   }
 }

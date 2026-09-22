@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -71,6 +71,19 @@ function tmpKey(): { readonly path: string; readonly cleanup: () => void } {
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
   };
 }
+
+test('reusing a Worker identity requires exact owner-only mode and valid key content', () => {
+  const key = tmpKey();
+  try {
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /valid Ed25519 private key/);
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    chmodSync(key.path, 0o644);
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /invalid permissions/);
+  } finally {
+    key.cleanup();
+  }
+});
 
 function target(port: number, claimSecret: string, keyPath: string): WorkerEnrollmentTarget {
   return { enrollmentId: 'enroll-1', host: '127.0.0.1', port, claimSecret, identityKeyPath: keyPath };

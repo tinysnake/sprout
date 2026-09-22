@@ -217,7 +217,7 @@ export function uninstallLaunchAgent(options: {
     if (!serviceIsAbsent(run, options.uid, options.label)) {
       throw new LaunchAgentUninstallError(
         'bootout-failed',
-        `launchctl bootout for ${service} failed; the service is left in place (${messageOf(error)})`,
+        'launchctl could not prove that the exact Worker service was unloaded; the service is left in place',
       );
     }
   }
@@ -234,7 +234,7 @@ export function uninstallLaunchAgent(options: {
     } catch (error) {
       throw new LaunchAgentUninstallError(
         'delete-failed',
-        `the LaunchAgent property list could not be removed (${messageOf(error)})`,
+        'the LaunchAgent property list could not be removed; the service is left in place',
       );
     }
   }
@@ -276,9 +276,6 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * Restart the loaded LaunchAgent in place.

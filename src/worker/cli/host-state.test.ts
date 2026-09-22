@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -402,6 +402,42 @@ test('concurrent lock acquisition lets exactly one starter win and maps the lose
     } finally {
       holder.kill();
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('a releasing marker recovers after a crash between owner retirement and directory cleanup', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const identity = processIdentity(50_002, 'r');
+    const held = acquireWorkerLock(paths, identity, probe(identity));
+    const ownerPath = join(held.path, `owner-${identity.ownerToken}`);
+    const marker = `${held.path}.releasing-${identity.ownerToken}-crash`;
+    renameSync(ownerPath, marker);
+    rmdirSync(held.path);
+    const recovered = acquireWorkerLock(paths, processIdentity(50_003, 's'), () => ({ state: 'dead' }));
+    assert.ok(existsSync(recovered.path));
+    recovered.release();
+    assert.equal(existsSync(marker), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a pending marker recovers after a crash before canonical lock creation', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const identity = processIdentity(50_004, 'p');
+    const lockPath = join(paths.stateDirectory, 'worker.lock');
+    const marker = `${lockPath}.pending-${identity.ownerToken}`;
+    writeFileSync(marker, `${JSON.stringify({ version: 1, kind: 'worker', process: identity })}\n`, { mode: 0o600 });
+    const recovered = acquireWorkerLock(paths, processIdentity(50_005, 'q'), () => ({ state: 'dead' }));
+    assert.ok(existsSync(recovered.path));
+    recovered.release();
+    assert.equal(existsSync(marker), false);
   } finally {
     cleanup();
   }

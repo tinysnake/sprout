@@ -29,13 +29,14 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import {
@@ -43,6 +44,7 @@ import {
   PRIVATE_FILE_MODE,
   writePrivateFile,
 } from '../host-files.ts';
+import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
 
 /** The LaunchAgent label prefix the Worker service uses on macOS. */
 export const WORKER_SERVICE_LABEL_PREFIX = 'dev.sprout.worker';
@@ -261,18 +263,30 @@ function removeFileRequired(filePath: string): void {
   }
 }
 
-/** Read the identity private key, refusing a key that other users can read. */
+/** Read and validate the identity private key, refusing unsafe or malformed material. */
 export function readIdentityKey(paths: WorkerHostPaths): string {
-  if (!existsSync(paths.identityPath)) {
-    throw new WorkerHostStateError('invalid', 'the host-local Worker identity key is missing');
-  }
-  if (!hasExactPrivateFileMode(paths.identityPath)) {
+  try {
+    const stat = lstatSync(paths.identityPath);
+    if (!stat.isFile()) throw new Error('not a regular file');
+    if ((stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+      throw new Error('invalid permissions');
+    }
+    const privateKey = readFileSync(paths.identityPath, 'utf8');
+    validateWorkerIdentityPrivateKey(privateKey);
+    return privateKey;
+  } catch (error) {
+    if (error instanceof WorkerHostStateError) throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new WorkerHostStateError('invalid', 'the host-local Worker identity key is missing');
+    }
+    if (error instanceof Error && error.message === 'the host-local Worker identity key is not a valid Ed25519 private key') {
+      throw new WorkerHostStateError('invalid', error.message);
+    }
     throw new WorkerHostStateError(
       'invalid',
-      'the host-local Worker identity key does not have the required owner-only permissions; run reset and enroll again',
+      'the host-local Worker identity key is unreadable, malformed, or does not have the required owner-only permissions; run reset and enroll again',
     );
   }
-  return readFileSync(paths.identityPath, 'utf8');
 }
 
 /** Whether a host-local enrollment already exists. */
@@ -352,9 +366,20 @@ export function writeConfig(paths: WorkerHostPaths, config: WorkerHostConfig): v
   writePrivateFile(paths.configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
-/** Write the live daemon's state record with owner-only permissions. */
+const SAFE_RUNTIME_DETAILS = new Set([
+  'the Worker identity is proven and awaiting Human approval',
+  'the Worker protocol is incompatible',
+  'the Worker identity or enrollment was refused',
+  'the Worker connection could not be established',
+  'the Sprout instance refused the connection',
+]);
+
+/** Write the live daemon's state record with owner-only, sanitized diagnostics. */
 export function writeRuntimeState(paths: WorkerHostPaths, state: WorkerRuntimeState): void {
-  writePrivateFile(paths.runtimePath, `${JSON.stringify(state, null, 2)}\n`);
+  const safeState: WorkerRuntimeState = state.detail === undefined
+    ? state
+    : { ...state, detail: SAFE_RUNTIME_DETAILS.has(state.detail) ? state.detail : 'the Worker connection could not be established' };
+  writePrivateFile(paths.runtimePath, `${JSON.stringify(safeState, null, 2)}\n`);
 }
 
 /**
@@ -389,7 +414,7 @@ export function readRuntimeState(paths: WorkerHostPaths): WorkerRuntimeState | u
     !isWorkerProcessIdentity(record['process']) ||
     (record['process'] as WorkerProcessIdentity).pid !== record['pid'] ||
     (record['epoch'] !== undefined && typeof record['epoch'] !== 'number') ||
-    (record['detail'] !== undefined && typeof record['detail'] !== 'string')
+    (record['detail'] !== undefined && (typeof record['detail'] !== 'string' || !SAFE_RUNTIME_DETAILS.has(record['detail'])))
   ) {
     throw new WorkerHostStateError('invalid', 'the host-local runtime state record is malformed');
   }
@@ -692,79 +717,140 @@ function classifyLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockCl
   return sameWorkerProcess(holder.process, evidence.process) ? 'duplicate' : 'stale';
 }
 
-/**
- * Reclaim a stale lock by unlinking only its token-bound owner entry.
- *
- * The canonical lock is a directory. A replacement cannot create that directory
- * until `rmdir` succeeds, and `rmdir` cannot succeed until the expected owner
- * entry is removed. If a stale release/reclaimer has already replaced the
- * directory, this exact token-bound unlink gets ENOENT instead of touching the
- * new owner's distinct entry. This is the POSIX ownership-bound removal that a
- * plain check-then-unlink lock file cannot provide.
- */
-function reclaimStaleWorkerLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockClassification {
-  const holder = readWorkerLock(lockPath);
-  if (holder === undefined) return 'unknown';
-  const classification = classifyLock(lockPath, probe);
-  if (classification !== 'stale') return classification;
+/** A durable lifecycle marker outside the canonical lock directory. */
+function lifecyclePath(lockPath: string, phase: 'pending' | 'releasing', processIdentity: WorkerProcessIdentity): string {
+  const suffix = phase === 'pending' ? '' : `-${randomBytes(8).toString('hex')}`;
+  return `${lockPath}.${phase}-${processIdentity.ownerToken}${suffix}`;
+}
+
+function lifecycleEntries(lockPath: string): string[] {
+  const parent = dirname(lockPath);
+  const prefix = `${lockPath}.`;
   try {
-    unlinkSync(workerLockOwnerPath(lockPath, holder.process));
+    return readdirSync(parent)
+      .filter((entry) => entry.startsWith(prefix.slice(parent.length + 1)))
+      .map((entry) => join(parent, entry));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return classifyLock(lockPath, probe);
-    throw error;
-  }
-  try {
-    rmdirSync(lockPath);
-    return 'stale';
-  } catch (error) {
-    // A compliant concurrent acquirer sees an empty directory as unknown and
-    // cannot create a new owner before this rmdir. ENOTEMPTY/ENOENT therefore
-    // means another owner or an external mutation won; re-classify and refuse.
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'stale';
-    if ((error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
-      return classifyLock(lockPath, probe);
-    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   }
 }
 
+function readLockRecordFile(filePath: string): WorkerLockRecord | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (record['version'] !== 1 || (record['kind'] !== 'worker' && record['kind'] !== 'reset') || !isWorkerProcessIdentity(record['process'])) return undefined;
+    return record as unknown as WorkerLockRecord;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Atomically release only the lock directory entry owned by this caller.
- *
- * The unique owner-token pathname is the removal capability. A stale release
- * that observed an older lock can only unlink its old entry; it cannot unlink a
- * same-PID replacement's entry. Once that expected entry is gone, `rmdir`
- * removes only the now-empty lock directory; a replacement cannot appear until
- * after that atomic directory removal completes.
+ * Recover a lifecycle marker without treating missing process evidence as death.
+ * The canonical directory is removed before its marker, so a crash cannot leave
+ * an empty canonical lock with no durable recovery evidence.
  */
+function recoverLockLifecycle(lockPath: string, probe: WorkerProcessProbe): WorkerLockClassification | undefined {
+  const markers = lifecycleEntries(lockPath);
+  if (markers.length === 0) return undefined;
+  if (markers.length !== 1) return 'unknown';
+  const marker = markers[0];
+  if (marker === undefined) return 'unknown';
+  const record = readLockRecordFile(marker);
+  if (record === undefined) return 'unknown';
+  // Releasing markers still carry process evidence: an interrupted cleanup
+  // must not turn an unreadable owner into automatic reclaim, even if the
+  // canonical directory was already removed.
+  const evidence = probe(record.process.pid);
+  if (evidence.state === 'unknown') return 'unknown';
+  if (evidence.state === 'alive' && sameWorkerProcess(record.process, evidence.process)) return 'duplicate';
+  // A stale pending marker can be removed even when another valid owner now
+  // occupies the canonical directory: it never acquired authority. A
+  // releasing marker with a non-empty canonical directory is external or
+  // concurrent mutation and remains fail-closed.
+  if (existsSync(lockPath)) {
+    try {
+      if (readdirSync(lockPath).length !== 0) {
+        if (marker.includes(`${lockPath}.pending-`)) {
+          unlinkSync(marker);
+          return undefined;
+        }
+        return 'unknown';
+      }
+      rmdirSync(lockPath);
+    } catch {
+      return 'unknown';
+    }
+  }
+  try {
+    unlinkSync(marker);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'unknown';
+  }
+  return 'stale';
+}
+
+/** Move one exact owner entry to a durable, owner-token-bound release marker. */
+function retireWorkerLock(lockPath: string, processIdentity: WorkerProcessIdentity): string | undefined {
+  const marker = lifecyclePath(lockPath, 'releasing', processIdentity);
+  try {
+    renameSync(workerLockOwnerPath(lockPath, processIdentity), marker);
+    return marker;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+/** Reclaim a stale lock while preserving a recoverable crash marker. */
+function reclaimStaleWorkerLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockClassification {
+  const holder = readWorkerLock(lockPath);
+  if (holder === undefined) return recoverLockLifecycle(lockPath, probe) ?? 'unknown';
+  const classification = classifyLock(lockPath, probe);
+  if (classification !== 'stale') return classification;
+  const marker = retireWorkerLock(lockPath, holder.process);
+  if (marker === undefined) return classifyLock(lockPath, probe);
+  try {
+    rmdirSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      try { unlinkSync(marker); } catch { /* canonical absence is already proven */ }
+      return 'stale';
+    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOTEMPTY') return classifyLock(lockPath, probe);
+    throw error;
+  }
+  try { unlinkSync(marker); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return 'stale';
+}
+
+/** Release is bound to the exact owner entry and leaves a durable marker. */
 function releaseWorkerLock(
   lockPath: string,
   processIdentity: WorkerProcessIdentity,
   options: WorkerLockOptions,
 ): void {
-  // This observation is deliberately not followed by a pathname unlink. It
-  // gives the deterministic test seam its stale-release interleaving while the
-  // token-bound owner entry below remains the only destructive operation.
   if (options.onReleaseObserved !== undefined) {
     void readWorkerLock(lockPath);
     options.onReleaseObserved();
   }
-  try {
-    unlinkSync(workerLockOwnerPath(lockPath, processIdentity));
-  } catch (error) {
-    // The lock was already released or replaced. In either case this stale
-    // owner has no authority to remove the canonical directory.
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
+  const marker = retireWorkerLock(lockPath, processIdentity);
+  if (marker === undefined) return;
   try {
     rmdirSync(lockPath);
   } catch (error) {
-    // A replacement can only make the directory non-empty after another actor
-    // removed it and recreated it. Never retry rmdir by pathname in that case.
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
-      throw error;
-    }
+    // A replacement can only exist after this rmdir. ENOTEMPTY/ENOENT means
+    // another actor or external mutation won; never remove its lock by pathname.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error;
+    return;
+  }
+  try { unlinkSync(marker); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 
@@ -792,9 +878,22 @@ export function acquireWorkerLock(
   ensureStateDirectory(paths);
   const lockPath = workerLockPath(paths);
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const lifecycle = recoverLockLifecycle(lockPath, probe);
+    if (lifecycle === 'unknown' || lifecycle === 'duplicate') {
+      throw new DuplicateWorkerProcessError(readWorkerLock(lockPath)?.process.pid);
+    }
+    const pendingPath = lifecyclePath(lockPath, 'pending', processIdentity);
+    let pendingDescriptor: number | undefined;
+    try {
+      pendingDescriptor = openSync(pendingPath, 'wx', PRIVATE_FILE_MODE);
+      writeFileSync(pendingDescriptor, `${JSON.stringify({ version: 1, kind, process: processIdentity } satisfies WorkerLockRecord)}\n`, 'utf8');
+    } finally {
+      if (pendingDescriptor !== undefined) closeSync(pendingDescriptor);
+    }
     try {
       mkdirSync(lockPath, { mode: PRIVATE_DIRECTORY_MODE });
     } catch (error) {
+      try { unlinkSync(pendingPath); } catch { /* recovery marker remains only on an interrupted process */ }
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const classification = classifyLock(lockPath, probe);
       if (classification !== 'stale') {
@@ -807,37 +906,17 @@ export function acquireWorkerLock(
       continue;
     }
     const ownerPath = workerLockOwnerPath(lockPath, processIdentity);
-    let descriptor: number | undefined;
     try {
-      descriptor = openSync(ownerPath, 'wx', PRIVATE_FILE_MODE);
-      writeFileSync(descriptor, `${JSON.stringify({ version: 1, kind, process: processIdentity } satisfies WorkerLockRecord)}\n`, 'utf8');
+      // The pending marker is prepared before mkdir. Renaming it into the
+      // canonical directory makes an interrupted start recoverable instead of
+      // wedging an empty lock directory forever.
+      renameSync(pendingPath, ownerPath);
     } catch (error) {
-      // The directory is ours because mkdir succeeded. Clean an incomplete
-      // record before reporting the write failure so it cannot become a
-      // permanent unknown fence.
-      try {
-        if (descriptor !== undefined) {
-          closeSync(descriptor);
-          descriptor = undefined;
-        }
-        unlinkSync(ownerPath);
-      } catch {
-        // The original write error is decisive; an operator can still see the
-        // remaining owner-only fence instead of a false successful start.
-      }
-      try {
-        rmdirSync(lockPath);
-      } catch {
-        // Keep the original error for a failed creation.
-      }
+      try { rmdirSync(lockPath); } catch { /* preserve the original failure */ }
       throw error;
-    } finally {
-      if (descriptor !== undefined) closeSync(descriptor);
     }
     return {
       path: lockPath,
-      // The token-bound entry plus rmdir ensures a stale owner cannot unlink a
-      // replacement after it has observed the old record.
       release: () => releaseWorkerLock(lockPath, processIdentity, options),
     };
   }

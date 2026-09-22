@@ -190,6 +190,16 @@ export function generateWorkerIdentity(): { readonly publicKey: string; readonly
   };
 }
 
+/** Validate the exact host identity key format before it is reused. */
+export function validateWorkerIdentityPrivateKey(privateKeyPem: string): void {
+  try {
+    const privateKey = createPrivateKey(privateKeyPem);
+    if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('unsupported key type');
+  } catch {
+    throw new Error('the host-local Worker identity key is not a valid Ed25519 private key');
+  }
+}
+
 export function signWorkerChallenge(privateKeyPem: string, challenge: { readonly enrollmentId: string; readonly nonce: string }): string {
   const privateKey = createPrivateKey(privateKeyPem);
   return sign(null, Buffer.from(workerChallengeMessage(challenge), 'utf8'), privateKey).toString('base64');
