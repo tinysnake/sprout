@@ -33,6 +33,7 @@ import { parseWorkerConfiguration } from '../../host-config.ts';
 import { EnvironmentWorker } from '../server.ts';
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
 import { createEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
+import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
   WorkerEnrollmentPendingError,
@@ -318,6 +319,13 @@ export function parseEndpoint(value: string): { readonly host: string; readonly 
   if (authorityMatch === null) {
     throw new WorkerHostStateError('invalid', 'the endpoint must include only a host and an explicit port');
   }
+  // Preserve and validate the caller's explicit port token before WHATWG URL
+  // normalization. WHATWG clears a scheme's default port (`http`/`ws` 80 and
+  // `https`/`wss` 443), but those are valid explicit endpoints in this contract.
+  const port = Number(authorityMatch[2]);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new WorkerHostStateError('invalid', 'the endpoint port must be a number between 1 and 65535');
+  }
   const withScheme = `${scheme ?? 'ws'}://${authority}`;
   let url: URL;
   try {
@@ -325,12 +333,8 @@ export function parseEndpoint(value: string): { readonly host: string; readonly 
   } catch {
     throw new WorkerHostStateError('invalid', 'the endpoint is not a valid host:port');
   }
-  if (url.hostname === '' || url.port === '') {
+  if (url.hostname === '') {
     throw new WorkerHostStateError('invalid', 'the endpoint must include a host and an explicit port');
-  }
-  const port = Number(url.port);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new WorkerHostStateError('invalid', 'the endpoint port must be a number between 1 and 65535');
   }
   return { host: url.hostname, port };
 }
@@ -628,9 +632,15 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         }
         if (error instanceof WorkerEnrollmentRefusedError) {
           recordState(paths, {
-            pid: process.pid, process: processIdentity, state: error.code === 'incompatible' ? 'incompatible' : 'revoked', at: now(), detail: error.code === 'incompatible' ? 'the Worker protocol is incompatible' : 'the Worker identity or enrollment was refused',
+            pid: process.pid,
+            process: processIdentity,
+            state: error.code === 'incompatible' ? 'incompatible' : 'revoked',
+            at: now(),
+            detail: error.code === 'incompatible'
+              ? WORKER_DIAGNOSTICS.protocolIncompatible
+              : WORKER_DIAGNOSTICS.enrollmentRefused,
           });
-          err(`sprout worker start: ${diagnosticOf(error, 'the Worker connection was refused')}`);
+          err(`sprout worker start: ${diagnosticOf(error, WORKER_DIAGNOSTICS.connectionRefused)}`);
           lock.release();
           return WORKER_EXIT.refused;
         }

@@ -433,7 +433,12 @@ test('channel loss invalidates the epoch, and a reconnect receives a newer one',
  */
 
 /** A raw WS handshake whose readiness barrier the test drives frame by frame. */
-async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
+async function openRawWorker(
+  h: Harness,
+  keyPath: string,
+  claimSecret: string,
+  protocolVersion = WORKER_PROTOCOL_VERSION,
+) {
   const { WebSocket, createWebSocketStream } = await import('ws');
   const identity = loadOrCreateWorkerIdentity(keyPath);
   const publicKey = workerPublicKey(identity.privateKey);
@@ -479,7 +484,7 @@ async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
           signature: signWorkerChallenge(identity.privateKey, challenge),
         },
         platform: 'macos',
-        protocolVersion: WORKER_PROTOCOL_VERSION,
+        protocolVersion,
         engineFacts: [],
       });
       continue;
@@ -487,6 +492,53 @@ async function openRawWorker(h: Harness, keyPath: string, claimSecret: string) {
     return { socket, stream, frame, next, write, close: () => socket.close() };
   }
 }
+
+test('a real gateway refusal never echoes malformed protocol evidence to the stream or diagnostics', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  const hostileProtocol = '1./private/worker.sock:7443';
+  const fixedReason = 'the Worker protocol is incompatible with this Sprout build';
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+
+    const raw = await openRawWorker(h, key.path, '', hostileProtocol);
+    assert.deepEqual(raw.frame, {
+      type: 'worker/refused',
+      reason: fixedReason,
+      code: 'incompatible',
+    });
+    raw.close();
+
+    const logs: string[] = [];
+    let refusalMessage = '';
+    await assert.rejects(
+      () => connectWorkerEnrollment({
+        target: target(h.port, '', key.path),
+        protocolVersion: hostileProtocol,
+        engineFacts: [],
+        log: (line) => logs.push(line),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        refusalMessage = error.message;
+        assert.equal(refusalMessage, fixedReason);
+        return true;
+      },
+    );
+
+    const durable = await h.enrollments.readiness('enroll-1');
+    assert.deepEqual(durable.readiness.compatibility, {
+      state: 'incompatible',
+      detail: fixedReason,
+    });
+    const exposed = JSON.stringify({ frame: raw.frame, refusalMessage, logs, durable });
+    assert.doesNotMatch(exposed, /private|worker\.sock|7443/);
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
 
 test('concurrent claims with the same secret over HTTP yield exactly one success', async () => {
   const h = await harness();

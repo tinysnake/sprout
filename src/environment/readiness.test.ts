@@ -156,6 +156,27 @@ test('protocol compatibility is derived from the reported major version, not gue
   assert.equal(protocolMajor('nonsense'), undefined);
 });
 
+test('malformed protocol evidence is incompatible without entering readiness diagnostics', () => {
+  const hostileProtocol = '1./private/worker.sock:7443';
+  const supported = { minMajor: 2, maxMajor: 2 };
+  assert.deepEqual(protocolCompatibility(hostileProtocol, supported), {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+
+  const observed = observedFactsFromWorkerReadiness({
+    protocolVersion: hostileProtocol,
+    engines: [],
+    at: 5_000,
+    supported,
+  });
+  assert.deepEqual(observed.compatibility, {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+  assert.doesNotMatch(JSON.stringify(observed), /private|worker\.sock|7443/);
+});
+
 test('work safety is projected from the lease registry without collapsing other facts', () => {
   assert.equal(
     workSafetyFromLeases([{ instanceId: 'env-1', state: 'active' }], 'env-1'),

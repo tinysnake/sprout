@@ -15,6 +15,8 @@
  *   colour never carries the distinction alone (ADR-0009).
  */
 
+import { sanitizeProtocolVersion } from './privacy.ts';
+
 export type EnrollmentStatus = 'pending' | 'approved' | 'revoked' | 'archived';
 export type ConnectionState = 'never-connected' | 'online' | 'reconnecting' | 'offline';
 export type ProtocolCompatibility = 'unknown' | 'compatible' | 'incompatible';
@@ -99,6 +101,10 @@ export interface ProtocolVersionRange {
   readonly maxMajor: number;
 }
 
+/** Product-owned detail used for every reported protocol incompatibility. */
+export const PROTOCOL_INCOMPATIBLE_DETAIL =
+  'the Worker protocol is incompatible with this Sprout build';
+
 /** Parse the leading numeric major version of a protocol string, or `undefined`. */
 export function protocolMajor(version: string | undefined): number | undefined {
   if (version === undefined) return undefined;
@@ -119,19 +125,13 @@ export function protocolCompatibility(
   version: string | undefined,
   supported: ProtocolVersionRange,
 ): { readonly state: ProtocolCompatibility; readonly detail?: string } {
-  const major = protocolMajor(version);
-  if (major === undefined || version === undefined) return { state: 'unknown' };
-  if (major < supported.minMajor) {
-    return {
-      state: 'incompatible',
-      detail: `Worker protocol ${version} is older than the supported minimum v${supported.minMajor}.`,
-    };
-  }
-  if (major > supported.maxMajor) {
-    return {
-      state: 'incompatible',
-      detail: `Worker protocol ${version} is newer than the supported maximum v${supported.maxMajor}.`,
-    };
+  if (version === undefined) return { state: 'unknown' };
+  const safeVersion = sanitizeProtocolVersion(version);
+  const major = protocolMajor(safeVersion);
+  // A present but malformed version is incompatible, not unknown: it is
+  // evidence from an untrusted Worker, but it is never repeated in diagnostics.
+  if (major === undefined || major < supported.minMajor || major > supported.maxMajor) {
+    return { state: 'incompatible', detail: PROTOCOL_INCOMPATIBLE_DETAIL };
   }
   return { state: 'compatible' };
 }
@@ -160,11 +160,13 @@ export function observedFactsFromWorkerReadiness(input: {
   readonly compatibility: CompatibilityFact;
   readonly engines: readonly EngineReadinessFact[];
 } {
+  const compatibility = protocolCompatibility(input.protocolVersion, input.supported);
+  const protocolVersion = sanitizeProtocolVersion(input.protocolVersion);
   return {
     connection: { state: 'online', lastConfirmedAt: input.at },
     compatibility: {
-      state: protocolCompatibility(input.protocolVersion, input.supported).state,
-      workerProtocolVersion: input.protocolVersion,
+      ...compatibility,
+      ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
     },
     engines: input.engines.map((engine) => ({
       engine: engine.engine,

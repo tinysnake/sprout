@@ -1,4 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
+import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 
 /**
  * Product-owned Worker diagnostic categories (ADR-0009).
@@ -19,6 +20,7 @@ export const WORKER_DIAGNOSTICS = {
   identityProofRefused: 'the Worker identity proof was refused',
   enrollmentRefused: 'the Worker enrollment was refused',
   connectionRefused: 'the Worker connection was refused',
+  protocolIncompatible: PROTOCOL_INCOMPATIBLE_DETAIL,
   transportReady: 'the Worker transport is ready',
   identificationSucceeded: 'the enrollment-backed Worker connection was identified',
   identificationFailed: 'the enrollment-backed Worker connection could not be identified',

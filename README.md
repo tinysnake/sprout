@@ -84,7 +84,9 @@ and reports `local-configuration-failure`, matching the fail-closed start/reset
 fence. The enrollment endpoint argument is strictly a host plus explicit port,
 optionally prefixed by `ws://`, `wss://`, `http://`, or `https://`; URL userinfo,
 paths, queries, and fragments are rejected rather than normalized into process
-arguments. `reset` and
+arguments. Explicit default ports (`http`/`ws` 80 and `https`/`wss` 443) are
+accepted; the CLI preserves the supplied port before WHATWG URL normalization.
+`reset` and
 `uninstall-service` fail closed: they refuse while a foreground Worker holds the
 lock, and they leave host-local state untouched when the LaunchAgent cannot be
 proven unloaded. Runtime and lock ownership use an owner-only, per-start opaque

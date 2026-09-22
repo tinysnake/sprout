@@ -35,6 +35,7 @@ import type { WorkerConnectionEpoch } from '../environment/worker-epoch.ts';
 import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
 import { protocolCompatibility, type ProtocolVersionRange } from '../environment/readiness.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
+import { sanitizeProtocolVersion } from '../environment/privacy.ts';
 import {
   encodeGatewayFrame,
   decodeGatewayFrame,
@@ -215,6 +216,7 @@ export class WorkerGateway {
     // Step 4: refuse a protocol mismatch before acceptance, so a Worker the core
     // cannot speak to never receives an epoch or carries a command.
     const compatibility = protocolCompatibility(prove.protocolVersion, this.#supportedProtocol);
+    const protocolVersion = sanitizeProtocolVersion(prove.protocolVersion);
     if (compatibility.state === 'incompatible') {
       // Record the observation (the enrollment is preserved) but do not accept.
       await this.#enrollments.connectWorker({
@@ -223,11 +225,11 @@ export class WorkerGateway {
         connection: { state: 'reconnecting' },
         compatibility: {
           ...compatibility,
-          ...(prove.protocolVersion !== undefined ? { workerProtocolVersion: prove.protocolVersion } : {}),
+          ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
         },
         engines: [],
       });
-      const reason = compatibility.detail ?? 'the Worker protocol is incompatible with this Sprout build';
+      const reason = WORKER_DIAGNOSTICS.protocolIncompatible;
       safeWrite(stream, { type: 'worker/refused', reason, code: 'incompatible' });
       reader.dispose();
       stream.end();
@@ -242,7 +244,7 @@ export class WorkerGateway {
         // The Worker's own declared version decides compatibility, so a protocol
         // mismatch blocks admission instead of being assumed compatible.
         ...compatibility,
-        ...(prove.protocolVersion !== undefined ? { workerProtocolVersion: prove.protocolVersion } : {}),
+        ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
       },
       engines: [],
     });

@@ -45,6 +45,7 @@ import {
   PRIVATE_FILE_MODE,
   writePrivateFile,
 } from '../host-files.ts';
+import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
 
 /** The LaunchAgent label prefix the Worker service uses on macOS. */
@@ -369,6 +370,10 @@ export function writeConfig(paths: WorkerHostPaths, config: WorkerHostConfig): v
 
 const SAFE_RUNTIME_DETAILS = new Set([
   'the Worker identity is proven and awaiting Human approval',
+  WORKER_DIAGNOSTICS.protocolIncompatible,
+  WORKER_DIAGNOSTICS.enrollmentRefused,
+  // Retain records written by earlier E3 revisions while new records use the
+  // shared product-owned diagnostic allowlist above.
   'the Worker protocol is incompatible',
   'the Worker identity or enrollment was refused',
   'the Worker connection could not be established',
