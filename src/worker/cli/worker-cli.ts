@@ -745,10 +745,10 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         processAlive: (pid) => isProcessAlive(pid),
         processMatchesRuntime: (identity) => {
           const observed = processProbe(identity.pid);
-          return observed !== undefined &&
-            observed.pid === identity.pid &&
-            observed.startIdentity === identity.startIdentity &&
-            observed.ownerToken === identity.ownerToken;
+          return observed.state === 'alive' &&
+            observed.process.pid === identity.pid &&
+            observed.process.startIdentity === identity.startIdentity &&
+            observed.process.ownerToken === identity.ownerToken;
         },
         serviceInstalled,
       });

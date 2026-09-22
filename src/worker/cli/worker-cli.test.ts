@@ -23,7 +23,9 @@ import {
   workerServiceLabel,
   writePrivateFile,
   type WorkerProcessIdentity,
-} from './host-state.ts';import {
+  type WorkerProcessProbe,
+} from './host-state.ts';
+import {
   WorkerEnrollmentPendingError,
   WorkerEnrollmentRefusedError,
   type WorkerEnrollmentConnection,
@@ -94,8 +96,11 @@ function processIdentity(pid: number, tokenCharacter = 'a'): WorkerProcessIdenti
   return { pid, startIdentity: `test-start-${pid}-${tokenCharacter}`, ownerToken: tokenCharacter.repeat(43) };
 }
 
-function probe(...identities: readonly WorkerProcessIdentity[]) {
-  return (pid: number): WorkerProcessIdentity | undefined => identities.find((identity) => identity.pid === pid);
+function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessProbe {
+  return (pid) => {
+    const identity = identities.find((candidate) => candidate.pid === pid);
+    return identity === undefined ? { state: 'dead' } : { state: 'alive', process: identity };
+  };
 }
 
 /** A connector that answers as an approved, accepted Worker would. */
@@ -725,6 +730,37 @@ test('reset refuses while a live foreground Worker holds the lock', async () => 
     assert.match(h.err.join('\n'), /still owns/);
     assert.ok(existsSync(h.paths.identityPath), 'the identity survives a refused reset');
     assert.ok(existsSync(h.paths.configPath), 'the configuration survives a refused reset');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('reset refuses its maintenance fence when a live Worker binding is unavailable', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const holderIdentity = processIdentity(77_004, 'u');
+    const resetIdentity = processIdentity(process.pid, 'v');
+    const holder = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      confirm: async () => true,
+      platform: 'darwin',
+      uid: 501,
+      run: () => '',
+      currentProcess: () => resetIdentity,
+      // This models a live process whose environment/start marker cannot be
+      // read (or a platform that cannot provide it), not a proven-dead pid.
+      processProbe: () => ({ state: 'unknown' }),
+    });
+    const status = await cli.run(['reset', '--yes']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.err.join('\n'), /still owns/);
+    assert.ok(existsSync(h.paths.identityPath), 'the destructive reset is fenced by unavailable evidence');
+    assert.ok(existsSync(h.paths.configPath), 'the configuration survives the refused reset');
+    holder.release();
   } finally {
     h.cleanup();
   }

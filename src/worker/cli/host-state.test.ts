@@ -25,6 +25,7 @@ import {
   WorkerHostStateError,
   type WorkerHostConfig,
   type WorkerProcessIdentity,
+  type WorkerProcessProbe,
 } from './host-state.ts';
 import {
   launchAgentPlistPath,
@@ -74,8 +75,11 @@ function processIdentity(pid: number, tokenCharacter = 'a'): WorkerProcessIdenti
   return { pid, startIdentity: `test-start-${pid}-${tokenCharacter}`, ownerToken: tokenCharacter.repeat(43) };
 }
 
-function probe(...identities: readonly WorkerProcessIdentity[]) {
-  return (pid: number): WorkerProcessIdentity | undefined => identities.find((identity) => identity.pid === pid);
+function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessProbe {
+  return (pid) => {
+    const identity = identities.find((candidate) => candidate.pid === pid);
+    return identity === undefined ? { state: 'dead' } : { state: 'alive', process: identity };
+  };
 }
 
 test('state and configuration files are owner-only and the directory is restrictive', () => {
@@ -173,13 +177,32 @@ test('the single-instance lock refuses a live holder and reclaims a stale one', 
     );
     foreign.release();
 
-    // A stale lock with no matching process binding is reclaimed.
+    // A stale lock with a positively dead owner is reclaimed.
     clearRuntimeState(paths);
     const stale = acquireWorkerLock(paths, holderIdentity, probe(holderIdentity));
-    const reclaimed = acquireWorkerLock(paths, requesterIdentity, () => undefined);
+    const reclaimed = acquireWorkerLock(paths, requesterIdentity, () => ({ state: 'dead' }));
     assert.ok(existsSync(reclaimed.path));
     reclaimed.release();
     stale.release();
+  } finally {
+    cleanup();
+  }
+});
+
+test('unavailable process evidence refuses a duplicate Worker start instead of reclaiming its lock', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const holderIdentity = processIdentity(51_003, 'u');
+    const requesterIdentity = processIdentity(51_004, 'v');
+    const holder = acquireWorkerLock(paths, holderIdentity, probe(holderIdentity));
+    assert.throws(
+      () => acquireWorkerLock(paths, requesterIdentity, () => ({ state: 'unknown' })),
+      (error: unknown) => error instanceof DuplicateWorkerProcessError,
+      'a live process whose environment/start evidence is unavailable is not stale',
+    );
+    assert.ok(existsSync(holder.path), 'the possibly live holder remains protected');
+    holder.release();
   } finally {
     cleanup();
   }
@@ -384,20 +407,33 @@ test('concurrent lock acquisition lets exactly one starter win and maps the lose
   }
 });
 
-test('a lock released by one pid never removes a lock another pid re-created', () => {
+test('an owner release cannot unlink a replacement created after it observed the old lock', () => {
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
     const firstIdentity = processIdentity(50_001, 'd');
     const secondIdentity = processIdentity(50_001, 'e');
-    const first = acquireWorkerLock(paths, firstIdentity, probe(firstIdentity));
+    let second: ReturnType<typeof acquireWorkerLock> | undefined;
+    const first = acquireWorkerLock(
+      paths,
+      firstIdentity,
+      probe(firstIdentity),
+      'worker',
+      {
+        // The first owner observes its own lock, then a same-PID replacement
+        // proves the old binding stale and recreates the canonical pathname.
+        // When the first owner resumes, it must not unlink that replacement.
+        onReleaseObserved: () => {
+          second = acquireWorkerLock(paths, secondIdentity, probe(secondIdentity));
+        },
+      },
+    );
     first.release();
-    const second = acquireWorkerLock(paths, secondIdentity, probe(secondIdentity));
-    // The first holder's stale release must not destroy a same-PID replacement.
-    first.release();
-    assert.ok(existsSync(second.path), 'an ownership-checked release preserves the newer lock');
-    second.release();
-    assert.equal(existsSync(second.path), false);
+    if (second === undefined) assert.fail('the replacement reclaimed and recreated the lock during stale release');
+    const replacement = second;
+    assert.ok(existsSync(replacement.path), 'an atomic ownership-bound release preserves the newer lock');
+    replacement.release();
+    assert.equal(existsSync(replacement.path), false);
   } finally {
     cleanup();
   }

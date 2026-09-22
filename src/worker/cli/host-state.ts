@@ -27,6 +27,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmdirSync,
   statSync,
@@ -116,8 +117,23 @@ export interface WorkerProcessIdentity {
   readonly ownerToken: string;
 }
 
+/**
+ * The result of probing a local process binding.
+ *
+ * `dead` is positive proof that the pid is gone. `alive` contains enough
+ * evidence to compare the exact process incarnation. `unknown` means the pid
+ * may still be alive, but the platform or permissions could not expose the
+ * owner token or start marker. It is deliberately distinct from `dead`: lock
+ * reclamation must never turn unavailable evidence into permission to start a
+ * second Worker or to destroy its host state.
+ */
+export type WorkerProcessProbeResult =
+  | { readonly state: 'dead' }
+  | { readonly state: 'alive'; readonly process: WorkerProcessIdentity }
+  | { readonly state: 'unknown' };
+
 /** Probe the small, comparable process facts needed for host-local ownership. */
-export type WorkerProcessProbe = (pid: number) => WorkerProcessIdentity | undefined;
+export type WorkerProcessProbe = (pid: number) => WorkerProcessProbeResult;
 
 /** Why the host-local Worker state could not be used. */
 export class WorkerHostStateError extends Error {
@@ -439,11 +455,11 @@ export function sameWorkerProcess(
  * Darwin exposes both the process start time and environment through `ps`; on
  * Linux the equivalent owner-only `/proc` entries are used so local tests and
  * development carriers retain the same safety property. Unsupported platforms
- * return no evidence and therefore fail closed (never trust or steal a live
- * record).
+ * and unreadable evidence return `unknown` and therefore fail closed (never
+ * trust or steal a possibly live record).
  */
-export function probeWorkerProcess(pid: number): WorkerProcessIdentity | undefined {
-  if (!isProcessAlive(pid)) return undefined;
+export function probeWorkerProcess(pid: number): WorkerProcessProbeResult {
+  if (!isProcessAlive(pid)) return { state: 'dead' };
   try {
     const ownerToken = process.platform === 'linux'
       ? environmentValue(readFileSync(`/proc/${pid}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')
@@ -453,21 +469,23 @@ export function probeWorkerProcess(pid: number): WorkerProcessIdentity | undefin
       : process.platform === 'darwin'
         ? darwinStartIdentity(pid)
         : undefined;
-    if (ownerToken === undefined || startIdentity === undefined) return undefined;
+    if (ownerToken === undefined || startIdentity === undefined) return { state: 'unknown' };
     const identity = { pid, startIdentity, ownerToken };
-    return isWorkerProcessIdentity(identity) ? identity : undefined;
+    return isWorkerProcessIdentity(identity)
+      ? { state: 'alive', process: identity }
+      : { state: 'unknown' };
   } catch {
-    return undefined;
+    return { state: 'unknown' };
   }
 }
 
 /** Bind the current process after `start` has installed its owner token. */
 export function currentWorkerProcess(ownerToken: string): WorkerProcessIdentity {
-  const identity = probeWorkerProcess(process.pid);
-  if (identity === undefined || identity.ownerToken !== ownerToken) {
+  const evidence = probeWorkerProcess(process.pid);
+  if (evidence.state !== 'alive' || evidence.process.ownerToken !== ownerToken) {
     throw new WorkerHostStateError('invalid', 'could not establish a host-local Worker process identity');
   }
-  return identity;
+  return evidence.process;
 }
 
 function environmentValue(contents: Buffer | string, name: string): string | undefined {
@@ -626,7 +644,7 @@ export class DuplicateWorkerProcessError extends Error {
   }
 }
 
-/** The pid file a running Worker holds for the lifetime of `start`. */
+/** The owner-only lock directory a running Worker holds for the lifetime of `start`. */
 export function workerLockPath(paths: WorkerHostPaths): string {
   return join(paths.stateDirectory, 'worker.lock');
 }
@@ -639,77 +657,188 @@ interface WorkerLockRecord {
   readonly process: WorkerProcessIdentity;
 }
 
-/** How old an unparseable lock file must be before it is safe to reclaim. */
-const LOCK_RECLAIM_GRACE_MS = 1_000;
+/** Test-only observation point for the release/replacement interleaving. */
+export interface WorkerLockOptions {
+  /** Called after a release has observed the pathname, before its atomic take. */
+  readonly onReleaseObserved?: () => void;
+}
+
+type WorkerLockClassification = 'duplicate' | 'stale' | 'unknown';
+
+/** The private, token-bound entry held inside the canonical lock directory. */
+function workerLockOwnerName(processIdentity: WorkerProcessIdentity): string {
+  return `owner-${processIdentity.ownerToken}`;
+}
+
+function workerLockOwnerPath(lockPath: string, processIdentity: WorkerProcessIdentity): string {
+  return join(lockPath, workerLockOwnerName(processIdentity));
+}
 
 /**
  * Classify the current lock file from the caller's point of view.
  *
  * - `duplicate`: an exact live process binding holds it; refuse.
- * - `stale`: it has no matching live process binding, or is unparseable and old
- *   enough that no concurrent starter can still be writing it; reclaim.
- * - `contended`: it is unparseable and freshly created, so a concurrent
- *   starter may be mid-write; refuse rather than steal the lock.
+ * - `stale`: the owner pid is positively known dead, or an observed live
+ *   process has a different complete binding; reclaim is safe.
+ * - `unknown`: the lock is malformed or the process evidence is unavailable;
+ *   refuse rather than steal a possibly live Worker or reset fence.
  */
-function classifyLock(lockPath: string, probe: WorkerProcessProbe): 'duplicate' | 'stale' | 'contended' {
+function classifyLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockClassification {
   const holder = readWorkerLock(lockPath);
-  if (holder === undefined) {
-    let ageMs = Infinity;
-    try {
-      ageMs = Date.now() - statSync(lockPath).mtimeMs;
-    } catch {
-      return 'stale';
-    }
-    return ageMs > LOCK_RECLAIM_GRACE_MS ? 'stale' : 'contended';
+  if (holder === undefined) return 'unknown';
+  const evidence = probe(holder.process.pid);
+  if (evidence.state === 'dead') return 'stale';
+  if (evidence.state === 'unknown') return 'unknown';
+  return sameWorkerProcess(holder.process, evidence.process) ? 'duplicate' : 'stale';
+}
+
+/**
+ * Reclaim a stale lock by unlinking only its token-bound owner entry.
+ *
+ * The canonical lock is a directory. A replacement cannot create that directory
+ * until `rmdir` succeeds, and `rmdir` cannot succeed until the expected owner
+ * entry is removed. If a stale release/reclaimer has already replaced the
+ * directory, this exact token-bound unlink gets ENOENT instead of touching the
+ * new owner's distinct entry. This is the POSIX ownership-bound removal that a
+ * plain check-then-unlink lock file cannot provide.
+ */
+function reclaimStaleWorkerLock(lockPath: string, probe: WorkerProcessProbe): WorkerLockClassification {
+  const holder = readWorkerLock(lockPath);
+  if (holder === undefined) return 'unknown';
+  const classification = classifyLock(lockPath, probe);
+  if (classification !== 'stale') return classification;
+  try {
+    unlinkSync(workerLockOwnerPath(lockPath, holder.process));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return classifyLock(lockPath, probe);
+    throw error;
   }
-  return sameWorkerProcess(holder.process, probe(holder.process.pid)) ? 'duplicate' : 'stale';
+  try {
+    rmdirSync(lockPath);
+    return 'stale';
+  } catch (error) {
+    // A compliant concurrent acquirer sees an empty directory as unknown and
+    // cannot create a new owner before this rmdir. ENOTEMPTY/ENOENT therefore
+    // means another owner or an external mutation won; re-classify and refuse.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'stale';
+    if ((error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
+      return classifyLock(lockPath, probe);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Atomically release only the lock directory entry owned by this caller.
+ *
+ * The unique owner-token pathname is the removal capability. A stale release
+ * that observed an older lock can only unlink its old entry; it cannot unlink a
+ * same-PID replacement's entry. Once that expected entry is gone, `rmdir`
+ * removes only the now-empty lock directory; a replacement cannot appear until
+ * after that atomic directory removal completes.
+ */
+function releaseWorkerLock(
+  lockPath: string,
+  processIdentity: WorkerProcessIdentity,
+  options: WorkerLockOptions,
+): void {
+  // This observation is deliberately not followed by a pathname unlink. It
+  // gives the deterministic test seam its stale-release interleaving while the
+  // token-bound owner entry below remains the only destructive operation.
+  if (options.onReleaseObserved !== undefined) {
+    void readWorkerLock(lockPath);
+    options.onReleaseObserved();
+  }
+  try {
+    unlinkSync(workerLockOwnerPath(lockPath, processIdentity));
+  } catch (error) {
+    // The lock was already released or replaced. In either case this stale
+    // owner has no authority to remove the canonical directory.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  try {
+    rmdirSync(lockPath);
+  } catch (error) {
+    // A replacement can only make the directory non-empty after another actor
+    // removed it and recreated it. Never retry rmdir by pathname in that case.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
+      throw error;
+    }
+  }
 }
 
 /**
  * Acquire the single-instance lock, or throw when a live Worker holds it.
  *
- * The check-then-write race is closed by creating the file exclusively (`wx`):
+ * The check-then-write race is closed by creating the lock directory
+ * exclusively (`mkdir`):
  * two concurrent `start` processes can never both acquire it, and the loser of
  * an `EEXIST` re-reads the winner's binding and fails with the documented
- * duplicate-process error rather than a generic filesystem failure. A lock with
- * no exact live binding is reclaimed by one bounded retry.
+ * duplicate-process error rather than a generic filesystem failure. A normal
+ * lock is reclaimed only when its owner is proven dead or replaced; unavailable
+ * process evidence is a duplicate-process refusal, including for reset fences.
  */
 export function acquireWorkerLock(
   paths: WorkerHostPaths,
   processIdentity: WorkerProcessIdentity,
   probe: WorkerProcessProbe = probeWorkerProcess,
   kind: WorkerLockKind = 'worker',
+  options: WorkerLockOptions = {},
 ): { readonly release: () => void; readonly path: string } {
+  if (!isWorkerProcessIdentity(processIdentity)) {
+    throw new WorkerHostStateError('invalid', 'could not establish a valid host-local Worker process identity');
+  }
   ensureStateDirectory(paths);
   const lockPath = workerLockPath(paths);
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    let descriptor: number;
     try {
-      descriptor = openSync(lockPath, 'wx', PRIVATE_FILE_MODE);
+      mkdirSync(lockPath, { mode: PRIVATE_DIRECTORY_MODE });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const classification = classifyLock(lockPath, probe);
-      if (classification === 'duplicate' || classification === 'contended') {
+      if (classification !== 'stale') {
         throw new DuplicateWorkerProcessError(readWorkerLock(lockPath)?.process.pid);
       }
-      removeFileIfPresent(lockPath);
+      const reclaimed = reclaimStaleWorkerLock(lockPath, probe);
+      if (reclaimed !== 'stale') {
+        throw new DuplicateWorkerProcessError(readWorkerLock(lockPath)?.process.pid);
+      }
       continue;
     }
+    const ownerPath = workerLockOwnerPath(lockPath, processIdentity);
+    let descriptor: number | undefined;
     try {
+      descriptor = openSync(ownerPath, 'wx', PRIVATE_FILE_MODE);
       writeFileSync(descriptor, `${JSON.stringify({ version: 1, kind, process: processIdentity } satisfies WorkerLockRecord)}\n`, 'utf8');
+    } catch (error) {
+      // The directory is ours because mkdir succeeded. Clean an incomplete
+      // record before reporting the write failure so it cannot become a
+      // permanent unknown fence.
+      try {
+        if (descriptor !== undefined) {
+          closeSync(descriptor);
+          descriptor = undefined;
+        }
+        unlinkSync(ownerPath);
+      } catch {
+        // The original write error is decisive; an operator can still see the
+        // remaining owner-only fence instead of a false successful start.
+      }
+      try {
+        rmdirSync(lockPath);
+      } catch {
+        // Keep the original error for a failed creation.
+      }
+      throw error;
     } finally {
-      closeSync(descriptor);
+      if (descriptor !== undefined) closeSync(descriptor);
     }
     return {
       path: lockPath,
-      // Every binding component is checked, so a same-PID replacement can
-      // never release a newer process's lock.
-      release: () => {
-        const holder = readWorkerLock(lockPath);
-        if (holder !== undefined && holder.kind === kind && sameWorkerProcess(processIdentity, holder.process)) {
-          removeFileIfPresent(lockPath);
-        }
-      },
+      // The token-bound entry plus rmdir ensures a stale owner cannot unlink a
+      // replacement after it has observed the old record.
+      release: () => releaseWorkerLock(lockPath, processIdentity, options),
     };
   }
   // The second exclusive create also lost: a concurrent starter won it.
@@ -717,13 +846,18 @@ export function acquireWorkerLock(
 }
 
 function readWorkerLock(lockPath: string): WorkerLockRecord | undefined {
-  if (!existsSync(lockPath)) return undefined;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(lockPath, 'utf8'));
+    const entries = readdirSync(lockPath);
+    const ownerEntries = entries.filter((entry) => /^owner-[A-Za-z0-9_-]{43}$/.test(entry));
+    if (ownerEntries.length !== 1) return undefined;
+    const ownerEntry = ownerEntries[0];
+    if (ownerEntry === undefined) return undefined;
+    const parsed: unknown = JSON.parse(readFileSync(join(lockPath, ownerEntry), 'utf8'));
     if (typeof parsed !== 'object' || parsed === null) return undefined;
     const record = parsed as Record<string, unknown>;
     if (record['version'] !== 1 || (record['kind'] !== 'worker' && record['kind'] !== 'reset') || !isWorkerProcessIdentity(record['process'])) return undefined;
-    return record as unknown as WorkerLockRecord;
+    const lock = record as unknown as WorkerLockRecord;
+    return ownerEntry === workerLockOwnerName(lock.process) ? lock : undefined;
   } catch {
     return undefined;
   }
@@ -741,7 +875,10 @@ export function activeWorkerLockHolder(
   probe: WorkerProcessProbe = probeWorkerProcess,
 ): number | undefined {
   const lock = readWorkerLock(workerLockPath(paths));
-  if (lock?.kind === 'worker' && sameWorkerProcess(lock.process, probe(lock.process.pid))) return lock.process.pid;
+  const evidence = lock === undefined ? undefined : probe(lock.process.pid);
+  if (lock?.kind === 'worker' && evidence?.state === 'alive' && sameWorkerProcess(lock.process, evidence.process)) {
+    return lock.process.pid;
+  }
   return undefined;
 }
 
