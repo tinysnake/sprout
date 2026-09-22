@@ -15,7 +15,6 @@ import {
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
-import { EnrollmentError } from './environment/enrollment.ts';
 import {
   EnvironmentCatalog,
   projectCatalogEntry,
@@ -79,6 +78,7 @@ import {
   type EnvironmentWorkerConfiguration,
 } from './worker/environment-worker.ts';
 import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
+import { createWorkerProbeRequester } from './worker/readiness-requester.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
@@ -918,6 +918,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       onMutation: onEnrollmentMutation,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
+    // One synchronous lifecycle authority is shared by the enrollment service,
+    // the archive service, and the Worker gateway, so revoke/reset/archive is
+    // ordered with epoch acceptance in a single run-to-completion step
+    // (R118-EPOCH-001).
+    const lifecycleAuthority = enrollments.lifecycleAuthority;
     // The catalog refresh and its pool publication are defined here, after the
     // enrollment service and epoch registry exist, and re-invoked whenever an
     // accepted connection appears or a channel is lost.
@@ -1005,6 +1010,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       enrollments: stores.enrollments,
       leases: pool,
       recovery,
+      lifecycleAuthority,
       onMutation: onEnrollmentMutation,
     });
     // The enrollment-backed outbound Worker gateway (#115, ADR-0012). A host
@@ -1137,32 +1143,13 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(first.instanceId),
       };
     };
-    const requestWorkerProbe = async (enrollmentId: string) => {
-      const enrollment = await enrollments.get(enrollmentId);
-      if (enrollment === undefined) throw new EnrollmentError('unknown-enrollment', 'Unknown enrollment.');
-      if (enrollment.status !== 'approved') {
-        throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
-      }
-      const live = workerGateway.liveFor(enrollment.environmentInstanceId);
-      if (live === undefined) throw new Error('the Environment Worker is offline');
-      const isCurrent = (): boolean =>
-        enrollment.status === 'approved' &&
-        workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
-        workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
-      if (!isCurrent()) throw new Error('the Environment Worker is offline');
-      const result = await enrollmentEnvironment.probeReadiness(enrollment.environmentInstanceId);
-      if (result === undefined) throw new Error('the Environment Worker is offline');
-      const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
-        enrollmentId,
-        connectionEpoch: live.epoch.epoch,
-        isCurrent,
-      });
-      if (!recorded || !isCurrent()) {
-        throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
-      }
-      await refreshEnvironmentCatalog();
-      return result.probe;
-    };
+    const requestWorkerProbe = createWorkerProbeRequester({
+      enrollments,
+      workerGateway,
+      workerEpochs,
+      environment: enrollmentEnvironment,
+      refreshEnvironmentCatalog,
+    });
 
     const api = createRunApi({
       orchestrator,

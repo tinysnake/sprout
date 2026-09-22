@@ -43,8 +43,10 @@ async function runWorker(): Promise<void> {
   // cannot submit or manufacture any of these facts.
   const startupProbe = await probeEnvironmentReadiness(engineConfigurations);
   let workerReadiness: WorkerReadinessFacts = startupProbe.readiness;
-  const runProbe = async () => {
-    const result = await probeEnvironmentReadiness(engineConfigurations);
+  const runProbe = async (params: { readonly requiredModels?: readonly string[] } = {}) => {
+    const result = await probeEnvironmentReadiness(engineConfigurations, {
+      ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
+    });
     workerReadiness = result.readiness;
     return result;
   };
@@ -80,7 +82,7 @@ async function runWorker(): Promise<void> {
       onLog: log,
       workspaceRoot,
       readiness: () => workerReadiness,
-      readinessProbe: () => runProbe(),
+      readinessProbe: (params) => runProbe(params),
     });
     connection.stream.on('close', () => {
       void worker.shutdown().then(() => process.exit(0));
@@ -97,7 +99,7 @@ async function runWorker(): Promise<void> {
       onLog: log,
       workspaceRoot,
       readiness: () => workerReadiness,
-      readinessProbe: () => runProbe(),
+      readinessProbe: (params) => runProbe(params),
     });
     process.stdin.on('error', () => undefined);
     process.stdin.on('close', () => {
@@ -119,7 +121,7 @@ async function runWorker(): Promise<void> {
         onLog: log,
         workspaceRoot,
         readiness: () => workerReadiness,
-        readinessProbe: () => runProbe(),
+        readinessProbe: (params) => runProbe(params),
       });
       socket.on('error', () => undefined);
       socket.on('close', () => {

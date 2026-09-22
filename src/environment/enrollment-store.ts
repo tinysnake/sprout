@@ -15,7 +15,25 @@ export interface EnrollmentStore {
    * instance. `false` means an existing authority owns that instance.
    */
   createIfInstanceAbsent(enrollment: EnvironmentEnrollment): Promise<boolean>;
+  /**
+   * Save an enrollment document unconditionally (lifecycle decisions).
+   *
+   * Callers that already hold the latest durable revision use this; a slow
+   * reconciliation must use {@link saveIfRevision} instead so its save cannot
+   * overwrite a newer lifecycle decision (R118-EPOCH-001).
+   */
   save(enrollment: EnvironmentEnrollment): Promise<void>;
+  /**
+   * Compare-and-set one enrollment document on its durable `revision`.
+   *
+   * Applies only when the stored document's revision still equals
+   * `expectedRevision`; returns the saved document when it applied, or
+   * `undefined` when a concurrent writer moved the revision first (or the
+   * record is gone). The store is the serialization point, so two concurrent
+   * saves cannot both apply and a stale pre-epoch reconciliation can never
+   * overwrite a later revoke/reset.
+   */
+  saveIfRevision(enrollment: EnvironmentEnrollment, expectedRevision: number): Promise<EnvironmentEnrollment | undefined>;
   get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined>;
   list(): Promise<readonly EnvironmentEnrollment[]>;
   /**
@@ -54,6 +72,22 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     this.#enrollments.set(enrollment.id, enrollment);
   }
 
+  /**
+   * Compare-and-set on the stored revision.
+   *
+   * The body reads and writes synchronously (no `await` between them), so it is
+   * atomic with respect to any other microtask in this process.
+   */
+  async saveIfRevision(
+    enrollment: EnvironmentEnrollment,
+    expectedRevision: number,
+  ): Promise<EnvironmentEnrollment | undefined> {
+    const current = this.#enrollments.get(enrollment.id);
+    if (current === undefined || current.revision !== expectedRevision) return undefined;
+    this.#enrollments.set(enrollment.id, enrollment);
+    return enrollment;
+  }
+
   async get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined> {
     return this.#enrollments.get(enrollmentId);
   }
@@ -80,6 +114,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       ...current,
       claim: { ...claim, consumedAt },
       updatedAt: consumedAt,
+      revision: (current.revision ?? 0) + 1,
     };
     this.#enrollments.set(enrollmentId, consumed);
     return consumed;

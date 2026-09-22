@@ -8,6 +8,7 @@ import { EnvironmentEnrollmentService } from '../environment/enrollment-service.
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
 import { createPendingEnrollment } from '../environment/enrollment.ts';
+import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import { workerIdentityDigest } from '../environment/enrollment-identity.ts';
 import { WorkerGateway } from './gateway.ts';
 import { EnrollmentWorkerPort } from './enrollment-port.ts';
@@ -41,7 +42,16 @@ interface Harness {
 }
 
 async function harness(): Promise<Harness> {
-  const enrollmentStore = new InMemoryEnrollmentStore();
+  return harnessWithStore(new InMemoryEnrollmentStore());
+}
+
+/**
+ * A harness whose enrollment store is supplied by the caller.
+ *
+ * A gated store lets a test suspend the gateway's pre-epoch lifecycle re-read so
+ * a revoke can be interleaved into an exact acceptance window deterministically.
+ */
+async function harnessWithStore(enrollmentStore: InMemoryEnrollmentStore): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
@@ -72,6 +82,53 @@ async function harness(): Promise<Harness> {
     },
   };
 }
+
+test('a revoke landing during the acceptance window refuses the connection instead of accepting a stale epoch (R118-EPOCH-001)', async () => {
+  // Deterministically suspend the gateway's pre-epoch lifecycle re-read of the
+  // enrollment, so the revoke lands exactly inside the acceptance window.
+  class GatedStore extends InMemoryEnrollmentStore {
+    #remaining = -1;
+    #signalGate: (() => void) | undefined;
+    readonly gateReached = new Promise<void>((resolve) => { this.#signalGate = resolve; });
+    #release: (() => void) | undefined;
+    readonly gateReleased = new Promise<void>((resolve) => { this.#release = resolve; });
+    blockNthGetFromNow(count: number): void { this.#remaining = count; }
+    releaseGet(): void { this.#release?.(); }
+    override async get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined> {
+      if (this.#remaining > 0) {
+        this.#remaining -= 1;
+        if (this.#remaining === 0) {
+          this.#signalGate?.();
+          await this.gateReleased;
+        }
+      }
+      return super.get(enrollmentId);
+    }
+  }
+  const store = new GatedStore();
+  const h = await harnessWithStore(store);
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    // `connectWorkerEnrollment` performs its own reads; block the gateway-side
+    // re-read that happens after reconciliation, which is the acceptance fence.
+    store.blockNthGetFromNow(3);
+    const connecting = connect(h, '', key.path).catch((error: unknown) => error);
+    await store.gateReached;
+    await h.enrollments.revoke('enroll-1', 'retired during acceptance');
+    store.releaseGet();
+    const result = await connecting;
+    assert.ok(result instanceof Error, 'the connection is refused');
+    assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
+    assert.equal(h.gateway.epochs.current('enroll-1'), undefined);
+    const durable = await h.enrollments.get('enroll-1');
+    assert.equal(durable?.status, 'revoked', 'the revoke is the durable authority');
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
 
 function tmpKey(): { readonly path: string; readonly cleanup: () => void } {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-worker-key-'));

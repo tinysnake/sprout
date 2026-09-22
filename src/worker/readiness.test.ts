@@ -6,6 +6,7 @@ import { EnvironmentWorker } from './server.ts';
 import { WorkerClient, WorkerReadinessClient } from './client.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { probeEnvironmentReadiness, piAuthCheckArgs, type ReadinessCommandRunner } from './readiness.ts';
+import { observedFactsFromWorkerReadiness } from '../environment/readiness.ts';
 import type { EngineConfiguration } from './engine-selection.ts';
 
 const configurations: readonly EngineConfiguration[] = [
@@ -200,4 +201,116 @@ test('explicit readiness probes execute on the Worker channel and cannot accept 
   assert.equal(result.probe.latencyMs, 7);
   assert.equal(result.readiness.observedAt, 42);
   assert.equal(connected.info.readiness?.protocolVersion, '2');
+});
+
+test('Codex local bundled-catalog presence is checked with the pinned non-inference command (#114 C3)', async () => {
+  const account = { account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true };
+  const calls: (readonly string[])[] = [];
+  const runner: ReadinessCommandRunner = {
+    async run(_binary, args) {
+      calls.push(args);
+      return { stdout: 'codex-cli 0.154.0', exitCode: 0 };
+    },
+    async accountRead() { return { stdout: JSON.stringify(account), exitCode: 0 }; },
+    async bundledModels() {
+      return { stdout: JSON.stringify({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-5-codex' }] }), exitCode: 0 };
+    },
+  };
+  const present = await probeEnvironmentReadiness([configurations[0]!], {
+    commandRunner: runner,
+    requiredModels: ['gpt-6-astra'],
+  });
+  // Local presence is an independent fact; account entitlement and models stay
+  // unknown/unavailable and continue to block admission.
+  assert.equal(present.readiness.engines[0]?.modelIdPresent, true);
+  assert.equal(present.readiness.engines[0]?.modelAvailability, 'unknown');
+  assert.deepEqual(present.readiness.engines[0]?.models, []);
+  // The pinned local command is the only model operation: no `model/list`, no
+  // `--list-models`, no default (network-capable) `debug models`.
+  assert.deepEqual(calls, [['--version']]);
+
+  const absent = await probeEnvironmentReadiness([configurations[0]!], {
+    commandRunner: runner,
+    requiredModels: ['does-not-exist'],
+  });
+  assert.equal(absent.readiness.engines[0]?.modelIdPresent, false);
+});
+
+test('Codex local-catalog presence fails closed on non-zero exit and malformed output (#114 C3)', async () => {
+  const account = { account: { type: 'apiKey' }, requiresOpenaiAuth: true };
+  for (const bundled of [
+    { stdout: '', exitCode: 1 },
+    { stdout: 'not-json', exitCode: 0 },
+    { stdout: JSON.stringify({ models: 'nope' }), exitCode: 0 },
+    { stdout: JSON.stringify({ models: [{ display_name: 'no slug' }] }), exitCode: 0 },
+  ]) {
+    const result = await probeEnvironmentReadiness([configurations[0]!], {
+      commandRunner: {
+        async run() { return { stdout: 'codex-cli 0.154.0', exitCode: 0 }; },
+        async accountRead() { return { stdout: JSON.stringify(account), exitCode: 0 }; },
+        async bundledModels() { return bundled; },
+      },
+      requiredModels: ['gpt-6-astra'],
+    });
+    assert.equal(result.readiness.engines[0]?.modelIdPresent, undefined, JSON.stringify(bundled));
+    // Authentication remains an independent fact.
+    assert.equal(result.readiness.engines[0]?.readiness, 'ready');
+  }
+});
+
+test('the Pi adapter never executes --list-models and reports no local catalog fact (#114 C3)', async () => {
+  const calls: (readonly string[])[] = [];
+  const result = await probeEnvironmentReadiness([configurations[1]!], {
+    commandRunner: {
+      async run(_binary, args) {
+        calls.push(args);
+        return args[0] === '--version'
+          ? { stdout: 'pi 0.86.1', exitCode: 0 }
+          : { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+      },
+    },
+  });
+  assert.equal(result.readiness.engines[0]?.modelIdPresent, undefined);
+  assert.equal(result.readiness.engines[0]?.modelAvailability, 'unknown');
+  for (const args of calls) assert.equal(args.includes('--list-models'), false);
+});
+
+test('a Worker-declared provider or account identity is dropped at the readiness ingress boundary (#114 C6, R118-BOUNDARY-003)', async () => {
+  // A proven Worker is still not allowed to widen the persisted vocabulary. An
+  // unknown authMode/authType/source must be dropped rather than pass a generic
+  // identifier sanitizer, so no provider/account identity can be persisted.
+  const observed = observedFactsFromWorkerReadiness({
+    protocolVersion: '2',
+    at: 1,
+    supported: { minMajor: 2, maxMajor: 2 },
+    engines: [{
+      engine: 'pi',
+      installed: true,
+      readiness: 'ready',
+      modelAvailability: 'unknown',
+      models: [],
+      authenticated: true,
+      // A malicious or legacy Worker tries to smuggle provider/account identity.
+      authMode: 'provider-account',
+      authType: 'openai-codex',
+      source: 'openai-codex',
+    }],
+  });
+  const engine = observed.engines[0]!;
+  assert.equal(engine.authMode, undefined, 'unknown authMode is dropped');
+  assert.equal(engine.authType, undefined, 'unknown authType is dropped');
+  assert.equal(engine.source, undefined, 'unknown source is dropped');
+  assert.doesNotMatch(JSON.stringify(observed), /openai-codex|provider-account/);
+  // A known allowlisted value still survives.
+  const allowed = observedFactsFromWorkerReadiness({
+    protocolVersion: '2',
+    at: 1,
+    supported: { minMajor: 2, maxMajor: 2 },
+    engines: [{
+      engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [],
+      authenticated: true, authMode: 'api_key', source: 'codex-account-read',
+    }],
+  });
+  assert.equal(allowed.engines[0]?.authMode, 'api_key');
+  assert.equal(allowed.engines[0]?.source, 'codex-account-read');
 });

@@ -22,6 +22,7 @@ import {
   toEnvironmentReadinessView,
   toMessageView,
   toProjectView,
+  toProbeResultView,
   toRunView,
   toTaskContextState,
   toTaskRunLinkView,
@@ -334,6 +335,57 @@ test('the readiness wire view retains only safe Worker provenance and independen
   });
   assert.equal(JSON.stringify(view).includes('provider'), false);
   assert.equal(JSON.stringify(view).includes('account'), false);
+});
+
+test('a legal multi-engine aggregate probe version is preserved identically in readiness and probe history (R118-PROVENANCE-005)', () => {
+  const probe = {
+    at: 1_234, latencyMs: 12, protocolOk: true, enginesOk: true, source: 'worker' as const,
+    version: '0.154.0, 0.86.1', summary: 'Worker non-readiness probe completed.',
+  };
+  const readinessView = toEnvironmentReadinessView({
+    environmentInstanceId: 'env-1',
+    summary: { level: 'yellow', reason: 'Model entitlement is unavailable.' },
+    readiness: {
+      enrollmentStatus: 'approved',
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      capabilities: [],
+      engines: [],
+      probe,
+      workSafety: { state: 'clear' },
+    },
+  });
+  const historyView = toProbeResultView(probe);
+  assert.equal(readinessView.probe?.version, '0.154.0, 0.86.1');
+  assert.equal(historyView?.version, '0.154.0, 0.86.1');
+  assert.equal(readinessView.probe?.version, historyView?.version);
+  // An illegal version is still degraded in both projections.
+  assert.equal(toProbeResultView({ ...probe, version: 'not a version' })?.version, 'unknown-version');
+});
+
+test('the readiness wire view drops a Worker-supplied provider/account identity (#114 C6, R118-BOUNDARY-003)', () => {
+  const view = toEnvironmentReadinessView({
+    environmentInstanceId: 'env-1',
+    summary: { level: 'yellow', reason: 'Model entitlement is unavailable.' },
+    readiness: {
+      enrollmentStatus: 'approved',
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      capabilities: [],
+      engines: [{
+        engine: 'pi', installed: true, readiness: 'ready', required: true,
+        models: { state: 'unknown', models: [] }, authenticated: true,
+        // A legacy/raw document that bypassed the ingress sanitizer still must
+        // not leak through the wire projection.
+        authMode: 'provider-account', authType: 'openai-codex', source: 'openai-codex',
+      }],
+      workSafety: { state: 'clear' },
+    },
+  });
+  assert.equal(view.engines[0]?.authMode, undefined);
+  assert.equal(view.engines[0]?.authType, undefined);
+  assert.equal(view.engines[0]?.source, undefined);
+  assert.doesNotMatch(JSON.stringify(view), /openai-codex|provider-account/);
 });
 
 test('a run view exposes the workspace binding it was admitted under, sanitized', () => {

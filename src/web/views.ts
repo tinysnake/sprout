@@ -39,6 +39,12 @@ import {
   DEFAULT_RECOVERY_REASON,
 } from '../environment/privacy.ts';
 import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
+import {
+  allowlistedReadinessValue,
+  READINESS_AUTH_MODES,
+  READINESS_AUTH_TYPES,
+  READINESS_SOURCES,
+} from '../environment/readiness.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
 import {
   sanitizeWorkspacePath,
@@ -475,9 +481,23 @@ export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeRe
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
     ...(probe.source !== undefined ? { source: probe.source } : {}),
     ...(probe.version !== undefined
-      ? { version: /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(probe.version) ? probe.version : 'unknown-version' }
+      ? { version: probeVersionOrUnknown(probe.version) }
       : {}),
   };
+}
+
+/**
+ * The one probe-version sanitizer for both probe history and GET readiness.
+ *
+ * A Worker that reports multiple engines produces an aggregate version like
+ * `0.154.0, 0.86.1`. Both projections must accept that legal shape identically,
+ * or the same observation would be degraded to `unknown-version` in one place
+ * and preserved in the other (R118-PROVENANCE-005).
+ */
+export function probeVersionOrUnknown(version: string): string {
+  return /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(version)
+    ? version
+    : 'unknown-version';
 }
 
 export function toEnvironmentReadinessView(input: {
@@ -521,28 +541,33 @@ export function toEnvironmentReadinessView(input: {
       permission: capability.permission,
       required: capability.required,
     })),
-    engines: readiness.engines.map((engine) => ({
-      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
-      ...(engine.version !== undefined
-        ? { version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(engine.version) ? engine.version : 'unknown-version' }
-        : {}),
-      installed: engine.installed,
-      readiness: engine.readiness,
-      required: engine.required,
-      models: {
-        state: engine.models.state,
-        models: engine.models.models.map((model) =>
-          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
-        ),
-      },
-      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
-      ...(engine.authMode !== undefined ? { authMode: sanitizeIdentifier(engine.authMode, { fallback: 'unknown', kind: 'generic' }) } : {}),
-      ...(engine.authType !== undefined ? { authType: sanitizeIdentifier(engine.authType, { fallback: 'unknown', kind: 'generic' }) } : {}),
-      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
-      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
-      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
-      ...(engine.source !== undefined ? { source: sanitizeIdentifier(engine.source, { fallback: 'unknown', kind: 'generic' }) } : {}),
-    })),
+    engines: readiness.engines.map((engine) => {
+      const authMode = allowlistedReadinessValue(engine.authMode, READINESS_AUTH_MODES);
+      const authType = allowlistedReadinessValue(engine.authType, READINESS_AUTH_TYPES);
+      const source = allowlistedReadinessValue(engine.source, READINESS_SOURCES);
+      return {
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+        ...(engine.version !== undefined
+          ? { version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(engine.version) ? engine.version : 'unknown-version' }
+          : {}),
+        installed: engine.installed,
+        readiness: engine.readiness,
+        required: engine.required,
+        models: {
+          state: engine.models.state,
+          models: engine.models.models.map((model) =>
+            sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+          ),
+        },
+        ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+        ...(authMode !== undefined ? { authMode } : {}),
+        ...(authType !== undefined ? { authType } : {}),
+        ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+        ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+        ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+        ...(source !== undefined ? { source } : {}),
+      };
+    }),
     ...(readiness.probe !== undefined
       ? {
           probe: {
@@ -553,7 +578,7 @@ export function toEnvironmentReadinessView(input: {
             summary: sanitizeOperatorText(readiness.probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
             ...(readiness.probe.source !== undefined ? { source: readiness.probe.source } : {}),
             ...(readiness.probe.version !== undefined
-              ? { version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(readiness.probe.version) ? readiness.probe.version : 'unknown-version' }
+              ? { version: probeVersionOrUnknown(readiness.probe.version) }
               : {}),
           },
         }

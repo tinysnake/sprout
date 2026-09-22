@@ -306,6 +306,9 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         segments[4] === 'readiness'
       ) {
         try {
+          // Readiness, summary, and the current-epoch probe history come from
+          // one authority snapshot, so a lifecycle decision crossing the read
+          // cannot yield an approved body with differently-scoped probes.
           const assembled = await enrollments.readiness(segments[3] ?? '');
           return json(context, 200, {
             readiness: toEnvironmentReadinessView({
@@ -313,7 +316,7 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
               readiness: assembled.readiness,
               summary: assembled.summary,
             }),
-            probes: (await enrollments.listProbes(segments[3] ?? ''))
+            probes: assembled.probes
               .map(toProbeResultView)
               .filter((probe) => probe !== undefined),
           });

@@ -8,6 +8,8 @@ import {
   type ReadinessWriteAuthority,
 } from './readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
+import type { EnvironmentEnrollment } from './enrollment.ts';
+import { workerIdentityFixture } from './worker-identity-fixture.ts';
 
 class DelayedReadinessStore extends InMemoryEnvironmentReadinessStore {
   #signalStarted: (() => void) | undefined;
@@ -239,4 +241,164 @@ test('disconnect after the atomic commit cannot project the prior epoch as curre
   assert.equal((await service.readiness('enroll-1')).readiness.connection.state, 'never-connected');
   assert.equal((await service.readiness('enroll-1')).readiness.probe, undefined);
   assert.equal((await service.listProbes('enroll-1')).length, 1, 'accepted history remains auditable');
+});
+
+/**
+ * An enrollment store whose Nth `get` blocks until released, so a lifecycle
+ * decision can be interleaved into a specific suspension point of a slow
+ * `connectWorker` reconciliation.
+ */
+class GatedEnrollmentStore extends InMemoryEnrollmentStore {
+  #remainingUntilGate = -1;
+  #signalGate: (() => void) | undefined;
+  readonly gateReached = new Promise<void>((resolve) => { this.#signalGate = resolve; });
+  #releaseGate: (() => void) | undefined;
+  readonly gateReleased = new Promise<void>((resolve) => { this.#releaseGate = resolve; });
+
+  /** Block the Nth `get` from now (1 = the very next call). */
+  blockNthGetFromNow(count: number): void {
+    this.#remainingUntilGate = count;
+  }
+
+  releaseGet(): void { this.#releaseGate?.(); }
+
+  override async get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined> {
+    if (this.#remainingUntilGate > 0) {
+      this.#remainingUntilGate -= 1;
+      if (this.#remainingUntilGate === 0) {
+        this.#signalGate?.();
+        await this.gateReleased;
+      }
+    }
+    return super.get(enrollmentId);
+  }
+}
+
+/**
+ * R118-EPOCH-001: a slow pre-epoch identity reconciliation must not overwrite a
+ * revoke/reset that lands while its durable read is suspended.
+ */
+test('a pre-epoch reconciliation cannot overwrite a revoke that lands during its durable read', async () => {
+  const store = new GatedEnrollmentStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: store,
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
+    idFactory: () => 'enroll-1',
+    clock: () => 1_000,
+  });
+  const identity = workerIdentityFixture();
+  await service.requestEnrollment({
+    environmentInstanceId: 'env-1',
+    displayName: 'Environment',
+    publicKey: identity.publicKey,
+    platform: 'macos',
+    capabilityRequests: ['agent-run'],
+    engineFacts: [],
+  });
+  await service.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
+
+  const proof = await identity.prove(service, 'enroll-1');
+  // connectWorker reads the enrollment, then re-reads it after the proof to CAS
+  // its reconciliation. Block that second read.
+  store.blockNthGetFromNow(2);
+  const connecting = service.connectWorker({
+    enrollmentId: 'enroll-1',
+    proof,
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+    engines: [],
+  });
+  await store.gateReached;
+  // A Human revokes while the reconciliation is suspended mid-read.
+  await service.revoke('enroll-1', 'retired');
+  store.releaseGet();
+
+  const outcome = await connecting;
+  assert.equal(outcome.authoritySuperseded, true, 'the reconciliation is refused as superseded');
+  const durable = await service.get('enroll-1');
+  assert.equal(durable?.status, 'revoked', 'the newer revoke is the durable authority');
+  assert.deepEqual(durable?.decisions.map((decision) => decision.kind), ['requested', 'approved', 'revoked'], 'the superseded reconciliation left no durable decision');
+  // The readiness projection exposes no current facts after revoke.
+  const projected = await service.readiness('enroll-1');
+  assert.equal(projected.enrollment.status, 'revoked');
+  assert.equal(projected.readiness.connection.state, 'never-connected');
+  assert.deepEqual(projected.probes, []);
+});
+
+test('a pre-epoch reconciliation cannot overwrite a reset that lands during its durable read', async () => {
+  const store = new GatedEnrollmentStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: store,
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
+    idFactory: () => 'enroll-1',
+    clock: () => 1_000,
+  });
+  const identity = workerIdentityFixture();
+  await service.requestEnrollment({
+    environmentInstanceId: 'env-1', displayName: 'Environment', publicKey: identity.publicKey,
+    platform: 'macos', capabilityRequests: ['agent-run'], engineFacts: [],
+  });
+  await service.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
+  const proof = await identity.prove(service, 'enroll-1');
+  store.blockNthGetFromNow(2);
+  const connecting = service.connectWorker({
+    enrollmentId: 'enroll-1', proof, connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2' }, engines: [],
+  });
+  await store.gateReached;
+  await service.reset('enroll-1', 'rotate');
+  store.releaseGet();
+  const outcome = await connecting;
+  assert.equal(outcome.authoritySuperseded, true);
+  const durable = await service.get('enroll-1');
+  assert.equal(durable?.status, 'pending');
+  assert.equal(durable?.requiresFreshIdentity, true);
+  assert.deepEqual(durable?.decisions.map((decision) => decision.kind), ['requested', 'approved', 'reset']);
+});
+
+test('concurrent lifecycle decisions are serialized through the durable revision CAS', async () => {
+  const store = new InMemoryEnrollmentStore();
+  const service = new EnvironmentEnrollmentService({
+    enrollments: store,
+    readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
+    idFactory: () => 'enroll-1',
+    clock: () => 1_000,
+  });
+  await service.requestEnrollment({
+    environmentInstanceId: 'env-1', displayName: 'Environment', publicKey: 'worker-public-key',
+    platform: 'macos', capabilityRequests: ['agent-run'], engineFacts: [],
+  });
+  await service.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
+  // Two revokes in flight: the CAS retries against the freshest document so no
+  // decision is silently lost and the final document is one coherent lifecycle.
+  await Promise.all([
+    service.revoke('enroll-1', 'first'),
+    service.revoke('enroll-1', 'second'),
+  ]);
+  const durable = await service.get('enroll-1');
+  assert.equal(durable?.status, 'revoked');
+  assert.equal(durable?.decisions.filter((decision) => decision.kind === 'revoked').length, 2);
+});
+
+test('a Worker-declared provider/account identity never reaches the durable readiness document (#114 C6, R118-BOUNDARY-003)', async () => {
+  const { service, store } = await enrolled();
+  // A Worker over the authenticated channel tries to smuggle provider identity
+  // into the structured fields. The service sanitizes on the way in.
+  const recorded = await service.observeWorkerReadiness('enroll-1', {
+    ...startupReadiness(),
+    engines: [{
+      engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [],
+      authenticated: true, authMode: 'provider-account', authType: 'openai-codex', source: 'openai-codex',
+    }],
+  }, { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true });
+  assert.equal(recorded, true);
+  const stored = await store.getReadiness('env-1');
+  const serialized = JSON.stringify(stored);
+  assert.equal(serialized.includes('openai-codex'), false, 'no provider identity is persisted');
+  assert.equal(serialized.includes('provider-account'), false, 'no account-mode identity is persisted');
+  assert.equal(stored?.engines[0]?.authType, undefined);
+  assert.equal(stored?.engines[0]?.source, undefined);
 });

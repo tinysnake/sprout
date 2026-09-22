@@ -117,6 +117,15 @@ export interface EnvironmentEnrollment {
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /**
+   * Monotonic durable authority revision of this enrollment document.
+   *
+   * Every mutation that appends a decision or changes lifecycle state bumps it.
+   * It is the compare-and-set token a slow pre-epoch reconciliation uses so its
+   * durable save can never overwrite a newer revoke/reset (R118-EPOCH-001).
+   * Older documents without the field normalize to 0.
+   */
+  readonly revision: number;
   readonly decisions: readonly EnrollmentDecision[];
 }
 
@@ -137,6 +146,15 @@ export interface EnrollmentConnectionOutcome {
   readonly enrollment: EnvironmentEnrollment;
   /** True only when this attempt requires a Human decision before work. */
   readonly requiresHumanApproval: boolean;
+  /**
+   * True when a concurrent revoke/reset/archive invalidated this attempt before
+   * its durable reconciliation could be saved (R118-EPOCH-001).
+   *
+   * The stale save is discarded rather than overwriting the newer lifecycle
+   * decision, so a gateway must treat this as a refusal instead of accepting an
+   * epoch for the superseded connection.
+   */
+  readonly authoritySuperseded?: boolean;
 }
 
 export type EnrollmentErrorCode =
@@ -241,6 +259,7 @@ export function createPendingEnrollment(input: CreatePendingEnrollmentInput): En
     ),
     createdAt: input.at,
     updatedAt: input.at,
+    revision: 0,
     decisions: [
       {
         kind: 'requested',
@@ -427,6 +446,7 @@ export function approveEnrollment(
     everApproved: true,
     capabilityPermissions: permissions,
     updatedAt: input.at,
+    revision: (enrollment.revision ?? 0) + 1,
   };
 }
 
@@ -441,6 +461,7 @@ export function revokeEnrollment(enrollment: EnvironmentEnrollment, at: number, 
     }),
     status: 'revoked',
     updatedAt: at,
+    revision: (enrollment.revision ?? 0) + 1,
   };
 }
 
@@ -479,6 +500,7 @@ export function resetEnrollment(enrollment: EnvironmentEnrollment, at: number, r
       Object.keys(enrollment.capabilityPermissions).map((capability) => [capability, false]),
     ),
     updatedAt: at,
+    revision: (enrollment.revision ?? 0) + 1,
   };
 }
 
@@ -499,11 +521,16 @@ export function setCapabilityPermission(
     ...enrollment,
     capabilityPermissions: { ...enrollment.capabilityPermissions, [capability]: allowed },
     updatedAt: at,
+    revision: (enrollment.revision ?? 0) + 1,
   };
 }
 
 function recordDecision(enrollment: EnvironmentEnrollment, decision: EnrollmentDecision): EnvironmentEnrollment {
-  return { ...enrollment, decisions: [...enrollment.decisions, decision] };
+  return {
+    ...enrollment,
+    revision: (enrollment.revision ?? 0) + 1,
+    decisions: [...enrollment.decisions, decision],
+  };
 }
 
 /**
@@ -530,6 +557,7 @@ export function normalizeEnrollment(enrollment: EnvironmentEnrollment): Environm
   const { protocolVersion: _rawProtocolVersion, ...workerRest } = enrollment.worker;
   return {
     ...enrollment,
+    revision: Number.isSafeInteger(enrollment.revision) && enrollment.revision >= 0 ? enrollment.revision : 0,
     displayName: sanitizeOperatorText(enrollment.displayName, { fallback: 'Environment', maxLength: 120 }),
     worker: {
       ...workerRest,

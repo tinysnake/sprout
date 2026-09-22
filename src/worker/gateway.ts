@@ -339,8 +339,9 @@ export class WorkerGateway {
 
     // Step 4: only an approved identity is accepted; a proven-but-pending
     // identity waits for the Human and reconnects after approval.
-    if (outcome.outcome !== 'reconnected') {
-      const pending = awaitingApproval(outcome.requiresHumanApproval, outcome.outcome);
+    if (outcome.authoritySuperseded === true || outcome.outcome !== 'reconnected') {
+      const pending = outcome.authoritySuperseded !== true &&
+        awaitingApproval(outcome.requiresHumanApproval, outcome.outcome);
       safeWrite(stream, pending
         ? { type: 'worker/pending', enrollmentId, outcome: outcome.outcome, environmentInstanceId: outcome.enrollment.environmentInstanceId }
         : { type: 'worker/refused', reason: 'the Worker identity is not approved for work', code: 'revoked' });
@@ -357,11 +358,20 @@ export class WorkerGateway {
     // Accept: a newer epoch owns this Environment instance exclusively. The
     // regular path has one durable enrollment per instance; this also fences a
     // legacy duplicate before it can leave two transports live.
+    //
     // Re-read the lifecycle immediately before minting transport authority. A
     // revoke/reset may have raced the identity reconciliation above; such a
     // result must remain pre-epoch identity history, never become accepted.
+    // The synchronous lifecycle generation is checked in the same
+    // run-to-completion step as epoch acceptance, so a revoke/reset that landed
+    // while the durable read was suspended cannot be outrun (R118-EPOCH-001).
+    const lifecycleGeneration = this.#enrollments.lifecycleAuthority.generation(enrollmentId);
     const currentEnrollment = await this.#enrollments.get(enrollmentId);
-    if (currentEnrollment === undefined || currentEnrollment.status !== 'approved') {
+    if (
+      currentEnrollment === undefined ||
+      currentEnrollment.status !== 'approved' ||
+      this.#enrollments.lifecycleAuthority.generation(enrollmentId) !== lifecycleGeneration
+    ) {
       reader.dispose();
       stream.end();
       return { accepted: false, reason: 'the Worker identity is not approved for work' };

@@ -80,6 +80,41 @@ export class SqliteEnrollmentStore implements EnrollmentStore {
     this.#save(enrollment);
   }
 
+  /**
+   * Compare-and-set on the stored revision (R118-EPOCH-001).
+   *
+   * The whole re-read/check/write runs inside one `BEGIN IMMEDIATE` transaction,
+   * so a stale pre-epoch reconciliation cannot overwrite a newer revoke/reset
+   * even across processes. The database serializes the write, so this is the
+   * durable authority boundary.
+   */
+  async saveIfRevision(
+    enrollment: EnvironmentEnrollment,
+    expectedRevision: number,
+  ): Promise<EnvironmentEnrollment | undefined> {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.#db
+        .prepare('SELECT document FROM environment_enrollments WHERE id = ?')
+        .get(enrollment.id) as { readonly document: string } | undefined;
+      if (row === undefined) {
+        this.#db.exec('COMMIT');
+        return undefined;
+      }
+      const current = normalizeEnrollment(JSON.parse(row.document) as EnvironmentEnrollment);
+      if (current.revision !== expectedRevision) {
+        this.#db.exec('COMMIT');
+        return undefined;
+      }
+      this.#save(enrollment);
+      this.#db.exec('COMMIT');
+      return enrollment;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   #save(enrollment: EnvironmentEnrollment): void {
     this.#db
       .prepare(
@@ -133,6 +168,7 @@ export class SqliteEnrollmentStore implements EnrollmentStore {
         ...current,
         claim: { ...claim, consumedAt },
         updatedAt: consumedAt,
+        revision: (current.revision ?? 0) + 1,
       };
       this.#db
         .prepare(

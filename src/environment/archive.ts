@@ -22,6 +22,7 @@
  */
 
 import { EnrollmentError, type EnvironmentEnrollment } from './enrollment.ts';
+import { EnrollmentLifecycleAuthority } from './enrollment-authority.ts';
 import { sanitizeOperatorText, DEFAULT_ARCHIVE_REASON, DEFAULT_RESTORE_REASON } from './privacy.ts';
 import type { EnrollmentStore } from './enrollment-store.ts';
 
@@ -76,6 +77,8 @@ export interface EnvironmentArchiveServiceOptions {
    * ineligible without a restart. An observation only; it must never throw.
    */
   readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
+  /** Optional shared lifecycle authority fence (R118-EPOCH-001). */
+  readonly lifecycleAuthority?: EnrollmentLifecycleAuthority;
 }
 
 /**
@@ -91,6 +94,7 @@ export class EnvironmentArchiveService {
   readonly #recovery: ArchiveRecoveryPort | undefined;
   readonly #clock: () => number;
   readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
+  readonly #authority: EnrollmentLifecycleAuthority;
 
   constructor(options: EnvironmentArchiveServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -98,6 +102,7 @@ export class EnvironmentArchiveService {
     this.#recovery = options.recovery;
     this.#clock = options.clock ?? Date.now;
     this.#onMutation = options.onMutation;
+    this.#authority = options.lifecycleAuthority ?? new EnrollmentLifecycleAuthority();
   }
 
   /** Announce a durable decision to the catalog observer, never throwing. */
@@ -137,6 +142,7 @@ export class EnvironmentArchiveService {
       ...enrollment,
       status: 'archived',
       updatedAt: at,
+      revision: (enrollment.revision ?? 0) + 1,
       decisions: [
         ...enrollment.decisions,
         {
@@ -147,6 +153,7 @@ export class EnvironmentArchiveService {
         },
       ],
     };
+    this.#authority.bump(enrollment.id);
     await this.#enrollments.save(archived);
     this.#announce(archived);
     return archived;
@@ -185,6 +192,7 @@ export class EnvironmentArchiveService {
       ...enrollment,
       status: restoredStatus,
       updatedAt: at,
+      revision: (enrollment.revision ?? 0) + 1,
       decisions: [
         ...enrollment.decisions,
         {
@@ -195,6 +203,7 @@ export class EnvironmentArchiveService {
         },
       ],
     };
+    this.#authority.bump(enrollment.id);
     await this.#enrollments.save(restored);
     this.#announce(restored);
     return restored;

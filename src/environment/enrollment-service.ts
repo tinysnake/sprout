@@ -13,6 +13,7 @@ import {
   type EnrollmentConnectionOutcome,
 } from './enrollment.ts';
 import { createEnrollmentId, workerIdentityDigest } from './enrollment-identity.ts';
+import { EnrollmentLifecycleAuthority } from './enrollment-authority.ts';
 import { createClaimSecret, claimSecretDigest, verifyClaimSecret, DEFAULT_CLAIM_TTL_MS } from './enrollment-claim.ts';
 import type { EnrollmentStore } from './enrollment-store.ts';
 import { WorkerProofAuthority, WorkerProofError, type WorkerIdentityChallenge, type WorkerIdentityProof } from './worker-proof.ts';
@@ -20,7 +21,13 @@ import {
   assembleEnvironmentReadiness,
   type AssembledReadiness,
 } from './readiness-service.ts';
-import { observedFactsFromWorkerReadiness } from './readiness.ts';
+import {
+  allowlistedReadinessValue,
+  observedFactsFromWorkerReadiness,
+  READINESS_AUTH_MODES,
+  READINESS_AUTH_TYPES,
+  READINESS_SOURCES,
+} from './readiness.ts';
 import type {
   CompatibilityFact,
   ConnectionFact,
@@ -88,28 +95,36 @@ function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadine
         ? { detail: sanitizeOperatorText(observed.compatibility.detail, { fallback: DEFAULT_COMPATIBILITY_DETAIL }) }
         : {}),
     },
-    engines: observed.engines.map((engine) => ({
-      engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
-      ...(engine.version !== undefined
-        ? { version: sanitizeEngineVersion(engine.version) ?? 'unknown-version' }
-        : {}),
-      installed: engine.installed,
-      readiness: engine.readiness,
-      required: engine.required,
-      models: {
-        state: engine.models.state,
-        models: engine.models.models.map((model) =>
-          sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
-        ),
-      },
-      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
-      ...(engine.authMode !== undefined ? { authMode: sanitizeIdentifier(engine.authMode, { fallback: 'unknown', kind: 'generic' }) } : {}),
-      ...(engine.authType !== undefined ? { authType: sanitizeIdentifier(engine.authType, { fallback: 'unknown', kind: 'generic' }) } : {}),
-      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
-      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
-      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
-      ...(engine.source !== undefined ? { source: sanitizeIdentifier(engine.source, { fallback: 'unknown', kind: 'generic' }) } : {}),
-    })),
+    engines: observed.engines.map((engine) => {
+      // The auth/source fields are a closed-world product enum: a legacy or
+      // bypassing document that stored a provider/account identity in one of
+      // them is dropped rather than echoed (#114 C6, R118-BOUNDARY-003).
+      const authMode = allowlistedReadinessValue(engine.authMode, READINESS_AUTH_MODES);
+      const authType = allowlistedReadinessValue(engine.authType, READINESS_AUTH_TYPES);
+      const source = allowlistedReadinessValue(engine.source, READINESS_SOURCES);
+      return {
+        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+        ...(engine.version !== undefined
+          ? { version: sanitizeEngineVersion(engine.version) ?? 'unknown-version' }
+          : {}),
+        installed: engine.installed,
+        readiness: engine.readiness,
+        required: engine.required,
+        models: {
+          state: engine.models.state,
+          models: engine.models.models.map((model) =>
+            sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
+          ),
+        },
+        ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+        ...(authMode !== undefined ? { authMode } : {}),
+        ...(authType !== undefined ? { authType } : {}),
+        ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+        ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+        ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+        ...(source !== undefined ? { source } : {}),
+      };
+    }),
   };
 }
 
@@ -167,6 +182,15 @@ export interface EnvironmentEnrollmentServiceOptions {
   /** How long a host claim stays usable. Defaults to 15 minutes. */
   readonly claimTtlMs?: number;
   /**
+   * The shared synchronous lifecycle authority fence (R118-EPOCH-001).
+   *
+   * When the runtime composes one instance, the enrollment service, the archive
+   * service, and the Worker gateway share it, so revocation/reset is ordered
+   * with epoch acceptance. Defaults to a private instance for callers that do
+   * not need to coordinate.
+   */
+  readonly lifecycleAuthority?: EnrollmentLifecycleAuthority;
+  /**
    * Invoked after a durable enrollment authority decision is written (E2, #116).
    *
    * The dynamic Environment catalog observes approval, revocation, reset, and
@@ -218,7 +242,7 @@ export class EnvironmentEnrollmentService {
   readonly #currentConnectionEpoch: (enrollmentId: string) => number | undefined;
   readonly #onAuthorityLost: ((enrollmentId: string) => void) | undefined;
   /** Local lifecycle generation checked at the store mutation boundary. */
-  readonly #authorityGenerations = new Map<string, number>();
+  readonly #authority: EnrollmentLifecycleAuthority;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -235,6 +259,7 @@ export class EnvironmentEnrollmentService {
       options.proofAuthority ?? new WorkerProofAuthority({ clock: this.#clock });
     this.#claimSecretFactory = options.claimSecretFactory ?? createClaimSecret;
     this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
+    this.#authority = options.lifecycleAuthority ?? new EnrollmentLifecycleAuthority();
     this.#onMutation = options.onMutation;
   }
 
@@ -396,6 +421,10 @@ export class EnvironmentEnrollmentService {
   }): Promise<EnrollmentConnectionOutcome> {
     const enrollment = await this.#requireEnrollment(input.enrollmentId);
     const at = this.#clock();
+    // Capture the lifecycle generation before any await that can interleave a
+    // revoke/reset. Reconciliation appends a durable decision but must never
+    // overwrite a lifecycle decision that crossed this window (R118-EPOCH-001).
+    const lifecycleGeneration = this.#authority.generation(enrollment.id);
     // A claimed-but-unconsumed enrollment must not accept an identity proof: the
     // one-use secret is the host's admission to the proof step, so proof alone
     // cannot bind an identity to a Web-created pending enrollment (#115).
@@ -425,7 +454,19 @@ export class EnvironmentEnrollmentService {
     // Identity reconciliation happens before the gateway accepts an epoch.
     // Consequently this method must not persist `online` or any Worker facts:
     // only an accepted epoch may mint the mandatory readiness authority below.
-    await this.#enrollments.save(outcome.enrollment);
+    //
+    // Save through the durable revision CAS so a slow pre-epoch reconciliation
+    // can never clobber a newer revoke/reset. Re-read the lifecycle first: if a
+    // Human decision landed while the proof verified, this reconciliation is
+    // history that must not be published at all.
+    const current = await this.#requireEnrollment(enrollment.id);
+    if (this.#authority.generation(enrollment.id) !== lifecycleGeneration) {
+      return { ...outcome, authoritySuperseded: true };
+    }
+    const saved = await this.#enrollments.saveIfRevision(outcome.enrollment, current.revision);
+    if (saved === undefined) {
+      return { ...outcome, authoritySuperseded: true };
+    }
     return outcome;
   }
 
@@ -475,31 +516,28 @@ export class EnvironmentEnrollmentService {
     enrollmentId: string,
     input: { readonly capabilityPermissions: Readonly<Record<string, boolean>>; readonly actor?: string },
   ): Promise<ApproveEnrollmentResult> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    const approved = approveEnrollment(enrollment, {
+    return this.#mutateWithCas(enrollmentId, (current) => approveEnrollment(current, {
       capabilityPermissions: input.capabilityPermissions,
       at: this.#clock(),
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
+    })).then((enrollment) => {
+      this.#announce(enrollment);
+      return { enrollment };
     });
-    await this.#enrollments.save(approved);
-    this.#announce(approved);
-    return { enrollment: approved };
   }
 
   async revoke(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    this.#loseAuthority(enrollment.id);
-    const revoked = revokeEnrollment(enrollment, this.#clock(), reason);
-    await this.#enrollments.save(revoked);
+    this.#loseAuthority(enrollmentId);
+    const at = this.#clock();
+    const revoked = await this.#mutateWithCas(enrollmentId, (current) => revokeEnrollment(current, at, reason));
     this.#announce(revoked);
     return revoked;
   }
 
   async reset(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    this.#loseAuthority(enrollment.id);
-    const reset = resetEnrollment(enrollment, this.#clock(), reason);
-    await this.#enrollments.save(reset);
+    this.#loseAuthority(enrollmentId);
+    const at = this.#clock();
+    const reset = await this.#mutateWithCas(enrollmentId, (current) => resetEnrollment(current, at, reason));
     this.#announce(reset);
     return reset;
   }
@@ -509,9 +547,11 @@ export class EnvironmentEnrollmentService {
     capability: string,
     allowed: boolean,
   ): Promise<EnvironmentEnrollment> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    const updated = setCapabilityPermission(enrollment, capability, allowed, this.#clock());
-    await this.#enrollments.save(updated);
+    const at = this.#clock();
+    const updated = await this.#mutateWithCas(
+      enrollmentId,
+      (current) => setCapabilityPermission(current, capability, allowed, at),
+    );
     this.#announce(updated);
     return updated;
   }
@@ -585,8 +625,22 @@ export class EnvironmentEnrollmentService {
     );
   }
 
-  /** Assemble the independent facts plus the deterministic summary. */
-  async readiness(enrollmentId: string): Promise<AssembledReadiness & { readonly enrollment: EnvironmentEnrollment }> {
+  /**
+   * Assemble the independent facts plus the deterministic summary.
+   *
+   * Readiness and the current-epoch probe history are returned as **one**
+   * lifecycle/epoch snapshot. The caller must not read them separately, or a
+   * lifecycle decision that crosses an await could pair an approved readiness
+   * document with a differently-scoped probe list (R118-EPOCH-001).
+   */
+  async readiness(
+    enrollmentId: string,
+  ): Promise<AssembledReadiness & { readonly enrollment: EnvironmentEnrollment; readonly probes: readonly ProbeResultFact[] }> {
+    // Capture authority before the durable reads and re-check it synchronously
+    // after them. A revoke/reset/archive bumps this generation before its own
+    // save, so an observed change means the lifecycle moved across the reads and
+    // no fact from before that move may be projected as current.
+    const generation = this.#authority.generation(enrollmentId);
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const [rawObserved, rawProbes, leases, recoveryRecords] = await Promise.all([
       this.#readiness.getReadiness(enrollment.environmentInstanceId),
@@ -597,19 +651,28 @@ export class EnvironmentEnrollmentService {
     // Sanitize on the way out as well as on the way in: a document written by an
     // earlier build (or by an adapter that bypassed this service) must not leak
     // free text through the readiness projection either.
-    // Re-read after the durable reads. This closes the API projection race in
-    // which revoke/reset completes while the readiness store is being read.
-    const currentEnrollment = await this.#requireEnrollment(enrollmentId);
+    const readEnrollment = await this.#requireEnrollment(enrollmentId);
+    // Synchronous authority check: no await separates it from the reads above.
+    // The durable status is always the freshest read; the *facts* are suppressed
+    // whenever a lifecycle decision crossed the reads, so an in-flight revoke can
+    // never be paired with stale current readiness or probes.
+    const authorityStable = this.#authority.generation(enrollmentId) === generation;
+    const currentEnrollment = readEnrollment;
+    const lifecycleCurrent = authorityStable && currentEnrollment.status === 'approved';
     const currentEpoch = this.#currentConnectionEpoch(currentEnrollment.id);
     // Durable history remains inspectable, but only facts bound to the live
     // accepted epoch may look current in the readiness/API projection.
-    const observed = currentEnrollment.status === 'approved' && rawObserved !== undefined &&
+    const observed = lifecycleCurrent && rawObserved !== undefined &&
       rawObserved.enrollmentId === currentEnrollment.id &&
       rawObserved.connectionEpoch === currentEpoch
       ? sanitizeObservedReadiness(rawObserved)
       : undefined;
-    const probes = rawProbes.map(sanitizeProbe);
-    const currentProbes = currentEnrollment.status === 'approved' ? probes.filter((probe) =>
+    // The probe *history* is durable audit across reconnects; like the original
+    // `listProbes` it is projected whenever the lifecycle is still approved and
+    // is emptied by revoke/reset. Only the *latest current* probe (the one that
+    // can make a summary Green) is epoch-scoped.
+    const probes = lifecycleCurrent ? rawProbes.map(sanitizeProbe) : [];
+    const currentProbes = lifecycleCurrent ? probes.filter((probe) =>
       probe.enrollmentId === currentEnrollment.id && probe.connectionEpoch === currentEpoch,
     ) : [];
     const latestProbe = currentProbes.length > 0 ? currentProbes[currentProbes.length - 1] : undefined;
@@ -623,7 +686,7 @@ export class EnvironmentEnrollmentService {
       supportedProtocol: this.#supportedProtocol,
       now: this.#clock(),
     });
-    return { ...assembled, enrollment: currentEnrollment };
+    return { ...assembled, enrollment: currentEnrollment, probes };
   }
 
   async #currentLeases(): Promise<readonly LeaseSafetyFact[]> {
@@ -647,13 +710,21 @@ export class EnvironmentEnrollmentService {
     return normalizeEnrollment(enrollment);
   }
 
+  /**
+   * The shared lifecycle authority fence, exposed so the gateway can compare a
+   * generation captured at acceptance with the current generation synchronously.
+   */
+  get lifecycleAuthority(): EnrollmentLifecycleAuthority {
+    return this.#authority;
+  }
+
   /** Combine the caller's connection token with the service's live resolver. */
   #acceptedAuthority(
     enrollment: EnvironmentEnrollment,
     authority: ReadinessWriteAuthority,
   ): ReadinessWriteAuthority | undefined {
     const enrollmentId = enrollment.id;
-    const generation = this.#authorityGenerations.get(enrollmentId) ?? 0;
+    const generation = this.#authority.generation(enrollmentId);
     if (
       // An epoch resolver alone is not enrollment authority. In particular, a
       // pending enrollment must never write merely because it has a number.
@@ -663,7 +734,7 @@ export class EnvironmentEnrollmentService {
       authority.connectionEpoch <= 0
     ) return undefined;
     const isCurrent = (): boolean =>
-      (this.#authorityGenerations.get(enrollmentId) ?? 0) === generation &&
+      this.#authority.generation(enrollmentId) === generation &&
       authority.isCurrent() &&
       this.#currentConnectionEpoch(enrollmentId) === authority.connectionEpoch;
     return isCurrent()
@@ -671,12 +742,33 @@ export class EnvironmentEnrollmentService {
       : undefined;
   }
 
+  /**
+   * Apply one lifecycle mutation through the durable revision CAS.
+   *
+   * The mutation is recomputed against the freshest durable document and saved
+   * only when the revision it was derived from is still current, retrying if a
+   * concurrent writer moved it. This makes every lifecycle write monotonic: two
+   * revokes cannot lose one another, and a slow reconciliation that captured an
+   * older revision can never overwrite the result (R118-EPOCH-001).
+   */
+  async #mutateWithCas(
+    enrollmentId: string,
+    mutate: (current: EnvironmentEnrollment) => EnvironmentEnrollment,
+  ): Promise<EnvironmentEnrollment> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const current = await this.#requireEnrollment(enrollmentId);
+      const saved = await this.#enrollments.saveIfRevision(mutate(current), current.revision);
+      if (saved !== undefined) return saved;
+    }
+    throw new EnrollmentError(
+      'duplicate-identity',
+      'The enrollment changed concurrently; retry the lifecycle decision.',
+    );
+  }
+
   /** Fence local lifecycle authority before the durable decision is published. */
   #loseAuthority(enrollmentId: string): void {
-    this.#authorityGenerations.set(
-      enrollmentId,
-      (this.#authorityGenerations.get(enrollmentId) ?? 0) + 1,
-    );
+    this.#authority.bump(enrollmentId);
     this.#onAuthorityLost?.(enrollmentId);
   }
 }

@@ -159,6 +159,30 @@ export function protocolCompatibility(
 }
 
 /**
+ * Closed-world allowlists for the structured privacy-reduced readiness fields.
+ *
+ * The authenticated Worker is inside the trust boundary for *authority*, but it
+ * is not allowed to widen the persisted fact vocabulary. These fields have a
+ * tiny product-owned value set, so an unknown string must be dropped rather than
+ * carried through a generic identifier sanitizer: a Worker that declares
+ * `authType: "openai-codex"` or `authMode: "provider-account"` must never have
+ * that provider/account identity persisted or projected (#114 C6, R118-BOUNDARY-003).
+ */
+export const READINESS_AUTH_MODES = new Set(['chatgpt', 'api_key', 'workload_identity']);
+export const READINESS_AUTH_TYPES = new Set(['oauth', 'api_key']);
+export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'unknown']);
+
+/**
+ * Reduce a Worker-declared auth/source field to the allowlisted enum, or drop it.
+ *
+ * Dropping (rather than rewriting to a generic `unknown` string) keeps the
+ * absence of a fact explicit and guarantees no other value can reach storage.
+ */
+export function allowlistedReadinessValue(value: unknown, allow: ReadonlySet<string>): string | undefined {
+  return typeof value === 'string' && allow.has(value) ? value : undefined;
+}
+
+/**
  * Map a Worker's neutral readiness declaration onto observed readiness facts.
  *
  * The Worker reports what it actually verified; a fact it did not verify is
@@ -199,24 +223,29 @@ export function observedFactsFromWorkerReadiness(input: {
       ...compatibility,
       ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
     },
-    engines: input.engines.map((engine) => ({
-      engine: engine.engine,
-      ...(engine.version !== undefined ? { version: engine.version } : {}),
-      installed: engine.installed === true,
-      readiness: normalizeEngineReadiness(engine.readiness),
-      required: false,
-      models: {
-        state: normalizeModelAvailability(engine.modelAvailability),
-        models: [...engine.models],
-      },
-      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
-      ...(engine.authMode !== undefined ? { authMode: engine.authMode } : {}),
-      ...(engine.authType !== undefined ? { authType: engine.authType } : {}),
-      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
-      ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
-      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
-      ...(engine.source !== undefined ? { source: engine.source } : {}),
-    })),
+    engines: input.engines.map((engine) => {
+      const authMode = allowlistedReadinessValue(engine.authMode, READINESS_AUTH_MODES);
+      const authType = allowlistedReadinessValue(engine.authType, READINESS_AUTH_TYPES);
+      const source = allowlistedReadinessValue(engine.source, READINESS_SOURCES);
+      return {
+        engine: engine.engine,
+        ...(engine.version !== undefined ? { version: engine.version } : {}),
+        installed: engine.installed === true,
+        readiness: normalizeEngineReadiness(engine.readiness),
+        required: false,
+        models: {
+          state: normalizeModelAvailability(engine.modelAvailability),
+          models: [...engine.models],
+        },
+        ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+        ...(authMode !== undefined ? { authMode } : {}),
+        ...(authType !== undefined ? { authType } : {}),
+        ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+        ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
+        ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+        ...(source !== undefined ? { source } : {}),
+      };
+    }),
   };
 }
 

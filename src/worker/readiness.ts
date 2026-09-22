@@ -22,26 +22,23 @@ export interface ReadinessCommandRunner {
     binary: string,
     options?: { readonly env?: NodeJS.ProcessEnv },
   ): Promise<{ readonly stdout: string; readonly exitCode: number }>;
+  /**
+   * Structured Codex `debug models --bundled` over the CLI, strictly local.
+   *
+   * It is the pinned non-inference operation that proves the installed binary
+   * knows a model id (binary capability only, never account entitlement). It is
+   * a separate seam so a test can assert the exact pinned arguments and output
+   * without spawning a process.
+   */
+  bundledModels?(
+    binary: string,
+    options?: { readonly env?: NodeJS.ProcessEnv },
+  ): Promise<{ readonly stdout: string; readonly exitCode: number }>;
 }
 
 const defaultCommandRunner: ReadinessCommandRunner = {
   async run(binary, args, options) {
-    try {
-      const result = await execFileAsync(binary, [...args], {
-        ...(options?.env !== undefined ? { env: options.env } : {}),
-        maxBuffer: 256 * 1024,
-        windowsHide: true,
-      });
-      return { stdout: String(result.stdout), exitCode: 0 };
-    } catch (error) {
-      const failure = error as { readonly stdout?: unknown; readonly status?: unknown; readonly code?: unknown };
-      return {
-        stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
-        exitCode: typeof failure.status === 'number'
-          ? failure.status
-          : failure.code === 'ENOENT' ? 127 : 1,
-      };
-    }
+    return defaultRun(binary, args, options);
   },
   async accountRead(binary, options) {
     const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
@@ -74,7 +71,37 @@ const defaultCommandRunner: ReadinessCommandRunner = {
       child.kill('SIGTERM');
     }
   },
+  async bundledModels(binary, options) {
+    // `codex debug models --bundled` is strictly local: no network, no auth
+    // store read or write (#114 §2.4, §4). It is the pinned non-inference
+    // local-catalog-presence probe.
+    return defaultRun(binary, ['debug', 'models', '--bundled'], options);
+  },
 };
+
+/** The pinned local CLI runner used by both `run` and `bundledModels`. */
+async function defaultRun(
+  binary: string,
+  args: readonly string[],
+  options?: { readonly env?: NodeJS.ProcessEnv },
+): Promise<{ readonly stdout: string; readonly exitCode: number }> {
+  try {
+    const result = await execFileAsync(binary, [...args], {
+      ...(options?.env !== undefined ? { env: options.env } : {}),
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+    });
+    return { stdout: String(result.stdout), exitCode: 0 };
+  } catch (error) {
+    const failure = error as { readonly stdout?: unknown; readonly status?: unknown; readonly code?: unknown };
+    return {
+      stdout: typeof failure.stdout === 'string' ? failure.stdout : '',
+      exitCode: typeof failure.status === 'number'
+        ? failure.status
+        : failure.code === 'ENOENT' ? 127 : 1,
+    };
+  }
+}
 
 function commandOptions(env: NodeJS.ProcessEnv | undefined): { readonly env?: NodeJS.ProcessEnv } {
   return env === undefined ? {} : { env };
@@ -85,6 +112,15 @@ export interface ReadinessProbeOptions {
   readonly commandRunner?: ReadinessCommandRunner;
   readonly env?: NodeJS.ProcessEnv;
   readonly piProvider?: string;
+  /**
+   * Model ids the Environment's configured use requires (#114 C3).
+   *
+   * Codex compares them against its strictly local bundled catalog to set
+   * `modelIdPresent`. Account entitlement remains independently `unknown` for
+   * both engines, so a required target still blocks admission regardless of
+   * local presence.
+   */
+  readonly requiredModels?: readonly string[];
 }
 
 /** Versions whose non-inference contracts were pinned and verified by #114. */
@@ -295,19 +331,93 @@ async function probeCodex(
     return unknownFact('codex', version, at, 'codex-account-read', account.exitCode || 1);
   }
   const ready = parsed.authenticated;
+  // The local-catalog-presence fact is independent of authentication and of
+  // account entitlement. #114 C3 makes it provable for Codex through
+  // `codex debug models --bundled`; account entitlement stays `unknown`, so it
+  // still blocks admission. A required target is compared by slug; when no
+  // target is required, the probe reports whether *some* model is present.
+  const requiredModels = options.requiredModels ?? [];
+  const modelIdPresent = await codexLocalCatalogPresence(
+    configuration,
+    options,
+    requiredModels,
+  );
   return {
     engine: 'codex',
     ...(version !== undefined ? { version } : {}),
     installed: true,
     readiness: ready ? 'ready' : 'login-required',
+    // Account entitlement remains independently unknown (#114 C3).
     modelAvailability: 'unknown',
     models: [],
     authenticated: ready,
     ...(parsed.authMode !== undefined ? { authMode: parsed.authMode } : {}),
+    ...(modelIdPresent !== undefined ? { modelIdPresent } : {}),
     probedAt: at,
     probeExitCode: account.exitCode,
     source: 'codex-account-read',
   };
+}
+
+/**
+ * The strict local bundled-catalog presence check (#114 C3, R118-MODEL-004).
+ *
+ * `codex debug models --bundled` is strictly local and never reads or writes
+ * the auth store. It proves only that the installed binary knows a model slug
+ * (binary capability), never account entitlement. Any non-zero exit, malformed
+ * output, missing slug, or version mismatch fails closed to `undefined` — the
+ * fact is simply not established.
+ */
+async function codexLocalCatalogPresence(
+  configuration: Extract<EngineConfiguration, { readonly engine: 'codex' }>,
+  options: Required<Pick<ReadinessProbeOptions, 'clock' | 'commandRunner'>> & ReadinessProbeOptions,
+  requiredModels: readonly string[],
+): Promise<boolean | undefined> {
+  let result: { readonly stdout: string; readonly exitCode: number };
+  try {
+    result = await (options.commandRunner.bundledModels ?? defaultCommandRunner.bundledModels!)(
+      configuration.binaryPath,
+      commandOptions(options.env),
+    );
+  } catch {
+    return undefined;
+  }
+  if (result.exitCode !== 0) return undefined;
+  let parseResult: { readonly slugs: readonly string[] } | undefined;
+  try {
+    parseResult = codexBundledModels(result.stdout);
+  } catch {
+    parseResult = undefined;
+  }
+  if (parseResult === undefined) return undefined;
+  if (requiredModels.length === 0) return parseResult.slugs.length > 0;
+  return requiredModels.every((model) => parseResult!.slugs.includes(model));
+}
+
+/**
+ * Parse the pinned `codex debug models --bundled` JSON without echoing it.
+ *
+ * Only the `models[].slug` strings are retained; every other field (including
+ * descriptions and provider metadata) is discarded at this boundary.
+ */
+function codexBundledModels(stdout: string): { readonly slugs: readonly string[] } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.trim());
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const models = (parsed as Record<string, unknown>).models;
+  if (!Array.isArray(models)) return undefined;
+  const slugs: string[] = [];
+  for (const entry of models) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined;
+    const slug = (entry as Record<string, unknown>).slug;
+    if (typeof slug !== 'string' || slug === '') return undefined;
+    slugs.push(slug);
+  }
+  return { slugs };
 }
 
 /** Execute non-inference probes on the Worker host for the configured engines. */
@@ -318,11 +428,14 @@ export async function probeEnvironmentReadiness(
   const clock = options.clock ?? Date.now;
   const commandRunner = options.commandRunner ?? defaultCommandRunner;
   const started = clock();
+  const requiredModels = (options.requiredModels ?? []).filter(
+    (model): model is string => typeof model === 'string' && model !== '',
+  );
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
     try {
       engines.push(configuration.engine === 'codex'
-        ? await probeCodex(configuration, { ...options, clock, commandRunner })
+        ? await probeCodex(configuration, { ...options, clock, commandRunner, requiredModels })
         : configuration.engine === 'pi'
           ? await probePi(configuration, { ...options, clock, commandRunner })
           : unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
