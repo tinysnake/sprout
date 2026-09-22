@@ -82,6 +82,13 @@ export interface WorkerGatewayAcceptance {
 
 export type WorkerGatewayOutcome = WorkerGatewayAcceptance | WorkerGatewayRefusal;
 
+/** The precise accepted authority generation whose transport ended. */
+export interface WorkerGatewayConnectionClosed {
+  readonly enrollmentId: string;
+  readonly environmentInstanceId: string;
+  readonly epoch: WorkerConnectionEpoch;
+}
+
 /**
  * Serves the machine-authentication boundary of one Worker connection.
  *
@@ -115,7 +122,7 @@ export class WorkerGateway {
    * instance's connection fact now offline (E2), instead of leaving an
    * ineligible instance published as eligible until the next unrelated refresh.
    */
-  readonly #closeListeners = new Set<() => void>();
+  readonly #closeListeners = new Set<(closed: WorkerGatewayConnectionClosed) => void>();
 
   constructor(options: WorkerGatewayOptions) {
     this.#enrollments = options.enrollments;
@@ -138,7 +145,7 @@ export class WorkerGateway {
   }
 
   /** Subscribe to the loss of any live accepted connection. */
-  onConnectionClosed(listener: () => void): () => void {
+  onConnectionClosed(listener: (closed: WorkerGatewayConnectionClosed) => void): () => void {
     this.#closeListeners.add(listener);
     return () => this.#closeListeners.delete(listener);
   }
@@ -330,7 +337,13 @@ export class WorkerGateway {
         }
         for (const listener of channelClosedListeners) listener();
         channelClosedListeners.clear();
-        for (const listener of this.#closeListeners) listener();
+        for (const listener of this.#closeListeners) {
+          listener({
+            enrollmentId,
+            environmentInstanceId: outcome.enrollment.environmentInstanceId,
+            epoch,
+          });
+        }
       },
     });
     this.#live.set(enrollmentId, { connectionId: epoch.connectionId, transport });

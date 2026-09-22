@@ -213,6 +213,13 @@ test('readiness is authoritative only for its current Worker connection epoch', 
 
   catalog.update([input({ currentEpoch: 2, observed: observed({ connectionEpoch: 2 }) })]);
   assert.equal(catalog.entry('mac-enrolled-1')?.eligible, true, 'only fresh epoch two facts restore admission');
+
+  // A delayed transport-close event for epoch one must not fence the already
+  // current replacement. Close fencing is conditional on the exact generation.
+  assert.equal(catalog.clearEpoch('enroll-1', 1), false);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, true);
+  assert.equal(catalog.clearEpoch('enroll-1', 2), true);
+  assert.equal(catalog.entry('mac-enrolled-1')?.eligible, false);
 });
 
 test('an unknown Worker platform remains explicit and cannot admit or resolve as macOS', () => {
@@ -451,4 +458,60 @@ test('catalog stores persist only portable facts and sanitize historical records
   for (const forbidden of ['workingDirectory', 'privateKey', 'browserSecret', 'engineCredential', '198.51', 'synthetic-secret']) {
     assert.equal(row.document.includes(forbidden), false, `historical SQLite row excludes ${forbidden}`);
   }
+});
+
+test('historical privacy migration preserves colliding unsafe identities across reopen and rerun', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-catalog-collision-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'sprout.db');
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`
+    PRAGMA user_version = 11;
+    CREATE TABLE environment_catalog (
+      instance_id TEXT PRIMARY KEY, enrollment_id TEXT NOT NULL,
+      document TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+  `);
+  const insert = legacy.prepare('INSERT INTO environment_catalog VALUES (?, ?, ?, ?)');
+  for (const [index, instanceId] of ['/private/legacy/host-a', '/private/legacy/host-b'].entries()) {
+    insert.run(
+      instanceId,
+      `/private/legacy/enrollment-${index}`,
+      JSON.stringify({
+        definition: {
+          id: `/private/legacy/definition-${index}`,
+          platform: 'macos',
+          capabilities: [{ name: 'agent-run', requiresLease: true }],
+        },
+        instance: {
+          id: instanceId,
+          definitionId: `/private/legacy/definition-${index}`,
+          workingDirectory: `/private/legacy/work-${index}`,
+        },
+      }),
+      NOW + index,
+    );
+  }
+  legacy.close();
+
+  const first = new SqliteEnvironmentCatalogStore({ filename });
+  const once = await first.list();
+  first.close();
+  assert.equal(once.length, 2, 'no historical record is collapsed');
+  assert.equal(new Set(once.map((record) => record.instanceId)).size, 2);
+  assert.equal(new Set(once.map((record) => record.enrollmentId)).size, 2);
+  const serialized = JSON.stringify(once);
+  assert.equal(serialized.includes('/private/legacy'), false, 'no historical private path survives');
+
+  // Reopen proves the migrated rows are durable. Re-running the migration from
+  // its input version proves sanitization is deterministic and idempotent.
+  const reopened = new SqliteEnvironmentCatalogStore({ filename });
+  assert.deepEqual(await reopened.list(), once);
+  reopened.close();
+  const rewind = new DatabaseSync(filename);
+  rewind.exec('PRAGMA user_version = 11;');
+  rewind.close();
+  const rerun = new SqliteEnvironmentCatalogStore({ filename });
+  assert.deepEqual(await rerun.list(), once);
+  rerun.close();
 });

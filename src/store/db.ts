@@ -12,6 +12,7 @@ import { SqliteEnrollmentStore } from '../environment/sqlite-enrollment-store.ts
 import { SqliteEnvironmentCatalogStore } from '../environment/sqlite-catalog-store.ts';
 import { SqliteEnvironmentReadinessStore } from '../environment/sqlite-readiness-store.ts';
 import { SqliteRecoveryStore } from '../environment/sqlite-recovery-store.ts';
+import { SqliteWorkerConnectionEpochStore } from '../environment/worker-epoch-store.ts';
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
@@ -77,6 +78,8 @@ export {
  *   (`environment/sqlite-catalog-store.ts`)
  * - readiness domain: `environment_readiness`, `environment_probes`
  *   (`environment/sqlite-readiness-store.ts`)
+ * - Worker authority domain: `worker_connection_epochs`
+ *   (`environment/worker-epoch-store.ts`)
  * - recovery domain: `environment_recovery`, `environment_force_releases`
  *   (`environment/sqlite-recovery-store.ts`)
  */
@@ -115,6 +118,7 @@ export class SqliteStore {
   readonly enrollments: SqliteEnrollmentStore;
   readonly environmentCatalog: SqliteEnvironmentCatalogStore;
   readonly environmentReadiness: SqliteEnvironmentReadinessStore;
+  readonly workerConnectionEpochs: SqliteWorkerConnectionEpochStore;
   readonly recovery: SqliteRecoveryStore;
   readonly schemaVersion: number;
 
@@ -151,6 +155,7 @@ export class SqliteStore {
     this.enrollments = new SqliteEnrollmentStore({ db: this.db });
     this.environmentCatalog = new SqliteEnvironmentCatalogStore({ db: this.db });
     this.environmentReadiness = new SqliteEnvironmentReadinessStore({ db: this.db });
+    this.workerConnectionEpochs = new SqliteWorkerConnectionEpochStore({ db: this.db });
     this.recovery = new SqliteRecoveryStore({ db: this.db });
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than

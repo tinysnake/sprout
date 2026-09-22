@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { EnvironmentDefinition, EnvironmentInstance, EnvironmentPlatform } from './model.ts';
 import { sanitizeIdentifier } from './privacy.ts';
 
@@ -31,8 +33,12 @@ export function sanitizeEnvironmentCatalogRecord(input: {
 } {
   const rawDefinition = object(input.definition);
   const rawInstance = object(input.instance);
-  const instanceId = safeId(input.instanceId, 'unknown-instance');
-  const definitionId = safeId(rawDefinition.id ?? rawInstance.definitionId, 'unknown-definition');
+  const instanceId = safeId(input.instanceId, 'unknown-instance', 'instance');
+  const definitionId = safeId(
+    rawDefinition.id ?? rawInstance.definitionId,
+    'unknown-definition',
+    'definition',
+  );
   const capabilities = Array.isArray(rawDefinition.capabilities)
     ? rawDefinition.capabilities.flatMap((candidate) => {
         const capability = object(candidate);
@@ -48,7 +54,7 @@ export function sanitizeEnvironmentCatalogRecord(input: {
     : [];
   return {
     instanceId,
-    enrollmentId: safeId(input.enrollmentId, 'unknown-enrollment'),
+    enrollmentId: safeId(input.enrollmentId, 'unknown-enrollment', 'enrollment'),
     definition: {
       id: definitionId,
       platform: portablePlatform(rawDefinition.platform),
@@ -72,11 +78,19 @@ function object(value: unknown): Readonly<Record<string, unknown>> {
     : {};
 }
 
-function safeId(value: unknown, fallback: string): string {
+function safeId(value: unknown, fallback: string, kind: string): string {
   // Instance/enrollment ids are already product-approved opaque identities.
   // Preserve their exact portable reference (including ids with numeric suffixes)
   // while refusing paths, URLs, whitespace, and arbitrary diagnostic text.
-  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,200}$/.test(value)
-    ? value
-    : fallback;
+  if (typeof value === 'string' && /^[A-Za-z0-9._-]{1,200}$/.test(value)) return value;
+
+  // Historical v11 rows may use a private path as identity. A shared fallback
+  // would collapse distinct rows onto one primary key during privacy migration.
+  // Keep a one-way, domain-separated digest instead: it is deterministic across
+  // reopen/migration reruns, distinct for distinct historical identities, and
+  // never writes the private source value back to durable storage.
+  const digest = createHash('sha256')
+    .update(`sprout-catalog-${kind}\0${typeof value}\0${String(value)}`)
+    .digest('hex');
+  return `${fallback}-${digest}`;
 }

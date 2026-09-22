@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -24,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 13;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 12;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 13;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -585,18 +586,31 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       ).get();
       if (table === undefined) return;
       const rows = db.prepare(
-        'SELECT instance_id, enrollment_id, document, updated_at FROM environment_catalog',
+        'SELECT instance_id, enrollment_id, document, updated_at FROM environment_catalog ORDER BY instance_id',
       ).all() as unknown as readonly {
         readonly instance_id: string;
         readonly enrollment_id: string;
         readonly document: string;
         readonly updated_at: number;
       }[];
-      const update = db.prepare(
-        `UPDATE environment_catalog
-            SET instance_id = ?, enrollment_id = ?, document = ?, updated_at = ?
-          WHERE instance_id = ?`,
+      // Rebuild instead of updating primary keys in place. This makes the
+      // migration total even when several private legacy keys sanitize to the
+      // same candidate. `collisionSafeCatalogId` deterministically disambiguates
+      // that candidate without retaining any source identity.
+      db.exec(`
+        DROP TABLE IF EXISTS environment_catalog_v12;
+        CREATE TABLE environment_catalog_v12 (
+          instance_id TEXT PRIMARY KEY,
+          enrollment_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      const insert = db.prepare(
+        `INSERT INTO environment_catalog_v12
+          (instance_id, enrollment_id, document, updated_at) VALUES (?, ?, ?, ?)`,
       );
+      const used = new Set<string>();
       for (const row of rows) {
         let parsed: unknown;
         try {
@@ -614,19 +628,63 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           instance: document.instance,
           updatedAt: row.updated_at,
         });
-        // The primary key is derived from the existing key, so the update keeps
-        // historical attribution stable while stripping every unapproved field.
-        update.run(
-          safe.instanceId,
+        const instanceId = collisionSafeCatalogId(safe.instanceId, row, used);
+        used.add(instanceId);
+        insert.run(
+          instanceId,
           safe.enrollmentId,
-          JSON.stringify({ definition: safe.definition, instance: safe.instance }),
+          JSON.stringify({
+            definition: safe.definition,
+            instance: { ...safe.instance, id: instanceId },
+          }),
           safe.updatedAt,
-          row.instance_id,
         );
       }
+      db.exec(`
+        DROP TABLE environment_catalog;
+        ALTER TABLE environment_catalog_v12 RENAME TO environment_catalog;
+      `);
+    },
+  },
+  {
+    fromVersion: 12,
+    toVersion: 13,
+    name: 'durable_worker_connection_epochs',
+    migrate: (db) => {
+      // Readiness is durable, so its authority generation cannot restart at 1
+      // on every process. This high-water table allocates a strictly increasing
+      // epoch for each authenticated enrollment connection across reopen.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_connection_epochs (
+          enrollment_id TEXT PRIMARY KEY,
+          high_water INTEGER NOT NULL CHECK (high_water > 0)
+        );
+      `);
     },
   },
 ];
+
+/** Resolve even an adversarial candidate collision without exposing legacy keys. */
+function collisionSafeCatalogId(
+  candidate: string,
+  row: {
+    readonly instance_id: string;
+    readonly enrollment_id: string;
+    readonly document: string;
+    readonly updated_at: number;
+  },
+  used: ReadonlySet<string>,
+): string {
+  if (!used.has(candidate)) return candidate;
+  const source = `${row.instance_id}\0${row.enrollment_id}\0${row.document}\0${row.updated_at}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const digest = createHash('sha256')
+      .update(`sprout-catalog-collision\0${attempt}\0${source}`)
+      .digest('hex');
+    const resolved = `unknown-instance-${digest}`;
+    if (!used.has(resolved)) return resolved;
+  }
+}
 
 /** Options for database migration and initialization. */
 export interface MigrateDatabaseOptions {

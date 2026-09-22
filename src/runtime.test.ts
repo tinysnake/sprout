@@ -51,10 +51,12 @@ import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
 import { InMemoryEnvironmentCatalogStore } from './environment/catalog-store.ts';
 import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
+import { InMemoryWorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
 import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
+import { resolveEnvironmentInstance } from './project/resolve.ts';
 import { GENERAL_COLLABORATION_TEMPLATE as GENERAL_TEMPLATE } from './project/template.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
@@ -136,6 +138,7 @@ function inMemoryStores(): MemoryStores {
     enrollments: new InMemoryEnrollmentStore(),
     environmentCatalog: new InMemoryEnvironmentCatalogStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
+    workerConnectionEpochs: new InMemoryWorkerConnectionEpochStore(),
     recovery: new InMemoryRecoveryStore(),
     agentIdentities: new InMemoryAgentStore(),
     projectAuthorities: new InMemoryProjectAuthorityStore(),
@@ -580,6 +583,7 @@ test('runtime construction failure closes environment and worker resources witho
     enrollments: new InMemoryEnrollmentStore(),
     environmentCatalog: new InMemoryEnvironmentCatalogStore(),
     environmentReadiness: new InMemoryEnvironmentReadinessStore(),
+    workerConnectionEpochs: new InMemoryWorkerConnectionEpochStore(),
     recovery: new InMemoryRecoveryStore(),
     agentIdentities: new InMemoryAgentStore(),
     projectAuthorities: new InMemoryProjectAuthorityStore(),
@@ -608,7 +612,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 13; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 14; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -1785,7 +1789,8 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
     configuration: hostConfiguration({ databasePath, environmentSource: 'enrollment' }),
     projectRoot: '/synthetic/project-root',
   });
-  await enrollEligibleInstance(first, 'host-a', 'key-a');
+  const enrollmentId = await enrollEligibleInstance(first, 'host-a', 'key-a');
+  const firstEpoch = first.workerEpochs.current(enrollmentId)!;
   await first.close();
 
   // Reopen exactly as a restart would: no in-memory epoch survives, but the
@@ -1799,6 +1804,41 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
     assert.equal(record?.definition.platform, 'macos');
     assert.ok(second.environmentCatalog.entry('host-a') !== undefined, 'entry survives reopen');
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false, 'no epoch after a restart');
+
+    // A restart must not restart the authority namespace at epoch 1. The new
+    // authenticated connection receives a durable, strictly newer generation,
+    // and the old persisted readiness cannot make that connection eligible.
+    const replacement = second.workerEpochs.accept(enrollmentId);
+    assert.ok(replacement.epoch > firstEpoch.epoch, 'restart keeps the epoch high-water mark');
+    await second.refreshEnvironmentCatalog();
+    assert.equal(
+      second.environmentCatalog.entry('host-a')?.eligible,
+      false,
+      'the replacement cannot inherit readiness from the pre-restart connection',
+    );
+
+    // Delayed old facts remain non-authoritative; only readiness produced by
+    // the replacement epoch restores admission.
+    await second.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: firstEpoch.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+      ],
+    });
+    await second.refreshEnvironmentCatalog();
+    assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false);
+    await second.enrollments.observeReadiness(enrollmentId, {
+      connectionEpoch: replacement.epoch,
+      connection: { state: 'online', lastConfirmedAt: Date.now() },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+      ],
+    });
+    await second.refreshEnvironmentCatalog();
+    assert.equal(second.environmentCatalog.entry('host-a')?.eligible, true);
   } finally {
     await second.close();
   }
@@ -1979,6 +2019,58 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
     assert.equal(settled.environmentInstanceId, 'enrolled-host-1');
     assert.equal(settled.status, 'completed');
     assert.equal(settled.result?.status === 'completed' ? settled.result.text : undefined, 'enrolled reply');
+
+    // Transport close synchronously fences the already-published catalog and
+    // pool before the store-backed refresh can cross its first await. Resolution
+    // in that exact window must fail closed while the durable entry remains.
+    const accepted = runtime.workerGateway.liveFor('enrolled-host-1');
+    assert.ok(accepted !== undefined);
+    accepted.close();
+    assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, false);
+    assert.ok(runtime.environmentCatalog.entry('enrolled-host-1') !== undefined, 'offline stays inspectable');
+    assert.equal(runtime.pool.requiresLease('enrolled-host-1', ADMISSION_CAPABILITY), undefined);
+    assert.deepEqual(
+      resolveEnvironmentInstance([runtime.projects.get(authorityProject.id)!], ADMISSION_CAPABILITY, runtime.pool),
+      { ok: false, reason: 'no-available-environment' },
+    );
+
+    // Reconnect receives the next authority generation and can restore
+    // eligibility only after this connection reports its own readiness.
+    await worker.shutdown().catch(() => undefined);
+    worker = undefined;
+    const replacement = await connectWorkerEnrollment({
+      target: {
+        enrollmentId,
+        host: '127.0.0.1',
+        port,
+        claimSecret: undefined,
+        identityKeyPath: keyPath,
+      },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [{ engine: 'scripted', installed: true, authenticated: true, models: ['scripted-model'] }],
+    });
+    connections.push(replacement);
+    assert.ok(replacement.epoch > connection.epoch);
+    worker = new EnvironmentWorker({
+      environmentInstanceId: 'enrolled-host-1',
+      engines: new Map([
+        ['scripted', new ScriptedEngineAdapter({ turns: [scriptedTurn('replacement reply')] })],
+      ]),
+      input: replacement.stream,
+      output: replacement.stream,
+      workspaceRoot,
+      readiness: () => ({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [{
+          engine: 'scripted', installed: true, readiness: 'ready',
+          modelAvailability: 'available', models: ['scripted-model'],
+        }],
+      }),
+    });
+    await waitFor(
+      () => runtime.environmentCatalog.entry('enrolled-host-1')?.eligible === true,
+      'the replacement connection to restore current-epoch eligibility',
+    );
   } finally {
     await worker?.shutdown().catch(() => undefined);
     for (const connection of connections) connection.close();

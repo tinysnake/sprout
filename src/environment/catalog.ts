@@ -346,6 +346,20 @@ export class EnvironmentCatalog {
     }
   }
 
+  /**
+   * Fence one closing epoch without allowing an old close event to evict a
+   * newer replacement that is already current.
+   */
+  clearEpoch(enrollmentId: string, closingEpoch: number): boolean {
+    for (const [instanceId, input] of this.#inputs) {
+      if (input.enrollment.id !== enrollmentId || input.currentEpoch !== closingEpoch) continue;
+      this.#inputs.set(instanceId, { ...input, currentEpoch: undefined });
+      this.#reproject();
+      return true;
+    }
+    return false;
+  }
+
   #reproject(): readonly EnvironmentCatalogEntry[] {
     const next = new Map<string, EnvironmentCatalogEntry>();
     for (const [instanceId, input] of this.#inputs) {

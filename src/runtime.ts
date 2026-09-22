@@ -80,6 +80,7 @@ import {
 import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
+import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
 import { workSafetyFromRecovery } from './environment/recovery.ts';
 
@@ -139,6 +140,8 @@ export interface RuntimeStores {
   readonly environmentCatalog: EnvironmentCatalogStore;
   /** The durable observed Environment readiness facts (#87). */
   readonly environmentReadiness: EnvironmentReadinessStore;
+  /** Durable monotonic authority generations for authenticated Workers. */
+  readonly workerConnectionEpochs: WorkerConnectionEpochStore;
   /** The durable Environment recovery records and Force Release outcomes (#88). */
   readonly recovery: RecoveryStore;
   /** The durable portable Agent identities (#90). */
@@ -903,7 +906,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
     // The epoch registry is created before the catalog refresh below, so an
     // already-accepted connection's epoch is visible in the first projection.
-    const workerEpochs = new WorkerConnectionRegistry();
+    const workerEpochs = new WorkerConnectionRegistry({ store: stores.workerConnectionEpochs });
     // The catalog refresh and its pool publication are defined here, after the
     // enrollment service and epoch registry exist, and re-invoked whenever an
     // accepted connection appears or a channel is lost.
@@ -1026,7 +1029,15 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       }, 10);
       timer.unref();
     });
-    workerGateway.onConnectionClosed(() => {
+    workerGateway.onConnectionClosed((closed) => {
+      // Disconnect detection is the admission fence. Clear this exact epoch and
+      // republish synchronously before any store-backed refresh crosses an await,
+      // so resolution cannot select an offline instance in the propagation
+      // window. A delayed close for an older connection cannot evict a newer one.
+      catalogProjectionRevision += 1;
+      if (environmentCatalog.clearEpoch(closed.enrollmentId, closed.epoch.epoch)) {
+        publishCatalogMembership();
+      }
       void refreshEnvironmentCatalog();
     });
     /**
