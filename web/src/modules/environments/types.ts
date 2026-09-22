@@ -18,9 +18,20 @@ export type CapabilityKey = string;
 export type EngineReadiness = Record<string, EngineStatus>;
 
 export interface EngineDetailInfo {
-  version: string;
+  version?: string;
+  /** Independent Worker facts; none is inferred from readiness or another row. */
+  installed?: boolean;
+  readiness?: EngineStatus;
   authStatus: string;
+  authenticated?: boolean;
+  authMode?: string;
+  authType?: string;
   modelAvailability?: string;
+  models?: string[];
+  modelIdPresent?: boolean;
+  observedAt?: number;
+  probeExitCode?: number;
+  source?: string;
   notes?: string;
 }
 
@@ -59,11 +70,15 @@ export interface ForcedReleaseRecord {
 }
 
 export interface ProbeRecord {
+  /** ISO rendering of the Worker's `at`, never the browser request time. */
   timestamp: string;
+  observedAt?: number;
   latencyMs: number;
   protocolOk: boolean;
   enginesOk: boolean;
   summary: string;
+  source?: 'worker';
+  version?: string;
 }
 
 /** The capabilities the enrollment actually declared, keyed by name. */

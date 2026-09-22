@@ -42,6 +42,7 @@ async function harness(): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     idFactory: () => 'enroll-e3',
   });
   const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });

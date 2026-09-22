@@ -23,6 +23,7 @@ function service(options: { readonly now?: () => number } = {}): {
     enrollments: new EnvironmentEnrollmentService({
       enrollments: store,
       readiness: new InMemoryEnvironmentReadinessStore(),
+      currentConnectionEpoch: () => undefined,
       clock: options.now ?? (() => 1_000),
       idFactory: () => 'enroll-1',
       claimSecretFactory: () => 'claim-secret-one',
@@ -86,6 +87,7 @@ test('an expired claim is refused cleanly at the exact boundary', async () => {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     clock: () => now,
     idFactory: () => 'enroll-1',
     claimSecretFactory: () => 'claim-secret-one',

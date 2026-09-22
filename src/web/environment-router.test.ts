@@ -85,6 +85,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: enrollmentsStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => 1,
     leases: () => pool.leases(),
     ...(options.requiredEngines !== undefined ? { requiredEngines: options.requiredEngines } : {}),
     clock: () => 10_000,
@@ -119,17 +120,28 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
       recovery,
       archive,
       requestProbe: async (enrollmentId) => {
-        const probe = await enrollments.recordProbe(enrollmentId, {
-          at: workerProbeAt++,
+        const at = workerProbeAt++;
+        const probe = {
+          at,
           latencyMs: 7,
           protocolOk: true,
           enginesOk: false,
           source: 'worker' as const,
           version: '0.154.0',
           summary: 'Worker non-inference readiness probe completed.',
+        };
+        const recorded = await enrollments.observeWorkerReadiness(enrollmentId, {
+          protocolVersion: '2',
+          observedAt: at,
+          engines: [],
+          probe,
+        }, {
+          enrollmentId,
+          connectionEpoch: 1,
+          isCurrent: () => true,
         });
-        if (probe === undefined) throw new Error('synthetic Worker probe was rejected');
-        return probe;
+        if (!recorded) throw new Error('synthetic Worker probe was rejected');
+        return { ...probe, enrollmentId, connectionEpoch: 1 };
       },
     })],
   });
@@ -566,6 +578,13 @@ test('an empty engine configuration does not fabricate a dual-engine requirement
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
       ],
     });
+    await runtime.enrollments.observeReadiness('enroll-1', {
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
+      ],
+    }, { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {
@@ -612,6 +631,13 @@ test('an explicitly required engine is Red when unavailable, and only that one',
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
       ],
     });
+    await runtime.enrollments.observeReadiness('enroll-1', {
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
+      ],
+    }, { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {

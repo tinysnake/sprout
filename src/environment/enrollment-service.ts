@@ -30,7 +30,11 @@ import type {
   ProtocolVersionRange,
 } from './readiness.ts';
 import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProtocolVersion } from './privacy.ts';
-import type { EnvironmentReadinessStore, ObservedReadiness } from './readiness-store.ts';
+import type {
+  EnvironmentReadinessStore,
+  ObservedReadiness,
+  ReadinessWriteAuthority,
+} from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
 
 function sanitizeEngineVersion(value: string): string | undefined {
@@ -38,6 +42,12 @@ function sanitizeEngineVersion(value: string): string | undefined {
   // identifier redaction quite correctly treats dotted unknown text as a host;
   // accept only the pinned CLI-version shape here.
   return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(value) ? value : undefined;
+}
+
+function sanitizeProbeVersion(value: string): string | undefined {
+  return /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(value)
+    ? value
+    : undefined;
 }
 
 /**
@@ -113,7 +123,7 @@ function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
     ...(Number.isSafeInteger(probe.connectionEpoch) && (probe.connectionEpoch ?? 0) > 0
       ? { connectionEpoch: probe.connectionEpoch }
       : {}),
-    ...(probe.version !== undefined ? { version: sanitizeEngineVersion(probe.version) ?? 'unknown-version' } : {}),
+    ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) ?? 'unknown-version' } : {}),
     summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
   };
 }
@@ -121,6 +131,8 @@ function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
 export interface EnvironmentEnrollmentServiceOptions {
   readonly enrollments: EnrollmentStore;
   readonly readiness: EnvironmentReadinessStore;
+  /** Current accepted epoch, or undefined while the enrollment is offline. */
+  readonly currentConnectionEpoch: (enrollmentId: string) => number | undefined;
   /** The leases that decide work safety. Optional: an Environment with no work. */
   readonly leases?: () => Promise<readonly LeaseSafetyFact[]> | readonly LeaseSafetyFact[];
   /**
@@ -201,10 +213,12 @@ export class EnvironmentEnrollmentService {
   readonly #claimSecretFactory: () => string;
   readonly #claimTtlMs: number;
   readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
+  readonly #currentConnectionEpoch: (enrollmentId: string) => number | undefined;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
     this.#readiness = options.readiness;
+    this.#currentConnectionEpoch = options.currentConnectionEpoch;
     this.#leases = options.leases;
     this.#recoveryRecords = options.recoveryRecords;
     this.#requiredEngines = options.requiredEngines ?? [];
@@ -402,60 +416,40 @@ export class EnvironmentEnrollmentService {
     }
     const identityDigest = workerIdentityDigest(verifiedPublicKey);
     const outcome = reconcileWorkerConnection(enrollment, identityDigest, at);
-    // Only an accepted connection can produce readiness: a refused attempt (a
-    // revoked binding, an invalidated identity, or a new key against a decided
-    // one) is recorded as an authority decision alone, so unapproved connections
-    // never overwrite the observed facts of the enrolled Worker.
-    if (outcome.outcome !== 'duplicate-new-key-refused' && outcome.outcome !== 'revoked-refused' && outcome.outcome !== 'stale-identity-refused') {
-      await this.#readiness.saveReadiness(
-        enrollment.environmentInstanceId,
-        sanitizeObservedReadiness({
-          enrollmentId: enrollment.id,
-          connection: input.connection,
-          compatibility: input.compatibility,
-          engines: input.engines,
-        }),
-      );
-    }
+    // Identity reconciliation happens before the gateway accepts an epoch.
+    // Consequently this method must not persist `online` or any Worker facts:
+    // only an accepted epoch may mint the mandatory readiness authority below.
     await this.#enrollments.save(outcome.enrollment);
     return outcome;
   }
 
-  /** Record a fresh readiness observation without changing enrollment authority. */
-  async observeReadiness(enrollmentId: string, observed: ObservedReadiness): Promise<void> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    await this.#readiness.saveReadiness(
-      enrollment.environmentInstanceId,
-      sanitizeObservedReadiness({ ...observed, enrollmentId: enrollment.id }),
-    );
-  }
-
-  /** Append one readiness-probe result; prior probes are preserved. */
-  async recordProbe(
+  /** Record one accepted-epoch observation as a single durable commit. */
+  async observeReadiness(
     enrollmentId: string,
-    probe: ProbeResultFact,
-    options: {
-      /** The accepted Worker epoch which produced this probe. */
-      readonly connectionEpoch?: number;
-      /** Evaluated by the store immediately before append. */
-      readonly isCurrent?: () => boolean;
-    } = {},
-  ): Promise<ProbeResultFact | undefined> {
+    observed: ObservedReadiness,
+    authority: ReadinessWriteAuthority,
+    probe?: Omit<ProbeResultFact, 'enrollmentId' | 'connectionEpoch'>,
+  ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    if (options.isCurrent !== undefined && !options.isCurrent()) return undefined;
-    const sanitized = sanitizeProbe({
-      ...probe,
-      ...(options.connectionEpoch !== undefined
-        ? { enrollmentId: enrollment.id, connectionEpoch: options.connectionEpoch }
-        : {}),
+    const accepted = this.#acceptedAuthority(enrollment.id, authority);
+    if (accepted === undefined) return false;
+    const readiness = sanitizeObservedReadiness({
+      ...observed,
+      enrollmentId: enrollment.id,
+      connectionEpoch: accepted.connectionEpoch,
     });
-    const guard = options.isCurrent === undefined ? {} : { isCurrent: options.isCurrent };
-    const appended = await this.#readiness.appendProbe(
+    const sanitizedProbe = probe === undefined
+      ? undefined
+      : sanitizeProbe({
+          ...probe,
+          enrollmentId: enrollment.id,
+          connectionEpoch: accepted.connectionEpoch,
+        });
+    return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
-      sanitized,
-      guard,
+      { readiness, ...(sanitizedProbe !== undefined ? { probe: sanitizedProbe } : {}) },
+      accepted,
     );
-    return appended ? sanitized : undefined;
   }
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
@@ -543,41 +537,36 @@ export class EnvironmentEnrollmentService {
         readonly source?: string;
       }[];
     },
-    options: {
-      /** The accepted connection epoch that supplied this Worker observation. */
-      readonly connectionEpoch?: number;
-      /** Refuses a stale observation immediately before it becomes durable. */
-      readonly isCurrent?: () => boolean;
-    } = {},
+    authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    // The runtime supplies the gateway authority check for inbound observations.
-    // A late request from a disconnected/replaced channel must not overwrite the
-    // current epoch's facts. Callers without an epoch retain the old additive
-    // readiness seam, but the catalog treats those legacy facts as non-authoritative.
-    if (options.isCurrent !== undefined && !options.isCurrent()) return false;
+    const accepted = this.#acceptedAuthority(enrollment.id, authority);
+    if (accepted === undefined) return false;
     const observed = observedFactsFromWorkerReadiness({
       ...readiness,
       at: this.#clock(),
       supported: this.#supportedProtocol,
     });
-    const guard = options.isCurrent === undefined ? {} : { isCurrent: options.isCurrent };
-    const saved = await this.#readiness.saveReadiness(
+    const storedReadiness = sanitizeObservedReadiness({
+      ...observed,
+      enrollmentId: enrollment.id,
+      connectionEpoch: accepted.connectionEpoch,
+    });
+    const probe = readiness.probe === undefined
+      ? undefined
+      : sanitizeProbe({
+          ...readiness.probe,
+          enrollmentId: enrollment.id,
+          connectionEpoch: accepted.connectionEpoch,
+        });
+    // Readiness and its startup/explicit probe cross exactly one store call.
+    // Store adapters check the live guard at their mutation boundary and commit
+    // both documents atomically, so there is no partial-readiness race.
+    return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
-      sanitizeObservedReadiness({
-        ...observed,
-        enrollmentId: enrollment.id,
-        ...(options.connectionEpoch !== undefined ? { connectionEpoch: options.connectionEpoch } : {}),
-      }),
-      guard,
+      { readiness: storedReadiness, ...(probe !== undefined ? { probe } : {}) },
+      accepted,
     );
-    if (!saved) return false;
-    if (readiness.probe === undefined) return true;
-    // Startup and explicit probes share this exact append path.  The epoch is
-    // bound before persistence and the store repeats the authority check at
-    // its own mutation boundary, so a disconnected/replaced Worker leaves no
-    // later probe history behind.
-    return (await this.recordProbe(enrollmentId, readiness.probe, options)) !== undefined;
   }
 
   /** Assemble the independent facts plus the deterministic summary. */
@@ -592,9 +581,19 @@ export class EnvironmentEnrollmentService {
     // Sanitize on the way out as well as on the way in: a document written by an
     // earlier build (or by an adapter that bypassed this service) must not leak
     // free text through the readiness projection either.
-    const observed = rawObserved === undefined ? undefined : sanitizeObservedReadiness(rawObserved);
+    const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
+    // Durable history remains inspectable, but only facts bound to the live
+    // accepted epoch may look current in the readiness/API projection.
+    const observed = rawObserved !== undefined &&
+      rawObserved.enrollmentId === enrollment.id &&
+      rawObserved.connectionEpoch === currentEpoch
+      ? sanitizeObservedReadiness(rawObserved)
+      : undefined;
     const probes = rawProbes.map(sanitizeProbe);
-    const latestProbe = probes.length > 0 ? probes[probes.length - 1] : undefined;
+    const currentProbes = probes.filter((probe) =>
+      probe.enrollmentId === enrollment.id && probe.connectionEpoch === currentEpoch,
+    );
+    const latestProbe = currentProbes.length > 0 ? currentProbes[currentProbes.length - 1] : undefined;
     const assembled = assembleEnvironmentReadiness({
       enrollment,
       observed,
@@ -627,5 +626,23 @@ export class EnvironmentEnrollmentService {
       throw new EnrollmentError('unknown-enrollment', `Unknown enrollment: ${enrollmentId}`);
     }
     return normalizeEnrollment(enrollment);
+  }
+
+  /** Combine the caller's connection token with the service's live resolver. */
+  #acceptedAuthority(
+    enrollmentId: string,
+    authority: ReadinessWriteAuthority,
+  ): ReadinessWriteAuthority | undefined {
+    if (
+      authority.enrollmentId !== enrollmentId ||
+      !Number.isSafeInteger(authority.connectionEpoch) ||
+      authority.connectionEpoch <= 0
+    ) return undefined;
+    const isCurrent = (): boolean =>
+      authority.isCurrent() &&
+      this.#currentConnectionEpoch(enrollmentId) === authority.connectionEpoch;
+    return isCurrent()
+      ? { enrollmentId, connectionEpoch: authority.connectionEpoch, isCurrent }
+      : undefined;
   }
 }

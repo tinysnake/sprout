@@ -22,7 +22,7 @@ test('Codex and Pi readiness use only the #114 non-inference contract and keep m
       return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
     },
     async accountRead() {
-      return { stdout: JSON.stringify({ account: { type: 'chatgpt', email: 'must-not-survive' }, requiresOpenaiAuth: true, planType: 'must-not-survive' }), exitCode: 0 };
+      return { stdout: JSON.stringify({ account: { type: 'chatgpt', email: 'must-not-survive', planType: 'plus' }, requiresOpenaiAuth: true }), exitCode: 0 };
     },
   };
   const result = await probeEnvironmentReadiness(configurations, { commandRunner: runner, clock: () => 1000 });
@@ -82,6 +82,9 @@ test('malformed pinned auth schemas fail closed for both engines', async () => {
     { status: 'ready' },
     { status: 'ready', provider: 'other-provider', authType: 'oauth' },
     { status: 'ready', provider: 'openai-codex', authType: 'chatgpt' },
+    { status: 'not_ready', provider: 'openai-codex', reason: 'made_up' },
+    { status: 'unexpected', provider: 'openai-codex', reason: 'invalid_state' },
+    { status: 'ready', provider: 'openai-codex', authType: 'oauth', secret: 'extra' },
   ];
   for (const response of malformedPi) {
     const result = await probeEnvironmentReadiness([configurations[1]!], {
@@ -96,7 +99,19 @@ test('malformed pinned auth schemas fail closed for both engines', async () => {
     assert.equal(result.readiness.engines[0]?.readiness, 'unknown', JSON.stringify(response));
   }
 
-  for (const response of [{}, { account: {} }, { account: false }, { account: { type: 'chatgpt' } }]) {
+  const malformedCodex = [
+    {},
+    { requiresOpenaiAuth: true, account: {} },
+    { requiresOpenaiAuth: true, account: false },
+    { requiresOpenaiAuth: true, account: { type: 'chatgpt' } },
+    { requiresOpenaiAuth: true, account: { type: 'chatgpt', email: null } },
+    { requiresOpenaiAuth: true, account: { type: 'chatgpt', email: null, planType: 'platinum' } },
+    { requiresOpenaiAuth: true, account: { type: 'amazonBedrock' } },
+    { requiresOpenaiAuth: true, account: { type: 'amazonBedrock', usesCodexManagedCredentials: 'yes' } },
+    { requiresOpenaiAuth: true, account: { type: 'garbage' } },
+    { requiresOpenaiAuth: true, account: { type: 'apiKey', email: null } },
+  ];
+  for (const response of malformedCodex) {
     const result = await probeEnvironmentReadiness([configurations[0]!], {
       commandRunner: {
         async run() { return { stdout: 'codex-cli 0.154.0', exitCode: 0 }; },
@@ -104,6 +119,24 @@ test('malformed pinned auth schemas fail closed for both engines', async () => {
       },
     });
     assert.equal(result.readiness.engines[0]?.readiness, 'unknown', JSON.stringify(response));
+  }
+});
+
+test('all pinned Codex account variants are accepted only with their complete tagged fields', async () => {
+  const variants = [
+    { account: { type: 'apiKey' }, requiresOpenaiAuth: true, authMode: 'api_key' },
+    { account: { type: 'chatgpt', email: null, planType: 'enterprise' }, requiresOpenaiAuth: true, authMode: 'chatgpt' },
+    { account: { type: 'amazonBedrock', usesCodexManagedCredentials: false }, requiresOpenaiAuth: false, authMode: 'workload_identity' },
+  ] as const;
+  for (const { authMode, ...response } of variants) {
+    const result = await probeEnvironmentReadiness([configurations[0]!], {
+      commandRunner: {
+        async run() { return { stdout: 'codex-cli 0.154.0', exitCode: 0 }; },
+        async accountRead() { return { stdout: JSON.stringify(response), exitCode: 0 }; },
+      },
+    });
+    assert.equal(result.readiness.engines[0]?.readiness, 'ready');
+    assert.equal(result.readiness.engines[0]?.authMode, authMode);
   }
 });
 

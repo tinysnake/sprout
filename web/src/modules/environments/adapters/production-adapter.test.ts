@@ -37,7 +37,7 @@ function enrollmentFacts(overrides: Partial<EnvironmentFactsView> = {}): Environ
       engines: [{ engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['m1'] } }],
       workSafety: { state: 'held' },
     },
-    probes: [{ at: 900, latencyMs: 12, protocolOk: true, enginesOk: true, summary: 'ok' }],
+    probes: [{ at: 900, latencyMs: 12, protocolOk: true, enginesOk: true, summary: 'ok', source: 'worker', version: '0.154.0' }],
     recovery: [],
     forceReleases: [],
     ...overrides,
@@ -90,9 +90,41 @@ test('the bridge renders Worker source, version, observation time, auth, and mod
   };
   const environment = await new ProductionEnvironmentService(adapter(facts)).getEnvironment('enroll-1');
   assert.deepEqual(environment?.engineDetails?.pi, {
-    version: '0.86.1', authStatus: 'ready', modelAvailability: 'unknown',
-    notes: 'Source: pi-auth-check · Observed: 1970-01-01T00:00:01.234Z',
+    version: '0.86.1', installed: true, readiness: 'ready', authStatus: 'authenticated',
+    authenticated: true, authType: 'oauth', modelAvailability: 'unknown', models: [],
+    modelIdPresent: false, observedAt: 1_234, probeExitCode: 0, source: 'pi-auth-check',
   });
+  assert.deepEqual(environment?.probeHistory[0], {
+    timestamp: '1970-01-01T00:00:00.900Z', observedAt: 900,
+    latencyMs: 12, protocolOk: true, enginesOk: true, summary: 'ok',
+    source: 'worker', version: '0.154.0',
+  });
+});
+
+test('an explicit probe result keeps the Worker record time and provenance instead of browser-relative time', async () => {
+  const facts = enrollmentFacts();
+  const wire = adapter(facts);
+  wire.requestProbe = async () => ({
+    at: 1_700_000_000_123,
+    latencyMs: 17,
+    protocolOk: true,
+    enginesOk: false,
+    summary: 'Worker observation',
+    source: 'worker',
+    version: '0.154.0, 0.86.1',
+  });
+  const probe = await new ProductionEnvironmentService(wire).triggerProbe('enroll-1');
+  assert.deepEqual(probe, {
+    timestamp: '2023-11-14T22:13:20.123Z',
+    observedAt: 1_700_000_000_123,
+    latencyMs: 17,
+    protocolOk: true,
+    enginesOk: false,
+    summary: 'Worker observation',
+    source: 'worker',
+    version: '0.154.0, 0.86.1',
+  });
+  assert.notEqual(probe.timestamp, 'just now');
 });
 
 test('an unknown environment returns undefined instead of an invented row', async () => {

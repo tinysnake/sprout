@@ -55,12 +55,8 @@ export interface EngineReadinessFact {
   readonly probeExitCode?: number;
   readonly source?: string;
 }
-/** One recorded readiness probe, append-only in the durable observation history. */
-export interface ProbeResultFact {
-  /** The enrollment authority that accepted the Worker which made this observation. */
-  readonly enrollmentId?: string;
-  /** The accepted Worker connection epoch which made this observation. */
-  readonly connectionEpoch?: number;
+/** One Worker-produced readiness probe before core-side authority binding. */
+export interface ReadinessProbeFact {
   readonly at: number;
   readonly latencyMs: number;
   readonly protocolOk: boolean;
@@ -68,6 +64,14 @@ export interface ProbeResultFact {
   readonly summary: string;
   readonly source?: 'worker';
   readonly version?: string;
+}
+
+/** One recorded probe, bound to accepted authority in durable history. */
+export interface ProbeResultFact extends ReadinessProbeFact {
+  /** The enrollment authority that accepted the Worker which made this observation. */
+  readonly enrollmentId: string;
+  /** The accepted Worker connection epoch which made this observation. */
+  readonly connectionEpoch: number;
 }
 
 export interface ConnectionFact {
@@ -94,7 +98,7 @@ export interface EnvironmentReadiness {
   readonly compatibility: CompatibilityFact;
   readonly capabilities: readonly CapabilityReadinessFact[];
   readonly engines: readonly EngineReadinessFact[];
-  readonly probe?: ProbeResultFact;
+  readonly probe?: ReadinessProbeFact;
   readonly workSafety: WorkSafetyFact;
 }
 

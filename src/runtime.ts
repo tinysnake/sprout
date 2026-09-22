@@ -886,12 +886,16 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
 
     const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
     const openedStoresForCatalog = stores;
+    // Epoch authority exists before the readiness service: every write and
+    // every current projection is resolved against this same registry.
+    const workerEpochs = new WorkerConnectionRegistry({ store: stores.workerConnectionEpochs });
     // Environment enrollment and readiness (#87). It reads the durable enrollment
     // and observed-readiness stores and projects work safety from the same lease
     // registry the run and Task domains use, so the facts never diverge.
     const enrollmentOptions: EnvironmentEnrollmentServiceOptions = {
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
+      currentConnectionEpoch: (enrollmentId) => workerEpochs.current(enrollmentId)?.epoch,
       leases: () => pool.leases(),
       // Recovery records are authoritative over the lease projection, so the
       // summary can distinguish `reconciling` from `recovery` and a reconnect
@@ -907,9 +911,6 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       onMutation: onEnrollmentMutation,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
-    // The epoch registry is created before the catalog refresh below, so an
-    // already-accepted connection's epoch is visible in the first projection.
-    const workerEpochs = new WorkerConnectionRegistry({ store: stores.workerConnectionEpochs });
     // The catalog refresh and its pool publication are defined here, after the
     // enrollment service and epoch registry exist, and re-invoked whenever an
     // accepted connection appears or a channel is lost.
@@ -1094,6 +1095,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       }
       if (!isCurrent()) return;
       await enrollments.observeWorkerReadiness(enrollment.id, info.readiness, {
+        enrollmentId: enrollment.id,
         connectionEpoch: epoch.epoch,
         // The service repeats this check immediately before durable storage. If
         // a custom asynchronous store still races replacement, the old epoch
@@ -1138,6 +1140,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         workerEpochs.isCurrent(enrollment.id, live.epoch.connectionId) &&
         workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === live.epoch.connectionId;
       const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
+        enrollmentId,
         connectionEpoch: live.epoch.epoch,
         isCurrent,
       });
@@ -1280,14 +1283,8 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         if (enrollment === undefined) return;
         const live = workerGateway.liveFor(enrollment.environmentInstanceId);
         if (live === undefined) {
-          // The configured/test-development carrier predates connection epochs.
-          // Preserve its additive #87 observation seam without allowing the
-          // enrollment production path to infer a live Worker from a lookup.
-          if (environmentSource === 'enrollment' || runtimeEnvironment.info === undefined || enrollment.status !== 'approved') return;
-          const info = await runtimeEnvironment.info(enrollment.environmentInstanceId);
-          if (info?.readiness === undefined) return;
-          await enrollments.observeWorkerReadiness(enrollmentId, info.readiness);
-          await refreshEnvironmentCatalog();
+          // No accepted gateway epoch means no authority to persist Worker
+          // facts, including on configured/development carriers.
           return;
         }
         if (live.enrollment.id !== enrollmentId) return;

@@ -331,6 +331,7 @@ test('a claim document stores only a one-way digest, never the raw secret', asyn
   const service = new EnvironmentEnrollmentService({
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     idFactory: () => 'enroll-1',
     claimSecretFactory: () => 'super-secret-claim-value',
   });

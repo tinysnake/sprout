@@ -117,6 +117,7 @@ function service(): EnvironmentEnrollmentService {
   return new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => 1,
     clock: () => 1_000,
     idFactory: () => 'enroll-falsify',
   });
@@ -364,7 +365,13 @@ try {
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
       ],
     });
-    await enrollments.recordProbe('enroll-falsify', {
+    await enrollments.observeReadiness('enroll-falsify', {
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
+      ],
+    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true }, {
       at: 1_000,
       latencyMs: 1,
       protocolOk: true,
@@ -379,6 +386,7 @@ try {
     const requiring = new EnvironmentEnrollmentService({
       enrollments: new InMemoryEnrollmentStore(),
       readiness: new InMemoryEnvironmentReadinessStore(),
+      currentConnectionEpoch: () => 1,
       requiredEngines: ['pi'],
       clock: () => 1_000,
       idFactory: () => 'enroll-falsify',
@@ -391,7 +399,7 @@ try {
       engines: [
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
       ],
-    });
+    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true });
     const blocked = await requiring.readiness('enroll-falsify');
     check('M77-READY-001', 'an explicitly required engine is a Red block', blocked.summary.level !== 'red');
     check('M77-READY-001', 'the summary names the decisive required engine', !/pi/i.test(blocked.summary.reason));
@@ -419,7 +427,15 @@ try {
       },
       engines: [],
     });
-    await enrollments.recordProbe('enroll-falsify', {
+    await enrollments.observeReadiness('enroll-falsify', {
+      connection: { state: 'online' },
+      compatibility: {
+        state: 'incompatible',
+        workerProtocolVersion: '3',
+        detail: `mismatch at ${secretPath} with ${secretToken} from ${secretAddress}`,
+      },
+      engines: [],
+    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true }, {
       at: 1_000,
       latencyMs: 1,
       protocolOk: false,

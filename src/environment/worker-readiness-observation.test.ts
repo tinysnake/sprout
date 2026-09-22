@@ -4,50 +4,58 @@ import { test } from 'node:test';
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import {
   InMemoryEnvironmentReadinessStore,
-  type ReadinessWriteGuard,
+  type ReadinessObservation,
+  type ReadinessWriteAuthority,
 } from './readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
-import type { ObservedReadiness } from './readiness-store.ts';
-import type { ProbeResultFact } from './readiness.ts';
 
 class DelayedReadinessStore extends InMemoryEnvironmentReadinessStore {
-  #releaseSave: (() => void) | undefined;
-  #releaseAppend: (() => void) | undefined;
-  readonly saveStarted = new Promise<void>((resolve) => { this.#releaseSave = resolve; });
-  readonly appendStarted = new Promise<void>((resolve) => { this.#releaseAppend = resolve; });
-  #continueSave: (() => void) | undefined;
-  #continueAppend: (() => void) | undefined;
-  readonly waitForSave = new Promise<void>((resolve) => { this.#continueSave = resolve; });
-  readonly waitForAppend = new Promise<void>((resolve) => { this.#continueAppend = resolve; });
+  #signalStarted: (() => void) | undefined;
+  readonly commitStarted = new Promise<void>((resolve) => { this.#signalStarted = resolve; });
+  #continueCommit: (() => void) | undefined;
+  readonly waitForCommit = new Promise<void>((resolve) => { this.#continueCommit = resolve; });
 
-  override async saveReadiness(
+  override async commitObservation(
     environmentInstanceId: string,
-    observed: ObservedReadiness,
-    guard?: ReadinessWriteGuard,
+    observation: ReadinessObservation,
+    authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
-    this.#releaseSave?.();
-    await this.waitForSave;
-    return super.saveReadiness(environmentInstanceId, observed, guard);
+    this.#signalStarted?.();
+    await this.waitForCommit;
+    return super.commitObservation(environmentInstanceId, observation, authority);
   }
 
-  override async appendProbe(
-    environmentInstanceId: string,
-    probe: ProbeResultFact,
-    guard?: ReadinessWriteGuard,
-  ): Promise<boolean> {
-    this.#releaseAppend?.();
-    await this.waitForAppend;
-    return super.appendProbe(environmentInstanceId, probe, guard);
-  }
-
-  continueSave(): void { this.#continueSave?.(); }
-  continueAppend(): void { this.#continueAppend?.(); }
+  continueCommit(): void { this.#continueCommit?.(); }
 }
 
-async function enrolled(readiness = new InMemoryEnvironmentReadinessStore()) {
+class PostCommitDelayedReadinessStore extends InMemoryEnvironmentReadinessStore {
+  #signalCommitted: (() => void) | undefined;
+  readonly committed = new Promise<void>((resolve) => { this.#signalCommitted = resolve; });
+  #continueReturn: (() => void) | undefined;
+  readonly waitForReturn = new Promise<void>((resolve) => { this.#continueReturn = resolve; });
+
+  override async commitObservation(
+    environmentInstanceId: string,
+    observation: ReadinessObservation,
+    authority: ReadinessWriteAuthority,
+  ): Promise<boolean> {
+    const committed = await super.commitObservation(environmentInstanceId, observation, authority);
+    this.#signalCommitted?.();
+    await this.waitForReturn;
+    return committed;
+  }
+
+  continueReturn(): void { this.#continueReturn?.(); }
+}
+
+async function enrolled(
+  readiness = new InMemoryEnvironmentReadinessStore(),
+  currentConnectionEpoch: () => number | undefined = () => 7,
+) {
   const service = new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness,
+    currentConnectionEpoch,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -83,6 +91,7 @@ function startupReadiness() {
 test('startup Worker readiness persists one epoch-bound probe and its independent provenance facts', async () => {
   const { service } = await enrolled();
   const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), {
+    enrollmentId: 'enroll-1',
     connectionEpoch: 7,
     isCurrent: () => true,
   });
@@ -107,6 +116,7 @@ test('startup Worker readiness persists one epoch-bound probe and its independen
 test('a stale epoch is rejected before either readiness or probe persistence', async () => {
   const { service } = await enrolled();
   const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), {
+    enrollmentId: 'enroll-1',
     connectionEpoch: 7,
     isCurrent: () => false,
   });
@@ -115,37 +125,68 @@ test('a stale epoch is rejected before either readiness or probe persistence', a
   assert.deepEqual(await service.listProbes('enroll-1'), []);
 });
 
-test('disconnect during an asynchronous readiness/probe write cannot append a superseded epoch', async () => {
+test('the store rejects mixed-epoch readiness and probe as one unit', async () => {
+  const store = new InMemoryEnvironmentReadinessStore();
+  const committed = await store.commitObservation('env-1', {
+    readiness: {
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 7,
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [],
+    },
+    probe: {
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 6,
+      at: 1_234,
+      latencyMs: 12,
+      protocolOk: true,
+      enginesOk: true,
+      summary: 'mixed authority must fail',
+    },
+  }, {
+    enrollmentId: 'enroll-1',
+    connectionEpoch: 7,
+    isCurrent: () => true,
+  });
+  assert.equal(committed, false);
+  assert.equal(await store.getReadiness('env-1'), undefined);
+  assert.deepEqual(await store.listProbes('env-1'), []);
+});
+
+test('disconnect while an atomic readiness/probe commit is waiting leaves neither document', async () => {
   const store = new DelayedReadinessStore();
-  const { service } = await enrolled(store);
   let current = true;
+  const { service } = await enrolled(store, () => current ? 7 : undefined);
   const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
+    enrollmentId: 'enroll-1',
     connectionEpoch: 7,
     isCurrent: () => current,
   });
-  await store.saveStarted;
+  await store.commitStarted;
   current = false;
-  store.continueSave();
+  store.continueCommit();
   assert.equal(await recording, false);
   assert.equal(await store.getReadiness('env-1'), undefined);
   assert.deepEqual(await service.listProbes('enroll-1'), []);
 });
 
-test('disconnect between readiness save and probe append rejects the old probe record', async () => {
-  const store = new DelayedReadinessStore();
-  const { service } = await enrolled(store);
+test('disconnect after the atomic commit cannot project the prior epoch as current', async () => {
+  const store = new PostCommitDelayedReadinessStore();
   let current = true;
+  const { service } = await enrolled(store, () => current ? 7 : undefined);
   const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
+    enrollmentId: 'enroll-1',
     connectionEpoch: 7,
     isCurrent: () => current,
   });
-  await store.saveStarted;
-  store.continueSave();
-  await store.appendStarted;
+  await store.committed;
   current = false;
-  store.continueAppend();
+  store.continueReturn();
 
-  assert.equal(await recording, false);
+  assert.equal(await recording, true, 'the observation was valid at its atomic commit point');
   assert.equal((await store.getReadiness('env-1'))?.connectionEpoch, 7);
-  assert.deepEqual(await service.listProbes('enroll-1'), []);
+  assert.equal((await service.readiness('enroll-1')).readiness.connection.state, 'never-connected');
+  assert.equal((await service.readiness('enroll-1')).readiness.probe, undefined);
+  assert.equal((await service.listProbes('enroll-1')).length, 1, 'accepted history remains auditable');
 });

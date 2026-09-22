@@ -136,17 +136,24 @@ function auditOf(history: readonly ForceReleaseView[]): EnvironmentInstance['for
   };
 }
 
-function probesOf(probes: readonly ProbeResultView[], now: number): ProbeRecord[] {
+function probeOf(probe: ProbeResultView): ProbeRecord {
+  return {
+    timestamp: new Date(probe.at).toISOString(),
+    observedAt: probe.at,
+    latencyMs: probe.latencyMs,
+    protocolOk: probe.protocolOk,
+    enginesOk: probe.enginesOk,
+    summary: probe.summary,
+    ...(probe.source !== undefined ? { source: probe.source } : {}),
+    ...(probe.version !== undefined ? { version: probe.version } : {}),
+  };
+}
+
+function probesOf(probes: readonly ProbeResultView[]): ProbeRecord[] {
   return [...probes]
     .sort((a, b) => b.at - a.at)
     .slice(0, 12)
-    .map((probe) => ({
-      timestamp: relativeTime(connectionAgeSec(probe.at, now)),
-      latencyMs: probe.latencyMs,
-      protocolOk: probe.protocolOk,
-      enginesOk: probe.enginesOk,
-      summary: probe.summary,
-    }));
+    .map(probeOf);
 }
 
 /** The permission rows the page renders, in the enrollment's declared order. */
@@ -172,17 +179,21 @@ function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance
   const details: NonNullable<EnvironmentInstance['engineDetails']> = {};
   for (const engine of readiness.engines) {
     details[engine.engine] = {
-      version: engine.version ?? (engine.installed ? 'installed' : 'unknown'),
-      authStatus: engine.readiness,
+      ...(engine.version !== undefined ? { version: engine.version } : {}),
+      installed: engine.installed,
+      readiness: engineStatusOf(engine.readiness),
+      authStatus: engine.authenticated === true
+        ? 'authenticated'
+        : engine.authenticated === false ? 'not-authenticated' : 'unknown',
+      ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
+      ...(engine.authMode !== undefined ? { authMode: engine.authMode } : {}),
+      ...(engine.authType !== undefined ? { authType: engine.authType } : {}),
       modelAvailability: engine.models.state,
-      ...(engine.source !== undefined || engine.probedAt !== undefined
-        ? {
-            notes: [
-              engine.source !== undefined ? `Source: ${engine.source}` : undefined,
-              engine.probedAt !== undefined ? `Observed: ${new Date(engine.probedAt).toISOString()}` : undefined,
-            ].filter((value): value is string => value !== undefined).join(' · '),
-          }
-        : {}),
+      models: [...engine.models.models],
+      ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+      ...(engine.probedAt !== undefined ? { observedAt: engine.probedAt } : {}),
+      ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
+      ...(engine.source !== undefined ? { source: engine.source } : {}),
     };
   }
   return details;
@@ -219,7 +230,7 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     engineDetails: engineDetails(readiness),
     leaseRecovery: leaseRecoveryOf(recovery),
     forcedReleaseRecord: auditOf(forceReleases),
-    probeHistory: probesOf(probes, now),
+    probeHistory: probesOf(probes),
     boundWorkspaces: [],
   };
 }
@@ -304,13 +315,7 @@ export class ProductionEnvironmentService implements EnvironmentService {
     // authenticated Worker measures latency and derives each observation on
     // the Environment host.
     const recorded = await this.#adapter.requestProbe(id);
-    return {
-      timestamp: relativeTime(0),
-      latencyMs: recorded.latencyMs,
-      protocolOk: recorded.protocolOk,
-      enginesOk: recorded.enginesOk,
-      summary: recorded.summary,
-    };
+    return probeOf(recorded);
   }
 
   async togglePermission(id: string, cap: CapabilityKey): Promise<void> {

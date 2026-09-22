@@ -78,6 +78,7 @@ try {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: new SqliteEnrollmentStore({ filename: join(directory, 'sprout.db') }),
     readiness: new SqliteEnvironmentReadinessStore({ filename: join(directory, 'sprout.db') }),
+    currentConnectionEpoch: () => undefined,
     clock: () => 1_000,
     idFactory: () => 'enroll-probe',
   });

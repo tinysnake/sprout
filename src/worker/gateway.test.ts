@@ -45,6 +45,7 @@ async function harness(): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     idFactory: () => 'enroll-1',
   });
   const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });
@@ -378,6 +379,7 @@ test('an expired claim cannot be used to authenticate a Worker', async () => {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     idFactory: () => 'enroll-1',
     claimTtlMs: 1,
   });
@@ -580,10 +582,11 @@ test('a real gateway refusal never echoes malformed protocol evidence to the str
     );
 
     const durable = await h.enrollments.readiness('enroll-1');
-    assert.deepEqual(durable.readiness.compatibility, {
-      state: 'incompatible',
-      detail: fixedReason,
-    });
+    assert.deepEqual(
+      durable.readiness.compatibility,
+      { state: 'unknown' },
+      'a pre-acceptance refusal has no epoch authority to persist readiness',
+    );
     const exposed = JSON.stringify({ refusal: raw.frame, reason: refusalMessage, connectorLogs: logs, readiness: durable });
     for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
       assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through an exposed surface: ${sentinel}`);
@@ -619,10 +622,11 @@ test('a real gateway refuses every present non-string protocol version without r
       raw.close();
 
       const readiness = await h.enrollments.readiness('enroll-1');
-      assert.deepEqual(readiness.readiness.compatibility, {
-        state: 'incompatible',
-        detail: fixedRefusal.reason,
-      });
+      assert.deepEqual(
+        readiness.readiness.compatibility,
+        { state: 'unknown' },
+        'a pre-acceptance refusal has no epoch authority to persist readiness',
+      );
       const exposed = JSON.stringify({ refusal: raw.frame, reason: fixedRefusal.reason, readiness });
       assert.equal(exposed.includes(privacyMarker), false, `${malformed.kind} protocolVersion entered diagnostics`);
       assert.equal(h.gateway.liveFor('mac-mini-1'), undefined, `${malformed.kind} protocolVersion was accepted`);

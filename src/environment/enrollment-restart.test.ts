@@ -47,11 +47,18 @@ function service(
   return new EnvironmentEnrollmentService({
     enrollments: store.enrollments,
     readiness: store.readiness,
+    currentConnectionEpoch: () => 1,
     ...(options.leases !== undefined ? { leases: () => options.leases! } : {}),
     clock: () => options.now ?? 10_000,
     idFactory: () => 'enroll-1',
   });
 }
+
+const readinessAuthority = {
+  enrollmentId: 'enroll-1',
+  connectionEpoch: 1,
+  isCurrent: () => true,
+} as const;
 
 async function request(
   enrollments: EnvironmentEnrollmentService,
@@ -236,7 +243,7 @@ test('observed readiness facts and probe history survive reopen without being si
     const worker = workerIdentityFixture();
     await request(enrollments, worker);
     await enrollments.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
-    await enrollments.observeReadiness('enroll-1', {
+    const observation = {
       connection: { state: 'online', lastConfirmedAt: 5_000 },
       compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
       engines: [
@@ -255,15 +262,15 @@ test('observed readiness facts and probe history survive reopen without being si
           models: { state: 'available', models: ['pi-model'] },
         },
       ],
-    });
-    await enrollments.recordProbe('enroll-1', {
+    } as const;
+    await enrollments.observeReadiness('enroll-1', observation, readinessAuthority, {
       at: 1_000,
       latencyMs: 20,
       protocolOk: true,
       enginesOk: false,
       summary: 'codex login required',
     });
-    await enrollments.recordProbe('enroll-1', {
+    await enrollments.observeReadiness('enroll-1', observation, readinessAuthority, {
       at: 2_000,
       latencyMs: 12,
       protocolOk: true,
@@ -306,6 +313,14 @@ test('a refused connection never produces or overwrites readiness facts', async 
         { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
       ],
     });
+    await enrollments.observeReadiness('enroll-1', {
+      connection: { state: 'online', lastConfirmedAt: 2_000 },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
+        { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
+      ],
+    }, readinessAuthority);
 
     // A different verified key tries to connect: refused, and it must not
     // overwrite the enrolled Worker's observed readiness with its own claims.
@@ -378,7 +393,7 @@ test('work safety is projected from the lease registry into the Red summary', as
         { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
         { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
       ],
-    });
+    }, readinessAuthority);
     const assembled = await enrollments.readiness('enroll-1');
     assert.equal(assembled.readiness.workSafety.state, 'recovery');
     assert.equal(assembled.summary.level, 'red');

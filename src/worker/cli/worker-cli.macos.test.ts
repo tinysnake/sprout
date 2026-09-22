@@ -185,6 +185,7 @@ test('sprout worker enroll reads a real piped claim secret over the default stdi
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
+    currentConnectionEpoch: () => undefined,
     idFactory: () => 'enroll-e3-pipe',
   });
   const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });

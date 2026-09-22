@@ -454,6 +454,32 @@ export interface EnvironmentReadinessView {
   readonly workSafety: { readonly state: string };
 }
 
+/** Safe browser projection of one Worker probe; internal authority ids stay core-side. */
+export interface ProbeResultView {
+  readonly at: number;
+  readonly latencyMs: number;
+  readonly protocolOk: boolean;
+  readonly enginesOk: boolean;
+  readonly summary: string;
+  readonly source?: 'worker';
+  readonly version?: string;
+}
+
+export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeResultView | undefined {
+  if (probe === undefined) return undefined;
+  return {
+    at: probe.at,
+    latencyMs: probe.latencyMs,
+    protocolOk: probe.protocolOk,
+    enginesOk: probe.enginesOk,
+    summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
+    ...(probe.source !== undefined ? { source: probe.source } : {}),
+    ...(probe.version !== undefined
+      ? { version: /^(?:\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:, \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)*$/.test(probe.version) ? probe.version : 'unknown-version' }
+      : {}),
+  };
+}
+
 export function toEnvironmentReadinessView(input: {
   readonly environmentInstanceId: string;
   readonly readiness: EnvironmentReadiness;

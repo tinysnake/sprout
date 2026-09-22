@@ -16,9 +16,15 @@ import type {
   CompatibilityFact,
   ConnectionFact,
   EngineReadinessFact,
-  ProbeResultFact,
+  ReadinessProbeFact,
 } from '../environment/readiness.ts';
-import { toEnrollmentView, toEnvironmentReadinessView, toEnvironmentRecoveryView, toForceReleaseView } from './views.ts';
+import {
+  toEnrollmentView,
+  toEnvironmentReadinessView,
+  toEnvironmentRecoveryView,
+  toForceReleaseView,
+  toProbeResultView,
+} from './views.ts';
 
 /**
  * The Environment enrollment and readiness router (#87).
@@ -37,7 +43,7 @@ import { toEnrollmentView, toEnvironmentReadinessView, toEnvironmentRecoveryView
 export interface EnvironmentRouterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
   /** Worker-hosted probe request. The browser never submits observation facts. */
-  readonly requestProbe?: (enrollmentId: string) => Promise<ProbeResultFact>;
+  readonly requestProbe?: (enrollmentId: string) => Promise<ReadinessProbeFact>;
   /**
    * The Environment reconciliation and recovery capability (#88).
    *
@@ -307,7 +313,9 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
               readiness: assembled.readiness,
               summary: assembled.summary,
             }),
-            probes: await enrollments.listProbes(segments[3] ?? ''),
+            probes: (await enrollments.listProbes(segments[3] ?? ''))
+              .map(toProbeResultView)
+              .filter((probe) => probe !== undefined),
           });
         } catch (error) {
           return enrollmentFailure(context, error);
@@ -328,7 +336,7 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             // Ignore the body entirely. A client can request a probe, but only
             // the authenticated Worker may supply its measured observations.
             const recorded = await requestProbe(segments[3] ?? '');
-            return json(context, 201, { probe: recorded });
+            return json(context, 201, { probe: toProbeResultView(recorded) });
           }
           return json(context, 503, { error: 'the Environment Worker probe is unavailable' });
         } catch (error) {

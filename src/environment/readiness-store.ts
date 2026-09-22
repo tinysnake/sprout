@@ -34,29 +34,38 @@ export interface ObservedReadiness {
 }
 
 /**
- * A live authority fence evaluated by the store immediately before mutation.
+ * A live accepted-connection authority fence evaluated by the store immediately
+ * before its one atomic mutation.
  *
  * Checking before an asynchronous store call is insufficient: a replacement
  * Worker can be accepted while that call is suspended.  The store owns this
  * final check so a stale epoch cannot cross the check/write boundary.
  */
-export interface ReadinessWriteGuard {
-  readonly isCurrent?: () => boolean;
+export interface ReadinessWriteAuthority {
+  readonly enrollmentId: string;
+  readonly connectionEpoch: number;
+  readonly isCurrent: () => boolean;
+}
+
+/** One all-or-nothing durable observation from an accepted Worker epoch. */
+export interface ReadinessObservation {
+  readonly readiness: ObservedReadiness;
+  readonly probe?: ProbeResultFact;
 }
 
 export interface EnvironmentReadinessStore {
-  saveReadiness(
+  /**
+   * Replace readiness and optionally append its probe as one atomic commit.
+   *
+   * The authority is mandatory. Implementations must evaluate it immediately
+   * before mutation and leave both documents untouched when it is stale.
+   */
+  commitObservation(
     environmentInstanceId: string,
-    observed: ObservedReadiness,
-    guard?: ReadinessWriteGuard,
+    observation: ReadinessObservation,
+    authority: ReadinessWriteAuthority,
   ): Promise<boolean>;
   getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined>;
-  /** Append one probe result, preserving every prior observation. */
-  appendProbe(
-    environmentInstanceId: string,
-    probe: ProbeResultFact,
-    guard?: ReadinessWriteGuard,
-  ): Promise<boolean>;
   listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]>;
 }
 
@@ -64,13 +73,20 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   readonly #readiness = new Map<string, ObservedReadiness>();
   readonly #probes = new Map<string, ProbeResultFact[]>();
 
-  async saveReadiness(
+  async commitObservation(
     environmentInstanceId: string,
-    observed: ObservedReadiness,
-    guard: ReadinessWriteGuard = {},
+    observation: ReadinessObservation,
+    authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
-    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
-    this.#readiness.set(environmentInstanceId, observed);
+    if (!validAuthority(observation, authority) || !authority.isCurrent()) return false;
+    // No await may separate this check from these mutations. JavaScript's
+    // run-to-completion rule makes readiness + probe one in-memory commit.
+    this.#readiness.set(environmentInstanceId, observation.readiness);
+    if (observation.probe !== undefined) {
+      const history = this.#probes.get(environmentInstanceId) ?? [];
+      history.push(observation.probe);
+      this.#probes.set(environmentInstanceId, history);
+    }
     return true;
   }
 
@@ -78,19 +94,22 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     return this.#readiness.get(environmentInstanceId);
   }
 
-  async appendProbe(
-    environmentInstanceId: string,
-    probe: ProbeResultFact,
-    guard: ReadinessWriteGuard = {},
-  ): Promise<boolean> {
-    if (guard.isCurrent !== undefined && !guard.isCurrent()) return false;
-    const history = this.#probes.get(environmentInstanceId) ?? [];
-    history.push(probe);
-    this.#probes.set(environmentInstanceId, history);
-    return true;
-  }
-
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {
     return [...(this.#probes.get(environmentInstanceId) ?? [])].sort((a, b) => a.at - b.at);
   }
+}
+
+/** Refuse a store caller that tries to mix facts from two authority epochs. */
+export function validAuthority(
+  observation: ReadinessObservation,
+  authority: ReadinessWriteAuthority,
+): boolean {
+  const { readiness, probe } = observation;
+  return Number.isSafeInteger(authority.connectionEpoch) && authority.connectionEpoch > 0 &&
+    readiness.enrollmentId === authority.enrollmentId &&
+    readiness.connectionEpoch === authority.connectionEpoch &&
+    (probe === undefined || (
+      probe.enrollmentId === authority.enrollmentId &&
+      probe.connectionEpoch === authority.connectionEpoch
+    ));
 }

@@ -38,7 +38,7 @@ import {
   type AssembledReadiness,
 } from './readiness-service.ts';
 import type {
-  ProbeResultFact,
+  ReadinessProbeFact,
   ProtocolVersionRange,
   WorkSafetyState,
 } from './readiness.ts';
@@ -93,7 +93,7 @@ export interface EnvironmentCatalogInput {
   readonly observed: ObservedReadiness | undefined;
   readonly workSafety: WorkSafetyState;
   readonly currentEpoch: number | undefined;
-  readonly probe?: ProbeResultFact;
+  readonly probe?: ReadinessProbeFact;
   readonly requiredEngines: readonly string[];
   readonly supportedProtocol: ProtocolVersionRange;
   readonly now: number;

@@ -115,15 +115,6 @@ function pinnedVersionFromOutput(engine: 'codex' | 'pi', output: string): string
   return match?.[1];
 }
 
-function safeCodexAuthMode(value: unknown): 'chatgpt' | 'api_key' | 'workload_identity' | 'other' | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.toLowerCase();
-  if (normalized.includes('chatgpt') || normalized.includes('oauth')) return 'chatgpt';
-  if (normalized.includes('api')) return 'api_key';
-  if (normalized.includes('workload')) return 'workload_identity';
-  return 'other';
-}
-
 function safePiAuthType(value: unknown): 'oauth' | 'api_key' | undefined {
   // Pi's documented authType is already the privacy-reduced fact.  In
   // particular, oauth is not a provider name and must never be rewritten into
@@ -134,13 +125,15 @@ function safePiAuthType(value: unknown): 'oauth' | 'api_key' | undefined {
 function piAuthResponse(
   value: unknown,
   provider: string,
-): { readonly status: 'ready' | 'not_ready'; readonly authType?: 'oauth' | 'api_key' } | undefined {
+): { readonly status: 'ready' | 'not_ready' | 'invalid'; readonly authType?: 'oauth' | 'api_key' } | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (record.status !== 'ready' && record.status !== 'not_ready') return undefined;
+  if (!hasOnlyKeys(record, ['status', 'provider', 'reason', 'authType'])) return undefined;
+  if (record.status !== 'ready' && record.status !== 'not_ready' && record.status !== 'invalid') return undefined;
   // Provider is validated at the Worker boundary but deliberately discarded:
   // it is a routing input, not a persisted readiness identity fact.
   if (record.provider !== provider) return undefined;
+  if (record.reason !== undefined && !PI_AUTH_REASONS.has(record.reason)) return undefined;
   const authType = record.authType === undefined ? undefined : safePiAuthType(record.authType);
   if (record.authType !== undefined && authType === undefined) return undefined;
   // The pinned ready shape includes a supported auth type. A missing one cannot
@@ -151,15 +144,57 @@ function piAuthResponse(
 
 function codexAccountResponse(
   value: unknown,
-): { readonly authenticated: boolean; readonly authMode?: 'chatgpt' | 'api_key' | 'workload_identity' | 'other' } | undefined {
+): { readonly authenticated: boolean; readonly authMode?: 'chatgpt' | 'api_key' | 'workload_identity' } | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
+  if (!hasOnlyKeys(record, ['account', 'requiresOpenaiAuth'])) return undefined;
   // `requiresOpenaiAuth` is part of the pinned account/read response schema.
   if (typeof record.requiresOpenaiAuth !== 'boolean' || !Object.hasOwn(record, 'account')) return undefined;
   if (record.account === null) return { authenticated: false };
   if (typeof record.account !== 'object' || Array.isArray(record.account)) return undefined;
-  const type = safeCodexAuthMode((record.account as Record<string, unknown>).type);
-  return type === undefined ? undefined : { authenticated: true, authMode: type };
+  const account = record.account as Record<string, unknown>;
+  switch (account.type) {
+    case 'apiKey':
+      return hasOnlyKeys(account, ['type'])
+        ? { authenticated: true, authMode: 'api_key' }
+        : undefined;
+    case 'chatgpt':
+      if (
+        !hasOnlyKeys(account, ['type', 'email', 'planType']) ||
+        !Object.hasOwn(account, 'email') ||
+        !Object.hasOwn(account, 'planType') ||
+        (account.email !== null && typeof account.email !== 'string') ||
+        !CODEX_PLAN_TYPES.has(account.planType)
+      ) return undefined;
+      return { authenticated: true, authMode: 'chatgpt' };
+    case 'amazonBedrock':
+      return hasOnlyKeys(account, ['type', 'usesCodexManagedCredentials']) &&
+        typeof account.usesCodexManagedCredentials === 'boolean'
+        ? { authenticated: true, authMode: 'workload_identity' }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+const PI_AUTH_REASONS = new Set<unknown>([
+  'provider_not_found',
+  'credentials_not_configured',
+  'credential_not_available',
+  'invalid_state',
+]);
+
+const CODEX_PLAN_TYPES = new Set<unknown>([
+  'free', 'go', 'plus', 'pro', 'prolite', 'team',
+  'self_serve_business_prolite', 'self_serve_business_usage_based',
+  'business', 'ent26', 'enterprise_cbp_automation',
+  'enterprise_cbp_usage_based', 'enterprise', 'edu', 'edu_plus', 'edu_pro',
+  'unknown',
+]);
+
+function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Object.keys(record);
+  return keys.every((key) => allowed.includes(key));
 }
 
 function prohibitedCredentialText(value: string): boolean {

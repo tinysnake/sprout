@@ -45,6 +45,7 @@ try {
   const service = new EnvironmentEnrollmentService({
     enrollments,
     readiness,
+    currentConnectionEpoch: () => 1,
     clock: () => 1_000,
     idFactory: () => 'enroll-probe',
   });
@@ -130,14 +131,16 @@ try {
   check('approval grants exactly the requested capability', approved?.capabilityPermissions['agent-run'] === true);
 
   // 6. Facts stay independent: an engine problem does not change enrollment.
-  await service.observeReadiness('enroll-probe', {
+  const observedReadiness = {
     connection: { state: 'online', lastConfirmedAt: 2_000 },
     compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
     engines: [
       { engine: 'codex', installed: true, readiness: 'login-required', required: true, models: { state: 'unknown', models: [] } },
       { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-probe'] } },
     ],
-  });
+  } as const;
+  const authority = { enrollmentId: 'enroll-probe', connectionEpoch: 1, isCurrent: () => true } as const;
+  await service.observeReadiness('enroll-probe', observedReadiness, authority);
   const assembled = await service.readiness('enroll-probe');
   check('enrollment remains approved while an engine needs login', assembled.readiness.enrollmentStatus === 'approved');
   check('connection is its own fact', assembled.readiness.connection.state === 'online');
@@ -237,7 +240,7 @@ try {
   check('durable state keeps the decisive reset reason', durableText.includes('rotate') === true);
 
   // 11. Marked free text is sanitized before it is retained.
-  await service.recordProbe('enroll-probe', {
+  await service.observeReadiness('enroll-probe', observedReadiness, authority, {
     at: 3_000,
     latencyMs: 5,
     protocolOk: true,
