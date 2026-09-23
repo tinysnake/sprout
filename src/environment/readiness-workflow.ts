@@ -116,6 +116,7 @@ export class EnvironmentReadinessWorkflow {
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
   readonly #resolveRequirements: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
+  readonly #hasRequirementResolver: boolean;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
   readonly #collectingBootstrap = new Set<string>();
   readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
@@ -125,7 +126,8 @@ export class EnvironmentReadinessWorkflow {
     this.#workerGateway = options.workerGateway;
     this.#environment = options.environment;
     this.#refreshEnvironmentCatalog = options.refreshEnvironmentCatalog;
-    this.#resolveRequirements = options.resolveRequirements ?? (() => ({}));
+    this.#resolveRequirements = options.resolveRequirements ?? (() => ({ requiredModels: [] }));
+    this.#hasRequirementResolver = options.resolveRequirements !== undefined;
     this.#scheduleRetry =
       options.scheduleRetry ??
       ((run, delayMs) => {
@@ -260,7 +262,8 @@ export class EnvironmentReadinessWorkflow {
     const requirements = await this.#resolveRequirements();
     const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
     if (!ticket) throw new Error('the Environment Worker is offline');
-    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId, ticket.requirements);
+    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
+      this.#hasRequirementResolver ? ticket.requirements : undefined);
     if (rawResult === undefined) throw new Error('the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {

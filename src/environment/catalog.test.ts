@@ -50,17 +50,22 @@ test('#128: Pi-only and multi-engine targets bind applicable measured evidence, 
     requirements: scope,
     observed: { ...base, requirements: scope, engines },
   });
-  const codex = { ...base.engines[0]!, modelIdPresent: true, targetModels: ['codex-model'], requirementRevision: both.revision! };
-  const piEngine = { ...codex, engine: 'pi', models: { state: 'available' as const, models: ['pi-model'] }, targetModels: ['pi-model'] };
+  const codex = { ...base.engines[0]!, modelIdPresent: true, targetModels: ['codex-model'], requirementRevision: both.revisionsByEngine!.codex! };
+  const piEngine = { ...codex, engine: 'pi', models: { state: 'available' as const, models: ['pi-model'] }, targetModels: ['pi-model'], requirementRevision: both.revisionsByEngine!.pi! };
   assert.equal(projectCatalogEntry(evidence(both, [codex])).eligible, false, 'missing applicable engine blocks');
   assert.equal(projectCatalogEntry(evidence(both, [codex, { ...piEngine, targetModels: [] }])).eligible, false, 'Pi auth alone cannot prove a local model');
   assert.equal(projectCatalogEntry(evidence(both, [codex, piEngine])).eligible, true);
+  const piChanged = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'new-pi-model' }]);
+  assert.equal(projectCatalogEntry({ ...evidence(both, [codex, piEngine]), requirements: piChanged }).eligible, false,
+    'the changed Pi target remains blocking');
+  assert.equal(piChanged.revisionsByEngine?.codex, both.revisionsByEngine?.codex,
+    'independent Codex proof survives a Pi target edit');
   assert.equal(projectCatalogEntry(evidence(both, [{ ...codex, targetModels: [] }, piEngine])).eligible, false, 'aggregate available cannot bypass target proof');
   const changed = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'pi-model' }], [{ id: 'agent', configurationVersion: 2 }]);
   assert.equal(projectCatalogEntry({ ...evidence(both, [codex, piEngine]), requirements: changed }).eligible, false, 'same targets with a new revision invalidate');
   const unrelated = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'pi-model' }]);
   assert.equal(unrelated.revision, both.revision);
-  assert.equal(projectCatalogEntry(evidence(pi, [{ ...piEngine, requirementRevision: pi.revision! }])).eligible, true);
+  assert.equal(projectCatalogEntry(evidence(pi, [{ ...piEngine, requirementRevision: pi.revisionsByEngine!.pi! }])).eligible, true);
 });
 
 function enrollment(overrides: {

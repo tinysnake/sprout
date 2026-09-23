@@ -208,8 +208,9 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
         (input.requirements === undefined
           ? engine.models.state === 'available'
           : targetEvidenceSatisfiesRequirements(engine, input.requirements) &&
-            JSON.stringify(authoritativeObserved?.requirements?.modelsByEngine) === JSON.stringify(input.requirements.modelsByEngine) &&
-            authoritativeObserved?.requirements?.revision === input.requirements.revision &&
+            JSON.stringify(authoritativeObserved?.requirements?.modelsByEngine?.[engine.engine]) === JSON.stringify(input.requirements.modelsByEngine?.[engine.engine]) &&
+            (authoritativeObserved?.requirements?.revisionsByEngine?.[engine.engine] ?? authoritativeObserved?.requirements?.revision) ===
+              (input.requirements.revisionsByEngine?.[engine.engine] ?? input.requirements.revision) &&
             engine.models.state === 'available'),
     );
   const eligible =

@@ -40,7 +40,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
     assert.ok(await store.commitObservation('env-1', old, authority));
     assert.equal((await project()).eligible, false, 'old aggregate available lacks measured targets');
     const fresh = createReadinessObservation({ protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
-      targetModels: ['target'], requirementRevision: requirements.revision }], probe }, scope);
+      targetModels: ['target'], requirementRevision: requirements.revisionsByEngine!.codex }], probe }, scope);
     assert.ok(fresh);
     assert.ok(await store.commitObservation('env-1', fresh, authority));
     assert.equal((await project()).eligible, true);

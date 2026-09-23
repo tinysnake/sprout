@@ -292,7 +292,7 @@ test('#128: Worker measures only applicable engine targets and leaves Pi model s
   assert.deepEqual(result.readiness.engines.find((engine) => engine.engine === 'codex')?.targetModels, ['codex-target']);
   assert.deepEqual(result.readiness.engines.find((engine) => engine.engine === 'pi')?.targetModels, []);
   assert.equal(result.readiness.engines.find((engine) => engine.engine === 'pi')?.modelIdPresent, undefined);
-  assert.equal(result.readiness.engines[0]?.requirementRevision, requirements.revision);
+  assert.equal(result.readiness.engines[0]?.requirementRevision, requirements.revisionsByEngine?.[result.readiness.engines[0]!.engine]);
 });
 
 test('a Worker-declared provider or account identity is dropped at the readiness ingress boundary (#114 C6, R118-BOUNDARY-003)', async () => {

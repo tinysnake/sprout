@@ -303,7 +303,7 @@ async function probePi(
     // The pinned Pi auth contract does not expose a local model catalog.
     // Keep requested targets visible but never claim they were measured.
     targetModels: [],
-    ...(options.requirements?.revision !== undefined ? { requirementRevision: options.requirements.revision } : {}),
+    ...(options.requirements?.revisionsByEngine?.pi ?? options.requirements?.revision ? { requirementRevision: (options.requirements.revisionsByEngine?.pi ?? options.requirements.revision)! } : {}),
     authenticated: ready,
     ...(authType !== undefined ? { authType } : {}),
     probedAt: at,
@@ -360,7 +360,7 @@ async function probeCodex(
     ...(parsed.authMode !== undefined ? { authMode: parsed.authMode } : {}),
     ...(modelIdPresent !== undefined ? { modelIdPresent } : {}),
     targetModels: modelIdPresent !== undefined ? [...requiredModels] : [],
-    ...(options.requirements?.revision !== undefined ? { requirementRevision: options.requirements.revision } : {}),
+    ...(options.requirements?.revisionsByEngine?.codex ?? options.requirements?.revision ? { requirementRevision: (options.requirements.revisionsByEngine?.codex ?? options.requirements.revision)! } : {}),
     probedAt: at,
     probeExitCode: account.exitCode,
     source: 'codex-account-read',

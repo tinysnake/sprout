@@ -57,7 +57,7 @@ function validateRequirementScope(value: unknown): ReadinessRequirementScope | u
   if (typeof value !== 'object' || value === null || Array.isArray(value) ||
       Object.getPrototypeOf(value) !== Object.prototype) return undefined;
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const allowed = ['revision', 'requiredEngines', 'requiredModels', 'modelsByEngine'];
+  const allowed = ['revision', 'revisionsByEngine', 'requiredEngines', 'requiredModels', 'modelsByEngine'];
   if (Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))) return undefined;
   const field = (key: string): unknown => descriptors[key]?.value;
   if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) return undefined;
@@ -78,11 +78,16 @@ function validateRequirementScope(value: unknown): ReadinessRequirementScope | u
   };
   if (!validList('requiredEngines') || !validList('requiredModels')) return undefined;
   const mapping = field('modelsByEngine');
+  const revisions = field('revisionsByEngine');
+  if (revisions !== undefined && (typeof revisions !== 'object' || revisions === null || Array.isArray(revisions) ||
+      Object.entries(revisions).some(([engine, value]) => !/^[A-Za-z0-9_.-]{1,128}$/.test(engine) ||
+        typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)))) return undefined;
   if (mapping !== undefined && (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping) ||
       Object.entries(mapping).some(([engine, models]) => !/^[A-Za-z0-9_.-]{1,128}$/.test(engine) ||
         !Array.isArray(models) || models.some((model) => typeof model !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(model))))) return undefined;
   return {
     ...('revision' in descriptors ? { revision: revision as string } : {}),
+    ...(revisions !== undefined ? { revisionsByEngine: { ...revisions as Record<string, string> } } : {}),
     ...('requiredEngines' in descriptors ? { requiredEngines: [...field('requiredEngines') as string[]] } : {}),
     ...('requiredModels' in descriptors ? { requiredModels: [...field('requiredModels') as string[]] } : {}),
     ...(mapping !== undefined ? { modelsByEngine: Object.fromEntries(Object.entries(mapping).map(([engine, models]) => [engine, [...models as string[]]])) } : {}),
