@@ -33,6 +33,7 @@ import { WorkerProofError } from '../environment/worker-proof.ts';
 import { decideWorkerTransport, type WorkerTransportFacts } from '../environment/worker-transport.ts';
 import type { WorkerConnectionEpoch } from '../environment/worker-epoch.ts';
 import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
+import type { WorkerConnectionEpochStore } from '../environment/worker-epoch-store.ts';
 import { protocolCompatibility, type ProtocolVersionRange } from '../environment/readiness.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
 import { sanitizeProtocolVersion } from '../environment/privacy.ts';
@@ -54,7 +55,8 @@ export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 export interface WorkerGatewayOptions {
   readonly enrollments: EnvironmentEnrollmentService;
-  readonly epochs?: WorkerConnectionRegistry;
+  /** Durable high-water allocation; the mutable registry remains gateway-owned. */
+  readonly epochStore?: WorkerConnectionEpochStore;
   /**
    * Core-owned configured work-model targets. Captured at acceptance and sent
    * only over the authenticated JSON-RPC channel; a browser never supplies
@@ -172,14 +174,22 @@ export class WorkerGateway {
 
   constructor(options: WorkerGatewayOptions) {
     this.#enrollments = options.enrollments;
-    this.#epochs = options.epochs ?? new WorkerConnectionRegistry();
+    this.#epochs = new WorkerConnectionRegistry({
+      ...(options.epochStore !== undefined ? { store: options.epochStore } : {}),
+    });
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS;
     this.#supportedProtocol = options.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL;
     this.#requiredModels = options.requiredModels ?? (() => []);
   }
 
-  get epochs(): WorkerConnectionRegistry {
-    return this.#epochs;
+  /** The current accepted generation number, without exposing its mutable issuer. */
+  currentConnectionEpoch(enrollmentId: string): number | undefined {
+    return this.#epochs.current(enrollmentId)?.epoch;
+  }
+
+  /** Whether a connection still owns its accepted generation. */
+  isCurrentConnection(enrollmentId: string, connectionId: string): boolean {
+    return this.#epochs.isCurrent(enrollmentId, connectionId);
   }
 
   /**

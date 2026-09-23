@@ -66,7 +66,7 @@ async function harness(): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
-    currentConnectionEpoch: (enrollmentId) => gateways.current?.epochs.current(enrollmentId)?.epoch,
+    currentConnectionEpoch: (enrollmentId) => gateways.current?.currentConnectionEpoch(enrollmentId),
     onAuthorityLost: (enrollmentId) => gateways.current?.invalidateEnrollment(enrollmentId),
     verifyObservationAuthority: (authority, scope) => gateways.current?.verifyObservationAuthority(authority, scope),
     idFactory: () => 'enroll-1',
@@ -99,7 +99,6 @@ async function harness(): Promise<Harness> {
   const workflow = new EnvironmentReadinessWorkflow({
     enrollments,
     workerGateway: gateway,
-    workerEpochs: gateway.epochs,
     environment: port,
     refreshEnvironmentCatalog: async () => undefined,
   });
@@ -406,7 +405,7 @@ test('revoke closes the real channel and no GET/POST fact survives the lifecycle
   const connection = h.gateway.liveFor(INSTANCE_ID)!;
   await h.enrollments.revoke('enroll-1', 'retired');
   assert.equal(h.gateway.liveFor(INSTANCE_ID), undefined, 'the accepted channel is removed synchronously');
-  assert.equal(h.gateway.epochs.current('enroll-1'), undefined, 'the epoch is invalidated');
+  assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined, 'the epoch is invalidated');
   assert.equal(connection.epoch.epoch, 1);
 
   const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
@@ -434,7 +433,7 @@ test('reset over the real gateway invalidates the epoch and returns no current f
 
   await h.enrollments.reset('enroll-1', 'rotate');
   assert.equal(h.gateway.liveFor(INSTANCE_ID), undefined);
-  assert.equal(h.gateway.epochs.current('enroll-1'), undefined);
+  assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
 
   const body = (await (await get(h, '/api/environments/enrollments/enroll-1/readiness')).json()) as {
     readiness: { enrollmentStatus: string; probe?: unknown; connection: { state: string } };

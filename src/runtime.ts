@@ -81,7 +81,6 @@ import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
-import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
 import { workSafetyFromRecovery } from './environment/recovery.ts';
@@ -338,12 +337,6 @@ export interface SproutRuntimeOptions {
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
-  /**
-   * Non-production test seam for isolated lower-level store contracts. Runtime
-   * never exposes this verifier and production composition always replaces it
-   * with the authenticated WorkerGateway verifier.
-   */
-  readonly testOnlyObservationAuthorityVerifier?: import('./environment/readiness-authority.ts').ObservationAuthorityVerifier;
 }
 
 /**
@@ -893,18 +886,16 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
 
     const staticRoot = options.staticRoot ?? join(projectRoot, 'web', 'dist');
     const openedStoresForCatalog = stores;
-    // Epoch authority exists before the readiness service: every write and
-    // every current projection is resolved against this same registry.
-    const workerEpochs = new WorkerConnectionRegistry({ store: stores.workerConnectionEpochs });
     // Environment enrollment and readiness (#87). It reads the durable enrollment
     // and observed-readiness stores and projects work safety from the same lease
     // registry the run and Task domains use, so the facts never diverge.
     let invalidateWorkerAuthority: (enrollmentId: string) => void = () => undefined;
     let verifyWorkerObservationAuthority: import('./environment/readiness-authority.ts').ObservationAuthorityVerifier = () => undefined;
+    let currentWorkerConnectionEpoch: (enrollmentId: string) => number | undefined = () => undefined;
     const enrollmentOptions: EnvironmentEnrollmentServiceOptions = {
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
-      currentConnectionEpoch: (enrollmentId) => workerEpochs.current(enrollmentId)?.epoch,
+      currentConnectionEpoch: (enrollmentId) => currentWorkerConnectionEpoch(enrollmentId),
       // Revoke/reset fences the accepted transport before its durable lifecycle
       // decision is published. The assignment is completed before any caller
       // can invoke a lifecycle mutation; the indirection keeps composition's
@@ -961,7 +952,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
             pool.leases(),
             openRecovery,
           ),
-          currentEpoch: workerEpochs.current(enrollment.id)?.epoch,
+          currentEpoch: currentWorkerConnectionEpoch(enrollment.id),
           requiredEngines: [engineId],
           supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
           now,
@@ -1025,11 +1016,12 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // The enrollment-backed outbound Worker gateway (#115, ADR-0012). A host
     // Worker claims its pending enrollment and initiates one authenticated
     // WS/WSS connection carrying the existing neutral Worker JSON-RPC under a
-    // monotonic connection epoch. The gateway owns exactly one registry shared
-    // with the runtime, so the catalog sees the same epoch the gateway accepted.
+    // monotonic connection epoch. The gateway exclusively owns the mutable
+    // registry; runtime projections consume only its read-only current-epoch
+    // query, so composition cannot issue an accepted epoch itself.
     const workerGateway = new WorkerGateway({
       enrollments,
-      epochs: workerEpochs,
+      epochStore: stores.workerConnectionEpochs,
       // Agent configuration is the core-owned declaration of the model a
       // future run will target. Codex is the sole engine with a safe local
       // catalog probe; do not feed a Pi-only target to Codex and claim a false
@@ -1044,8 +1036,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     });
     invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
     verifyWorkerObservationAuthority = (authority, scope) =>
-      options.testOnlyObservationAuthorityVerifier?.(authority, scope) ??
       workerGateway.verifyObservationAuthority(authority, scope);
+    currentWorkerConnectionEpoch = (enrollmentId) =>
+      workerGateway.currentConnectionEpoch(enrollmentId);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1063,7 +1056,6 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     const readinessWorkflow = new EnvironmentReadinessWorkflow({
       enrollments,
       workerGateway,
-      workerEpochs,
       environment: enrollmentEnvironment,
       refreshEnvironmentCatalog,
     });

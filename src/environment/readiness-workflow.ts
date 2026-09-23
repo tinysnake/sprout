@@ -26,8 +26,8 @@
  * probes are trigger modes of this one workflow. Target presence changes only
  * which collection command is used, never the validation or authority path.
  *
- * The Module owns no transport and no store. The gateway, the epoch registry,
- * the Worker collector, and the enrollment service arrive as explicit
+ * The Module owns no transport and no store. The gateway, the Worker collector,
+ * and the enrollment service arrive as explicit
  * dependencies, so the same logic runs in production and in the accepted-Worker
  * acceptance harness. It supersedes the former Worker-layer
  * `createWorkerProbeRequester`, whose explicit-probe orchestration is now the
@@ -79,11 +79,6 @@ export interface ReadinessLiveGateway {
   authorizeObservation?(environmentInstanceId: string): ReadinessObservationAuthority | undefined;
 }
 
-/** The monotonic epoch authority, so a replaced connection is not current. */
-export interface ReadinessEpochRegistry {
-  isCurrent(enrollmentId: string, connectionId: string): boolean;
-}
-
 /** The neutral Worker fact/probe collector over an accepted channel. */
 export interface ReadinessWorkerCollector {
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
@@ -93,7 +88,6 @@ export interface ReadinessWorkerCollector {
 export interface EnvironmentReadinessWorkflowOptions {
   readonly enrollments: EnvironmentEnrollmentService;
   readonly workerGateway: ReadinessLiveGateway;
-  readonly workerEpochs: ReadinessEpochRegistry;
   readonly environment: ReadinessWorkerCollector;
   /** Re-project the catalog after a committed observation. */
   readonly refreshEnvironmentCatalog: () => Promise<unknown>;
@@ -116,7 +110,6 @@ type CollectionOutcome =
 export class EnvironmentReadinessWorkflow {
   readonly #enrollments: EnvironmentEnrollmentService;
   readonly #workerGateway: ReadinessLiveGateway;
-  readonly #workerEpochs: ReadinessEpochRegistry;
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
@@ -124,7 +117,6 @@ export class EnvironmentReadinessWorkflow {
   constructor(options: EnvironmentReadinessWorkflowOptions) {
     this.#enrollments = options.enrollments;
     this.#workerGateway = options.workerGateway;
-    this.#workerEpochs = options.workerEpochs;
     this.#environment = options.environment;
     this.#refreshEnvironmentCatalog = options.refreshEnvironmentCatalog;
     this.#scheduleRetry =
@@ -274,7 +266,7 @@ export class EnvironmentReadinessWorkflow {
   /** Whether one accepted connection still owns the current instance authority. */
   #isCurrent(enrollmentId: string, environmentInstanceId: string, connectionId: string): boolean {
     return (
-      this.#workerEpochs.isCurrent(enrollmentId, connectionId) &&
+      this.#workerGateway.liveFor(environmentInstanceId)?.enrollment.id === enrollmentId &&
       this.#workerGateway.liveFor(environmentInstanceId)?.epoch.connectionId === connectionId
     );
   }

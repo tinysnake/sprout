@@ -121,7 +121,7 @@ test('a revoke landing during the acceptance window refuses the connection inste
     const result = await connecting;
     assert.ok(result instanceof Error, 'the connection is refused');
     assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
-    assert.equal(h.gateway.epochs.current('enroll-1'), undefined);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
     const durable = await h.enrollments.get('enroll-1');
     assert.equal(durable?.status, 'revoked', 'the revoke is the durable authority');
   } finally {
@@ -221,7 +221,7 @@ test('an approved Worker is accepted with a monotonic epoch and its identity is 
     const connection = await connect(h, '', key.path);
     assert.equal(connection.environmentInstanceId, 'mac-mini-1');
     assert.equal(connection.epoch, 1);
-    assert.equal(h.gateway.epochs.isCurrent('enroll-1', connection.connectionId), true);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', connection.connectionId), true);
     // The port exposes the accepted channel as the environment's engines seam.
     const live = h.gateway.liveFor('mac-mini-1');
     assert.notEqual(live, undefined);
@@ -240,12 +240,12 @@ test('revocation synchronously closes the accepted channel and invalidates its e
     await claimProveApprove(h, key.path, claim);
     const connection = await connect(h, '', key.path);
     assert.ok(h.gateway.liveFor('mac-mini-1'));
-    assert.equal(h.gateway.epochs.current('enroll-1')?.connectionId, connection.connectionId);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), connection.epoch);
 
     await h.enrollments.revoke('enroll-1', 'retired');
 
     assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
-    assert.equal(h.gateway.epochs.current('enroll-1'), undefined);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
   } finally {
     key.cleanup();
     await h.close();
@@ -275,11 +275,8 @@ test('a stale connection loses its epoch when a newer one is accepted', async ()
     const first = await connect(h, '', key.path);
     const second = await connect(h, '', key.path);
     assert.ok(second.epoch > first.epoch);
-    assert.deepEqual(h.gateway.epochs.decide('enroll-1', first.connectionId), {
-      accepted: false,
-      reason: 'superseded',
-    });
-    assert.equal(h.gateway.epochs.isCurrent('enroll-1', second.connectionId), true);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', first.connectionId), false);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', second.connectionId), true);
     first.close();
     second.close();
   } finally {
@@ -309,7 +306,7 @@ test('the neutral Worker JSON-RPC and worker/info cross the accepted bidirection
     assert.equal(connected.info.environmentInstanceId, 'mac-mini-1');
     // The additive `worker/info` readiness contract crosses the same channel.
     assert.equal(connected.info.readiness?.protocolVersion, WORKER_PROTOCOL_VERSION);
-    assert.equal(connection.epoch, h.gateway.epochs.current('enroll-1')?.epoch);
+    assert.equal(connection.epoch, h.gateway.currentConnectionEpoch('enroll-1'));
     await worker.shutdown();
     connection.close();
   } finally {
@@ -363,11 +360,8 @@ test('a duplicate live process with the same key replaces the epoch and invalida
     const second = await connect(h, '', key.path);
     // The second live process with the same identity is accepted as a newer
     // epoch, and the first is deterministically refused as superseded.
-    assert.equal(h.gateway.epochs.isCurrent('enroll-1', second.connectionId), true);
-    assert.deepEqual(h.gateway.epochs.decide('enroll-1', first.connectionId), {
-      accepted: false,
-      reason: 'superseded',
-    });
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', second.connectionId), true);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', first.connectionId), false);
     first.close();
     second.close();
   } finally {
@@ -405,8 +399,8 @@ test('a legacy duplicate enrollment cannot retain a second live transport for on
     const second = await connectEnrollment(h, 'enroll-2', '', secondKey.path);
     assert.equal(second.epoch, 1, 'a legacy sibling can have its own numeric epoch namespace');
     assert.equal(h.gateway.liveFor('mac-mini-1')?.enrollment.id, 'enroll-2');
-    assert.equal(h.gateway.epochs.isCurrent('enroll-1', first.connectionId), false);
-    assert.equal(h.gateway.epochs.isCurrent('enroll-2', second.connectionId), true);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', first.connectionId), false);
+    assert.equal(h.gateway.isCurrentConnection('enroll-2', second.connectionId), true);
     first.close();
     second.close();
   } finally {
@@ -544,7 +538,7 @@ test('channel loss invalidates the epoch, and a reconnect receives a newer one',
     // Channel loss: the Worker drops the socket.
     first.close();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(h.gateway.epochs.isCurrent('enroll-1', firstId), false);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', firstId), false);
     // A same-identity reconnect is accepted with a strictly newer epoch.
     const second = await connect(h, '', key.path);
     assert.ok(second.epoch > first.epoch);
@@ -762,7 +756,7 @@ test('a delayed older epoch cannot become live after a newer epoch wins the barr
     first.write({ type: 'worker/ready' });
     const afterFirst = await first.next();
     assert.equal(afterFirst.type, 'worker/refused', 'the older epoch is refused after the barrier');
-    assert.equal(h.gateway.epochs.current('enroll-1')?.epoch, secondEpoch);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), secondEpoch);
     assert.equal(h.gateway.liveFor('mac-mini-1')?.epoch.epoch, secondEpoch, 'the newer epoch stays live');
     first.close();
     second.close();
