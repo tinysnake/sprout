@@ -62,7 +62,7 @@ export interface WorkerGatewayOptions {
    * only over the authenticated JSON-RPC channel; a browser never supplies
    * these probe inputs.
    */
-  readonly requiredModels?: () => readonly string[];
+  readonly requiredModels?: () => readonly string[] | Promise<readonly string[]>;
   /** Milliseconds before an incomplete handshake is refused. */
   readonly handshakeTimeoutMs?: number;
   /** The Worker protocol range this core supports. */
@@ -125,7 +125,7 @@ export class WorkerGateway {
   readonly #epochs: WorkerConnectionRegistry;
   readonly #handshakeTimeoutMs: number;
   readonly #supportedProtocol: ProtocolVersionRange;
-  readonly #requiredModels: () => readonly string[];
+  readonly #requiredModels: () => readonly string[] | Promise<readonly string[]>;
   /**
    * Live accepted connections per enrollment. Normal enrollment creation makes
    * this a one-to-one relation with an Environment instance; the instance id is
@@ -514,6 +514,7 @@ export class WorkerGateway {
         });
       },
     });
+    const requiredModels = [...new Set((await this.#requiredModels()).filter((model): model is string => typeof model === 'string' && model !== ''))];
     this.#live.set(enrollmentId, {
       connectionId: epoch.connectionId,
       environmentInstanceId: outcome.enrollment.environmentInstanceId,
@@ -550,7 +551,7 @@ export class WorkerGateway {
       accepted: true,
       enrollment: outcome.enrollment,
       epoch,
-      requiredModels: [...new Set(this.#requiredModels().filter((model): model is string => typeof model === 'string' && model !== ''))],
+      requiredModels,
       transport,
       authorizeObservation,
       onChannelClosed: (listener) => {

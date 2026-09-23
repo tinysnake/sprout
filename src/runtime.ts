@@ -466,7 +466,10 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           effectiveWorkOptions(agent).map((option) => ({ ...option, id: agent.id }))),
         ...durable.flatMap((agent) => currentOptions(agent).map((option) => ({ ...option, id: agent.id }))),
       ];
-      return readinessRequirements(options, durable.map((agent) => ({ id: agent.id, configurationVersion: agent.configuration.currentVersion })));
+      // A version bump can edit instructions or effort without changing the
+      // model a Worker must measure. Applicability is the target set, not the
+      // Agent document's unrelated revision.
+      return readinessRequirements(options);
     };
     // The bridge between the M2 Project authority and the M1 collaboration
     // machinery (#92, F1): authority Projects are projected into the registry
@@ -1041,12 +1044,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // catalog probe; do not feed a Pi-only target to Codex and claim a false
       // target absence. The Worker may only compare these locally and must not
       // infer account entitlement.
-      requiredModels: () => [...new Set(
-        agents.list().flatMap((agent) => effectiveWorkOptions(agent)
-          .filter((option) => option.engine === 'codex')
-          .map((option) => option.workModel))
-          .filter((model) => model !== ''),
-      )],
+      requiredModels: async () => (await currentRequirements()).modelsByEngine?.codex ?? [],
     });
     invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
     verifyWorkerObservationAuthority = (authority, scope) =>

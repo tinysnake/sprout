@@ -141,7 +141,7 @@ export class EnvironmentReadinessWorkflow {
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(acceptance.enrollment.environmentInstanceId);
     if (!authority || !authority.isCurrent()) return;
-    const reservation = Promise.resolve(this.#resolveRequirements()).then((requirements) =>
+    const reservation = Promise.resolve(this.#hasRequirementResolver ? this.#resolveRequirements() : { requiredModels: acceptance.requiredModels }).then((requirements) =>
       this.#enrollments.issueReadinessAttempt(
         acceptance.enrollment.id, authority, true, requirements.requiredModels ?? [], requirements,
       )).catch(() => false as const);
@@ -172,7 +172,7 @@ export class EnvironmentReadinessWorkflow {
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
     if (authority === undefined || !authority.isCurrent()) return;
-    const requirements = await this.#resolveRequirements();
+    const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: acceptance.requiredModels };
     const mode: CollectionMode =
       this.#targeted(requirements.requiredModels ?? []) ? 'target-probe' : 'worker-info';
     const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
@@ -259,7 +259,7 @@ export class EnvironmentReadinessWorkflow {
     const reservation = this.#acceptanceReservations.get(authority.connectionId);
     if (reservation) await reservation;
     if (!authority.isCurrent()) throw new Error('the Environment Worker is offline');
-    const requirements = await this.#resolveRequirements();
+    const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: live?.requiredModels ?? [] };
     const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
     if (!ticket) throw new Error('the Environment Worker is offline');
     const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,

@@ -2772,6 +2772,37 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
  * readiness seeding stands in for it.
  */
 
+for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#128 ${backend}: durable Agent edits bind each fresh authenticated probe to current targets`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-durable-targets-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'old-target' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const received: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        received.push(params);
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'target read' };
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+      } });
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+        method: 'POST', headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}',
+      });
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(received.at(-1)?.requiredModels, ['old-target']);
+      const created = await h.runtime.agentService.create({ id: 'scout', displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'new-target', effort: 'medium' }] });
+      assert.equal(created.id, 'scout');
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(received.at(-1)?.requiredModels, ['new-target']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false,
+        'no target-specific available evidence may be inferred from an empty probe');
+    } finally { await h.close(); }
+  });
+}
+
 /** Compose one accepted enrollment + Worker for the #124 acceptance scenarios. */
 async function readinessWorkflowHarness(options: {
   readonly backend: 'memory' | 'sqlite';
@@ -3664,7 +3695,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
       const authority = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
       assert.ok(authority);
-      const result = { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+      const result = { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe };
       const store = h.runtime.stores.environmentReadiness;
       const before = await store.getCurrentObservation(INSTANCE_ID);
       const history = await store.listObservations(INSTANCE_ID);
