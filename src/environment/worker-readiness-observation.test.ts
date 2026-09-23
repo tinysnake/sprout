@@ -435,9 +435,48 @@ test('a Worker-declared provider/account identity never reaches the durable read
   assert.equal(stored?.engines[0]?.source, undefined);
 });
 
-test('direct service observations reject every non-worker probe source before durable storage (R118-BOUNDARY-003)', async () => {
+for (const missing of ['omitted', 'undefined'] as const) {
+  test(`direct service rejects ${missing} embedded probe before commit (R118-API-002)`, async (t) => {
+    const { service, store } = await enrolled();
+    const commit = t.mock.method(store, 'commitObservation');
+    const { probe: _probe, ...facts } = startupReadiness();
+    const readiness = missing === 'omitted' ? facts : { ...facts, probe: undefined };
+
+    // Explicit undefined is untyped caller input under exactOptionalPropertyTypes.
+    const recorded = await service.observeWorkerReadiness('enroll-1', readiness as never, {
+      enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true,
+    });
+
+    assert.equal(recorded, false);
+    assert.equal(commit.mock.callCount(), 0, 'incomplete observations never reach the mutation boundary');
+    assert.equal(await store.getReadiness('env-1'), undefined);
+    assert.deepEqual(await store.listProbes('env-1'), []);
+    const projected = await service.readiness('enroll-1');
+    assert.equal(projected.readiness.connection.state, 'never-connected');
+    assert.deepEqual(projected.probes, []);
+  });
+}
+
+test('direct service rejects malformed embedded probes before commit (R118-API-002)', async (t) => {
+  for (const probe of [null, {}, { ...startupReadiness().probe, latencyMs: -1 }]) {
+    const { service, store } = await enrolled();
+    const commit = t.mock.method(store, 'commitObservation');
+    const recorded = await service.observeWorkerReadiness(
+      'enroll-1',
+      { ...startupReadiness(), probe } as never,
+      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+    );
+    assert.equal(recorded, false);
+    assert.equal(commit.mock.callCount(), 0);
+    assert.equal(await store.getReadiness('env-1'), undefined);
+    assert.deepEqual(await store.listProbes('env-1'), []);
+  }
+});
+
+test('direct service observations reject every non-worker probe source before durable storage (R118-BOUNDARY-003)', async (t) => {
   for (const source of ['provider-account', 'openai-codex', 'unknown']) {
     const { service, store } = await enrolled();
+    const commit = t.mock.method(store, 'commitObservation');
     const readiness = {
       ...startupReadiness(),
       probe: { ...startupReadiness().probe, source },
@@ -451,6 +490,8 @@ test('direct service observations reject every non-worker probe source before du
       { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
     );
     assert.equal(recorded, false);
+    assert.equal(commit.mock.callCount(), 0);
+    assert.equal(await store.getReadiness('env-1'), undefined);
     const durable = await store.listProbes('env-1');
     assert.equal(durable.length, 0, `${source} must not become durable provenance`);
     assert.equal((await service.readiness('enroll-1')).readiness.probe?.source, undefined);

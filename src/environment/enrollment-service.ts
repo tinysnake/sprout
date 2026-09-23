@@ -566,11 +566,12 @@ export class EnvironmentEnrollmentService {
   }
 
   /**
-   * Record the readiness a connected Worker declared on `worker/info`.
+   * Record probe-bearing readiness from a connected Worker.
    *
    * This is the core-side half of the Worker proof: the Worker reports what it
    * verified, and this maps it onto the durable observed facts without inventing
-   * an installation, login, or model state the Worker did not state.
+   * an installation, login, or model state the Worker did not state. This is
+   * not a legacy non-probe path: even `worker/info` must carry a complete probe.
    */
   async observeWorkerReadiness(
     enrollmentId: string,
@@ -610,13 +611,12 @@ export class EnvironmentEnrollmentService {
     // This service is the final authenticated Worker boundary before storage.
     // Runtime callers validate the complete result earlier so they can reject a
     // missing returned probe; repeat the same closed-shape validation here for
-    // every embedded probe so no future authenticated caller can bypass it.
-    const validatedReadiness = readiness.probe === undefined
-      ? readiness
-      : validateWorkerReadinessProbeResult({ readiness, probe: readiness.probe })?.readiness;
-    if (validatedReadiness === undefined) return false;
+    // every observation, including one with a missing embedded probe, so no
+    // future authenticated caller can bypass it.
+    const validated = validateWorkerReadinessProbeResult({ readiness, probe: readiness.probe });
+    if (validated === undefined) return false;
     const observed = observedFactsFromWorkerReadiness({
-      ...validatedReadiness,
+      ...validated.readiness,
       at: this.#clock(),
       supported: this.#supportedProtocol,
     });
@@ -625,19 +625,17 @@ export class EnvironmentEnrollmentService {
       enrollmentId: enrollment.id,
       connectionEpoch: accepted.connectionEpoch,
     });
-    const probe = validatedReadiness.probe === undefined
-      ? undefined
-      : sanitizeProbe({
-          ...validatedReadiness.probe,
-          enrollmentId: enrollment.id,
-          connectionEpoch: accepted.connectionEpoch,
-        });
+    const probe = sanitizeProbe({
+      ...validated.probe,
+      enrollmentId: enrollment.id,
+      connectionEpoch: accepted.connectionEpoch,
+    });
     // Readiness and its startup/explicit probe cross exactly one store call.
     // Store adapters check the live guard at their mutation boundary and commit
     // both documents atomically, so there is no partial-readiness race.
     return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
-      { readiness: storedReadiness, ...(probe !== undefined ? { probe } : {}) },
+      { readiness: storedReadiness, probe },
       accepted,
     );
   }
