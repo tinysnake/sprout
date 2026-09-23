@@ -2842,4 +2842,83 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await h.close();
     }
   });
+
+  test(`#124 ${backend}: malformed readiness/engine facts are refused over the accepted Worker without mutation`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-engine-facts-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      // A configured target model selects the explicit target-probe collection
+      // mode, so the same malformed result also crosses the automatic path.
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const probe = {
+        at: Date.now(), latencyMs: 7, protocolOk: true, enginesOk: false,
+        source: 'worker' as const, version: '0.154.0', summary: 'malformed engine facts probe',
+      };
+      // Every engine below is invalid for a distinct reason: unknown readiness
+      // enum, non-boolean installed, unknown model-availability enum, non-array
+      // models, and an extra disallowed field. The result envelope and probe
+      // record are valid, so a refusal can only come from the engine-fact guard.
+      const malformedEngines = [
+        { engine: 'codex', installed: true, readiness: 'certainly-ready', modelAvailability: 'available', models: [] },
+        { engine: 'pi', installed: 'yes', readiness: 'ready', modelAvailability: 'available', models: [] },
+        { engine: 'opencode', installed: true, readiness: 'ready', modelAvailability: 'plenty', models: [] },
+        { engine: 'agy', installed: true, readiness: 'ready', modelAvailability: 'available', models: 'a-model' },
+        { engine: 'cursor', installed: true, readiness: 'ready', modelAvailability: 'available', models: [], accountEmail: 'worker@invalid' },
+      ];
+      let calls = 0;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          calls += 1;
+          return {
+            readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: malformedEngines, probe },
+            probe,
+          } as never;
+        },
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      // Automatic trigger: the transitional entry point delegates to the one
+      // composed workflow. Await it so the refusal is deterministic rather than
+      // inferred from an absent store row.
+      await h.runtime.observeWorkerReadiness(enrollmentId);
+      assert.ok(calls >= 1, 'the real Worker JSON-RPC probe was exercised');
+      assert.equal(
+        await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID),
+        undefined,
+        'a malformed engine fact must not commit a readiness document',
+      );
+      assert.deepEqual(
+        await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID),
+        [],
+        'a malformed engine fact must not append probe history',
+      );
+      // Explicit trigger: the Human-requested probe crosses the same workflow.
+      const response = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(response.status, 201, 'a malformed engine fact is never a successful probe');
+      assert.equal(((await response.json()) as { probe?: unknown }).probe, undefined);
+      assert.equal(
+        await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID),
+        undefined,
+        'the explicit path must also leave no readiness document',
+      );
+      assert.deepEqual(
+        await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID),
+        [],
+        'the explicit path must also append no probe history',
+      );
+      const assembled = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(assembled.readiness.connection.state, 'never-connected');
+      assert.deepEqual(assembled.probes, []);
+    } finally {
+      await h.close();
+    }
+  });
 }
