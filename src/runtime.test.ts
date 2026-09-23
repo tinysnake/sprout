@@ -2908,7 +2908,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               protocolVersion: WORKER_PROTOCOL_VERSION,
               engines: [
                 { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read', targetModels: params.requirements?.modelsByEngine?.codex ?? [], requirementRevision: params.requirements?.revision },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read', targetModels: params.requirements?.modelsByEngine?.codex ?? [], ...(params.requirements?.revision !== undefined ? { requirementRevision: params.requirements.revision } : {}) },
               ],
               probe,
             },
