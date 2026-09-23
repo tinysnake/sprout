@@ -41,6 +41,7 @@ import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
+import { EnvironmentArchiveService } from './environment/archive.ts';
 import { workerIdentityDigest } from './environment/enrollment-identity.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
@@ -78,17 +79,34 @@ import {
   type SproutRuntime,
   type TaskContextWorker,
 } from './runtime.ts';
+import { mintTestObservationAuthority } from './environment/readiness-authority.ts';
 
 /** The environment instance this composition test serves. */
 const INSTANCE_ID = 'composition-instance';
 const PROJECT_ID = 'composition-project';
 
-function readinessAuthority(runtime: SproutRuntime, enrollmentId: string, connectionEpoch: number) {
-  return {
+const enrollmentToInstance = new Map<string, string>();
+
+function readinessAuthority(
+  runtime: SproutRuntime,
+  enrollmentId: string,
+  connectionEpoch: number,
+  environmentInstanceId?: string,
+) {
+  const instanceId =
+    environmentInstanceId ??
+    enrollmentToInstance.get(enrollmentId) ??
+    runtime.environmentCatalog.entries().find((e) => e.enrollmentId === enrollmentId)?.instanceId ??
+    INSTANCE_ID;
+  const currentEpoch = runtime.workerEpochs.current(enrollmentId);
+  return mintTestObservationAuthority({
+    environmentInstanceId: instanceId,
     enrollmentId,
+    connectionId: currentEpoch?.connectionId ?? 'test-conn',
     connectionEpoch,
+    lifecycleGeneration: runtime.enrollments.lifecycleAuthority.generation(enrollmentId),
     isCurrent: () => runtime.workerEpochs.current(enrollmentId)?.epoch === connectionEpoch,
-  };
+  });
 }
 
 /** A complete typed host configuration for one synthetic local environment. */
@@ -1525,6 +1543,7 @@ test('production starts with zero Environments and admits an enrolled instance w
       engineFacts: [],
     });
     const enrollmentId = requested.enrollment.id;
+    enrollmentToInstance.set(enrollmentId, 'enrolled-host-1');
     await runtime.enrollments.approve(enrollmentId, {
       capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
     });
@@ -1578,6 +1597,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           publicKey: 'store-ingress-key', platform: 'macos',
           capabilityRequests: [ADMISSION_CAPABILITY], engineFacts: [],
         });
+        enrollmentToInstance.set(enrollment.id, 'host-store-ingress');
         await runtime.enrollments.approve(enrollment.id, {
           capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
         });
@@ -1644,6 +1664,7 @@ async function enrollEligibleInstance(
     engineFacts: [],
   });
   const enrollmentId = requested.enrollment.id;
+  enrollmentToInstance.set(enrollmentId, instanceId);
   await runtime.enrollments.approve(enrollmentId, {
     capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
   });
@@ -1674,6 +1695,7 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
       engineFacts: [],
     });
     const enrollmentId = requested.enrollment.id;
+    enrollmentToInstance.set(enrollmentId, 'host-a');
     await runtime.enrollments.approve(enrollmentId, {
       capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
     });
@@ -2917,6 +2939,360 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const assembled = await h.runtime.enrollments.readiness(enrollmentId);
       assert.equal(assembled.readiness.connection.state, 'never-connected');
       assert.deepEqual(assembled.probes, []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: authority substitution, forged capabilities, and caller callbacks are refused without mutation (Scenario 12)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-substitution-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 6, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '0.154.0', summary: 'real probe',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+            ],
+            probe: validProbe,
+          },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      const liveAuth = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
+      assert.ok(liveAuth !== undefined, 'owner issues scoped capability for live connection');
+      assert.equal(liveAuth.isCurrent(), true);
+
+      // Attempt authority substitution and forged capabilities:
+      // 1. Plain object literal imitating authority
+      const forgedLiteral = {
+        environmentInstanceId: INSTANCE_ID,
+        enrollmentId,
+        connectionId: liveAuth.connectionId,
+        connectionEpoch: liveAuth.connectionEpoch,
+        lifecycleGeneration: liveAuth.lifecycleGeneration,
+        isCurrent: () => true,
+      };
+      // 2. Copied capability via object spread
+      const spreadCopy = { ...liveAuth };
+      // 3. Copied capability via Object.assign
+      const assignedCopy = Object.assign({}, liveAuth);
+      const observationResult = {
+        readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
+        probe: validProbe,
+      };
+
+      for (const [label, forged] of [
+        ['forged object literal', forgedLiteral],
+        ['spread-copied capability', spreadCopy],
+        ['Object.assign copied capability', assignedCopy],
+      ] as const) {
+        assert.equal(
+          await h.runtime.enrollments.observeReadiness(enrollmentId, observationResult, forged as never),
+          false,
+          `${label} must be refused by observeReadiness`,
+        );
+      }
+
+      // Scope substitution: using authentic authority for another enrollment/instance
+      assert.equal(
+        await h.runtime.enrollments.observeReadiness('other-enrollment', observationResult, liveAuth),
+        false,
+        'scope substitution across enrollments must fail',
+      );
+
+      // Verify no mutation occurred
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID), []);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: post-commit-before-response loss preserves history while refusing current probe success and replacement does not inherit (Scenarios 4, 11)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-postcommit-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 6, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '0.154.0', summary: 'post-commit probe',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+            ],
+            probe: validProbe,
+          },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+
+      // Intercept store commit: capture when commit succeeds, hold before returning to caller,
+      // and disconnect the worker in that window.
+      const store = h.runtime.stores.environmentReadiness;
+      const origCommit = store.commitObservation.bind(store);
+      let committedSignal: (() => void) | undefined;
+      const committedPromise = new Promise<void>((resolve) => { committedSignal = resolve; });
+      let continueReturn: (() => void) | undefined;
+      const returnGate = new Promise<void>((resolve) => { continueReturn = resolve; });
+
+      store.commitObservation = async (...args) => {
+        const result = await origCommit(...args);
+        committedSignal?.();
+        await returnGate;
+        return result;
+      };
+
+      const pendingRequest = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+
+      await committedPromise;
+      // Close the channel (disconnect) after atomic commit but before response completion
+      h.runtime.workerGateway.liveFor(INSTANCE_ID)!.close();
+      continueReturn?.();
+
+      const response = await pendingRequest;
+      // Refuses current probe success!
+      assert.notEqual(response.status, 201, 'post-commit authority loss must refuse current probe success');
+
+      // But history is preserved: the atomic commit succeeded while live
+      const probes = await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID);
+      assert.equal(probes.length, 1, 'observation is preserved as durable history');
+      assert.equal(probes[0]?.summary, 'post-commit probe');
+
+      // Current query reports offline and no current probe facts
+      const currentReadiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.notEqual(currentReadiness.readiness.connection.state, 'online');
+      assert.equal(currentReadiness.readiness.probe, undefined);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+
+      // Replacement connection connects (epoch 2) using the same approved host key
+      const keyPath = join(directory, 'worker-key.pem');
+      await h.connect(enrollmentId, keyPath, {
+        readiness: () => ({
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          engines: [],
+          probe: { at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: false, source: 'worker', version: '2.0.0', summary: 'worker 2' },
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'replacement channel');
+      await h.runtime.refreshEnvironmentCatalog();
+
+      // Replacement connection cannot inherit current authority from predecessor
+      const afterReplacement = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(afterReplacement.readiness.probe?.summary, undefined, 'replacement cannot inherit predecessor probe as current');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'replacement is not eligible from old facts');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: pending and archived sessions cannot authorize observations or change identity (Scenarios 4, 12)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-pending-archive-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      // 1. Pending enrollment
+      const requestedPending = await h.runtime.enrollments.requestEnrollment({
+        environmentInstanceId: 'env-pending-test',
+        displayName: 'Pending Test',
+        publicKey: 'pending-key',
+        platform: 'macos',
+        capabilityRequests: [ADMISSION_CAPABILITY],
+        engineFacts: [],
+      });
+      const pendingId = requestedPending.enrollment.id;
+
+      // Pending session has no owner authority
+      assert.equal(
+        h.runtime.workerGateway.authorizeObservation('env-pending-test'),
+        undefined,
+        'pending instance cannot obtain observation authority',
+      );
+
+      // Attempting probe on pending enrollment fails
+      const probePendingRes = await fetch(`${h.base}/api/environments/enrollments/${pendingId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(probePendingRes.status, 201);
+
+      // Pending identity is unchanged
+      const pendingEnrollment = await h.runtime.enrollments.get(pendingId);
+      assert.equal(pendingEnrollment?.status, 'pending');
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness('env-pending-test'), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes('env-pending-test'), []);
+
+      // 2. Archived enrollment
+      const approvedId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'pre-archive probe',
+      };
+      await h.connect(approvedId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+
+      // Archive the environment
+      const archiveService = new EnvironmentArchiveService({
+        enrollments: h.runtime.stores.enrollments,
+        leases: h.runtime.pool,
+        lifecycleAuthority: h.runtime.enrollments.lifecycleAuthority,
+        onAuthorityLost: (id) => h.runtime.workerGateway.invalidateEnrollment(id),
+      });
+      await archiveService.archive(approvedId, 'operator archiving');
+
+      // Live authority lost immediately
+      assert.equal(h.runtime.workerGateway.authorizeObservation(INSTANCE_ID), undefined);
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
+
+      // Probe request on archived enrollment fails
+      const probeArchivedRes = await fetch(`${h.base}/api/environments/enrollments/${approvedId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(probeArchivedRes.status, 201);
+
+      // Archived identity is preserved
+      const archivedEnrollment = await h.runtime.enrollments.get(approvedId);
+      assert.equal(archivedEnrollment?.status, 'archived');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: reset raced before mutation leaves no observation mutation (Scenario 4)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-reset-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let started: (() => void) | undefined;
+      const startedProbe = new Promise<void>((resolve) => { started = resolve; });
+
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          started?.();
+          await gate;
+          const probe = {
+            at: Date.now(), latencyMs: 7, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: 'reset probe',
+          };
+          return {
+            readiness: {
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              engines: [],
+              probe,
+            },
+            probe,
+          };
+        },
+      });
+      await startedProbe;
+      const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      // Reset lands before mutation while probe collection is in flight
+      await h.runtime.enrollments.reset(enrollmentId, 'reset mid-collection');
+      release?.();
+      const response = await pending;
+      assert.notEqual(response.status, 201);
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: pre-epoch reconciliation cannot overwrite a later revoke decision (Scenario 5 CAS race)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-cas-race-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const store = h.runtime.stores.enrollments;
+      const origSaveIfRevision = store.saveIfRevision.bind(store);
+      let capturedRevision = 0;
+      let revokeCompleted = false;
+
+      store.saveIfRevision = async (enrollment, expectedRevision) => {
+        if (!revokeCompleted && enrollment.id === enrollmentId && enrollment.status === 'approved') {
+          capturedRevision = expectedRevision;
+          // While connectWorker reconciliation is preparing to write, a revoke lands first
+          await h.runtime.enrollments.revoke(enrollmentId, 'concurrent operator revoke');
+          revokeCompleted = true;
+        }
+        return origSaveIfRevision(enrollment, expectedRevision);
+      };
+
+      const { loadOrCreateWorkerIdentity, workerPublicKey } = await import('./worker/enrollment-connector.ts');
+      const { signWorkerChallenge } = await import('./environment/worker-proof.ts');
+      const host = loadOrCreateWorkerIdentity(join(directory, 'worker-key.pem'));
+      const challenge = await h.runtime.enrollments.issueChallenge(enrollmentId);
+      const proof = {
+        challengeId: challenge.id,
+        publicKey: workerPublicKey(host.privateKey),
+        signature: signWorkerChallenge(host.privateKey, challenge),
+      };
+
+      const outcome = await h.runtime.enrollments.connectWorker({
+        enrollmentId,
+        proof,
+        connection: { state: 'online' },
+        compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
+        engines: [],
+      });
+
+      // Older reconciliation was superseded by CAS
+      assert.equal(outcome.authoritySuperseded, true, 'reconciliation must be superseded by concurrent revoke');
+      const finalEnrollment = await h.runtime.enrollments.get(enrollmentId);
+      assert.equal(finalEnrollment?.status, 'revoked', 'later revoke decision must not be overwritten');
+      assert.ok(finalEnrollment?.revision !== undefined && finalEnrollment.revision > capturedRevision);
     } finally {
       await h.close();
     }

@@ -43,6 +43,10 @@ import {
   type WorkerGatewayServerFrame,
 } from './gateway-protocol.ts';
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
+import {
+  mintObservationAuthority,
+  type ReadinessObservationAuthority,
+} from '../environment/readiness-authority.ts';
 
 /** The default handshake deadline: a stalled Worker cannot hold a socket open. */
 export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
@@ -80,6 +84,13 @@ export interface WorkerGatewayAcceptance {
    * `WorkerClient` adapters from this, exactly as it does for any carrier.
    */
   readonly transport: JsonRpcTransport;
+  /**
+   * Authorize an observation for this accepted Worker connection (#125).
+   *
+   * Only the connection owner can issue this scoped capability. Returns
+   * undefined if the connection is no longer live or current.
+   */
+  authorizeObservation(): ReadinessObservationAuthority | undefined;
   /**
    * Subscribe to this accepted channel ending. The listener fires once when the
    * transport closes, so a cached handle can invalidate its adapters and facts
@@ -190,6 +201,19 @@ export class WorkerGateway {
       return undefined;
     }
     return live;
+  }
+
+  /**
+   * Authorize an observation for the live accepted connection of an instance (#125).
+   *
+   * Returns an owner-issued scoped capability binding Environment instance,
+   * enrollment, accepted connection identity/epoch, and lifecycle generation.
+   * Returns undefined if the instance has no live accepted Worker connection.
+   */
+  authorizeObservation(environmentInstanceId: string): ReadinessObservationAuthority | undefined {
+    const live = this.liveFor(environmentInstanceId);
+    if (live === undefined) return undefined;
+    return live.authorizeObservation();
   }
 
   /**
@@ -432,6 +456,7 @@ export class WorkerGateway {
       return { accepted: false, reason: 'a newer Worker connection epoch superseded this connection' };
     }
     reader.dispose();
+    const initialLifecycleGeneration = lifecycleGeneration;
     const channelClosedListeners = new Set<() => void>();
     const transport = new LineJsonRpcTransport({
       input: stream,
@@ -463,12 +488,35 @@ export class WorkerGateway {
       environmentInstanceId: outcome.enrollment.environmentInstanceId,
       transport,
     });
+    const authorizeObservation = (): ReadinessObservationAuthority | undefined => {
+      const currentGeneration = this.#enrollments.lifecycleAuthority.generation(enrollmentId);
+      if (currentGeneration !== initialLifecycleGeneration) return undefined;
+      if (!this.#epochs.isCurrent(enrollmentId, epoch.connectionId)) return undefined;
+      const live = this.#byInstance.get(outcome.enrollment.environmentInstanceId);
+      if (live?.epoch.connectionId !== epoch.connectionId) return undefined;
+      const checkLiveAuthority = (): boolean => {
+        return (
+          this.#enrollments.lifecycleAuthority.generation(enrollmentId) === initialLifecycleGeneration &&
+          this.#epochs.isCurrent(enrollmentId, epoch.connectionId) &&
+          this.#byInstance.get(outcome.enrollment.environmentInstanceId)?.epoch.connectionId === epoch.connectionId
+        );
+      };
+      return mintObservationAuthority({
+        environmentInstanceId: outcome.enrollment.environmentInstanceId,
+        enrollmentId,
+        connectionId: epoch.connectionId,
+        connectionEpoch: epoch.epoch,
+        lifecycleGeneration: initialLifecycleGeneration,
+        checkLiveAuthority,
+      });
+    };
     const acceptance: WorkerGatewayAcceptance = {
       accepted: true,
       enrollment: outcome.enrollment,
       epoch,
       requiredModels: [...new Set(this.#requiredModels().filter((model): model is string => typeof model === 'string' && model !== ''))],
       transport,
+      authorizeObservation,
       onChannelClosed: (listener) => {
         channelClosedListeners.add(listener);
         return () => channelClosedListeners.delete(listener);

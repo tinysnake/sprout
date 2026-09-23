@@ -1013,6 +1013,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       recovery,
       lifecycleAuthority,
       onMutation: onEnrollmentMutation,
+      onAuthorityLost: (enrollmentId) => invalidateWorkerAuthority(enrollmentId),
     });
     // The enrollment-backed outbound Worker gateway (#115, ADR-0012). A host
     // Worker claims its pending enrollment and initiates one authenticated

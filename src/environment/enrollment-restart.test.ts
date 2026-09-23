@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
+import { mintTestObservationAuthority } from './readiness-authority.ts';
 import { EnvironmentArchiveService, ArchiveError } from './archive.ts';
 import { approveEnrollment, EnrollmentError } from './enrollment.ts';
 import { SqliteEnrollmentStore } from './sqlite-enrollment-store.ts';
@@ -55,11 +56,11 @@ function service(
   });
 }
 
-const readinessAuthority = {
+const readinessAuthority = mintTestObservationAuthority({
+  environmentInstanceId: 'local-macos',
   enrollmentId: 'enroll-1',
   connectionEpoch: 1,
-  isCurrent: () => true,
-} as const;
+});
 
 async function request(
   enrollments: EnvironmentEnrollmentService,

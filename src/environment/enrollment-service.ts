@@ -31,10 +31,13 @@ import type {
 } from './readiness.ts';
 import type {
   EnvironmentReadinessStore,
-  ReadinessWriteAuthority,
 } from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
 import { createReadinessObservation, sanitizeObservedReadiness, sanitizeProbe } from './readiness-observation.ts';
+import {
+  verifyObservationAuthority,
+  type ReadinessObservationAuthority,
+} from './readiness-authority.ts';
 
 /**
  * The caller-facing Environment enrollment and readiness capability (#87).
@@ -390,14 +393,23 @@ export class EnvironmentEnrollmentService {
   async observeReadiness(
     enrollmentId: string,
     result: unknown,
-    authority: ReadinessWriteAuthority,
+    authority: ReadinessObservationAuthority,
   ): Promise<boolean> {
+    const verified = verifyObservationAuthority(authority, { enrollmentId });
+    if (verified === undefined) return false;
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const accepted = this.#acceptedAuthority(enrollment, authority);
-    if (accepted === undefined) return false;
+    if (
+      enrollment.status !== 'approved' ||
+      verified.environmentInstanceId !== enrollment.environmentInstanceId ||
+      verified.lifecycleGeneration !== this.#authority.generation(enrollmentId) ||
+      verified.connectionEpoch !== this.#currentConnectionEpoch(enrollmentId) ||
+      !authority.isCurrent()
+    ) {
+      return false;
+    }
     const observation = createReadinessObservation(result, {
       environmentInstanceId: enrollment.environmentInstanceId,
-      authority: accepted,
+      authority,
       supported: this.#supportedProtocol,
       at: this.#clock(),
     });
@@ -407,7 +419,7 @@ export class EnvironmentEnrollmentService {
     return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
       observation,
-      accepted,
+      authority,
     );
   }
 
@@ -510,7 +522,7 @@ export class EnvironmentEnrollmentService {
         readonly source?: string;
       }[];
     },
-    authority: ReadinessWriteAuthority,
+    authority: ReadinessObservationAuthority,
   ): Promise<boolean> {
     // `worker/info` carries only the embedded probe. Complete RPC results are
     // compared at requester/runtime ingress; both shapes share this final guard.
@@ -550,11 +562,12 @@ export class EnvironmentEnrollmentService {
     // never be paired with stale current readiness or probes.
     const authorityStable = this.#authority.generation(enrollmentId) === generation;
     const currentEnrollment = readEnrollment;
-    const lifecycleCurrent = authorityStable && currentEnrollment.status === 'approved';
+    const lifecycleApproved = authorityStable && currentEnrollment.status === 'approved';
     const currentEpoch = this.#currentConnectionEpoch(currentEnrollment.id);
+    const liveEpochCurrent = lifecycleApproved && currentEpoch !== undefined;
     // Durable history remains inspectable, but only facts bound to the live
     // accepted epoch may look current in the readiness/API projection.
-    const observed = lifecycleCurrent && rawObserved !== undefined &&
+    const observed = liveEpochCurrent && rawObserved !== undefined &&
       rawObserved.enrollmentId === currentEnrollment.id &&
       rawObserved.connectionEpoch === currentEpoch
       ? sanitizeObservedReadiness(rawObserved)
@@ -563,8 +576,8 @@ export class EnvironmentEnrollmentService {
     // `listProbes` it is projected whenever the lifecycle is still approved and
     // is emptied by revoke/reset. Only the *latest current* probe (the one that
     // can make a summary Green) is epoch-scoped.
-    const probes = lifecycleCurrent ? rawProbes.map(sanitizeProbe) : [];
-    const currentProbes = lifecycleCurrent ? probes.filter((probe) =>
+    const probes = lifecycleApproved ? rawProbes.map(sanitizeProbe) : [];
+    const currentProbes = liveEpochCurrent ? probes.filter((probe) =>
       probe.enrollmentId === currentEnrollment.id && probe.connectionEpoch === currentEpoch,
     ) : [];
     const latestProbe = currentProbes.length > 0 ? currentProbes[currentProbes.length - 1] : undefined;
@@ -610,29 +623,6 @@ export class EnvironmentEnrollmentService {
     return this.#authority;
   }
 
-  /** Combine the caller's connection token with the service's live resolver. */
-  #acceptedAuthority(
-    enrollment: EnvironmentEnrollment,
-    authority: ReadinessWriteAuthority,
-  ): ReadinessWriteAuthority | undefined {
-    const enrollmentId = enrollment.id;
-    const generation = this.#authority.generation(enrollmentId);
-    if (
-      // An epoch resolver alone is not enrollment authority. In particular, a
-      // pending enrollment must never write merely because it has a number.
-      enrollment.status !== 'approved' ||
-      authority.enrollmentId !== enrollmentId ||
-      !Number.isSafeInteger(authority.connectionEpoch) ||
-      authority.connectionEpoch <= 0
-    ) return undefined;
-    const isCurrent = (): boolean =>
-      this.#authority.generation(enrollmentId) === generation &&
-      authority.isCurrent() &&
-      this.#currentConnectionEpoch(enrollmentId) === authority.connectionEpoch;
-    return isCurrent()
-      ? { enrollmentId, connectionEpoch: authority.connectionEpoch, isCurrent }
-      : undefined;
-  }
 
   /**
    * Apply one lifecycle mutation through the durable revision CAS.

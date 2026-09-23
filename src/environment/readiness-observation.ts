@@ -14,6 +14,10 @@ import {
   sanitizeOperatorText, sanitizeProbeVersion, sanitizeProtocolVersion,
 } from './privacy.ts';
 import type { ObservedReadiness, ReadinessWriteAuthority } from './readiness-store.ts';
+import {
+  verifyObservationAuthority,
+  type ReadinessObservationAuthority,
+} from './readiness-authority.ts';
 
 declare const canonicalObservation: unique symbol;
 
@@ -41,15 +45,19 @@ export function createReadinessObservation(
   result: unknown,
   scope: {
     readonly environmentInstanceId: string;
-    readonly authority: ReadinessWriteAuthority;
+    readonly authority: ReadinessObservationAuthority;
     readonly supported: ProtocolVersionRange;
     readonly at: number;
   },
 ): ReadinessObservation | undefined {
+  const verified = verifyObservationAuthority(scope.authority, {
+    environmentInstanceId: scope.environmentInstanceId,
+  });
+  if (verified === undefined) return undefined;
   const validated = validateWorkerReadinessProbeResult(result);
   if (validated === undefined) return undefined;
   const { authority } = scope;
-  const { enrollmentId, connectionEpoch } = authority;
+  const { enrollmentId, connectionEpoch } = verified;
   if (!Number.isSafeInteger(connectionEpoch) || connectionEpoch <= 0) return undefined;
   const readiness = sanitizeObservedReadiness({
     ...observedFactsFromWorkerReadiness({
@@ -78,16 +86,18 @@ export function createReadinessObservation(
 export function readReadinessObservation(
   environmentInstanceId: string,
   observation: unknown,
-  authority: ReadinessWriteAuthority,
+  authority: ReadinessObservationAuthority,
 ): StoredPair | undefined {
   if (typeof observation !== 'object' || observation === null) return undefined;
+  const verified = verifyObservationAuthority(authority, { environmentInstanceId });
+  if (verified === undefined) return undefined;
   const write = observations.get(observation);
   if (write === undefined || write.environmentInstanceId !== environmentInstanceId ||
       write.authority !== authority ||
-      write.pair.readiness.enrollmentId !== authority.enrollmentId ||
-      write.pair.readiness.connectionEpoch !== authority.connectionEpoch) return undefined;
-  const pair = structuredClone(write.pair);
-  return write.isCurrent() ? pair : undefined;
+      write.pair.readiness.enrollmentId !== verified.enrollmentId ||
+      write.pair.readiness.connectionEpoch !== verified.connectionEpoch) return undefined;
+  if (!authority.isCurrent()) return undefined;
+  return structuredClone(write.pair);
 }
 
 function sanitizeEngineVersion(value: string): string | undefined {
