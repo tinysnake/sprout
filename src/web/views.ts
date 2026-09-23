@@ -39,7 +39,11 @@ import {
   DEFAULT_READINESS_SUMMARY,
   DEFAULT_RECOVERY_REASON,
 } from '../environment/privacy.ts';
-import type { EnvironmentReadiness, EnvironmentReadinessSummary } from '../environment/readiness.ts';
+import type {
+  EnvironmentReadiness,
+  EnvironmentReadinessSummary,
+  ReadinessReceipt,
+} from '../environment/readiness.ts';
 import {
   allowlistedReadinessValue,
   READINESS_AUTH_MODES,
@@ -457,7 +461,10 @@ export interface EnvironmentReadinessView {
     readonly summary: string;
     readonly source?: 'worker';
     readonly version?: string;
+    readonly observationId?: string;
   };
+  readonly observationId?: string;
+  readonly receipt?: ReadinessReceiptView;
   readonly workSafety: { readonly state: string };
 }
 
@@ -470,6 +477,29 @@ export interface ProbeResultView {
   readonly summary: string;
   readonly source?: 'worker';
   readonly version?: string;
+  readonly observationId?: string;
+}
+
+/** Safe browser projection of a committed observation receipt (#126). */
+export interface ReadinessReceiptView {
+  readonly observationId: string;
+  readonly environmentInstanceId: string;
+  readonly sequence: number;
+  readonly committedAt: number;
+  readonly probe: ProbeResultView;
+}
+
+export function toReadinessReceiptView(receipt: ReadinessReceipt | undefined): ReadinessReceiptView | undefined {
+  if (receipt === undefined) return undefined;
+  const probe = toProbeResultView(receipt.probe ?? receipt);
+  if (probe === undefined) return undefined;
+  return {
+    observationId: receipt.observationId,
+    environmentInstanceId: receipt.environmentInstanceId,
+    sequence: receipt.sequence,
+    committedAt: receipt.committedAt,
+    probe,
+  };
 }
 
 export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeResultView | undefined {
@@ -487,6 +517,7 @@ export function toProbeResultView(probe: EnvironmentReadiness['probe']): ProbeRe
     ...(probe.version !== undefined
       ? { version: sanitizeProbeVersion(probe.version) }
       : {}),
+    ...(probe.observationId !== undefined ? { observationId: probe.observationId } : {}),
   };
 }
 
@@ -497,6 +528,7 @@ export function toEnvironmentReadinessView(input: {
 }): EnvironmentReadinessView {
   const { readiness, summary } = input;
   const probe = toProbeResultView(readiness.probe);
+  const receiptView = toReadinessReceiptView(readiness.receipt);
   // The view is the last boundary before the wire. The service sanitizes the
   // stored facts, but a caller that hands this projection a raw readiness
   // document (a repair tool, a test, a future adapter) still must not leak a
@@ -560,6 +592,8 @@ export function toEnvironmentReadinessView(input: {
       };
     }),
     ...(probe !== undefined ? { probe } : {}),
+    ...(readiness.observationId !== undefined ? { observationId: readiness.observationId } : {}),
+    ...(receiptView !== undefined ? { receipt: receiptView } : {}),
     workSafety: { state: readiness.workSafety.state },
   };
 }

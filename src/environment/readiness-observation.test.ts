@@ -3,9 +3,11 @@ import { test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { createReadinessObservation, readReadinessObservation } from './readiness-observation.ts';
 import { InMemoryEnvironmentReadinessStore } from './readiness-store.ts';
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
+import { SqliteStore } from '../store/db.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
 
@@ -83,7 +85,12 @@ for (const backend of ['memory', 'sqlite'] as const) {
     assert.equal(await store.getReadiness('env-1'), undefined);
     assert.deepEqual(await store.listProbes('env-1'), []);
     current = true;
-    assert.equal(await store.commitObservation('env-1', observation, authority), true);
+    const receipt = await store.commitObservation('env-1', observation, authority);
+    assert.ok(receipt);
+    assert.equal(typeof receipt, 'object');
+    assert.equal(receipt.environmentInstanceId, 'env-1');
+    assert.equal(receipt.connectionEpoch, 7);
+    assert.ok(receipt.observationId.startsWith('obs-'));
     const stored = await store.getReadiness('env-1');
     const history = await store.listProbes('env-1');
     assert.equal(stored?.engines[0]?.models.state, 'unknown');
@@ -97,4 +104,369 @@ for (const backend of ['memory', 'sqlite'] as const) {
     assert.deepEqual(await store.getReadiness('env-1'), stored, 'refused writes cannot overwrite existing readiness');
     assert.deepEqual(await store.listProbes('env-1'), history, 'refused writes cannot append history');
   });
+
+  test(`${backend} atomic failure and coherent reads across sequential observations (Scenario 8, #126)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-obs-coherent-'));
+    const store = backend === 'memory'
+      ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => {
+      if (store instanceof SqliteEnvironmentReadinessStore) store.close();
+      rmSync(directory, { recursive: true, force: true });
+    });
+
+    const authority = readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'env-1',
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 1,
+      isCurrent: () => true,
+    });
+    const scope = {
+      environmentInstanceId: 'env-1',
+      authority,
+      supported: { minMajor: 2, maxMajor: 2 },
+      at: 1_000,
+      verifyAuthority: readinessAuthorityTestSeam.verify,
+    };
+
+    // 1. Missing / invalid observation produces atomic failure: no partial writes
+    const invalidResult = { readiness: { engines: [] }, probe: undefined };
+    const invalidObs = createReadinessObservation(invalidResult, scope);
+    assert.equal(invalidObs, undefined);
+    assert.equal(await store.getCurrentObservation('env-1'), undefined);
+    assert.equal(await store.getReadiness('env-1'), undefined);
+    assert.deepEqual(await store.listProbes('env-1'), []);
+
+    // 2. First valid observation commits atomically
+    const result1 = workerReadinessProbeFixture({
+      protocolVersion: '2',
+      observedAt: 1_000,
+      engines: [{ engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['model-a'] }],
+    });
+    const obs1 = createReadinessObservation(result1, scope);
+    assert.ok(obs1);
+    const receipt1 = await store.commitObservation('env-1', obs1, authority);
+    assert.ok(receipt1);
+    assert.equal(receipt1.sequence, 1);
+
+    const current1 = await store.getCurrentObservation('env-1');
+    assert.ok(current1);
+    assert.equal(current1.observationId, receipt1.observationId);
+    assert.equal(current1.readiness.observationId, receipt1.observationId);
+    assert.equal(current1.probe.at, receipt1.probe.at);
+    assert.equal(current1.sequence, 1);
+
+    // 3. Second valid observation commits atomically and advances current observation reference
+    const result2 = workerReadinessProbeFixture({
+      protocolVersion: '2',
+      observedAt: 2_000,
+      engines: [{ engine: 'pi', installed: true, readiness: 'login-required', modelAvailability: 'unknown', models: [] }],
+    });
+    const obs2 = createReadinessObservation(result2, { ...scope, at: 2_000 });
+    assert.ok(obs2);
+    const receipt2 = await store.commitObservation('env-1', obs2, authority);
+    assert.ok(receipt2);
+    assert.equal(receipt2.sequence, 2);
+    assert.notEqual(receipt2.observationId, receipt1.observationId);
+
+    // Current observation is observation 2; facts and probe are coherent from observation 2
+    const current2 = await store.getCurrentObservation('env-1');
+    assert.ok(current2);
+    assert.equal(current2.observationId, receipt2.observationId);
+    assert.equal(current2.readiness.observationId, receipt2.observationId);
+    assert.equal(current2.readiness.engines[0]?.readiness, 'login-required');
+    assert.equal(current2.probe.at, result2.probe.at);
+    assert.equal(current2.sequence, 2);
+
+    // History preserves both observations in persisted order
+    const history = await store.listProbes('env-1');
+    assert.equal(history.length, 2);
+    assert.equal(history[0]?.at, result1.probe.at);
+    assert.equal(history[1]?.at, result2.probe.at);
+
+    // Direct observation retrieval finds each observation by its identity
+    const direct1 = await store.getObservation('env-1', receipt1.observationId);
+    assert.ok(direct1);
+    assert.equal(direct1.observationId, receipt1.observationId);
+    assert.equal(direct1.sequence, 1);
+
+    const direct2 = await store.getObservation('env-1', receipt2.observationId);
+    assert.ok(direct2);
+    assert.equal(direct2.observationId, receipt2.observationId);
+    assert.equal(direct2.sequence, 2);
+  });
+
+  test(`${backend} exact receipt retrieval, canonical unknown-version, and multi-engine provenance (Scenario 11, #126)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-obs-receipt-'));
+    const store = backend === 'memory'
+      ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => {
+      if (store instanceof SqliteEnvironmentReadinessStore) store.close();
+      rmSync(directory, { recursive: true, force: true });
+    });
+
+    const authority = readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'env-multi',
+      enrollmentId: 'enroll-multi',
+      connectionEpoch: 3,
+      isCurrent: () => true,
+    });
+    const scope = {
+      environmentInstanceId: 'env-multi',
+      authority,
+      supported: { minMajor: 2, maxMajor: 2 },
+      at: 3_000,
+      verifyAuthority: readinessAuthorityTestSeam.verify,
+    };
+
+    // Multi-engine with unknown version for codex and valid semver for pi
+    const result = workerReadinessProbeFixture({
+      protocolVersion: '2',
+      observedAt: 3_000,
+      engines: [
+        {
+          engine: 'codex',
+          version: 'custom-build-alpha/preview',
+          installed: true,
+          readiness: 'ready',
+          modelAvailability: 'available',
+          models: ['gpt-5'],
+        },
+        {
+          engine: 'pi',
+          version: '0.86.1',
+          installed: true,
+          readiness: 'ready',
+          modelAvailability: 'available',
+          models: ['pi-special'],
+        },
+      ],
+    });
+
+    const observation = createReadinessObservation(result, scope);
+    assert.ok(observation);
+    const receipt = await store.commitObservation('env-multi', observation, authority);
+    assert.ok(receipt);
+
+    // Direct retrieval of exact committed receipt
+    const retrievedReceipt = await store.getReceipt('env-multi', receipt.observationId);
+    assert.ok(retrievedReceipt);
+    assert.deepEqual(retrievedReceipt, receipt);
+
+    // Direct retrieval of exact committed observation
+    const retrievedObs = await store.getObservation('env-multi', receipt.observationId);
+    assert.ok(retrievedObs);
+    assert.equal(retrievedObs.observationId, receipt.observationId);
+    assert.equal(retrievedObs.readiness.engines.length, 2);
+    assert.equal(retrievedObs.readiness.engines[0]?.version, 'unknown-version');
+    assert.equal(retrievedObs.readiness.engines[1]?.version, '0.86.1');
+
+    // Unknown receipt ID returns undefined
+    assert.equal(await store.getReceipt('env-multi', 'obs-non-existent'), undefined);
+    assert.equal(await store.getObservation('env-multi', 'obs-non-existent'), undefined);
+  });
+
+  test(`${backend} defensive values cannot affect stored state or admission (Scenario 12, #126)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-obs-defensive-'));
+    const store = backend === 'memory'
+      ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => {
+      if (store instanceof SqliteEnvironmentReadinessStore) store.close();
+      rmSync(directory, { recursive: true, force: true });
+    });
+
+    const authority = readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'env-def',
+      enrollmentId: 'enroll-def',
+      connectionEpoch: 5,
+      isCurrent: () => true,
+    });
+    const scope = {
+      environmentInstanceId: 'env-def',
+      authority,
+      supported: { minMajor: 2, maxMajor: 2 },
+      at: 4_000,
+      verifyAuthority: readinessAuthorityTestSeam.verify,
+    };
+
+    const result = workerReadinessProbeFixture({
+      protocolVersion: '2',
+      observedAt: 4_000,
+      engines: [{ engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] }],
+    });
+    const observation = createReadinessObservation(result, scope);
+    assert.ok(observation);
+    const receipt = await store.commitObservation('env-def', observation, authority);
+    assert.ok(receipt);
+
+    // Mutate returned receipt
+    Reflect.set(receipt, 'observationId', 'forged-obs');
+    Reflect.set(receipt.probe, 'summary', 'forged-summary');
+    Reflect.set(receipt, 'sequence', 999);
+
+    // Mutate returned current observation
+    const current = await store.getCurrentObservation('env-def');
+    assert.ok(current);
+    Reflect.set(current.readiness.engines[0]!, 'readiness', 'ready');
+    Reflect.set(current.readiness.engines[0]!.models, 'state', 'available');
+    Reflect.set(current.probe, 'protocolOk', false);
+
+    // Mutate returned readiness document
+    const readiness = await store.getReadiness('env-def');
+    assert.ok(readiness);
+    Reflect.set(readiness.engines[0]!, 'readiness', 'ready');
+
+    // Mutate returned probes list
+    const probes = await store.listProbes('env-def');
+    Reflect.set(probes[0]!, 'source', 'forged');
+
+    // Fresh read proves stored state is completely unaffected
+    const freshCurrent = await store.getCurrentObservation('env-def');
+    assert.ok(freshCurrent);
+    assert.notEqual(freshCurrent.observationId, 'forged-obs');
+    assert.equal(freshCurrent.sequence, 1);
+    assert.equal(freshCurrent.readiness.engines[0]?.readiness, 'unknown');
+    assert.equal(freshCurrent.readiness.engines[0]?.models.state, 'unknown');
+    assert.equal(freshCurrent.probe.protocolOk, true);
+    assert.equal(freshCurrent.probe.summary, 'Synthetic Worker readiness probe.');
+
+    const freshReadiness = await store.getReadiness('env-def');
+    assert.equal(freshReadiness?.engines[0]?.readiness, 'unknown');
+
+    const freshProbes = await store.listProbes('env-def');
+    assert.equal(freshProbes[0]?.source, 'worker');
+  });
 }
+
+test('sqlite additive migration preserves legacy history and reopen requires fresh accepted Worker evidence (Scenario 13, #126)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-obs-migration-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const dbPath = join(directory, 'sprout.db');
+
+  // 1. Seed a legacy database at schema version 14 with legacy readiness and probe rows
+  const legacyReadiness = {
+    enrollmentId: 'enroll-legacy',
+    connectionEpoch: 2,
+    connection: { state: 'online' as const, lastConfirmedAt: 500 },
+    compatibility: { state: 'compatible' as const, workerProtocolVersion: '2' },
+    engines: [{
+      engine: 'codex',
+      installed: true,
+      readiness: 'ready' as const,
+      required: true,
+      models: { state: 'available' as const, models: ['gpt-5'] },
+    }],
+  };
+  const legacyProbe = {
+    enrollmentId: 'enroll-legacy',
+    connectionEpoch: 2,
+    at: 500,
+    latencyMs: 10,
+    protocolOk: true,
+    enginesOk: true,
+    source: 'worker' as const,
+    version: '1.0.0',
+    summary: 'legacy probe from v14',
+  };
+
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    PRAGMA user_version = 14;
+    CREATE TABLE environment_enrollments (
+      id TEXT PRIMARY KEY,
+      environment_instance_id TEXT NOT NULL,
+      document TEXT NOT NULL
+    );
+    CREATE TABLE environment_instance_enrollment_authority (
+      environment_instance_id TEXT PRIMARY KEY,
+      enrollment_id TEXT NOT NULL
+    );
+    CREATE TABLE environment_readiness (
+      environment_instance_id TEXT PRIMARY KEY,
+      document TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE environment_probes (
+      environment_instance_id TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      document TEXT NOT NULL,
+      PRIMARY KEY (environment_instance_id, sequence)
+    );
+    CREATE TABLE worker_connection_epochs (
+      enrollment_id TEXT PRIMARY KEY,
+      high_water INTEGER NOT NULL CHECK (high_water > 0)
+    );
+  `);
+  legacyDb.prepare('INSERT INTO environment_enrollments VALUES (?, ?, ?)').run('enroll-legacy', 'env-leg', '{}');
+  legacyDb.prepare('INSERT INTO environment_instance_enrollment_authority VALUES (?, ?)').run('env-leg', 'enroll-legacy');
+  legacyDb.prepare('INSERT INTO environment_readiness VALUES (?, ?, ?)').run('env-leg', JSON.stringify(legacyReadiness), 500);
+  legacyDb.prepare('INSERT INTO environment_probes VALUES (?, ?, ?, ?)').run('env-leg', legacyProbe.at, 1, JSON.stringify(legacyProbe));
+  legacyDb.prepare('INSERT INTO worker_connection_epochs VALUES (?, ?)').run('enroll-legacy', 2);
+  legacyDb.close();
+
+  // 2. Open via SqliteStore (applies migration 14 -> 15)
+  const store = new SqliteStore({ filename: dbPath });
+  assert.equal(store.schemaVersion, 15);
+
+  // Legacy rows are preserved as historical; getCurrentObservation returns undefined
+  // because unscoped legacy rows cannot establish a current observation
+  const legacyCurrent = await store.environmentReadiness.getCurrentObservation('env-leg');
+  assert.equal(legacyCurrent, undefined, 'legacy row cannot be promoted to current observation');
+
+  // Legacy probe is still in history
+  const legacyProbes = await store.environmentReadiness.listProbes('env-leg');
+  assert.equal(legacyProbes.length, 1);
+  assert.equal(legacyProbes[0]?.summary, 'legacy probe from v14');
+
+  // 3. Fresh accepted Worker evidence establishes new current observation and receipt
+  const freshAuthority = readinessAuthorityTestSeam.mint({
+    environmentInstanceId: 'env-leg',
+    enrollmentId: 'enroll-legacy',
+    connectionEpoch: 3,
+    isCurrent: () => true,
+  });
+  const freshResult = workerReadinessProbeFixture({
+    protocolVersion: '2',
+    observedAt: 1_500,
+    engines: [{ engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5'] }],
+  });
+  const freshObs = createReadinessObservation(freshResult, {
+    environmentInstanceId: 'env-leg',
+    authority: freshAuthority,
+    supported: { minMajor: 2, maxMajor: 2 },
+    at: 1_500,
+    verifyAuthority: readinessAuthorityTestSeam.verify,
+  });
+  assert.ok(freshObs);
+  const receipt = await store.environmentReadiness.commitObservation('env-leg', freshObs, freshAuthority);
+  assert.ok(receipt);
+  assert.equal(receipt.connectionEpoch, 3);
+  assert.equal(receipt.sequence, 2);
+
+  // Now current observation is the fresh one
+  const freshCurrent = await store.environmentReadiness.getCurrentObservation('env-leg');
+  assert.ok(freshCurrent);
+  assert.equal(freshCurrent.observationId, receipt.observationId);
+  assert.equal(freshCurrent.sequence, 2);
+
+  // Reopen store: historical receipt survives
+  store.close();
+  const reopened = new SqliteStore({ filename: dbPath });
+  try {
+    assert.equal(reopened.schemaVersion, 15);
+    const retrievedReceipt = await reopened.environmentReadiness.getReceipt('env-leg', receipt.observationId);
+    assert.ok(retrievedReceipt);
+    assert.equal(retrievedReceipt.observationId, receipt.observationId);
+    assert.equal(retrievedReceipt.sequence, 2);
+
+    const allProbes = await reopened.environmentReadiness.listProbes('env-leg');
+    assert.equal(allProbes.length, 2);
+    assert.equal(allProbes[0]?.summary, 'legacy probe from v14');
+    assert.equal(allProbes[1]?.at, freshResult.probe.at);
+  } finally {
+    reopened.close();
+  }
+});

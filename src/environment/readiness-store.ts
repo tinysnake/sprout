@@ -1,8 +1,16 @@
-import type { ConnectionFact, CompatibilityFact, EngineReadinessFact, ProbeResultFact } from './readiness.ts';
+import type {
+  ConnectionFact,
+  CompatibilityFact,
+  EngineReadinessFact,
+  ProbeResultFact,
+  ReadinessReceipt,
+  ReadinessRequirementScope,
+} from './readiness.ts';
 import { readReadinessObservation, type ReadinessObservation } from './readiness-observation.ts';
 import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 export type { ReadinessObservation } from './readiness-observation.ts';
 export type { ReadinessObservationAuthority } from './readiness-authority.ts';
+export type { ReadinessReceipt, ReadinessRequirementScope } from './readiness.ts';
 
 /**
  * Durable storage for the observed Environment readiness facts (#87).
@@ -14,6 +22,8 @@ export type { ReadinessObservationAuthority } from './readiness-authority.ts';
  * value without erasing what was observed before.
  */
 export interface ObservedReadiness {
+  /** The opaque non-sensitive observation identity (#126). */
+  readonly observationId?: string;
   /**
    * The durable enrollment authority whose accepted Worker produced these facts.
    *
@@ -48,6 +58,27 @@ export interface ObservedReadiness {
  */
 export type ReadinessWriteAuthority = ReadinessObservationAuthority;
 
+/** One durable, canonically validated observation with its receipt and provenance (#126). */
+export interface StoredReadinessObservation {
+  readonly observationId: string;
+  readonly environmentInstanceId: string;
+  readonly enrollmentId?: string | undefined;
+  readonly connectionEpoch?: number | undefined;
+  readonly sequence: number;
+  readonly committedAt: number;
+  readonly readiness: ObservedReadiness;
+  readonly probe: ProbeResultFact;
+  readonly receipt: ReadinessReceipt;
+  readonly requirements?: ReadinessRequirementScope | undefined;
+}
+
+/** Parameters for querying historical observation records (#126). */
+export interface ReadinessHistoricalQuery {
+  readonly enrollmentId?: string;
+  readonly connectionEpoch?: number;
+  readonly limit?: number;
+}
+
 export interface EnvironmentReadinessStore {
   /**
    * Commit only an opaque, canonically validated readiness + required probe pair.
@@ -55,34 +86,97 @@ export interface EnvironmentReadinessStore {
    * The exact authority object is bound when the observation is created. Adapters
    * must call readReadinessObservation immediately before mutation; raw/forged
    * objects, a changed scope, or a stale authority leave both documents untouched.
+   * Returns the committed receipt on success, or false on refusal (#126).
    */
   commitObservation(
     environmentInstanceId: string,
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
-  ): Promise<boolean>;
+  ): Promise<ReadinessReceipt | false>;
   getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined>;
   listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]>;
+  getCurrentObservation(
+    environmentInstanceId: string,
+  ): Promise<StoredReadinessObservation | undefined>;
+  getObservation(
+    environmentInstanceId: string,
+    observationId: string,
+  ): Promise<StoredReadinessObservation | undefined>;
+  getReceipt(
+    environmentInstanceId: string,
+    observationId: string,
+  ): Promise<ReadinessReceipt | undefined>;
+  listObservations(
+    environmentInstanceId: string,
+    query?: ReadinessHistoricalQuery,
+  ): Promise<readonly StoredReadinessObservation[]>;
 }
 
 export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessStore {
   readonly #readiness = new Map<string, ObservedReadiness>();
   readonly #probes = new Map<string, ProbeResultFact[]>();
+  readonly #observations = new Map<string, StoredReadinessObservation>();
+  readonly #instanceObservations = new Map<string, string[]>();
+  readonly #currentObservations = new Map<string, string>();
+  readonly #sequences = new Map<string, number>();
 
   async commitObservation(
     environmentInstanceId: string,
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
-  ): Promise<boolean> {
+  ): Promise<ReadinessReceipt | false> {
     const pair = readReadinessObservation(environmentInstanceId, observation, authority);
     if (pair === undefined) return false;
-    // No await may separate this check from these mutations. JavaScript's
-    // run-to-completion rule makes readiness + probe one in-memory commit.
-    this.#readiness.set(environmentInstanceId, pair.readiness);
+
+    // JavaScript's run-to-completion rule makes this an atomic in-memory commit.
+    const sequence = (this.#sequences.get(environmentInstanceId) ?? 0) + 1;
+    this.#sequences.set(environmentInstanceId, sequence);
+    const committedAt = Date.now();
+
+    const receipt: ReadinessReceipt = {
+      observationId: pair.observationId,
+      environmentInstanceId,
+      enrollmentId: pair.readiness.enrollmentId!,
+      connectionEpoch: pair.readiness.connectionEpoch!,
+      sequence,
+      committedAt,
+      probe: pair.probe,
+      at: pair.probe.at,
+      latencyMs: pair.probe.latencyMs,
+      protocolOk: pair.probe.protocolOk,
+      enginesOk: pair.probe.enginesOk,
+      summary: pair.probe.summary,
+      ...(pair.probe.source !== undefined ? { source: pair.probe.source } : {}),
+      ...(pair.probe.version !== undefined ? { version: pair.probe.version } : {}),
+      ...(pair.requirements !== undefined ? { requirements: pair.requirements } : {}),
+    };
+
+    const storedObservation: StoredReadinessObservation = {
+      observationId: pair.observationId,
+      environmentInstanceId,
+      enrollmentId: pair.readiness.enrollmentId,
+      connectionEpoch: pair.readiness.connectionEpoch,
+      sequence,
+      committedAt,
+      readiness: pair.readiness,
+      probe: pair.probe,
+      receipt,
+      ...(pair.requirements !== undefined ? { requirements: pair.requirements } : {}),
+    };
+
+    this.#observations.set(pair.observationId, structuredClone(storedObservation));
+    const instObs = this.#instanceObservations.get(environmentInstanceId) ?? [];
+    instObs.push(pair.observationId);
+    this.#instanceObservations.set(environmentInstanceId, instObs);
+
+    this.#currentObservations.set(environmentInstanceId, pair.observationId);
+    this.#readiness.set(environmentInstanceId, structuredClone(pair.readiness));
+
     const history = this.#probes.get(environmentInstanceId) ?? [];
-    history.push(pair.probe);
+    history.push(structuredClone(pair.probe));
     this.#probes.set(environmentInstanceId, history);
-    return true;
+
+    return structuredClone(receipt);
   }
 
   async getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined> {
@@ -91,5 +185,47 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
 
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {
     return structuredClone(this.#probes.get(environmentInstanceId) ?? []).sort((a, b) => a.at - b.at);
+  }
+
+  async getCurrentObservation(
+    environmentInstanceId: string,
+  ): Promise<StoredReadinessObservation | undefined> {
+    const observationId = this.#currentObservations.get(environmentInstanceId);
+    if (observationId === undefined) return undefined;
+    return structuredClone(this.#observations.get(observationId));
+  }
+
+  async getObservation(
+    environmentInstanceId: string,
+    observationId: string,
+  ): Promise<StoredReadinessObservation | undefined> {
+    const obs = this.#observations.get(observationId);
+    if (obs === undefined || obs.environmentInstanceId !== environmentInstanceId) return undefined;
+    return structuredClone(obs);
+  }
+
+  async getReceipt(
+    environmentInstanceId: string,
+    observationId: string,
+  ): Promise<ReadinessReceipt | undefined> {
+    const obs = await this.getObservation(environmentInstanceId, observationId);
+    return obs ? structuredClone(obs.receipt) : undefined;
+  }
+
+  async listObservations(
+    environmentInstanceId: string,
+    query?: ReadinessHistoricalQuery,
+  ): Promise<readonly StoredReadinessObservation[]> {
+    const ids = this.#instanceObservations.get(environmentInstanceId) ?? [];
+    const results: StoredReadinessObservation[] = [];
+    for (const id of ids) {
+      const obs = this.#observations.get(id);
+      if (!obs) continue;
+      if (query?.enrollmentId !== undefined && obs.enrollmentId !== query.enrollmentId) continue;
+      if (query?.connectionEpoch !== undefined && obs.connectionEpoch !== query.connectionEpoch) continue;
+      results.push(structuredClone(obs));
+      if (query?.limit !== undefined && results.length >= query.limit) break;
+    }
+    return results;
   }
 }

@@ -721,7 +721,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 15; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec('PRAGMA user_version = 16; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
   database.close();
 
   let environmentClosed = 0;
@@ -2573,13 +2573,13 @@ test('real Gateway startup rejects invalid target probes and empty-target worker
 });
 
 /** Poll a predicate with a bounded deadline, so an async observer can settle. */
-async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, description: string): Promise<void> {
   // The complete suite exercises browser builds alongside this real WS
   // composition. Keep the assertion bounded, but leave enough scheduler room
   // for the Worker to install its JSON-RPC server after the accepted transport.
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for ${description}`);
@@ -3543,4 +3543,412 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await h.close();
     }
   });
+
+  test(`#126 ${backend}: concurrent read during an in-flight commit returns facts and probe from the same observation (Scenario 8)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-126-concurrent-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const initialProbe = {
+        at: 10_000, latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'initial probe',
+      };
+      const secondProbe = {
+        at: 20_000, latencyMs: 7, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'second probe',
+      };
+
+      let currentProbeResult = initialProbe;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'codex', version: '1.0.0', installed: true, authenticated: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'] },
+            ],
+            probe: currentProbeResult,
+          },
+          probe: currentProbeResult,
+        }),
+      });
+      await waitFor(
+        async () => (await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID)).length >= 1,
+        'startup observation',
+      );
+
+      // Intercept store commit to hold during the second probe commit
+      const store = h.runtime.stores.environmentReadiness;
+      const origCommit = store.commitObservation.bind(store);
+      let commitStartedSignal!: () => void;
+      const commitStartedPromise = new Promise<void>((r) => { commitStartedSignal = r; });
+      let releaseCommit!: () => void;
+      const releasePromise = new Promise<void>((r) => { releaseCommit = r; });
+
+      store.commitObservation = async (...args) => {
+        commitStartedSignal();
+        await releasePromise;
+        return origCommit(...args);
+      };
+
+      currentProbeResult = secondProbe;
+      const pendingPost = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+
+      await commitStartedPromise;
+
+      // Concurrent read during the in-flight commit window
+      const concurrentGet = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/readiness`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(concurrentGet.status, 200);
+      const concurrentBody = (await concurrentGet.json()) as {
+        readonly readiness: { readonly observationId?: string; readonly probe?: { readonly at: number } };
+        readonly receipt?: { readonly observationId: string };
+      };
+      // Before commit finishes, current readiness has not advanced
+      if (concurrentBody.readiness.probe !== undefined) {
+        assert.equal(concurrentBody.readiness.probe.at, initialProbe.at);
+      }
+
+      // Complete commit
+      releaseCommit();
+      const postResponse = await pendingPost;
+      assert.equal(postResponse.status, 201);
+      const postBody = (await postResponse.json()) as {
+        readonly probe: { readonly at: number };
+        readonly receipt: { readonly observationId: string; readonly sequence: number };
+      };
+      assert.equal(postBody.probe.at, secondProbe.at);
+      assert.ok(postBody.receipt.observationId.length > 0);
+
+      // Post-commit read: both facts and probe metadata come from the second observation
+      const postGet = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/readiness`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(postGet.status, 200);
+      const postGetBody = (await postGet.json()) as {
+        readonly readiness: { readonly observationId?: string; readonly probe?: { readonly at: number } };
+        readonly receipt?: { readonly observationId: string };
+      };
+      assert.equal(postGetBody.readiness.observationId, postBody.receipt.observationId);
+      assert.equal(postGetBody.readiness.probe?.at, secondProbe.at);
+      assert.equal(postGetBody.receipt?.observationId, postBody.receipt.observationId);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#126 ${backend}: committed receipts identify exact observation and support direct retrieval with multi-engine provenance (Scenario 11)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-126-receipt-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const multiProbe = {
+        at: 50_000, latencyMs: 8, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: 'multi-v1-custom/unpinned', summary: 'multi engine probe',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'codex', version: 'raw-unsupported-version-build', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'] },
+              { engine: 'pi', version: '0.86.1', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['pi-model'] },
+            ],
+            probe: multiProbe,
+          },
+          probe: multiProbe,
+        }),
+      });
+      await waitFor(
+        async () => (await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID)).length >= 1,
+        'startup probe',
+      );
+
+      // 1. POST probe returns receipt identifying exact canonical observation
+      const postRes = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.equal(postRes.status, 201);
+      const postBody = (await postRes.json()) as {
+        readonly probe: { readonly at: number; readonly source?: string };
+        readonly receipt: { readonly observationId: string; readonly sequence: number; readonly committedAt: number };
+      };
+      assert.equal(postBody.probe.source, 'worker');
+      const observationId = postBody.receipt.observationId;
+      assert.ok(observationId.startsWith('obs-'));
+
+      // 2. Subsequent GET /readiness identifies the same observation directly
+      const getRes = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/readiness`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(getRes.status, 200);
+      const getBody = (await getRes.json()) as {
+        readonly readiness: {
+          readonly observationId?: string;
+          readonly engines: readonly { readonly engine: string; readonly version?: string }[];
+        };
+        readonly receipt?: { readonly observationId: string; readonly sequence: number };
+      };
+      assert.equal(getBody.readiness.observationId, observationId);
+      assert.equal(getBody.receipt?.observationId, observationId);
+      assert.equal(getBody.receipt?.sequence, postBody.receipt.sequence);
+
+      // Canonical unknown-version and multi-engine provenance
+      const codexEngine = getBody.readiness.engines.find((e) => e.engine === 'codex');
+      const piEngine = getBody.readiness.engines.find((e) => e.engine === 'pi');
+      assert.equal(codexEngine?.version, 'unknown-version', 'unsupported version format is sanitized to unknown-version');
+      assert.equal(piEngine?.version, '0.86.1');
+
+      // 3. Direct retrieval via GET /receipts/:observationId without history scan
+      const directReceiptRes = await fetch(
+        `${h.base}/api/environments/enrollments/${enrollmentId}/receipts/${observationId}`,
+        { headers: { cookie: h.cookie } },
+      );
+      assert.equal(directReceiptRes.status, 200);
+      const directReceiptBody = (await directReceiptRes.json()) as { readonly receipt: { readonly observationId: string } };
+      assert.equal(directReceiptBody.receipt.observationId, observationId);
+
+      // Unknown observation id returns 404
+      const notFoundReceipt = await fetch(
+        `${h.base}/api/environments/enrollments/${enrollmentId}/receipts/obs-non-existent`,
+        { headers: { cookie: h.cookie } },
+      );
+      assert.equal(notFoundReceipt.status, 404);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#126 ${backend}: defensive copies on API responses cannot affect stored state or admission (Scenario 12)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-126-defensive-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const probeFact = {
+        at: 60_000, latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'probe for defensive test',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'codex', version: '1.0.0', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] },
+            ],
+            probe: probeFact,
+          },
+          probe: probeFact,
+        }),
+      });
+      await waitFor(
+        async () => (await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID)).length >= 1,
+        'startup observation',
+      );
+
+      const postRes = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.equal(postRes.status, 201);
+      const postBody = (await postRes.json()) as Record<string, any>;
+      // Attempt mutation of response payload
+      postBody.receipt.observationId = 'forged-obs-id';
+      postBody.probe.protocolOk = false;
+
+      const getRes = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/readiness`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(getRes.status, 200);
+      const getBody = (await getRes.json()) as Record<string, any>;
+      // Attempt mutation of GET payload
+      getBody.readiness.engines[0].readiness = 'ready';
+      getBody.readiness.engines[0].models = { state: 'available', models: ['gpt-6-astra'] };
+
+      // Verify stored state in runtime and admission eligibility are untouched
+      const currentObs = await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID);
+      assert.ok(currentObs);
+      assert.notEqual(currentObs.observationId, 'forged-obs-id');
+      assert.equal(currentObs.readiness.engines[0]?.readiness, 'unknown');
+      assert.equal(currentObs.probe.protocolOk, true);
+
+      // Admission still refuses because engine readiness is unknown
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    } finally {
+      await h.close();
+    }
+  });
 }
+
+test('#126 sqlite: SQLite reopen preserves historical receipts while requiring fresh accepted Worker evidence for current state (Scenario 13)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-126-reopen-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+
+  // First session: connect real worker, approve, probe, record receipt R1
+  const h1 = await readinessWorkflowHarness({
+    backend: 'sqlite',
+    directory,
+    agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+  });
+  const enrollmentId = (await h1.runtime.enrollments.list())[0]!.id;
+  const keyPath = join(directory, 'worker-key.pem');
+  const probeFact1 = {
+    at: 70_000, latencyMs: 5, protocolOk: true, enginesOk: true,
+    source: 'worker' as const, version: '1.0.0', summary: 'first session probe',
+  };
+  await h1.connect(enrollmentId, keyPath, {
+    readinessProbe: async () => ({
+      readiness: {
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [
+          { engine: 'codex', version: '1.0.0', installed: true, authenticated: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'] },
+        ],
+        probe: probeFact1,
+      },
+      probe: probeFact1,
+    }),
+  });
+  await waitFor(
+    async () => (await h1.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID)).length >= 1,
+    'first startup',
+  );
+  const postRes1 = await fetch(`${h1.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+    method: 'POST',
+    headers: { cookie: h1.cookie, 'x-sprout-csrf': h1.csrf, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(postRes1.status, 201);
+  const postBody1 = (await postRes1.json()) as { readonly receipt: { readonly observationId: string; readonly sequence: number; readonly connectionEpoch: number } };
+  const receipt1Id = postBody1.receipt.observationId;
+  await h1.close();
+
+  // Second session (reopen): before worker reconnects, old receipt is inspectable as history
+  // but cannot establish current success
+  const credential = randomBytes(16).toString('base64url');
+  const second = await createRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+      operatorCredential: credential,
+      runtimeConfiguration: { agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }] },
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  const { port: port2 } = await second.api.listen(0, '127.0.0.1');
+  const base2 = `http://127.0.0.1:${port2}`;
+  const session2 = await fetch(`${base2}/api/auth/session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  });
+  const cookie2 = (session2.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+  const { csrfToken: csrf2 } = (await session2.json()) as { csrfToken: string };
+
+  const connections: WorkerEnrollmentConnection[] = [];
+  const workers: InstanceType<typeof import('./worker/server.ts').EnvironmentWorker>[] = [];
+  try {
+    const reopenedGet = await fetch(`${base2}/api/environments/enrollments/${enrollmentId}/readiness`, {
+      headers: { cookie: cookie2 },
+    });
+    assert.equal(reopenedGet.status, 200);
+    const reopenedBody = (await reopenedGet.json()) as {
+      readonly readiness: { readonly connection: { readonly state: string }; readonly probe?: unknown };
+      readonly receipt?: unknown;
+    };
+    // Reopened database has no live worker connection: cannot establish current success
+    assert.equal(reopenedBody.readiness.probe, undefined);
+    assert.equal(reopenedBody.receipt, undefined);
+    assert.equal(second.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+
+    // Old receipt R1 remains directly inspectable as history
+    const histReceiptRes = await fetch(`${base2}/api/environments/enrollments/${enrollmentId}/receipts/${receipt1Id}`, {
+      headers: { cookie: cookie2 },
+    });
+    assert.equal(histReceiptRes.status, 200);
+    const histReceiptBody = (await histReceiptRes.json()) as { readonly receipt: { readonly observationId: string } };
+    assert.equal(histReceiptBody.receipt.observationId, receipt1Id);
+
+    // Fresh accepted Worker evidence is required to establish current success
+    const probeFact2 = {
+      at: 80_000, latencyMs: 6, protocolOk: true, enginesOk: true,
+      source: 'worker' as const, version: '1.0.0', summary: 'second session probe',
+    };
+    const { connectWorkerEnrollment } = await import('./worker/enrollment-connector.ts');
+    const { EnvironmentWorker } = await import('./worker/server.ts');
+    const conn2 = await connectWorkerEnrollment({
+      target: { enrollmentId, host: '127.0.0.1', port: port2, claimSecret: undefined, identityKeyPath: keyPath },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [{ engine: 'codex', installed: true, authenticated: true, models: [] }],
+    });
+    connections.push(conn2);
+    workers.push(new EnvironmentWorker({
+      environmentInstanceId: INSTANCE_ID,
+      engines: new Map(),
+      input: conn2.stream,
+      output: conn2.stream,
+      readinessProbe: async () => ({
+        readiness: {
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          engines: [
+            { engine: 'codex', version: '1.0.0', installed: true, authenticated: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'] },
+          ],
+          probe: probeFact2,
+        },
+        probe: probeFact2,
+      }),
+    }));
+    await waitFor(
+      () => second.workerGateway.liveFor(INSTANCE_ID) !== undefined,
+      'reconnected channel',
+    );
+
+    const postRes2 = await fetch(`${base2}/api/environments/enrollments/${enrollmentId}/probes`, {
+      method: 'POST',
+      headers: { cookie: cookie2, 'x-sprout-csrf': csrf2, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(postRes2.status, 201);
+    const postBody2 = (await postRes2.json()) as { readonly receipt: { readonly observationId: string; readonly sequence: number; readonly connectionEpoch: number } };
+    assert.notEqual(postBody2.receipt.observationId, receipt1Id);
+    assert.ok(postBody2.receipt.sequence > postBody1.receipt.sequence);
+
+    // Verify durable internal store receipts track monotonic epochs
+    const internal1 = await second.stores.environmentReadiness.getReceipt(INSTANCE_ID, receipt1Id);
+    const internal2 = await second.stores.environmentReadiness.getReceipt(INSTANCE_ID, postBody2.receipt.observationId);
+    assert.ok(internal1 && internal2);
+    assert.ok(internal2.connectionEpoch > internal1.connectionEpoch);
+
+    // Now current readiness has the fresh receipt
+    const freshGet = await fetch(`${base2}/api/environments/enrollments/${enrollmentId}/readiness`, {
+      headers: { cookie: cookie2 },
+    });
+    const freshBody = (await freshGet.json()) as { readonly receipt?: { readonly observationId: string } };
+    assert.equal(freshBody.receipt?.observationId, postBody2.receipt.observationId);
+  } finally {
+    for (const w of workers) await w.shutdown().catch(() => undefined);
+    for (const c of connections) c.close();
+    await second.close();
+  }
+});

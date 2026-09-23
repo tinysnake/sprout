@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 import type { WorkerProbeFact } from '../worker/protocol.ts';
 import {
@@ -8,6 +9,7 @@ import {
   READINESS_SOURCES,
   type ProbeResultFact,
   type ProtocolVersionRange,
+  type ReadinessRequirementScope,
 } from './readiness.ts';
 import {
   DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier,
@@ -26,9 +28,25 @@ export interface ReadinessObservation {
   readonly [canonicalObservation]: true;
 }
 
-interface StoredPair {
+/** Immutable authority scope representation for readiness observations (#126). */
+export interface ReadinessAuthorityScope {
+  readonly environmentInstanceId: string;
+  readonly enrollmentId: string;
+  readonly connectionEpoch: number;
+  readonly connectionId?: string;
+  readonly lifecycleGeneration?: number;
+}
+
+export interface StoredObservationPair {
+  readonly observationId: string;
   readonly readiness: ObservedReadiness;
   readonly probe: ProbeResultFact & WorkerProbeFact;
+  readonly requirements?: ReadinessRequirementScope;
+}
+
+/** Generate an opaque, non-sensitive observation identity (#126). */
+export function createObservationId(): string {
+  return `obs-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 }
 
 // A type assertion, object spread, or copied brand cannot forge this identity.
@@ -37,19 +55,28 @@ const observations = new WeakMap<object, {
   readonly environmentInstanceId: string;
   readonly authority: ReadinessWriteAuthority;
   readonly verifyAuthority: ObservationAuthorityVerifier;
-  readonly pair: StoredPair;
+  readonly observationId: string;
+  readonly requirements?: ReadinessRequirementScope;
+  readonly pair: {
+    readonly readiness: ObservedReadiness;
+    readonly probe: ProbeResultFact & WorkerProbeFact;
+  };
 }>();
+
+export interface CreateObservationScope {
+  readonly environmentInstanceId: string;
+  readonly authority: ReadinessObservationAuthority;
+  readonly supported: ProtocolVersionRange;
+  readonly at: number;
+  readonly verifyAuthority: ObservationAuthorityVerifier;
+  readonly observationId?: string;
+  readonly requirements?: ReadinessRequirementScope;
+}
 
 /** The only constructor; there is deliberately no projected-fact constructor. */
 export function createReadinessObservation(
   result: unknown,
-  scope: {
-    readonly environmentInstanceId: string;
-    readonly authority: ReadinessObservationAuthority;
-    readonly supported: ProtocolVersionRange;
-    readonly at: number;
-    readonly verifyAuthority: ObservationAuthorityVerifier;
-  },
+  scope: CreateObservationScope,
 ): ReadinessObservation | undefined {
   const verified = scope.verifyAuthority(scope.authority, {
     environmentInstanceId: scope.environmentInstanceId,
@@ -60,11 +87,13 @@ export function createReadinessObservation(
   const { authority } = scope;
   const { enrollmentId, connectionEpoch } = verified;
   if (!Number.isSafeInteger(connectionEpoch) || connectionEpoch <= 0) return undefined;
+  const observationId = scope.observationId ?? createObservationId();
   const readiness = sanitizeObservedReadiness({
     ...observedFactsFromWorkerReadiness({
       ...validated.readiness, at: scope.at, supported: scope.supported,
     }),
     enrollmentId, connectionEpoch,
+    observationId,
   });
   // The canonical validator already reduced the complete Worker probe. Unlike
   // historical readback, a new write never has optional provenance/version.
@@ -74,6 +103,8 @@ export function createReadinessObservation(
     environmentInstanceId: scope.environmentInstanceId,
     authority,
     verifyAuthority: scope.verifyAuthority,
+    observationId,
+    ...(scope.requirements !== undefined ? { requirements: scope.requirements } : {}),
     pair: { readiness, probe },
   });
   return observation;
@@ -88,7 +119,7 @@ export function readReadinessObservation(
   environmentInstanceId: string,
   observation: unknown,
   authority: ReadinessObservationAuthority,
-): StoredPair | undefined {
+): StoredObservationPair | undefined {
   if (typeof observation !== 'object' || observation === null) return undefined;
   const write = observations.get(observation);
   if (write === undefined) return undefined;
@@ -99,7 +130,12 @@ export function readReadinessObservation(
       write.pair.readiness.enrollmentId !== verified.enrollmentId ||
       write.pair.readiness.connectionEpoch !== verified.connectionEpoch) return undefined;
   if (!authority.isCurrent()) return undefined;
-  return structuredClone(write.pair);
+  return structuredClone({
+    observationId: write.observationId,
+    readiness: write.pair.readiness,
+    probe: write.pair.probe,
+    ...(write.requirements !== undefined ? { requirements: write.requirements } : {}),
+  });
 }
 
 function sanitizeEngineVersion(value: string): string | undefined {
@@ -112,6 +148,7 @@ function sanitizeEngineVersion(value: string): string | undefined {
 export function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
+    ...(observed.observationId !== undefined ? { observationId: observed.observationId } : {}),
     // Authority keys come from the core, never Worker text; preserve them exactly.
     ...(observed.enrollmentId !== undefined ? { enrollmentId: observed.enrollmentId } : {}),
     ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0

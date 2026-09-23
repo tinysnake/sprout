@@ -195,8 +195,20 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
   ],
   environment_readiness: [
     { name: 'environment_instance_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'current_observation_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  environment_observations: [
+    { name: 'observation_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'enrollment_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'connection_epoch', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'readiness_document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'probe_document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
   environment_probes: [
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 1 },
@@ -293,6 +305,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
         { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
         { name: 'environment_enrollments_instance_idx', tbl: 'environment_enrollments' },
+        { name: 'environment_observations_instance_seq_idx', tbl: 'environment_observations' },
         { name: 'environment_recovery_lease_idx', tbl: 'environment_recovery' },
         { name: 'environment_recovery_instance_idx', tbl: 'environment_recovery' },
         { name: 'environment_force_releases_instance_idx', tbl: 'environment_force_releases' },
@@ -309,6 +322,11 @@ test('explicit indexes keep their names, tables, and column order', async () => 
       readonly name: string;
     }[];
     assert.deepEqual(sessionColumns.map((column) => column.name), ['revoked_at', 'credential_version']);
+
+    const obsColumns = store.db.prepare('PRAGMA index_info(environment_observations_instance_seq_idx)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(obsColumns.map((column) => column.name), ['environment_instance_id', 'sequence']);
 
     const columns = store.db.prepare('PRAGMA index_info(task_run_links_by_task)').all() as unknown as readonly {
       readonly name: string;
@@ -342,6 +360,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'environment_force_releases',
         'environment_instance_enrollment_authority',
         'environment_leases',
+        'environment_observations',
         'environment_probes',
         'environment_readiness',
         'environment_recovery',
