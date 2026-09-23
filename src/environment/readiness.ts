@@ -64,6 +64,7 @@ export interface ReadinessProbeFact {
   readonly summary: string;
   readonly source?: 'worker';
   readonly version?: string;
+  readonly observationId?: string;
 }
 
 /** One recorded probe, bound to accepted authority in durable history. */
@@ -72,6 +73,32 @@ export interface ProbeResultFact extends ReadinessProbeFact {
   readonly enrollmentId: string;
   /** The accepted Worker connection epoch which made this observation. */
   readonly connectionEpoch: number;
+  readonly observationId?: string;
+}
+
+/** Requirement scope representation for readiness observations (#126). */
+export interface ReadinessRequirementScope {
+  readonly revision?: string;
+  readonly requiredEngines?: readonly string[];
+  readonly requiredModels?: readonly string[];
+}
+
+/**
+ * Committed observation receipt identifying the exact canonical durable
+ * observation (#126).
+ *
+ * Returned by probe commands and retrievable directly via API and store queries.
+ * Distinguishes current vs historical authority without scanning history.
+ */
+export interface ReadinessReceipt extends ProbeResultFact {
+  readonly observationId: string;
+  readonly environmentInstanceId: string;
+  readonly sequence: number;
+  readonly committedAt: number;
+  readonly probe: ProbeResultFact;
+  readonly authorityScope: import('./readiness-observation.ts').ReadinessAuthorityScope;
+  readonly readiness: import('./readiness-store.ts').ObservedReadiness;
+  readonly requirements?: ReadinessRequirementScope | undefined;
 }
 
 export interface ConnectionFact {
@@ -99,6 +126,8 @@ export interface EnvironmentReadiness {
   readonly capabilities: readonly CapabilityReadinessFact[];
   readonly engines: readonly EngineReadinessFact[];
   readonly probe?: ReadinessProbeFact;
+  readonly observationId?: string;
+  readonly receipt?: ReadinessReceipt;
   readonly workSafety: WorkSafetyFact;
 }
 

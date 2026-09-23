@@ -244,6 +244,10 @@ _Avoid_: Session key, reconnect count
 A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
 _Avoid_: Heartbeat, smoke run, hidden model call
 
+**Readiness observation receipt**:
+A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, and `requiredModels` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Probe-history ordering is not specified here (#127).
+_Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
+
 **Environment lease**:
 A time-bounded right to use an environment instance's lease-requiring capabilities, held either by a durable Task or by a one-round agent run. Uncommitted working files remain with the lease until preserved or discarded.
 _Avoid_: Agent environment, lock

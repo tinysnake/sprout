@@ -28,9 +28,12 @@ import type {
   LeaseSafetyFact,
   ProbeResultFact,
   ProtocolVersionRange,
+  ReadinessReceipt,
+  ReadinessRequirementScope,
 } from './readiness.ts';
 import type {
   EnvironmentReadinessStore,
+  StoredReadinessObservation,
 } from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
 import { createReadinessObservation, sanitizeObservedReadiness, sanitizeProbe } from './readiness-observation.ts';
@@ -400,8 +403,22 @@ export class EnvironmentEnrollmentService {
     result: unknown,
     authority: ReadinessObservationAuthority,
   ): Promise<boolean> {
+    const receipt = await this.recordReadinessObservation(enrollmentId, result, authority);
+    return receipt !== undefined;
+  }
+
+  /**
+   * Canonically validate, privacy-reduce, and atomically commit an observation,
+   * returning its durable receipt (#126).
+   */
+  async recordReadinessObservation(
+    enrollmentId: string,
+    result: unknown,
+    authority: ReadinessObservationAuthority,
+    options?: { readonly requirements?: ReadinessRequirementScope },
+  ): Promise<ReadinessReceipt | undefined> {
     const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
-    if (verified === undefined) return false;
+    if (verified === undefined) return undefined;
     const enrollment = await this.#requireEnrollment(enrollmentId);
     if (
       enrollment.status !== 'approved' ||
@@ -410,7 +427,7 @@ export class EnvironmentEnrollmentService {
       verified.connectionEpoch !== this.#currentConnectionEpoch(enrollmentId) ||
       !authority.isCurrent()
     ) {
-      return false;
+      return undefined;
     }
     const observation = createReadinessObservation(result, {
       environmentInstanceId: enrollment.environmentInstanceId,
@@ -418,15 +435,36 @@ export class EnvironmentEnrollmentService {
       supported: this.#supportedProtocol,
       at: this.#clock(),
       verifyAuthority: this.#verifyObservationAuthority,
+      ...(options?.requirements !== undefined ? { requirements: options.requirements } : {}),
     });
-    if (observation === undefined) return false;
+    if (observation === undefined) return undefined;
     // Store adapters re-check the live authority guard at their mutation
     // boundary and commit both documents atomically (including after an await).
-    return this.#readiness.commitObservation(
+    const recorded = await this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
       observation,
       authority,
     );
+    if (!recorded) return undefined;
+    return recorded;
+  }
+
+  async getObservation(
+    enrollmentId: string,
+    observationId: string,
+  ): Promise<StoredReadinessObservation | undefined> {
+    const enrollment = await this.#requireEnrollment(enrollmentId);
+    const observation = await this.#readiness.getObservation(enrollment.environmentInstanceId, observationId);
+    return observation?.enrollmentId === enrollmentId ? observation : undefined;
+  }
+
+  async getReceipt(
+    enrollmentId: string,
+    observationId: string,
+  ): Promise<ReadinessReceipt | undefined> {
+    const enrollment = await this.#requireEnrollment(enrollmentId);
+    const receipt = await this.#readiness.getReceipt(enrollment.environmentInstanceId, observationId);
+    return receipt?.enrollmentId === enrollmentId ? receipt : undefined;
   }
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
@@ -538,22 +576,26 @@ export class EnvironmentEnrollmentService {
   /**
    * Assemble the independent facts plus the deterministic summary.
    *
-   * Readiness and the current-epoch probe history are returned as **one**
-   * lifecycle/epoch snapshot. The caller must not read them separately, or a
-   * lifecycle decision that crosses an await could pair an approved readiness
-   * document with a differently-scoped probe list (R118-EPOCH-001).
+   * Readiness and its required probe metadata are read from the exact same
+   * committed observation identity (#126).
    */
   async readiness(
     enrollmentId: string,
-  ): Promise<AssembledReadiness & { readonly enrollment: EnvironmentEnrollment; readonly probes: readonly ProbeResultFact[] }> {
+  ): Promise<AssembledReadiness & {
+    readonly enrollment: EnvironmentEnrollment;
+    readonly probes: readonly ProbeResultFact[];
+    readonly currentObservation?: StoredReadinessObservation;
+    readonly receipt?: ReadinessReceipt;
+    readonly authorityCurrent: boolean;
+  }> {
     // Capture authority before the durable reads and re-check it synchronously
     // after them. A revoke/reset/archive bumps this generation before its own
     // save, so an observed change means the lifecycle moved across the reads and
     // no fact from before that move may be projected as current.
     const generation = this.#authority.generation(enrollmentId);
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    const [rawObserved, rawProbes, leases, recoveryRecords] = await Promise.all([
-      this.#readiness.getReadiness(enrollment.environmentInstanceId),
+    const [currentObs, rawProbes, leases, recoveryRecords] = await Promise.all([
+      this.#readiness.getCurrentObservation(enrollment.environmentInstanceId),
       this.#readiness.listProbes(enrollment.environmentInstanceId),
       this.#currentLeases(),
       this.#currentRecoveryRecords(),
@@ -571,22 +613,24 @@ export class EnvironmentEnrollmentService {
     const lifecycleApproved = authorityStable && currentEnrollment.status === 'approved';
     const currentEpoch = this.#currentConnectionEpoch(currentEnrollment.id);
     const liveEpochCurrent = lifecycleApproved && currentEpoch !== undefined;
-    // Durable history remains inspectable, but only facts bound to the live
-    // accepted epoch may look current in the readiness/API projection.
-    const observed = liveEpochCurrent && rawObserved !== undefined &&
-      rawObserved.enrollmentId === currentEnrollment.id &&
-      rawObserved.connectionEpoch === currentEpoch
-      ? sanitizeObservedReadiness(rawObserved)
+
+    // Facts and probe metadata must come from the same current observation (#126).
+    const observationCurrent = liveEpochCurrent && currentObs !== undefined &&
+      currentObs.enrollmentId === currentEnrollment.id &&
+      currentObs.connectionEpoch === currentEpoch &&
+      currentObs.authorityScope?.lifecycleGeneration === generation;
+
+    const observed = observationCurrent
+      ? sanitizeObservedReadiness(currentObs.readiness)
       : undefined;
+
     // The probe *history* is durable audit across reconnects; like the original
     // `listProbes` it is projected whenever the lifecycle is still approved and
-    // is emptied by revoke/reset. Only the *latest current* probe (the one that
-    // can make a summary Green) is epoch-scoped.
+    // is emptied by revoke/reset. The *current* probe comes from the current observation.
     const probes = lifecycleApproved ? rawProbes.map(sanitizeProbe) : [];
-    const currentProbes = liveEpochCurrent ? probes.filter((probe) =>
-      probe.enrollmentId === currentEnrollment.id && probe.connectionEpoch === currentEpoch,
-    ) : [];
-    const latestProbe = currentProbes.length > 0 ? currentProbes[currentProbes.length - 1] : undefined;
+    const latestProbe = observationCurrent ? sanitizeProbe(currentObs.probe) : undefined;
+    const receipt = observationCurrent ? currentObs.receipt : undefined;
+
     const assembled = assembleEnvironmentReadiness({
       enrollment: currentEnrollment,
       observed,
@@ -594,10 +638,18 @@ export class EnvironmentEnrollmentService {
       ...(recoveryRecords !== undefined ? { recoveryRecords } : {}),
       requiredEngines: this.#requiredEngines,
       ...(latestProbe !== undefined ? { probe: latestProbe } : {}),
+      receipt,
       supportedProtocol: this.#supportedProtocol,
       now: this.#clock(),
     });
-    return { ...assembled, enrollment: currentEnrollment, probes };
+    return {
+      ...assembled,
+      enrollment: currentEnrollment,
+      probes,
+      ...(currentObs !== undefined ? { currentObservation: currentObs } : {}),
+      ...(receipt !== undefined ? { receipt } : {}),
+      authorityCurrent: observationCurrent,
+    };
   }
 
   async #currentLeases(): Promise<readonly LeaseSafetyFact[]> {

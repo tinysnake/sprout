@@ -36,7 +36,7 @@
 
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { EnrollmentError } from './enrollment.ts';
-import type { ProbeResultFact } from './readiness.ts';
+import type { ReadinessReceipt } from './readiness.ts';
 import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 import type {
@@ -201,11 +201,11 @@ export class EnvironmentReadinessWorkflow {
    *
    * Resolves the live accepted Worker epoch, collects one explicit target probe
    * over the authenticated channel, persists it through the same contract, and
-   * returns the committed sanitized fact. It throws on pending/revoked/reset/
+   * returns the committed receipt (#126). It throws on pending/revoked/reset/
    * offline/superseded states rather than reporting a stale probe, so the HTTP
    * layer maps every refusal to a non-success response.
    */
-  async request(enrollmentId: string): Promise<ProbeResultFact> {
+  async request(enrollmentId: string): Promise<ReadinessReceipt> {
     const enrollment = await this.#enrollments.get(enrollmentId);
     if (enrollment === undefined) throw new EnrollmentError('unknown-enrollment', 'Unknown enrollment.');
     if (enrollment.status !== 'approved') {
@@ -224,24 +224,16 @@ export class EnvironmentReadinessWorkflow {
     if (!authority.isCurrent()) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
-    const recorded = await this.#persist(enrollment.id, authority, result);
-    if (!recorded || !authority.isCurrent()) {
+    const receipt = await this.#persist(enrollment.id, authority, result);
+    if (!receipt || !authority.isCurrent()) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
     await this.#refreshEnvironmentCatalog();
     if (!authority.isCurrent()) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
-    // Read back the durable, ingress-sanitized fact. The Worker result itself
-    // is untrusted runtime JSON-RPC input; returning it would allow a response
-    // that was never committed or whose privacy reduction differs from GET.
-    const committed = (await this.#enrollments.readiness(enrollment.id)).probes
-      .filter((probe) =>
-        probe.enrollmentId === enrollment.id &&
-        probe.connectionEpoch === authority.connectionEpoch &&
-        sameProbe(probe, result.probe),
-      )
-      .at(-1);
+    // Direct retrieval of the exact canonical committed observation by its receipt (#126):
+    const committed = await this.#enrollments.getReceipt(enrollment.id, receipt.observationId);
     // Final authority check after the catalog refresh: a revoke/reset can land
     // inside that await, and a response must never carry a probe from an epoch
     // the lifecycle has since invalidated.
@@ -313,8 +305,8 @@ export class EnvironmentReadinessWorkflow {
     enrollmentId: string,
     authority: ReadinessObservationAuthority,
     result: WorkerReadinessProbeResult,
-  ): Promise<boolean> {
-    return this.#enrollments.observeReadiness(enrollmentId, result, authority);
+  ): Promise<ReadinessReceipt | undefined> {
+    return this.#enrollments.recordReadinessObservation(enrollmentId, result, authority);
   }
 
   /** Schedule one bounded bootstrap retry against the same accepted epoch. */
@@ -326,17 +318,4 @@ export class EnvironmentReadinessWorkflow {
       void this.observeAccepted(acceptance, attempt + 1).catch(() => undefined);
     }, 10);
   }
-}
-
-function sameProbe(
-  left: WorkerReadinessProbeResult['probe'] | ProbeResultFact,
-  right: WorkerReadinessProbeResult['probe'],
-): boolean {
-  return left.at === right.at &&
-    left.latencyMs === right.latencyMs &&
-    left.protocolOk === right.protocolOk &&
-    left.enginesOk === right.enginesOk &&
-    left.source === right.source &&
-    left.version === right.version &&
-    left.summary === right.summary;
 }

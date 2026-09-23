@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 15;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 14;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 15;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -732,6 +732,41 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         FROM environment_enrollments
         GROUP BY environment_instance_id;
       `);
+    },
+  },
+  {
+    fromVersion: 14,
+    toVersion: 15,
+    name: 'environment_observations_and_committed_receipts',
+    migrate: (db) => {
+      // Readiness observations now have one coherent atomic storage representation
+      // with committed receipts (#126). Additive migration preserves existing
+      // environment_readiness and environment_probes history; legacy rows remain
+      // explicitly historical without synthesized authority or target evidence.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS environment_observations (
+          observation_id TEXT PRIMARY KEY,
+          environment_instance_id TEXT NOT NULL,
+          enrollment_id TEXT,
+          connection_epoch INTEGER,
+          sequence INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          readiness_document TEXT NOT NULL,
+          probe_document TEXT NOT NULL,
+          document TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS environment_observations_instance_seq_idx
+          ON environment_observations (environment_instance_id, sequence);
+      `);
+      const readinessTable = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'environment_readiness'",
+      ).get();
+      if (readinessTable !== undefined) {
+        const columns = db.prepare('PRAGMA table_info(environment_readiness)').all() as unknown as readonly { readonly name: string }[];
+        if (!columns.some((col) => col.name === 'current_observation_id')) {
+          db.exec('ALTER TABLE environment_readiness ADD COLUMN current_observation_id TEXT;');
+        }
+      }
     },
   },
 ];

@@ -8,6 +8,7 @@ import {
   READINESS_SOURCES,
   type ProbeResultFact,
   type ProtocolVersionRange,
+  type ReadinessRequirementScope,
 } from './readiness.ts';
 import {
   DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier,
@@ -26,9 +27,58 @@ export interface ReadinessObservation {
   readonly [canonicalObservation]: true;
 }
 
-interface StoredPair {
+/** Immutable authority scope representation for readiness observations (#126). */
+export interface ReadinessAuthorityScope {
+  readonly environmentInstanceId: string;
+  readonly enrollmentId: string;
+  readonly connectionEpoch: number;
+  readonly connectionId?: string;
+  readonly lifecycleGeneration?: number;
+}
+
+export interface StoredObservationPair {
+  readonly observationId: string;
   readonly readiness: ObservedReadiness;
   readonly probe: ProbeResultFact & WorkerProbeFact;
+  readonly requirements?: ReadinessRequirementScope;
+  readonly authorityScope: ReadinessAuthorityScope;
+}
+
+/** Generate an opaque, non-sensitive observation identity (#126). */
+export function createObservationId(): string {
+  return `obs-${crypto.randomUUID()}`;
+}
+
+/** Reject untrusted scope shapes before they can become durable authority context. */
+function validateRequirementScope(value: unknown): ReadinessRequirementScope | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const allowed = ['revision', 'requiredEngines', 'requiredModels'];
+  if (Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))) return undefined;
+  const field = (key: string): unknown => descriptors[key]?.value;
+  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) return undefined;
+  const revision = field('revision');
+  if ('revision' in descriptors &&
+      (typeof revision !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(revision))) return undefined;
+  const validList = (key: string): boolean => {
+    if (!(key in descriptors)) return true;
+    const list = field(key);
+    if (!Array.isArray(list) || Object.getPrototypeOf(list) !== Array.prototype ||
+        Reflect.ownKeys(list).length !== list.length + 1) return false;
+    for (let i = 0; i < list.length; i++) {
+      const entry = Object.getOwnPropertyDescriptor(list, String(i));
+      if (entry === undefined || typeof entry.value !== 'string' ||
+          !/^[A-Za-z0-9_.-]{1,128}$/.test(entry.value)) return false;
+    }
+    return true;
+  };
+  if (!validList('requiredEngines') || !validList('requiredModels')) return undefined;
+  return {
+    ...('revision' in descriptors ? { revision: revision as string } : {}),
+    ...('requiredEngines' in descriptors ? { requiredEngines: [...field('requiredEngines') as string[]] } : {}),
+    ...('requiredModels' in descriptors ? { requiredModels: [...field('requiredModels') as string[]] } : {}),
+  };
 }
 
 // A type assertion, object spread, or copied brand cannot forge this identity.
@@ -37,19 +87,28 @@ const observations = new WeakMap<object, {
   readonly environmentInstanceId: string;
   readonly authority: ReadinessWriteAuthority;
   readonly verifyAuthority: ObservationAuthorityVerifier;
-  readonly pair: StoredPair;
+  readonly observationId: string;
+  readonly requirements?: ReadinessRequirementScope;
+  readonly authorityScope: ReadinessAuthorityScope;
+  readonly pair: {
+    readonly readiness: ObservedReadiness;
+    readonly probe: ProbeResultFact & WorkerProbeFact;
+  };
 }>();
+
+export interface CreateObservationScope {
+  readonly environmentInstanceId: string;
+  readonly authority: ReadinessObservationAuthority;
+  readonly supported: ProtocolVersionRange;
+  readonly at: number;
+  readonly verifyAuthority: ObservationAuthorityVerifier;
+  readonly requirements?: ReadinessRequirementScope;
+}
 
 /** The only constructor; there is deliberately no projected-fact constructor. */
 export function createReadinessObservation(
   result: unknown,
-  scope: {
-    readonly environmentInstanceId: string;
-    readonly authority: ReadinessObservationAuthority;
-    readonly supported: ProtocolVersionRange;
-    readonly at: number;
-    readonly verifyAuthority: ObservationAuthorityVerifier;
-  },
+  scope: CreateObservationScope,
 ): ReadinessObservation | undefined {
   const verified = scope.verifyAuthority(scope.authority, {
     environmentInstanceId: scope.environmentInstanceId,
@@ -60,11 +119,23 @@ export function createReadinessObservation(
   const { authority } = scope;
   const { enrollmentId, connectionEpoch } = verified;
   if (!Number.isSafeInteger(connectionEpoch) || connectionEpoch <= 0) return undefined;
+  const requirements = scope.requirements;
+  const requirementSnapshot = requirements === undefined ? undefined : validateRequirementScope(requirements);
+  if (requirements !== undefined && requirementSnapshot === undefined) return undefined;
+  const observationId = createObservationId();
+  const authorityScope: ReadinessAuthorityScope = {
+    environmentInstanceId: verified.environmentInstanceId,
+    enrollmentId: verified.enrollmentId,
+    connectionId: verified.connectionId,
+    connectionEpoch: verified.connectionEpoch,
+    lifecycleGeneration: verified.lifecycleGeneration,
+  };
   const readiness = sanitizeObservedReadiness({
     ...observedFactsFromWorkerReadiness({
       ...validated.readiness, at: scope.at, supported: scope.supported,
     }),
     enrollmentId, connectionEpoch,
+    observationId,
   });
   // The canonical validator already reduced the complete Worker probe. Unlike
   // historical readback, a new write never has optional provenance/version.
@@ -74,6 +145,9 @@ export function createReadinessObservation(
     environmentInstanceId: scope.environmentInstanceId,
     authority,
     verifyAuthority: scope.verifyAuthority,
+    observationId,
+    authorityScope,
+    ...(requirementSnapshot !== undefined ? { requirements: requirementSnapshot } : {}),
     pair: { readiness, probe },
   });
   return observation;
@@ -88,7 +162,7 @@ export function readReadinessObservation(
   environmentInstanceId: string,
   observation: unknown,
   authority: ReadinessObservationAuthority,
-): StoredPair | undefined {
+): StoredObservationPair | undefined {
   if (typeof observation !== 'object' || observation === null) return undefined;
   const write = observations.get(observation);
   if (write === undefined) return undefined;
@@ -98,8 +172,16 @@ export function readReadinessObservation(
       write.authority !== authority ||
       write.pair.readiness.enrollmentId !== verified.enrollmentId ||
       write.pair.readiness.connectionEpoch !== verified.connectionEpoch) return undefined;
+  if (write.authorityScope.connectionId !== verified.connectionId ||
+      write.authorityScope.lifecycleGeneration !== verified.lifecycleGeneration) return undefined;
   if (!authority.isCurrent()) return undefined;
-  return structuredClone(write.pair);
+  return structuredClone({
+    observationId: write.observationId,
+    authorityScope: write.authorityScope,
+    readiness: write.pair.readiness,
+    probe: write.pair.probe,
+    ...(write.requirements !== undefined ? { requirements: write.requirements } : {}),
+  });
 }
 
 function sanitizeEngineVersion(value: string): string | undefined {
@@ -112,6 +194,7 @@ function sanitizeEngineVersion(value: string): string | undefined {
 export function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
+    ...(observed.observationId !== undefined ? { observationId: observed.observationId } : {}),
     // Authority keys come from the core, never Worker text; preserve them exactly.
     ...(observed.enrollmentId !== undefined ? { enrollmentId: observed.enrollmentId } : {}),
     ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0

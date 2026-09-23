@@ -10,6 +10,7 @@ import {
   type ReadinessObservation,
   type ReadinessWriteAuthority,
   type EnvironmentReadinessStore,
+  type ReadinessReceipt,
 } from './readiness-store.ts';
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
@@ -45,7 +46,7 @@ class DelayedReadinessStore extends InMemoryEnvironmentReadinessStore {
     environmentInstanceId: string,
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
-  ): Promise<boolean> {
+  ): Promise<ReadinessReceipt | false> {
     this.#signalStarted?.();
     await this.waitForCommit;
     return super.commitObservation(environmentInstanceId, observation, authority);
@@ -64,7 +65,7 @@ class PostCommitDelayedReadinessStore extends InMemoryEnvironmentReadinessStore 
     environmentInstanceId: string,
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
-  ): Promise<boolean> {
+  ): Promise<ReadinessReceipt | false> {
     const committed = await super.commitObservation(environmentInstanceId, observation, authority);
     this.#signalCommitted?.();
     await this.waitForReturn;

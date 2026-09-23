@@ -17,6 +17,7 @@ import type {
   ConnectionFact,
   EngineReadinessFact,
   ReadinessProbeFact,
+  ReadinessReceipt,
 } from '../environment/readiness.ts';
 import {
   toEnrollmentView,
@@ -24,6 +25,7 @@ import {
   toEnvironmentRecoveryView,
   toForceReleaseView,
   toProbeResultView,
+  toReadinessReceiptView,
 } from './views.ts';
 
 /**
@@ -43,7 +45,7 @@ import {
 export interface EnvironmentRouterOptions {
   readonly enrollments: EnvironmentEnrollmentService;
   /** Worker-hosted probe request. The browser never submits observation facts. */
-  readonly requestProbe?: (enrollmentId: string) => Promise<ReadinessProbeFact>;
+  readonly requestProbe?: (enrollmentId: string) => Promise<ReadinessProbeFact | ReadinessReceipt>;
   /**
    * The Environment reconciliation and recovery capability (#88).
    *
@@ -310,6 +312,7 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
           // one authority snapshot, so a lifecycle decision crossing the read
           // cannot yield an approved body with differently-scoped probes.
           const assembled = await enrollments.readiness(segments[3] ?? '');
+          const receiptView = toReadinessReceiptView(assembled.receipt);
           return json(context, 200, {
             readiness: toEnvironmentReadinessView({
               environmentInstanceId: assembled.enrollment.environmentInstanceId,
@@ -319,6 +322,68 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             probes: assembled.probes
               .map(toProbeResultView)
               .filter((probe) => probe !== undefined),
+            ...(receiptView !== undefined ? { receipt: receiptView } : {}),
+          });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
+      // GET /api/environments/enrollments/:id/receipts/:observationId — direct receipt query (#126).
+      if (
+        method === 'GET' &&
+        segments.length === 6 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'receipts'
+      ) {
+        try {
+          const receipt = await enrollments.getReceipt(segments[3] ?? '', segments[5] ?? '');
+          if (receipt === undefined) {
+            return json(context, 404, { error: 'observation receipt not found' });
+          }
+          const receiptView = toReadinessReceiptView(receipt);
+          if (receiptView === undefined) {
+            return json(context, 404, { error: 'observation receipt not found' });
+          }
+          return json(context, 200, {
+            receipt: receiptView,
+            authorityCurrent: (await enrollments.readiness(segments[3] ?? '')).receipt?.observationId === receipt.observationId,
+          });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
+      // GET /api/environments/enrollments/:id/observations/:observationId — direct observation query (#126).
+      if (
+        method === 'GET' &&
+        segments.length === 6 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'observations'
+      ) {
+        try {
+          const obs = await enrollments.getObservation(segments[3] ?? '', segments[5] ?? '');
+          if (obs === undefined) {
+            return json(context, 404, { error: 'observation not found' });
+          }
+          const receiptView = toReadinessReceiptView(obs.receipt);
+          const probeView = toProbeResultView(obs.probe);
+          return json(context, 200, {
+            observation: {
+              observationId: obs.observationId,
+              environmentInstanceId: obs.environmentInstanceId,
+              sequence: obs.sequence,
+              committedAt: obs.committedAt,
+              readiness: receiptView?.readiness,
+              authorityScope: receiptView?.authorityScope,
+              authorityCurrent: (await enrollments.readiness(segments[3] ?? '')).receipt?.observationId === obs.observationId,
+              ...(receiptView !== undefined ? { receipt: receiptView } : {}),
+              ...(probeView !== undefined ? { probe: probeView } : {}),
+            },
           });
         } catch (error) {
           return enrollmentFailure(context, error);
@@ -339,7 +404,17 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             // Ignore the body entirely. A client can request a probe, but only
             // the authenticated Worker may supply its measured observations.
             const recorded = await requestProbe(segments[3] ?? '');
-            return json(context, 201, { probe: toProbeResultView(recorded) });
+            const receipt = 'receipt' in recorded && recorded.receipt !== undefined
+              ? (recorded.receipt as ReadinessReceipt)
+              : ('observationId' in recorded && recorded.observationId !== undefined ? recorded as unknown as ReadinessReceipt : undefined);
+            if (receipt?.observationId === undefined) return json(context, 503, { error: 'committed receipt unavailable' });
+            const committed = await enrollments.getReceipt(segments[3] ?? '', receipt.observationId);
+            if (committed === undefined) return json(context, 503, { error: 'committed receipt unavailable' });
+            const receiptView = toReadinessReceiptView(committed);
+            return json(context, 201, {
+              probe: toProbeResultView(committed.probe),
+              receipt: receiptView,
+            });
           }
           return json(context, 503, { error: 'the Environment Worker probe is unavailable' });
         } catch (error) {
