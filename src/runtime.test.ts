@@ -1552,6 +1552,75 @@ function scriptedReadinessProbe() {
   });
 }
 
+for (const backend of ['memory', 'sqlite'] as const) {
+  for (const missing of ['omitted', 'undefined'] as const) {
+    test(`exposed ${backend} readiness store refuses ${missing} probe without admitting work (R118-API-002)`, async (t) => {
+      const directory = mkdtempSync(join(tmpdir(), 'sprout-store-ingress-'));
+      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const runtime = await createSproutRuntime({
+        configuration: hostConfiguration({
+          databasePath: join(directory, 'sprout.db'), environmentSource: 'enrollment',
+        }),
+        projectRoot: '/synthetic/project-root',
+        ...(backend === 'memory' ? { stores: inMemoryStores() } : {}),
+      });
+      try {
+        const { enrollment } = await runtime.enrollments.requestEnrollment({
+          environmentInstanceId: 'host-store-ingress', displayName: 'Store ingress',
+          publicKey: 'store-ingress-key', platform: 'macos',
+          capabilityRequests: [ADMISSION_CAPABILITY], engineFacts: [],
+        });
+        await runtime.enrollments.approve(enrollment.id, {
+          capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+        });
+        const epoch = runtime.workerEpochs.accept(enrollment.id);
+        const authority = readinessAuthority(runtime, enrollment.id, epoch.epoch);
+        assert.equal(authority.isCurrent(), true);
+        const raw = {
+          readiness: {
+            enrollmentId: enrollment.id, connectionEpoch: epoch.epoch,
+            connection: { state: 'online', lastConfirmedAt: Date.now() },
+            compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+            engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true,
+              models: { state: 'available', models: ['scripted-model'] } }],
+          },
+          ...(missing === 'undefined' ? { probe: undefined } : {}),
+        };
+        const store = runtime.stores.environmentReadiness;
+        const recorded = await store.commitObservation(enrollment.environmentInstanceId, raw as never, authority);
+        await runtime.refreshEnvironmentCatalog();
+        assert.equal(recorded, false);
+        assert.equal(await store.getReadiness(enrollment.environmentInstanceId), undefined);
+        assert.deepEqual(await store.listProbes(enrollment.environmentInstanceId), []);
+        assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, false);
+
+        // Read methods are not a raw write seam either. Mutating a returned
+        // unknown observation must not silently turn the instance admissible.
+        const unknown = scriptedReadinessProbe();
+        Reflect.set(unknown.readiness.engines[0]!, 'modelAvailability', 'unknown');
+        assert.equal(await runtime.enrollments.observeReadiness(enrollment.id, unknown, authority), true);
+        const readback = await store.getReadiness(enrollment.environmentInstanceId);
+        assert.ok(readback);
+        Reflect.set(readback.engines[0]!.models, 'state', 'available');
+        const history = await store.listProbes(enrollment.environmentInstanceId);
+        Reflect.set(history[0]!, 'source', 'unknown');
+        await runtime.refreshEnvironmentCatalog();
+        assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, false);
+        assert.equal((await store.getReadiness(enrollment.environmentInstanceId))?.engines[0]?.models.state, 'unknown');
+        assert.equal((await store.listProbes(enrollment.environmentInstanceId))[0]?.source, 'worker');
+
+        // The refusal is input validation, not a broken authority/admission path.
+        assert.equal(await runtime.enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), authority), true);
+        await runtime.refreshEnvironmentCatalog();
+        assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, true);
+        assert.equal((await store.listProbes(enrollment.environmentInstanceId)).length, 2);
+      } finally {
+        await runtime.close();
+      }
+    });
+  }
+}
+
 /** A helper that enrolls, approves, and makes eligible one instance. */
 async function enrollEligibleInstance(
   runtime: SproutRuntime,

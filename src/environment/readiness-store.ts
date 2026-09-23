@@ -1,4 +1,6 @@
 import type { ConnectionFact, CompatibilityFact, EngineReadinessFact, ProbeResultFact } from './readiness.ts';
+import { readReadinessObservation, type ReadinessObservation } from './readiness-observation.ts';
+export type { ReadinessObservation } from './readiness-observation.ts';
 
 /**
  * Durable storage for the observed Environment readiness facts (#87).
@@ -47,18 +49,13 @@ export interface ReadinessWriteAuthority {
   readonly isCurrent: () => boolean;
 }
 
-/** One all-or-nothing durable observation from an accepted Worker epoch. */
-export interface ReadinessObservation {
-  readonly readiness: ObservedReadiness;
-  readonly probe?: ProbeResultFact;
-}
-
 export interface EnvironmentReadinessStore {
   /**
-   * Replace readiness and optionally append its probe as one atomic commit.
+   * Commit only an opaque, canonically validated readiness + required probe pair.
    *
-   * The authority is mandatory. Implementations must evaluate it immediately
-   * before mutation and leave both documents untouched when it is stale.
+   * The exact authority object is bound when the observation is created. Adapters
+   * must call readReadinessObservation immediately before mutation; raw/forged
+   * objects, a changed scope, or a stale authority leave both documents untouched.
    */
   commitObservation(
     environmentInstanceId: string,
@@ -78,42 +75,22 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
-    if (!validAuthority(observation, authority) || !authority.isCurrent()) return false;
+    const pair = readReadinessObservation(environmentInstanceId, observation, authority);
+    if (pair === undefined) return false;
     // No await may separate this check from these mutations. JavaScript's
     // run-to-completion rule makes readiness + probe one in-memory commit.
-    this.#readiness.set(environmentInstanceId, observation.readiness);
-    if (observation.probe !== undefined) {
-      const history = this.#probes.get(environmentInstanceId) ?? [];
-      history.push(observation.probe);
-      this.#probes.set(environmentInstanceId, history);
-    }
+    this.#readiness.set(environmentInstanceId, pair.readiness);
+    const history = this.#probes.get(environmentInstanceId) ?? [];
+    history.push(pair.probe);
+    this.#probes.set(environmentInstanceId, history);
     return true;
   }
 
   async getReadiness(environmentInstanceId: string): Promise<ObservedReadiness | undefined> {
-    return this.#readiness.get(environmentInstanceId);
+    return structuredClone(this.#readiness.get(environmentInstanceId));
   }
 
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {
-    return [...(this.#probes.get(environmentInstanceId) ?? [])].sort((a, b) => a.at - b.at);
+    return structuredClone(this.#probes.get(environmentInstanceId) ?? []).sort((a, b) => a.at - b.at);
   }
-}
-
-/** Refuse a store caller that tries to mix facts from two authority epochs. */
-export function validAuthority(
-  observation: ReadinessObservation,
-  authority: ReadinessWriteAuthority,
-): boolean {
-  const { readiness, probe } = observation;
-  return Number.isSafeInteger(authority.connectionEpoch) && authority.connectionEpoch > 0 &&
-    readiness.enrollmentId === authority.enrollmentId &&
-    readiness.connectionEpoch === authority.connectionEpoch &&
-    (probe === undefined || (
-      probe.enrollmentId === authority.enrollmentId &&
-      probe.connectionEpoch === authority.connectionEpoch &&
-      // Store adapters are the last durable boundary. A raw/bypassing caller
-      // may omit provenance, but no runtime value other than exact `worker`
-      // may ever become durable probe source text (R118-BOUNDARY-003).
-      (probe.source === undefined || probe.source === 'worker')
-    ));
 }

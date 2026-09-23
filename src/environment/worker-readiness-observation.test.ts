@@ -265,7 +265,7 @@ test('a stale epoch is rejected before either readiness or probe persistence', a
   assert.deepEqual(await service.listProbes('enroll-1'), []);
 });
 
-test('the store rejects mixed-epoch readiness and probe as one unit', async () => {
+test('the store rejects raw mixed-epoch readiness and probe as one unit', async () => {
   const store = new InMemoryEnvironmentReadinessStore();
   const committed = await store.commitObservation('env-1', {
     readiness: {
@@ -284,7 +284,7 @@ test('the store rejects mixed-epoch readiness and probe as one unit', async () =
       enginesOk: true,
       summary: 'mixed authority must fail',
     },
-  }, {
+  } as never, {
     enrollmentId: 'enroll-1',
     connectionEpoch: 7,
     isCurrent: () => true,

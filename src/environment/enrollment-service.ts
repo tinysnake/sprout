@@ -21,13 +21,6 @@ import {
   assembleEnvironmentReadiness,
   type AssembledReadiness,
 } from './readiness-service.ts';
-import {
-  allowlistedReadinessValue,
-  observedFactsFromWorkerReadiness,
-  READINESS_AUTH_MODES,
-  READINESS_AUTH_TYPES,
-  READINESS_SOURCES,
-} from './readiness.ts';
 import type {
   CompatibilityFact,
   ConnectionFact,
@@ -36,21 +29,12 @@ import type {
   ProbeResultFact,
   ProtocolVersionRange,
 } from './readiness.ts';
-import { DEFAULT_COMPATIBILITY_DETAIL, DEFAULT_PROBE_SUMMARY, sanitizeIdentifier, sanitizeOperatorText, sanitizeProbeVersion, sanitizeProtocolVersion } from './privacy.ts';
 import type {
   EnvironmentReadinessStore,
-  ObservedReadiness,
   ReadinessWriteAuthority,
 } from './readiness-store.ts';
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
-import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
-
-function sanitizeEngineVersion(value: string): string | undefined {
-  // Version is a structured semver fact, not free-form Worker output.  Generic
-  // identifier redaction quite correctly treats dotted unknown text as a host;
-  // accept only the pinned CLI-version shape here.
-  return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(value) ? value : undefined;
-}
+import { createReadinessObservation, sanitizeObservedReadiness, sanitizeProbe } from './readiness-observation.ts';
 
 /**
  * The caller-facing Environment enrollment and readiness capability (#87).
@@ -66,83 +50,6 @@ function sanitizeEngineVersion(value: string): string | undefined {
  */
 
 export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 2 };
-
-function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
-  const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
-  return {
-    // Enrollment ids are core-issued opaque authority keys, never Worker text.
-    // Preserve them exactly so an epoch-bound observation can be compared with
-    // its enrollment; they are not exposed in the readiness browser view.
-    ...(observed.enrollmentId !== undefined ? { enrollmentId: observed.enrollmentId } : {}),
-    ...(Number.isSafeInteger(observed.connectionEpoch) && (observed.connectionEpoch ?? 0) > 0
-      ? { connectionEpoch: observed.connectionEpoch }
-      : {}),
-    connection: {
-      state: observed.connection.state,
-      ...(observed.connection.lastConfirmedAt !== undefined
-        ? { lastConfirmedAt: observed.connection.lastConfirmedAt }
-        : {}),
-    },
-    compatibility: {
-      state: observed.compatibility.state,
-      ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
-      ...(observed.compatibility.detail !== undefined
-        ? { detail: sanitizeOperatorText(observed.compatibility.detail, { fallback: DEFAULT_COMPATIBILITY_DETAIL }) }
-        : {}),
-    },
-    engines: observed.engines.map((engine) => {
-      // The auth/source fields are a closed-world product enum: a legacy or
-      // bypassing document that stored a provider/account identity in one of
-      // them is dropped rather than echoed (#114 C6, R118-BOUNDARY-003).
-      const authMode = allowlistedReadinessValue(engine.authMode, READINESS_AUTH_MODES);
-      const authType = allowlistedReadinessValue(engine.authType, READINESS_AUTH_TYPES);
-      const source = allowlistedReadinessValue(engine.source, READINESS_SOURCES);
-      return {
-        engine: sanitizeIdentifier(engine.engine, { fallback: 'unknown-engine', kind: 'engine' }),
-        ...(engine.version !== undefined
-          ? { version: sanitizeEngineVersion(engine.version) ?? 'unknown-version' }
-          : {}),
-        installed: engine.installed,
-        readiness: engine.readiness,
-        required: engine.required,
-        models: {
-          state: engine.models.state,
-          models: engine.models.models.map((model) =>
-            sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' }),
-          ),
-        },
-        ...(engine.authenticated !== undefined ? { authenticated: engine.authenticated } : {}),
-        ...(authMode !== undefined ? { authMode } : {}),
-        ...(authType !== undefined ? { authType } : {}),
-        ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
-        ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
-        ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
-        ...(source !== undefined ? { source } : {}),
-      };
-    }),
-  };
-}
-
-function sanitizeProbe(probe: ProbeResultFact): ProbeResultFact {
-  return {
-    // This is assigned from the locally resolved enrollment in recordProbe,
-    // rather than accepted from Worker output, and remains internal to probe
-    // history. It must stay exact for authority comparison.
-    enrollmentId: probe.enrollmentId,
-    connectionEpoch: probe.connectionEpoch,
-    at: probe.at,
-    latencyMs: probe.latencyMs,
-    protocolOk: probe.protocolOk,
-    enginesOk: probe.enginesOk,
-    ...(probe.version !== undefined ? { version: sanitizeProbeVersion(probe.version) } : {}),
-    // Probe provenance is a closed-world fact just like engine provenance.
-    // JSON-RPC is runtime input, so its TypeScript union cannot prevent a
-    // proven but malicious Worker from attempting to retain an account or
-    // provider identifier here.
-    ...(probe.source === 'worker' ? { source: 'worker' as const } : {}),
-    summary: sanitizeOperatorText(probe.summary, { fallback: DEFAULT_PROBE_SUMMARY }),
-  };
-}
 
 export interface EnvironmentEnrollmentServiceOptions {
   readonly enrollments: EnrollmentStore;
@@ -488,28 +395,18 @@ export class EnvironmentEnrollmentService {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const accepted = this.#acceptedAuthority(enrollment, authority);
     if (accepted === undefined) return false;
-    const validated = validateWorkerReadinessProbeResult(result);
-    if (validated === undefined) return false;
-    const observed = observedFactsFromWorkerReadiness({
-      ...validated.readiness,
-      at: this.#clock(),
+    const observation = createReadinessObservation(result, {
+      environmentInstanceId: enrollment.environmentInstanceId,
+      authority: accepted,
       supported: this.#supportedProtocol,
+      at: this.#clock(),
     });
-    const readiness = sanitizeObservedReadiness({
-      ...observed,
-      enrollmentId: enrollment.id,
-      connectionEpoch: accepted.connectionEpoch,
-    });
-    const probe = sanitizeProbe({
-      ...validated.probe,
-      enrollmentId: enrollment.id,
-      connectionEpoch: accepted.connectionEpoch,
-    });
+    if (observation === undefined) return false;
     // Store adapters re-check the live authority guard at their mutation
     // boundary and commit both documents atomically (including after an await).
     return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
-      { readiness, probe },
+      observation,
       accepted,
     );
   }

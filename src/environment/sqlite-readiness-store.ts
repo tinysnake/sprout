@@ -1,13 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type { ProbeResultFact } from './readiness.ts';
-import {
-  validAuthority,
-  type EnvironmentReadinessStore,
-  type ObservedReadiness,
-  type ReadinessObservation,
-  type ReadinessWriteAuthority,
+import type {
+  EnvironmentReadinessStore,
+  ObservedReadiness,
+  ReadinessObservation,
+  ReadinessWriteAuthority,
 } from './readiness-store.ts';
+import { readReadinessObservation } from './readiness-observation.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
@@ -61,7 +61,8 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
     observation: ReadinessObservation,
     authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
-    if (!validAuthority(observation, authority) || !authority.isCurrent()) return false;
+    const pair = readReadinessObservation(environmentInstanceId, observation, authority);
+    if (pair === undefined) return false;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#db
@@ -72,25 +73,23 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
              document = excluded.document,
              updated_at = excluded.updated_at`,
         )
-        .run(environmentInstanceId, JSON.stringify(observation.readiness), Date.now());
-      if (observation.probe !== undefined) {
-        const next = this.#db
-          .prepare(
-            'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?',
-          )
-          .get(environmentInstanceId) as { readonly sequence: number };
-        this.#db
-          .prepare(
-            `INSERT INTO environment_probes (environment_instance_id, at, sequence, document)
-             VALUES (?, ?, ?, ?)`,
-          )
-          .run(
-            environmentInstanceId,
-            observation.probe.at,
-            next.sequence + 1,
-            JSON.stringify(observation.probe),
-          );
-      }
+        .run(environmentInstanceId, JSON.stringify(pair.readiness), Date.now());
+      const next = this.#db
+        .prepare(
+          'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?',
+        )
+        .get(environmentInstanceId) as { readonly sequence: number };
+      this.#db
+        .prepare(
+          `INSERT INTO environment_probes (environment_instance_id, at, sequence, document)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          environmentInstanceId,
+          pair.probe.at,
+          next.sequence + 1,
+          JSON.stringify(pair.probe),
+        );
       this.#db.exec('COMMIT');
       return true;
     } catch (error) {
