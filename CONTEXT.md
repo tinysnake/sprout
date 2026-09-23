@@ -245,7 +245,7 @@ A Worker-produced, non-inference observation of the Environment's local capabili
 _Avoid_: Heartbeat, smoke run, hidden model call
 
 **Readiness observation receipt**:
-A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Probe-history ordering is not specified here (#127).
+A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, and `requiredModels` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Probe-history ordering is not specified here (#127).
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:

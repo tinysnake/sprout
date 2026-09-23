@@ -95,6 +95,34 @@ for (const backend of ['memory', 'sqlite'] as const) {
     assert.equal(receipt.environmentInstanceId, 'env-1');
     assert.equal(receipt.connectionEpoch, 7);
     assert.ok(receipt.observationId.startsWith('obs-'));
+    const before = await store.getCurrentObservation('env-1');
+    const beforeHistory = await store.listObservations('env-1');
+    const beforeProbes = await store.listProbes('env-1');
+    const canonicalResult = workerReadinessProbeFixture({
+      protocolVersion: '2', observedAt: 1_234,
+      engines: [{ engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] }],
+    });
+    const malformedScopes: unknown[] = [null, [], 1, 'bad', true, { unknown: true },
+      { revision: '' }, { revision: 4 }, { revision: 'bad/revision' },
+      { requiredModels: null }, { requiredModels: 'model' }, { requiredModels: [1] },
+      { requiredModels: ['bad/model'] }, { requiredModels: [, 'model'] },
+      { requiredEngines: [null] }, { requiredEngines: {} },
+      { requiredModels: ['model'], extra: true },
+    ];
+    for (const malformed of malformedScopes) {
+      const refused = createReadinessObservation(canonicalResult, { ...scope, requirements: malformed } as never);
+      assert.equal(refused, undefined, `malformed requirement scope refused: ${String(malformed)}`);
+      assert.equal(await store.commitObservation('env-1', refused as never, authority), false);
+      assert.deepEqual(await store.getCurrentObservation('env-1'), before);
+      assert.deepEqual(await store.listObservations('env-1'), beforeHistory);
+      assert.deepEqual(await store.listProbes('env-1'), beforeProbes);
+    }
+    const canonical = createReadinessObservation(canonicalResult, { ...scope, requirements: {
+      revision: 'r_1', requiredEngines: ['pi'], requiredModels: ['safe-model'],
+    } });
+    assert.ok(canonical);
+    assert.deepEqual(readReadinessObservation('env-1', canonical, authority)?.requirements,
+      { revision: 'r_1', requiredEngines: ['pi'], requiredModels: ['safe-model'] });
     const stored = await store.getReadiness('env-1');
     const history = await store.listProbes('env-1');
     assert.equal(stored?.engines[0]?.models.state, 'unknown');

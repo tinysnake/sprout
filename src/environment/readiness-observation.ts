@@ -49,6 +49,38 @@ export function createObservationId(): string {
   return `obs-${crypto.randomUUID()}`;
 }
 
+/** Reject untrusted scope shapes before they can become durable authority context. */
+function validateRequirementScope(value: unknown): ReadinessRequirementScope | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const allowed = ['revision', 'requiredEngines', 'requiredModels'];
+  if (Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))) return undefined;
+  const field = (key: string): unknown => descriptors[key]?.value;
+  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) return undefined;
+  const revision = field('revision');
+  if ('revision' in descriptors &&
+      (typeof revision !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(revision))) return undefined;
+  const validList = (key: string): boolean => {
+    if (!(key in descriptors)) return true;
+    const list = field(key);
+    if (!Array.isArray(list) || Object.getPrototypeOf(list) !== Array.prototype ||
+        Reflect.ownKeys(list).length !== list.length + 1) return false;
+    for (let i = 0; i < list.length; i++) {
+      const entry = Object.getOwnPropertyDescriptor(list, String(i));
+      if (entry === undefined || typeof entry.value !== 'string' ||
+          !/^[A-Za-z0-9_.-]{1,128}$/.test(entry.value)) return false;
+    }
+    return true;
+  };
+  if (!validList('requiredEngines') || !validList('requiredModels')) return undefined;
+  return {
+    ...('revision' in descriptors ? { revision: revision as string } : {}),
+    ...('requiredEngines' in descriptors ? { requiredEngines: [...field('requiredEngines') as string[]] } : {}),
+    ...('requiredModels' in descriptors ? { requiredModels: [...field('requiredModels') as string[]] } : {}),
+  };
+}
+
 // A type assertion, object spread, or copied brand cannot forge this identity.
 // Neither the caller's Worker result nor a store reader owns these snapshots.
 const observations = new WeakMap<object, {
@@ -87,15 +119,10 @@ export function createReadinessObservation(
   const { authority } = scope;
   const { enrollmentId, connectionEpoch } = verified;
   if (!Number.isSafeInteger(connectionEpoch) || connectionEpoch <= 0) return undefined;
-  const observationId = createObservationId();
   const requirements = scope.requirements;
-  if (requirements !== undefined && (
-    (requirements.revision !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(requirements.revision)) ||
-    [requirements.requiredEngines, requirements.requiredModels].some((values) =>
-      values !== undefined && (!Array.isArray(values) || values.some((value) =>
-        typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value))))
-  )) return undefined;
-  const requirementSnapshot = requirements === undefined ? undefined : structuredClone(requirements);
+  const requirementSnapshot = requirements === undefined ? undefined : validateRequirementScope(requirements);
+  if (requirements !== undefined && requirementSnapshot === undefined) return undefined;
+  const observationId = createObservationId();
   const authorityScope: ReadinessAuthorityScope = {
     environmentInstanceId: verified.environmentInstanceId,
     enrollmentId: verified.enrollmentId,

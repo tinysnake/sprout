@@ -3544,6 +3544,46 @@ for (const backend of ['memory', 'sqlite'] as const) {
     }
   });
 
+  test(`#126 ${backend}: malformed requirement scope refuses through accepted Runtime authority without mutation`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-126-scope-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const probe = { at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'scope probe' };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      const authority = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
+      assert.ok(authority);
+      const result = { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+      const store = h.runtime.stores.environmentReadiness;
+      const before = await store.getCurrentObservation(INSTANCE_ID);
+      const history = await store.listObservations(INSTANCE_ID);
+      const probes = await store.listProbes(INSTANCE_ID);
+      for (const requirements of [null, [], 1, 'bad', { unknown: true },
+        { revision: 'bad/revision' }, { requiredModels: [null] }, { requiredModels: ['bad/model'] }]) {
+        assert.equal(await h.runtime.enrollments.recordReadinessObservation(
+          enrollmentId, result, authority, { requirements } as never,
+        ), undefined);
+        assert.deepEqual(await store.getCurrentObservation(INSTANCE_ID), before);
+        assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
+        assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
+      }
+      const receipt = await h.runtime.enrollments.recordReadinessObservation(
+        enrollmentId, result, authority, { requirements: { revision: 'r1', requiredModels: ['safe-model'] } },
+      );
+      assert.ok(receipt);
+      assert.deepEqual(receipt.requirements, { revision: 'r1', requiredModels: ['safe-model'] });
+    } finally {
+      await h.close();
+    }
+  });
+
   test(`#126 ${backend}: concurrent read during an in-flight commit returns facts and probe from the same observation (Scenario 8)`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-126-concurrent-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
