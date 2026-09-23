@@ -15,7 +15,7 @@ import {
 } from './privacy.ts';
 import type { ObservedReadiness, ReadinessWriteAuthority } from './readiness-store.ts';
 import {
-  verifyObservationAuthority,
+  type ObservationAuthorityVerifier,
   type ReadinessObservationAuthority,
 } from './readiness-authority.ts';
 
@@ -36,7 +36,7 @@ interface StoredPair {
 const observations = new WeakMap<object, {
   readonly environmentInstanceId: string;
   readonly authority: ReadinessWriteAuthority;
-  readonly isCurrent: () => boolean;
+  readonly verifyAuthority: ObservationAuthorityVerifier;
   readonly pair: StoredPair;
 }>();
 
@@ -48,9 +48,10 @@ export function createReadinessObservation(
     readonly authority: ReadinessObservationAuthority;
     readonly supported: ProtocolVersionRange;
     readonly at: number;
+    readonly verifyAuthority: ObservationAuthorityVerifier;
   },
 ): ReadinessObservation | undefined {
-  const verified = verifyObservationAuthority(scope.authority, {
+  const verified = scope.verifyAuthority(scope.authority, {
     environmentInstanceId: scope.environmentInstanceId,
   });
   if (verified === undefined) return undefined;
@@ -72,7 +73,7 @@ export function createReadinessObservation(
   observations.set(observation, {
     environmentInstanceId: scope.environmentInstanceId,
     authority,
-    isCurrent: authority.isCurrent.bind(authority),
+    verifyAuthority: scope.verifyAuthority,
     pair: { readiness, probe },
   });
   return observation;
@@ -89,10 +90,11 @@ export function readReadinessObservation(
   authority: ReadinessObservationAuthority,
 ): StoredPair | undefined {
   if (typeof observation !== 'object' || observation === null) return undefined;
-  const verified = verifyObservationAuthority(authority, { environmentInstanceId });
-  if (verified === undefined) return undefined;
   const write = observations.get(observation);
-  if (write === undefined || write.environmentInstanceId !== environmentInstanceId ||
+  if (write === undefined) return undefined;
+  const verified = write.verifyAuthority(authority, { environmentInstanceId });
+  if (verified === undefined) return undefined;
+  if (write.environmentInstanceId !== environmentInstanceId ||
       write.authority !== authority ||
       write.pair.readiness.enrollmentId !== verified.enrollmentId ||
       write.pair.readiness.connectionEpoch !== verified.connectionEpoch) return undefined;

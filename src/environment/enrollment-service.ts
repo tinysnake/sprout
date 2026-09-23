@@ -35,7 +35,8 @@ import type {
 import type { EnvironmentRecoveryPhase } from './recovery.ts';
 import { createReadinessObservation, sanitizeObservedReadiness, sanitizeProbe } from './readiness-observation.ts';
 import {
-  verifyObservationAuthority,
+  refuseObservationAuthority,
+  type ObservationAuthorityVerifier,
   type ReadinessObservationAuthority,
 } from './readiness-authority.ts';
 
@@ -59,6 +60,8 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly readiness: EnvironmentReadinessStore;
   /** Current accepted epoch, or undefined while the enrollment is offline. */
   readonly currentConnectionEpoch: (enrollmentId: string) => number | undefined;
+  /** Gateway-owned verifier; test-only composition may supply an isolated seam. */
+  readonly verifyObservationAuthority?: ObservationAuthorityVerifier;
   /** Fence the accepted Worker before revoke/reset is durably published. */
   readonly onAuthorityLost?: (enrollmentId: string) => void;
   /** The leases that decide work safety. Optional: an Environment with no work. */
@@ -154,11 +157,13 @@ export class EnvironmentEnrollmentService {
   readonly #onAuthorityLost: ((enrollmentId: string) => void) | undefined;
   /** Local lifecycle generation checked at the store mutation boundary. */
   readonly #authority: EnrollmentLifecycleAuthority;
+  readonly #verifyObservationAuthority: ObservationAuthorityVerifier;
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
     this.#readiness = options.readiness;
     this.#currentConnectionEpoch = options.currentConnectionEpoch;
+    this.#verifyObservationAuthority = options.verifyObservationAuthority ?? refuseObservationAuthority;
     this.#onAuthorityLost = options.onAuthorityLost;
     this.#leases = options.leases;
     this.#recoveryRecords = options.recoveryRecords;
@@ -395,7 +400,7 @@ export class EnvironmentEnrollmentService {
     result: unknown,
     authority: ReadinessObservationAuthority,
   ): Promise<boolean> {
-    const verified = verifyObservationAuthority(authority, { enrollmentId });
+    const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
     if (verified === undefined) return false;
     const enrollment = await this.#requireEnrollment(enrollmentId);
     if (
@@ -412,6 +417,7 @@ export class EnvironmentEnrollmentService {
       authority,
       supported: this.#supportedProtocol,
       at: this.#clock(),
+      verifyAuthority: this.#verifyObservationAuthority,
     });
     if (observation === undefined) return false;
     // Store adapters re-check the live authority guard at their mutation

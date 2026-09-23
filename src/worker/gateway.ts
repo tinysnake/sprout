@@ -43,9 +43,10 @@ import {
   type WorkerGatewayServerFrame,
 } from './gateway-protocol.ts';
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
-import {
-  mintObservationAuthority,
-  type ReadinessObservationAuthority,
+import type {
+  AuthorityScopeBinding,
+  ObservationAuthorityVerifier,
+  ReadinessObservationAuthority,
 } from '../environment/readiness-authority.ts';
 
 /** The default handshake deadline: a stalled Worker cannot hold a socket open. */
@@ -166,6 +167,8 @@ export class WorkerGateway {
    * ineligible instance published as eligible until the next unrelated refresh.
    */
   readonly #closeListeners = new Set<(closed: WorkerGatewayConnectionClosed) => void>();
+  /** Capability identities minted only after this gateway accepted a Worker. */
+  readonly #observationAuthorities = new WeakMap<object, AuthorityScopeBinding>();
 
   constructor(options: WorkerGatewayOptions) {
     this.#enrollments = options.enrollments;
@@ -178,6 +181,24 @@ export class WorkerGateway {
   get epochs(): WorkerConnectionRegistry {
     return this.#epochs;
   }
+
+  /**
+   * Validate an authority minted by this authenticated gateway. This can verify
+   * but cannot issue authority; the registry is private to the gateway.
+   */
+  readonly verifyObservationAuthority: ObservationAuthorityVerifier = (authority, expectedScope) => {
+    if (typeof authority !== 'object' || authority === null) return undefined;
+    const binding = this.#observationAuthorities.get(authority);
+    if (binding === undefined) return undefined;
+    if (expectedScope !== undefined && (
+      (expectedScope.environmentInstanceId !== undefined && binding.environmentInstanceId !== expectedScope.environmentInstanceId) ||
+      (expectedScope.enrollmentId !== undefined && binding.enrollmentId !== expectedScope.enrollmentId) ||
+      (expectedScope.connectionId !== undefined && binding.connectionId !== expectedScope.connectionId) ||
+      (expectedScope.connectionEpoch !== undefined && binding.connectionEpoch !== expectedScope.connectionEpoch) ||
+      (expectedScope.lifecycleGeneration !== undefined && binding.lifecycleGeneration !== expectedScope.lifecycleGeneration)
+    )) return undefined;
+    return binding;
+  };
 
   /** Subscribe to accepted connections, so a port can build adapters from them. */
   onAccept(listener: (acceptance: WorkerGatewayAcceptance) => void): () => void {
@@ -501,14 +522,19 @@ export class WorkerGateway {
           this.#byInstance.get(outcome.enrollment.environmentInstanceId)?.epoch.connectionId === epoch.connectionId
         );
       };
-      return mintObservationAuthority({
+      const binding: AuthorityScopeBinding = {
         environmentInstanceId: outcome.enrollment.environmentInstanceId,
         enrollmentId,
         connectionId: epoch.connectionId,
         connectionEpoch: epoch.epoch,
         lifecycleGeneration: initialLifecycleGeneration,
-        checkLiveAuthority,
+      };
+      const authority: ReadinessObservationAuthority = Object.freeze({
+        ...binding,
+        isCurrent: checkLiveAuthority,
       });
+      this.#observationAuthorities.set(authority, binding);
+      return authority;
     };
     const acceptance: WorkerGatewayAcceptance = {
       accepted: true,

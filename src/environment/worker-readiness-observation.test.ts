@@ -15,7 +15,9 @@ import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
 import type { EnvironmentEnrollment } from './enrollment.ts';
 import { workerIdentityFixture } from './worker-identity-fixture.ts';
-import { mintTestObservationAuthority } from './readiness-authority.ts';
+import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
+
+const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
 
 function testAuthority(overrides: {
   readonly environmentInstanceId?: string;
@@ -24,7 +26,7 @@ function testAuthority(overrides: {
   readonly lifecycleGeneration?: number;
   readonly isCurrent?: () => boolean;
 } = {}) {
-  return mintTestObservationAuthority({
+  return readinessAuthorityTestSeam.mint({
     environmentInstanceId: overrides.environmentInstanceId ?? 'env-1',
     enrollmentId: overrides.enrollmentId ?? 'enroll-1',
     connectionEpoch: overrides.connectionEpoch ?? 7,
@@ -80,6 +82,7 @@ async function enrolled(
     enrollments: new InMemoryEnrollmentStore(),
     readiness,
     currentConnectionEpoch,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -244,6 +247,7 @@ test('a pending enrollment cannot write readiness even when an epoch resolver re
     enrollments: new InMemoryEnrollmentStore(),
     readiness: store,
     currentConnectionEpoch: () => 7,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-pending',
   });
   await service.requestEnrollment({
@@ -403,6 +407,7 @@ test('a pre-epoch reconciliation cannot overwrite a revoke that lands during its
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -451,6 +456,7 @@ test('a pre-epoch reconciliation cannot overwrite a reset that lands during its 
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -483,6 +489,7 @@ test('a pre-epoch reconciliation cannot overwrite a permission update that lands
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -515,6 +522,7 @@ test('concurrent lifecycle decisions are serialized through the durable revision
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });

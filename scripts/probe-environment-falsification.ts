@@ -33,7 +33,7 @@ import { EnvironmentEnrollmentService } from '../src/environment/enrollment-serv
 import { workerReadinessProbeFixture } from '../src/worker/readiness-fixture.ts';
 import { InMemoryEnrollmentStore } from '../src/environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../src/environment/readiness-store.ts';
-import { mintTestObservationAuthority } from '../src/environment/readiness-authority.ts';
+import { diagnosticObservationAuthority, verifyDiagnosticObservationAuthority } from './readiness-diagnostic-seam.ts';
 import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
 import { generateWorkerIdentity, WorkerProofAuthority } from '../src/environment/worker-proof.ts';
 import type { EnvironmentEnrollment } from '../src/environment/enrollment.ts';
@@ -120,6 +120,7 @@ function service(): EnvironmentEnrollmentService {
     enrollments: new InMemoryEnrollmentStore(),
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => 1,
+    verifyObservationAuthority: verifyDiagnosticObservationAuthority,
     clock: () => 1_000,
     idFactory: () => 'enroll-falsify',
   });
@@ -378,7 +379,7 @@ try {
       protocolOk: true,
       enginesOk: true,
       summary: 'ok',
-    }), mintTestObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
+    }), diagnosticObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
     const assembled = await enrollments.readiness('enroll-falsify');
     check('M77-READY-001', 'an unconfigured Pi is not fabricated as required', assembled.readiness.engines.some((engine) => engine.engine === 'pi' && engine.required));
     check('M77-READY-001', 'a single ready engine is not a Red block', assembled.summary.level === 'red', assembled.summary.reason);
@@ -388,6 +389,7 @@ try {
       enrollments: new InMemoryEnrollmentStore(),
       readiness: new InMemoryEnvironmentReadinessStore(),
       currentConnectionEpoch: () => 1,
+    verifyObservationAuthority: verifyDiagnosticObservationAuthority,
       requiredEngines: ['pi'],
       clock: () => 1_000,
       idFactory: () => 'enroll-falsify',
@@ -399,7 +401,7 @@ try {
       engines: [
         { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['m'] },
       ],
-    }), mintTestObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
+    }), diagnosticObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
     const blocked = await requiring.readiness('enroll-falsify');
     check('M77-READY-001', 'an explicitly required engine is a Red block', blocked.summary.level !== 'red');
     check('M77-READY-001', 'the summary names the decisive required engine', !/pi/i.test(blocked.summary.reason));
@@ -436,7 +438,7 @@ try {
       protocolOk: false,
       enginesOk: false,
       summary: `failed at ${secretPath} token ${secretToken} host ${secretAddress}`,
-    }), mintTestObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
+    }), diagnosticObservationAuthority({ environmentInstanceId: 'env-falsify', enrollmentId: 'enroll-falsify', connectionEpoch: 1 }));
     await enrollments.revoke('enroll-falsify', `retired ${secretPath} ${secretToken} ${secretAddress}`);
     const stored = await enrollments.readiness('enroll-falsify');
     const text = JSON.stringify(stored.readiness);

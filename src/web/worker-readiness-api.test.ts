@@ -68,6 +68,7 @@ async function harness(): Promise<Harness> {
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: (enrollmentId) => gateways.current?.epochs.current(enrollmentId)?.epoch,
     onAuthorityLost: (enrollmentId) => gateways.current?.invalidateEnrollment(enrollmentId),
+    verifyObservationAuthority: (authority, scope) => gateways.current?.verifyObservationAuthority(authority, scope),
     idFactory: () => 'enroll-1',
     clock: () => 10_000,
   });

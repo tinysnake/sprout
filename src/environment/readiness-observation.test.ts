@@ -7,7 +7,9 @@ import { createReadinessObservation, readReadinessObservation } from './readines
 import { InMemoryEnvironmentReadinessStore } from './readiness-store.ts';
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
-import { mintTestObservationAuthority } from './readiness-authority.ts';
+import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
+
+const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
 
 for (const backend of ['memory', 'sqlite'] as const) {
   test(`${backend} mutation accepts only scoped opaque canonical observations (R118-API-002)`, async (t) => {
@@ -20,7 +22,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       rmSync(directory, { recursive: true, force: true });
     });
     let current = true;
-    const authority = mintTestObservationAuthority({
+    const authority = readinessAuthorityTestSeam.mint({
       environmentInstanceId: 'env-1',
       enrollmentId: 'enroll-1',
       connectionEpoch: 7,
@@ -30,7 +32,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       protocolVersion: '2', observedAt: 1_234,
       engines: [{ engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] }],
     });
-    const scope = { environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 2 }, at: 1_234 };
+    const scope = { environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 2 }, at: 1_234, verifyAuthority: readinessAuthorityTestSeam.verify };
     const { probe: _probe, ...missingEmbedded } = result.readiness;
     for (const invalid of [
       undefined, { readiness: result.readiness }, { ...result, probe: undefined },
@@ -61,9 +63,9 @@ for (const backend of ['memory', 'sqlite'] as const) {
     assert.equal(await store.commitObservation('env-other', observation, authority), false);
     assert.equal(await store.commitObservation('env-1', observation, { ...authority, connectionEpoch: 8 } as never), false);
     assert.equal(await store.commitObservation('env-1', observation, { ...authority, enrollmentId: 'enroll-other' } as never), false);
-    assert.equal(await store.commitObservation('env-1', observation, mintTestObservationAuthority({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 8 })), false);
-    assert.equal(await store.commitObservation('env-1', observation, mintTestObservationAuthority({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-other', connectionEpoch: 7 })), false);
-    assert.equal(await store.commitObservation('env-1', observation, mintTestObservationAuthority({ environmentInstanceId: 'env-other', enrollmentId: 'enroll-1', connectionEpoch: 7 })), false);
+    assert.equal(await store.commitObservation('env-1', observation, readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 8 })), false);
+    assert.equal(await store.commitObservation('env-1', observation, readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-other', connectionEpoch: 7 })), false);
+    assert.equal(await store.commitObservation('env-1', observation, readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-other', enrollmentId: 'enroll-1', connectionEpoch: 7 })), false);
     assert.equal(await store.commitObservation('env-1', observation, { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true } as never), false, 'caller-assembled authority is refused');
     assert.equal(await store.commitObservation('env-1', observation, { ...authority } as never), false, 'copied authority is refused');
     assert.equal(await store.getReadiness('env-other'), undefined);

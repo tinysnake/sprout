@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
-import { mintTestObservationAuthority } from './readiness-authority.ts';
+import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
 import { EnvironmentArchiveService, ArchiveError } from './archive.ts';
 import { approveEnrollment, EnrollmentError } from './enrollment.ts';
 import { SqliteEnrollmentStore } from './sqlite-enrollment-store.ts';
@@ -31,6 +31,8 @@ import type { EnvironmentEnrollment } from './enrollment.ts';
  * verification rather than from a bare digest.
  */
 
+const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
+
 function databasePath(): { readonly directory: string; readonly path: string } {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-enrollment-'));
   return { directory, path: join(directory, 'sprout.db') };
@@ -50,13 +52,14 @@ function service(
     enrollments: store.enrollments,
     readiness: store.readiness,
     currentConnectionEpoch: () => 1,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     ...(options.leases !== undefined ? { leases: () => options.leases! } : {}),
     clock: () => options.now ?? 10_000,
     idFactory: () => 'enroll-1',
   });
 }
 
-const readinessAuthority = mintTestObservationAuthority({
+const readinessAuthority = readinessAuthorityTestSeam.mint({
   environmentInstanceId: 'local-macos',
   enrollmentId: 'enroll-1',
   connectionEpoch: 1,

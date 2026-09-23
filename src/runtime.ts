@@ -265,7 +265,6 @@ export interface SproutRuntime {
    * (#115). Present so Web-created pending enrollments have a machine channel.
    */
   readonly workerGateway: WorkerGateway;
-  readonly workerEpochs: WorkerConnectionRegistry;
   /**
    * The runtime environment port over accepted enrollment-backed connections
    * (E1) and the accepted-connection registry the dynamic catalog projects from
@@ -339,6 +338,12 @@ export interface SproutRuntimeOptions {
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
+  /**
+   * Non-production test seam for isolated lower-level store contracts. Runtime
+   * never exposes this verifier and production composition always replaces it
+   * with the authenticated WorkerGateway verifier.
+   */
+  readonly testOnlyObservationAuthorityVerifier?: import('./environment/readiness-authority.ts').ObservationAuthorityVerifier;
 }
 
 /**
@@ -895,6 +900,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // and observed-readiness stores and projects work safety from the same lease
     // registry the run and Task domains use, so the facts never diverge.
     let invalidateWorkerAuthority: (enrollmentId: string) => void = () => undefined;
+    let verifyWorkerObservationAuthority: import('./environment/readiness-authority.ts').ObservationAuthorityVerifier = () => undefined;
     const enrollmentOptions: EnvironmentEnrollmentServiceOptions = {
       enrollments: stores.enrollments,
       readiness: stores.environmentReadiness,
@@ -904,6 +910,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // can invoke a lifecycle mutation; the indirection keeps composition's
       // gateway/service construction order explicit.
       onAuthorityLost: (enrollmentId) => invalidateWorkerAuthority(enrollmentId),
+      verifyObservationAuthority: (authority, scope) => verifyWorkerObservationAuthority(authority, scope),
       leases: () => pool.leases(),
       // Recovery records are authoritative over the lease projection, so the
       // summary can distinguish `reconciling` from `recovery` and a reconnect
@@ -1036,6 +1043,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       )],
     });
     invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
+    verifyWorkerObservationAuthority = (authority, scope) =>
+      options.testOnlyObservationAuthorityVerifier?.(authority, scope) ??
+      workerGateway.verifyObservationAuthority(authority, scope);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1214,7 +1224,6 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       projectService,
       projectAccess: projectAccessService,
       workerGateway,
-      workerEpochs,
       enrollmentEnvironment,
       environmentSource,
       engines,
