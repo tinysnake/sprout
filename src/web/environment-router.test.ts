@@ -12,6 +12,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import { EnrollmentError } from '../environment/enrollment.ts';
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
@@ -620,13 +621,12 @@ test('an empty engine configuration does not fabricate a dual-engine requirement
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
       ],
     });
-    await runtime.enrollments.observeReadiness('enroll-1', {
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    await runtime.enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+      protocolVersion: '2.1',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       ],
-    }, { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
+    }), { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {
@@ -673,13 +673,12 @@ test('an explicitly required engine is Red when unavailable, and only that one',
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
       ],
     });
-    await runtime.enrollments.observeReadiness('enroll-1', {
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    await runtime.enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+      protocolVersion: '2.1',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       ],
-    }, { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
+    }), { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {

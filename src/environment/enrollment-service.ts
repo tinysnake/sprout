@@ -475,31 +475,41 @@ export class EnvironmentEnrollmentService {
     return outcome;
   }
 
-  /** Record one accepted-epoch observation as a single durable commit. */
+  /**
+   * The sole accepted-authority readiness write: validate a complete Worker
+   * result before projecting and atomically committing its readiness/probe pair.
+   * Legacy projected facts are not Worker evidence and are deliberately refused.
+   */
   async observeReadiness(
     enrollmentId: string,
-    observed: ObservedReadiness,
+    result: unknown,
     authority: ReadinessWriteAuthority,
-    probe?: Omit<ProbeResultFact, 'enrollmentId' | 'connectionEpoch'>,
   ): Promise<boolean> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
     const accepted = this.#acceptedAuthority(enrollment, authority);
     if (accepted === undefined) return false;
+    const validated = validateWorkerReadinessProbeResult(result);
+    if (validated === undefined) return false;
+    const observed = observedFactsFromWorkerReadiness({
+      ...validated.readiness,
+      at: this.#clock(),
+      supported: this.#supportedProtocol,
+    });
     const readiness = sanitizeObservedReadiness({
       ...observed,
       enrollmentId: enrollment.id,
       connectionEpoch: accepted.connectionEpoch,
     });
-    const sanitizedProbe = probe === undefined
-      ? undefined
-      : sanitizeProbe({
-          ...probe,
-          enrollmentId: enrollment.id,
-          connectionEpoch: accepted.connectionEpoch,
-        });
+    const probe = sanitizeProbe({
+      ...validated.probe,
+      enrollmentId: enrollment.id,
+      connectionEpoch: accepted.connectionEpoch,
+    });
+    // Store adapters re-check the live authority guard at their mutation
+    // boundary and commit both documents atomically (including after an await).
     return this.#readiness.commitObservation(
       enrollment.environmentInstanceId,
-      { readiness, ...(sanitizedProbe !== undefined ? { probe: sanitizedProbe } : {}) },
+      { readiness, probe },
       accepted,
     );
   }
@@ -605,39 +615,9 @@ export class EnvironmentEnrollmentService {
     },
     authority: ReadinessWriteAuthority,
   ): Promise<boolean> {
-    const enrollment = await this.#requireEnrollment(enrollmentId);
-    const accepted = this.#acceptedAuthority(enrollment, authority);
-    if (accepted === undefined) return false;
-    // This service is the final authenticated Worker boundary before storage.
-    // Runtime callers validate the complete result earlier so they can reject a
-    // missing returned probe; repeat the same closed-shape validation here for
-    // every observation, including one with a missing embedded probe, so no
-    // future authenticated caller can bypass it.
-    const validated = validateWorkerReadinessProbeResult({ readiness, probe: readiness.probe });
-    if (validated === undefined) return false;
-    const observed = observedFactsFromWorkerReadiness({
-      ...validated.readiness,
-      at: this.#clock(),
-      supported: this.#supportedProtocol,
-    });
-    const storedReadiness = sanitizeObservedReadiness({
-      ...observed,
-      enrollmentId: enrollment.id,
-      connectionEpoch: accepted.connectionEpoch,
-    });
-    const probe = sanitizeProbe({
-      ...validated.probe,
-      enrollmentId: enrollment.id,
-      connectionEpoch: accepted.connectionEpoch,
-    });
-    // Readiness and its startup/explicit probe cross exactly one store call.
-    // Store adapters check the live guard at their mutation boundary and commit
-    // both documents atomically, so there is no partial-readiness race.
-    return this.#readiness.commitObservation(
-      enrollment.environmentInstanceId,
-      { readiness: storedReadiness, probe },
-      accepted,
-    );
+    // `worker/info` carries only the embedded probe. Complete RPC results are
+    // compared at requester/runtime ingress; both shapes share this final guard.
+    return this.observeReadiness(enrollmentId, { readiness, probe: readiness?.probe }, authority);
   }
 
   /**

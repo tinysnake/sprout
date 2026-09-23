@@ -23,6 +23,7 @@ import { SqliteEnrollmentStore } from '../src/environment/sqlite-enrollment-stor
 import { SqliteEnvironmentReadinessStore } from '../src/environment/sqlite-readiness-store.ts';
 import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
 import { generateWorkerIdentity } from '../src/environment/worker-proof.ts';
+import { workerReadinessProbeFixture } from '../src/worker/readiness-fixture.ts';
 
 const SENTINEL_PRIVATE_KEY = 'BEGIN OPENSSH PRIVATE KEY sentinel-private-material';
 const SENTINEL_ENGINE_CREDENTIAL = 'sk-sentinel000000000000000000enginecredential';
@@ -131,14 +132,17 @@ try {
   check('approval grants exactly the requested capability', approved?.capabilityPermissions['agent-run'] === true);
 
   // 6. Facts stay independent: an engine problem does not change enrollment.
-  const observedReadiness = {
-    connection: { state: 'online', lastConfirmedAt: 2_000 },
-    compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+  const observedReadiness = workerReadinessProbeFixture({
+    observedAt: 2_000,
+    protocolVersion: '2.1',
     engines: [
-      { engine: 'codex', installed: true, readiness: 'login-required', required: true, models: { state: 'unknown', models: [] } },
-      { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-probe'] } },
+      { engine: 'codex', installed: true, readiness: 'login-required', modelAvailability: 'unknown', models: [] },
+      { engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['pi-probe'] },
     ],
-  } as const;
+  }, {
+    enginesOk: false,
+    summary: `probe touched ${SENTINEL_ABSOLUTE_PATH} with ${SENTINEL_ENGINE_CREDENTIAL}`,
+  });
   const authority = { enrollmentId: 'enroll-probe', connectionEpoch: 1, isCurrent: () => true } as const;
   await service.observeReadiness('enroll-probe', observedReadiness, authority);
   const assembled = await service.readiness('enroll-probe');
@@ -239,15 +243,11 @@ try {
   check('durable state keeps the decisive revoke reason', durableText.includes('retired') === true);
   check('durable state keeps the decisive reset reason', durableText.includes('rotate') === true);
 
-  // 11. Marked free text is sanitized before it is retained.
-  await service.observeReadiness('enroll-probe', observedReadiness, authority, {
-    at: 3_000,
-    latencyMs: 5,
-    protocolOk: true,
-    enginesOk: true,
-    summary: `probe touched ${SENTINEL_ABSOLUTE_PATH} with ${SENTINEL_ENGINE_CREDENTIAL}`,
-  });
-  const probesList = await service.listProbes('enroll-probe');
+  // 11. Reset refuses new writes; the earlier sanitized history is still durable.
+  const afterReset = await service.observeReadiness('enroll-probe', observedReadiness, authority);
+  check('a reset enrollment cannot publish current readiness', afterReset === false);
+  const probesList = await readiness.listProbes('probe-instance');
+  check('a refused post-reset write cannot append history', probesList.length === 1);
   const summary = probesList.at(-1)!.summary;
   check('a probe summary drops an absolute path', summary.includes(SENTINEL_ABSOLUTE_PATH) === false, summary);
   check('a probe summary drops a credential', summary.includes(SENTINEL_ENGINE_CREDENTIAL) === false, summary);

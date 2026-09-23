@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
+import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import { EnvironmentArchiveService, ArchiveError } from './archive.ts';
 import { approveEnrollment, EnrollmentError } from './enrollment.ts';
 import { SqliteEnrollmentStore } from './sqlite-enrollment-store.ts';
@@ -244,39 +245,39 @@ test('observed readiness facts and probe history survive reopen without being si
     await request(enrollments, worker);
     await enrollments.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
     const observation = {
-      connection: { state: 'online', lastConfirmedAt: 5_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      observedAt: 5_000,
+      protocolVersion: '2.1',
       engines: [
         {
           engine: 'codex',
           installed: true,
           readiness: 'login-required',
-          required: true,
-          models: { state: 'unknown', models: [] },
+          modelAvailability: 'unknown',
+          models: [],
         },
         {
           engine: 'pi',
           installed: true,
           readiness: 'ready',
-          required: true,
-          models: { state: 'available', models: ['pi-model'] },
+          modelAvailability: 'available',
+          models: ['pi-model'],
         },
       ],
     } as const;
-    await enrollments.observeReadiness('enroll-1', observation, readinessAuthority, {
+    await enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture(observation, {
       at: 1_000,
       latencyMs: 20,
       protocolOk: true,
       enginesOk: false,
       summary: 'codex login required',
-    });
-    await enrollments.observeReadiness('enroll-1', observation, readinessAuthority, {
+    }), readinessAuthority);
+    await enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture(observation, {
       at: 2_000,
       latencyMs: 12,
       protocolOk: true,
       enginesOk: true,
       summary: 'all engines ready',
-    });
+    }), readinessAuthority);
     first.close();
 
     const second = stores(path);
@@ -313,14 +314,14 @@ test('a refused connection never produces or overwrites readiness facts', async 
         { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
       ],
     });
-    await enrollments.observeReadiness('enroll-1', {
-      connection: { state: 'online', lastConfirmedAt: 2_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    await enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+      observedAt: 2_000,
+      protocolVersion: '2.1',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
-        { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
+        { engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['pi-model'] },
       ],
-    }, readinessAuthority);
+    }), readinessAuthority);
 
     // A different verified key tries to connect: refused, and it must not
     // overwrite the enrolled Worker's observed readiness with its own claims.
@@ -390,14 +391,13 @@ test('work safety is projected from the lease registry into the Red summary', as
     const worker = workerIdentityFixture();
     await request(enrollments, worker);
     await enrollments.approve('enroll-1', { capabilityPermissions: { 'agent-run': true } });
-    await enrollments.observeReadiness('enroll-1', {
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    await enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+      protocolVersion: '2.1',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
-        { engine: 'pi', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['pi-model'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
+        { engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['pi-model'] },
       ],
-    }, readinessAuthority);
+    }), readinessAuthority);
     const assembled = await enrollments.readiness('enroll-1');
     assert.equal(assembled.readiness.workSafety.state, 'recovery');
     assert.equal(assembled.summary.level, 'red');

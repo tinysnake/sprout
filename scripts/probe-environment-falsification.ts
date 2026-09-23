@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from '../src/environment/enrollment-service.ts';
+import { workerReadinessProbeFixture } from '../src/worker/readiness-fixture.ts';
 import { InMemoryEnrollmentStore } from '../src/environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../src/environment/readiness-store.ts';
 import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
@@ -365,19 +366,18 @@ try {
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
       ],
     });
-    await enrollments.observeReadiness('enroll-falsify', {
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+    await enrollments.observeReadiness('enroll-falsify', workerReadinessProbeFixture({
+      protocolVersion: '2',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['m'] },
       ],
-    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true }, {
+    }, {
       at: 1_000,
       latencyMs: 1,
       protocolOk: true,
       enginesOk: true,
       summary: 'ok',
-    });
+    }), { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true });
     const assembled = await enrollments.readiness('enroll-falsify');
     check('M77-READY-001', 'an unconfigured Pi is not fabricated as required', assembled.readiness.engines.some((engine) => engine.engine === 'pi' && engine.required));
     check('M77-READY-001', 'a single ready engine is not a Red block', assembled.summary.level === 'red', assembled.summary.reason);
@@ -393,13 +393,12 @@ try {
     });
     await request(requiring, identity.publicKey);
     await requiring.approve('enroll-falsify', { capabilityPermissions: { 'agent-run': true } });
-    await requiring.observeReadiness('enroll-falsify', {
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+    await requiring.observeReadiness('enroll-falsify', workerReadinessProbeFixture({
+      protocolVersion: '2',
       engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['m'] } },
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['m'] },
       ],
-    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true });
+    }), { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true });
     const blocked = await requiring.readiness('enroll-falsify');
     check('M77-READY-001', 'an explicitly required engine is a Red block', blocked.summary.level !== 'red');
     check('M77-READY-001', 'the summary names the decisive required engine', !/pi/i.test(blocked.summary.reason));
@@ -427,21 +426,16 @@ try {
       },
       engines: [],
     });
-    await enrollments.observeReadiness('enroll-falsify', {
-      connection: { state: 'online' },
-      compatibility: {
-        state: 'incompatible',
-        workerProtocolVersion: '3',
-        detail: `mismatch at ${secretPath} with ${secretToken} from ${secretAddress}`,
-      },
+    await enrollments.observeReadiness('enroll-falsify', workerReadinessProbeFixture({
+      protocolVersion: '3',
       engines: [],
-    }, { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true }, {
+    }, {
       at: 1_000,
       latencyMs: 1,
       protocolOk: false,
       enginesOk: false,
       summary: `failed at ${secretPath} token ${secretToken} host ${secretAddress}`,
-    });
+    }), { enrollmentId: 'enroll-falsify', connectionEpoch: 1, isCurrent: () => true });
     await enrollments.revoke('enroll-falsify', `retired ${secretPath} ${secretToken} ${secretAddress}`);
     const stored = await enrollments.readiness('enroll-falsify');
     const text = JSON.stringify(stored.readiness);

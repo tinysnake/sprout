@@ -64,7 +64,7 @@ export function createWorkerProbeRequester(
     if (result === undefined) {
       throw new Error('the Environment Worker returned an invalid readiness probe result');
     }
-    const recorded = await enrollments.observeWorkerReadiness(enrollmentId, result.readiness, {
+    const recorded = await enrollments.observeReadiness(enrollmentId, result, {
       enrollmentId,
       connectionEpoch: live.epoch.epoch,
       isCurrent,

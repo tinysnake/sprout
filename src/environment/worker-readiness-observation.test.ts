@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import {
   InMemoryEnvironmentReadinessStore,
   type ReadinessObservation,
   type ReadinessWriteAuthority,
+  type EnvironmentReadinessStore,
 } from './readiness-store.ts';
+import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
 import type { EnvironmentEnrollment } from './enrollment.ts';
 import { workerIdentityFixture } from './worker-identity-fixture.ts';
@@ -51,7 +56,7 @@ class PostCommitDelayedReadinessStore extends InMemoryEnvironmentReadinessStore 
 }
 
 async function enrolled(
-  readiness = new InMemoryEnvironmentReadinessStore(),
+  readiness: EnvironmentReadinessStore = new InMemoryEnvironmentReadinessStore(),
   currentConnectionEpoch: () => number | undefined = () => 7,
 ) {
   const service = new EnvironmentEnrollmentService({
@@ -88,6 +93,111 @@ function startupReadiness() {
       source: 'worker' as const, version: '0.86.1', summary: 'startup probe',
     },
   };
+}
+
+for (const kind of ['omitted', 'undefined', 'non-worker'] as const) {
+  test(`legacy observeReadiness rejects ${kind} probe before commit (R118-API-002)`, async (t) => {
+    const { service, store } = await enrolled();
+    const commit = t.mock.method(store, 'commitObservation');
+    const observed = {
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [],
+    };
+    const args: unknown[] = [
+      'enroll-1', observed,
+      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+    ];
+    if (kind !== 'omitted') {
+      args.push(kind === 'undefined' ? undefined : { ...startupReadiness().probe, source: 'unknown' });
+    }
+    // Reproduce the old public signature across an untyped caller boundary.
+    assert.equal(await Reflect.apply(service.observeReadiness, service, args), false);
+    assert.equal(commit.mock.callCount(), 0);
+    assert.equal(await store.getReadiness('env-1'), undefined);
+    assert.deepEqual(await store.listProbes('env-1'), []);
+  });
+}
+
+for (const persistent of [false, true]) {
+  test(`complete observeReadiness refuses invalid pairs without durable mutation (${persistent ? 'SQLite' : 'memory'}, R118-API-002)`, async (t) => {
+    const directory = persistent ? mkdtempSync(join(tmpdir(), 'sprout-readiness-ingress-')) : undefined;
+    const filename = directory === undefined ? undefined : join(directory, 'readiness.db');
+    const store = filename === undefined
+      ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename });
+    t.after(() => {
+      if (store instanceof SqliteEnvironmentReadinessStore) store.close();
+      if (directory !== undefined) rmSync(directory, { recursive: true, force: true });
+    });
+    const { service } = await enrolled(store);
+    const commit = t.mock.method(store, 'commitObservation');
+    const authority = { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true };
+    const readiness = startupReadiness();
+    const { probe, ...facts } = readiness;
+    const invalid: readonly [string, unknown][] = [
+      ['missing result', undefined],
+      ['omitted returned probe', { readiness }],
+      ['undefined returned probe', { readiness, probe: undefined }],
+      ['omitted embedded probe', { readiness: facts, probe }],
+      ['undefined embedded probe', { readiness: { ...facts, probe: undefined }, probe }],
+      ['null embedded probe', { readiness: { ...facts, probe: null }, probe }],
+      ['null returned probe', { readiness, probe: null }],
+      ['malformed probe', { readiness: { ...facts, probe: {} }, probe: {} }],
+      ['negative latency', {
+        readiness: { ...facts, probe: { ...probe, latencyMs: -1 } },
+        probe: { ...probe, latencyMs: -1 },
+      }],
+      ['mismatched pair', { readiness, probe: { ...probe, at: probe.at + 1 } }],
+      ['malformed readiness', { readiness: { ...readiness, engines: [{}] }, probe }],
+      ['extra field', { readiness, probe, injected: true }],
+      ...['unknown', 'provider-account', 'openai-codex'].map((source): [string, unknown] => [
+        `non-Worker source ${source}`,
+        { readiness: { ...facts, probe: { ...probe, source } }, probe: { ...probe, source } },
+      ]),
+    ];
+    for (const [label, result] of invalid) {
+      assert.equal(await service.observeReadiness('enroll-1', result, authority), false, label);
+      assert.equal(commit.mock.callCount(), 0, `${label}: no mutation-boundary call`);
+      assert.equal(await store.getReadiness('env-1'), undefined, label);
+      assert.deepEqual(await store.listProbes('env-1'), [], label);
+    }
+    const empty = await service.readiness('enroll-1');
+    assert.equal(empty.readiness.connection.state, 'never-connected');
+    assert.deepEqual(empty.probes, []);
+
+    // A complete pair is projected and privacy-reduced, not stored as caller-
+    // supplied product readiness; later invalid writes cannot overwrite it.
+    const unknownVersionProbe = { ...probe, version: 'unknown' };
+    assert.equal(await service.observeReadiness('enroll-1', {
+      readiness: { ...facts, probe: unknownVersionProbe }, probe: unknownVersionProbe,
+    }, authority), true);
+    assert.equal(commit.mock.callCount(), 1);
+    const acceptedReadiness = await store.getReadiness('env-1');
+    const acceptedHistory = await store.listProbes('env-1');
+    assert.equal(acceptedReadiness?.enrollmentId, 'enroll-1');
+    assert.equal(acceptedReadiness?.connectionEpoch, 7);
+    assert.deepEqual(acceptedReadiness?.connection, { state: 'online', lastConfirmedAt: 1_234 });
+    assert.equal(acceptedReadiness?.engines[0]?.version, '0.86.1');
+    assert.deepEqual(acceptedHistory, [{
+      ...probe, version: 'unknown-version', enrollmentId: 'enroll-1', connectionEpoch: 7,
+    }]);
+    for (const [label, result] of invalid) {
+      assert.equal(await service.observeReadiness('enroll-1', result, authority), false, label);
+      assert.equal(commit.mock.callCount(), 1, `${label}: no subsequent commit`);
+      assert.deepEqual(await store.getReadiness('env-1'), acceptedReadiness, label);
+      assert.deepEqual(await store.listProbes('env-1'), acceptedHistory, label);
+    }
+    if (filename !== undefined) {
+      const reopened = new SqliteEnvironmentReadinessStore({ filename });
+      try {
+        assert.deepEqual(await reopened.getReadiness('env-1'), acceptedReadiness);
+        assert.deepEqual(await reopened.listProbes('env-1'), acceptedHistory);
+      } finally {
+        reopened.close();
+      }
+    }
+  });
 }
 
 test('startup Worker readiness persists one epoch-bound probe and its independent provenance facts', async () => {
@@ -456,6 +566,20 @@ for (const missing of ['omitted', 'undefined'] as const) {
     assert.deepEqual(projected.probes, []);
   });
 }
+
+test('direct service rejects malformed Worker readiness before commit (R118-API-002)', async (t) => {
+  const { service, store } = await enrolled();
+  const commit = t.mock.method(store, 'commitObservation');
+  for (const readiness of [undefined, null, {}, 'invalid']) {
+    assert.equal(await service.observeWorkerReadiness(
+      'enroll-1', readiness as never,
+      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+    ), false);
+    assert.equal(commit.mock.callCount(), 0);
+    assert.equal(await store.getReadiness('env-1'), undefined);
+    assert.deepEqual(await store.listProbes('env-1'), []);
+  }
+});
 
 test('direct service rejects malformed embedded probes before commit (R118-API-002)', async (t) => {
   for (const probe of [null, {}, { ...startupReadiness().probe, latencyMs: -1 }]) {

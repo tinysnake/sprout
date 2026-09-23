@@ -33,6 +33,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 
 import type { AgentDefinition } from './agent/registry.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
@@ -696,19 +697,19 @@ test('the composed runtime exposes durable enrollment and readiness through its 
     const epoch = runtime.workerEpochs.accept(requested.enrollment.id);
     // Only the engine this build's configured Agents actually run on is required,
     // so a single ready engine is a complete Environment.
-    await runtime.enrollments.observeReadiness(requested.enrollment.id, {
-      connection: { state: 'online', lastConfirmedAt: now },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+    await runtime.enrollments.observeReadiness(requested.enrollment.id, workerReadinessProbeFixture({
+      observedAt: now,
+      protocolVersion: '2',
       engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
+        { engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
       ],
-    }, readinessAuthority(runtime, requested.enrollment.id, epoch.epoch), {
+    }, {
       at: now,
       latencyMs: 5,
       protocolOk: true,
       enginesOk: true,
       summary: 'ready',
-    });
+    }), readinessAuthority(runtime, requested.enrollment.id, epoch.epoch));
 
     const assembled = await runtime.enrollments.readiness(requested.enrollment.id);
     assert.equal(assembled.summary.level, 'green');
@@ -1533,14 +1534,8 @@ test('production starts with zero Environments and admits an enrolled instance w
     // A current, authenticated connection and facts from that exact epoch are
     // required; production admits it without a restart.
     const epoch = runtime.workerEpochs.accept(enrollmentId);
-    await runtime.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: epoch.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentId, epoch.epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, true);
     await runtime.refreshEnvironmentCatalog();
@@ -1548,6 +1543,14 @@ test('production starts with zero Environments and admits an enrolled instance w
     await runtime.close();
   }
 });
+
+function scriptedReadinessProbe() {
+  return workerReadinessProbeFixture({
+    protocolVersion: '2',
+    observedAt: Date.now(),
+    engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+  });
+}
 
 /** A helper that enrolls, approves, and makes eligible one instance. */
 async function enrollEligibleInstance(
@@ -1568,14 +1571,8 @@ async function enrollEligibleInstance(
     capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
   });
   const epoch = runtime.workerEpochs.accept(enrollmentId);
-  await runtime.enrollments.observeReadiness(enrollmentId, {
-    connectionEpoch: epoch.epoch,
-    connection: { state: 'online', lastConfirmedAt: Date.now() },
-    compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-    engines: [
-      { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-    ],
-  }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
+  await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    readinessAuthority(runtime, enrollmentId, epoch.epoch));
   await runtime.refreshEnvironmentCatalog();
   return enrollmentId;
 }
@@ -1615,14 +1612,8 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // Establishing the required readiness fact makes it eligible dynamically.
-    await runtime.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: emptyEpoch.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(runtime, enrollmentId, emptyEpoch.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentId, emptyEpoch.epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
   } finally {
@@ -1716,14 +1707,8 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     const replacement = runtime.workerEpochs.accept(enrollmentId);
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
-    await runtime.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: replacement.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(runtime, enrollmentId, replacement.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentId, replacement.epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
     if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
@@ -1760,14 +1745,10 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     assert.equal(runtime.environmentCatalog.entry('host-b')?.eligible, true);
     if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
 
-    // A delayed old-epoch observation is persisted as non-authoritative and
+    // A delayed old-epoch observation is refused as non-authoritative and
     // cannot make the new connection eligible or release/conflict-bypass lease.
-    await runtime.enrollments.observeReadiness(enrollmentA, {
-      connectionEpoch: first.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } }],
-    }, readinessAuthority(runtime, enrollmentA, first.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentA, first.epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     const blocked = runtime.pool.acquireLease({
@@ -1775,12 +1756,8 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     });
     assert.equal(blocked.ok, false);
 
-    await runtime.enrollments.observeReadiness(enrollmentA, {
-      connectionEpoch: replacement.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } }],
-    }, readinessAuthority(runtime, enrollmentA, replacement.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentA, replacement.epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
     const conflict = runtime.pool.acquireLease({
@@ -1832,24 +1809,12 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
 
     // Delayed old facts remain non-authoritative; only readiness produced by
     // the replacement epoch restores admission.
-    await second.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: firstEpoch.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(second, enrollmentId, firstEpoch.epoch));
+    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(second, enrollmentId, firstEpoch.epoch));
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false);
-    await second.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: replacement.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(second, enrollmentId, replacement.epoch));
+    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(second, enrollmentId, replacement.epoch));
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, true);
   } finally {
@@ -2428,14 +2393,8 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     const epoch = runtime.workerEpochs.accept(enrollmentId);
     // A pending enrollment may have an accepted-looking resolver epoch, but it
     // has no fact-write authority until Human approval.
-    await runtime.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: epoch.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentId, epoch.epoch));
     // Still pending: no admission.
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible ?? false, false);
     assert.equal(await runtime.stores.environmentReadiness.getReadiness('host-a'), undefined);
@@ -2445,14 +2404,8 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     await runtime.enrollments.approve(enrollmentId, {
       capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
     });
-    await runtime.enrollments.observeReadiness(enrollmentId, {
-      connectionEpoch: epoch.epoch,
-      connection: { state: 'online', lastConfirmedAt: Date.now() },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['scripted-model'] } },
-      ],
-    }, readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+      readinessAuthority(runtime, enrollmentId, epoch.epoch));
     await runtime.refreshEnvironmentCatalog();
     await waitFor(
       () => runtime.environmentCatalog.entry('host-a')?.eligible === true,
