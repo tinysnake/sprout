@@ -28,7 +28,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,6 +46,14 @@ import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import type { WorkerInfo } from './worker/protocol.ts';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkerReadinessFacts,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
+} from './worker/protocol.ts';
+import type { EnvironmentWorker } from './worker/server.ts';
+import type { WorkerEnrollmentConnection } from './worker/enrollment-connector.ts';
 import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
@@ -2493,3 +2501,345 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     await runtime.close();
   }
 });
+
+/**
+ * #124 acceptance: one application-level readiness workflow across triggers.
+ *
+ * These scenarios cross the composed Runtime with real enrollment approval, the
+ * real WorkerGateway, an authenticated Worker JSON-RPC channel, and the real HTTP
+ * router. The same contract runs against memory and SQLite. Authority is the
+ * actual accepted connection: no fabricated epoch callback or raw current-
+ * readiness seeding stands in for it.
+ */
+
+/** Compose one accepted enrollment + Worker for the #124 acceptance scenarios. */
+async function readinessWorkflowHarness(options: {
+  readonly backend: 'memory' | 'sqlite';
+  readonly directory: string;
+  readonly agents?: readonly AgentDefinition[];
+}): Promise<{
+  readonly runtime: SproutRuntime;
+  readonly base: string;
+  readonly cookie: string;
+  readonly csrf: string;
+  connect(
+    enrollmentId: string,
+    keyPath: string,
+    worker?: {
+      readonly readiness?: () => WorkerReadinessFacts;
+      readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
+    },
+  ): Promise<WorkerEnrollmentConnection>;
+  close(): Promise<void>;
+}> {
+  const { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } = await import(
+    './worker/enrollment-connector.ts'
+  );
+  const { EnvironmentWorker } = await import('./worker/server.ts');
+  const { WORKER_PROTOCOL_VERSION } = await import('./worker/protocol.ts');
+  const { signWorkerChallenge } = await import('./environment/worker-proof.ts');
+  const credential = randomBytes(16).toString('base64url');
+  const runtime = await createSproutRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(options.directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+      operatorCredential: credential,
+      ...(options.agents !== undefined
+        ? { runtimeConfiguration: { agents: [...options.agents] } }
+        : {}),
+    }),
+    projectRoot: '/synthetic/project-root',
+    ...(options.backend === 'memory' ? { stores: inMemoryStores() } : {}),
+  });
+  const { port } = await runtime.api.listen(0, '127.0.0.1');
+  const base = `http://127.0.0.1:${port}`;
+  const session = await fetch(`${base}/api/auth/session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  });
+  assert.equal(session.status, 201);
+  const cookie = (session.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+  const { csrfToken } = (await session.json()) as { csrfToken: string };
+
+  // Claim with the host key, prove possession, approve, then accept the Worker.
+  const workers: EnvironmentWorker[] = [];
+  const connections: WorkerEnrollmentConnection[] = [];
+
+  const requested = await runtime.enrollments.requestEnrollment({
+    environmentInstanceId: INSTANCE_ID,
+    displayName: 'Workflow Host',
+    platform: 'macos',
+    capabilityRequests: [ADMISSION_CAPABILITY],
+    engineFacts: [],
+  });
+  const enrollmentId = requested.enrollment.id;
+  const keyPath = join(options.directory, 'worker-key.pem');
+  const host = loadOrCreateWorkerIdentity(keyPath);
+  await runtime.enrollments.claimEnrollment(enrollmentId, requested.claim?.secret ?? '');
+  const challenge = await runtime.enrollments.issueChallenge(enrollmentId);
+  await runtime.enrollments.connectWorker({
+    enrollmentId,
+    proof: {
+      challengeId: challenge.id,
+      publicKey: workerPublicKey(host.privateKey),
+      signature: signWorkerChallenge(host.privateKey, challenge),
+    },
+    connection: { state: 'online' },
+    compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
+    engines: [],
+  });
+  await runtime.enrollments.approve(enrollmentId, {
+    capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+  });
+
+  return {
+    runtime,
+    base,
+    cookie,
+    csrf: csrfToken,
+    async connect(id, key, worker = {}) {
+      const connection = await connectWorkerEnrollment({
+        target: { enrollmentId: id, host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath: key },
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engineFacts: [{ engine: 'codex', installed: true, authenticated: true, models: [] }],
+      });
+      connections.push(connection);
+      const declaration = worker.readiness;
+      workers.push(new EnvironmentWorker({
+        environmentInstanceId: INSTANCE_ID,
+        engines: new Map(),
+        input: connection.stream,
+        output: connection.stream,
+        ...(declaration !== undefined ? { readiness: declaration } : {}),
+        ...(worker.readinessProbe !== undefined ? { readinessProbe: worker.readinessProbe } : {}),
+      }));
+      return connection;
+    },
+    async close() {
+      for (const worker of workers) await worker.shutdown().catch(() => undefined);
+      for (const connection of connections) connection.close();
+      await runtime.close();
+    },
+  };
+}
+
+for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#124 ${backend}: startup and automatic target probes cross one workflow and commit canonical facts`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-target-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      let received: WorkerReadinessProbeParams | undefined;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async (params) => {
+          received = params;
+          const probe = {
+            at: Date.now(), latencyMs: 8, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: 'target probe',
+          };
+          return {
+            readiness: {
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              engines: [
+                { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read' },
+              ],
+              probe,
+            },
+            probe,
+          };
+        },
+      });
+      await waitFor(() => received !== undefined, 'the target probe to reach the Worker');
+      assert.deepEqual(received, { requiredModels: ['gpt-6-astra'] }, 'targets are core-owned');
+      await waitFor(
+        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
+        'target-probe eligibility',
+      );
+      const readiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(readiness.readiness.probe?.latencyMs, 8);
+      const codex = readiness.readiness.engines.find((engine) => engine.engine === 'codex');
+      assert.equal(codex?.version, '0.154.0');
+      assert.equal(codex?.source, 'codex-account-read');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#124 ${backend}: empty-target bootstrap commits one canonical observation`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-bootstrap-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readiness: () => ({
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          engines: [
+            { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+          ],
+          probe: { at: Date.now(), latencyMs: 4, protocolOk: true, enginesOk: true, source: 'worker', version: '1.0.0', summary: 'bootstrap probe' },
+        }),
+      });
+      await waitFor(
+        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
+        'bootstrap eligibility',
+      );
+      const probes = await h.runtime.enrollments.listProbes(enrollmentId);
+      assert.ok(probes.length >= 1, 'the bootstrap observation is durable');
+      assert.equal(probes.at(-1)?.source, 'worker');
+      const readiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(readiness.readiness.connection.state, 'online');
+      assert.equal(readiness.readiness.probe?.version, '1.0.0');
+      assert.equal(readiness.summary.level, 'green', readiness.summary.reason);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#124 ${backend}: a browser POST is request-only and cannot supply facts`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-request-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          const probe = {
+            at: Date.now(), latencyMs: 9, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: 'requested probe',
+          };
+          return {
+            readiness: {
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              engines: [
+                { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' },
+              ],
+              probe,
+            },
+            probe,
+          };
+        },
+      });
+      await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true, 'startup eligibility');
+      const response = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          readiness: { engines: [{ engine: 'forged', readiness: 'ready' }] },
+          probe: { source: 'browser', version: 'forged', summary: 'browser fact' },
+          connectionEpoch: 999,
+          requiredModels: ['browser-forgery'],
+        }),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 201, text);
+      assert.equal(text.includes('browser fact'), false);
+      const returned = JSON.parse(text) as { probe: { source?: string } };
+      assert.equal(returned.probe.source, 'worker');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#124 ${backend}: contradictory Worker probe copies never mutate observation state`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-malformed-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const valid = { at: Date.now(), latencyMs: 9, protocolOk: true, enginesOk: true, source: 'worker' as const, version: '0.154.0', summary: 'probe' };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: valid },
+          probe: { ...valid, summary: 'contradictory returned copy' },
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      const response = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(response.status, 201);
+      const readiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(readiness.readiness.probe, undefined, 'no committed probe from a contradictory result');
+      assert.deepEqual(await h.runtime.enrollments.listProbes(enrollmentId), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#124 ${backend}: revoke inside the probe window reports no current facts`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-124-revoke-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let started: (() => void) | undefined;
+      const startedProbe = new Promise<void>((resolve) => { started = resolve; });
+      let calls = 0;
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          calls += 1;
+          started?.();
+          await gate;
+          const probe = {
+            at: Date.now(), latencyMs: 9, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: 'delayed probe',
+          };
+          return {
+            readiness: {
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              engines: [
+                { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' },
+              ],
+              probe,
+            },
+            probe,
+          };
+        },
+      });
+      await startedProbe;
+      const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      await h.runtime.enrollments.revoke(enrollmentId, 'retired mid-probe');
+      release?.();
+      const response = await pending;
+      assert.notEqual(response.status, 201, 'a superseded response is never a successful probe');
+      assert.equal(((await response.json()) as { probe?: unknown }).probe, undefined);
+      const readiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(readiness.readiness.connection.state, 'never-connected');
+      assert.equal(readiness.readiness.probe, undefined);
+      assert.deepEqual(await h.runtime.enrollments.listProbes(enrollmentId), []);
+      assert.ok(calls >= 1, 'the real Worker probe was exercised before the revoke');
+    } finally {
+      await h.close();
+    }
+  });
+}

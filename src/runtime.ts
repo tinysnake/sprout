@@ -65,7 +65,7 @@ import {
 import { TaskService } from './task/service.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
-import type { WorkerInfo, WorkerReadinessFacts, WorkerReadinessProbeResult } from './worker/protocol.ts';
+import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -77,10 +77,9 @@ import {
   selectEnvironmentWorker,
   type EnvironmentWorkerConfiguration,
 } from './worker/environment-worker.ts';
-import { WorkerGateway, type WorkerGatewayAcceptance } from './worker/gateway.ts';
+import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
-import { createWorkerProbeRequester } from './worker/readiness-requester.ts';
-import { validateWorkerReadinessProbeResult } from './worker/readiness-ingress.ts';
+import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import { WorkerConnectionRegistry } from './environment/worker-epoch.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
@@ -1041,6 +1040,22 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
+    /**
+     * The one application-level readiness workflow (#124).
+     *
+     * Runtime composes it rather than implementing a readiness business
+     * workflow of its own. Startup, automatic target probing, empty-target
+     * bootstrap, and Human-requested probes are trigger modes of this Module,
+     * which owns collection, canonical validation/privacy reduction,
+     * persistence coordination, and response authority checks.
+     */
+    const readinessWorkflow = new EnvironmentReadinessWorkflow({
+      enrollments,
+      workerGateway,
+      workerEpochs,
+      environment: enrollmentEnvironment,
+      refreshEnvironmentCatalog,
+    });
     // A newly accepted connection is a *fact* on an already-existing enrollment,
     // never a reason to create or dial a Worker; a lost channel makes that fact
     // offline again. Neither path creates a catalog entry: only a durable
@@ -1051,15 +1066,15 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
       publishCatalogMembership();
-      // The Worker's own `worker/info` readiness is observed over the accepted
-      // inbound channel (never by dialing one), so the catalog can reach
-      // eligibility once the required facts are established. The short defer
-      // lets the Worker consume `worker/listening`, dispose its enrollment-frame
-      // reader, and install the neutral JSON-RPC server before `worker/info`
-      // crosses the same socket. Without it an RPC request can be discarded as
-      // an unexpected final handshake frame.
+      // The Worker's own readiness is observed over the accepted inbound channel
+      // (never by dialing one), so the catalog can reach eligibility once the
+      // required facts are established. The short defer lets the Worker consume
+      // `worker/listening`, dispose its enrollment-frame reader, and install the
+      // neutral JSON-RPC server before the observation crosses the same socket.
+      // Without it an RPC request can be discarded as an unexpected final
+      // handshake frame.
       const timer = setTimeout(() => {
-        void observeAcceptedWorkerReadiness(acceptance).catch(() => undefined);
+        void readinessWorkflow.observeAccepted(acceptance).catch(() => undefined);
       }, 10);
       timer.unref();
     });
@@ -1074,93 +1089,6 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       }
       void refreshEnvironmentCatalog().catch(() => undefined);
     });
-    /**
-     * Observe the accepted Worker's readiness and re-project the catalog.
-     *
-     * When the Worker supports a probe, it receives the core-configured target
-     * models over the already-accepted channel. Otherwise the Worker-declared
-     * `worker/info` observation remains the non-fabricating fallback. Nothing
-     * here dials a Worker.
-     */
-    const observeAcceptedWorkerReadiness = async (
-      acceptance: WorkerGatewayAcceptance,
-      attempt = 0,
-    ): Promise<void> => {
-      if (runtimeEnvironment.info === undefined && runtimeEnvironment.probeReadiness === undefined) return;
-      const { enrollment, epoch } = acceptance;
-      // Both sides of the asynchronous `worker/info` request must still name
-      // this precise connection. A reconnect/replacement is not proof that the
-      // earlier channel's facts apply to the newer epoch.
-      const isCurrent = (): boolean =>
-        workerEpochs.isCurrent(enrollment.id, epoch.connectionId) &&
-        workerGateway.liveFor(enrollment.environmentInstanceId)?.epoch.connectionId === epoch.connectionId;
-      const retryAfterWorkerStarts = (): void => {
-        // The gateway's `worker/listening` barrier confirms transport ordering,
-        // not that the host has finished constructing its JSON-RPC server. A
-        // Worker can therefore be accepted just before it starts serving
-        // `worker/info`. Retry only on this exact current epoch; the timer is
-        // unreferenced and ends naturally on channel loss/replacement.
-        if (!isCurrent() || attempt >= 2_000) return;
-        const timer = setTimeout(() => {
-          void observeAcceptedWorkerReadiness(acceptance, attempt + 1).catch(() => undefined);
-        }, 10);
-        timer.unref();
-      };
-      if (!isCurrent()) return;
-      const currentEnrollment = await enrollments.get(enrollment.id);
-      if (currentEnrollment === undefined || currentEnrollment.status !== 'approved' || !isCurrent()) return;
-      let readiness: WorkerReadinessFacts | undefined;
-      try {
-        const requestTargetProbe = acceptance.requiredModels.length > 0 && runtimeEnvironment.probeReadiness !== undefined;
-        if (requestTargetProbe) {
-          const rawProbe = await runtimeEnvironment.probeReadiness!(enrollment.environmentInstanceId);
-          // The automatic/startup path crosses the same untrusted JSON-RPC
-          // guard as an explicit POST. A typed transport result is not runtime
-          // proof, and no part of an incomplete or internally inconsistent
-          // observation may reach the durable commit below (R118-API-002).
-          const probe = validateWorkerReadinessProbeResult(rawProbe);
-          if (probe === undefined) return;
-          readiness = probe.readiness;
-        } else {
-          const info = await runtimeEnvironment.info?.(enrollment.environmentInstanceId);
-          if (info?.readiness === undefined) {
-            retryAfterWorkerStarts();
-            return;
-          }
-          // With no configured target model the startup observation comes from
-          // the authenticated `worker/info` fallback. Reconstruct its complete
-          // probe result from the embedded fact so it crosses the exact same
-          // closed-shape validator and sanitizer as an explicit POST. Missing
-          // or malformed embedded probes never reach the service/store.
-          const probe = validateWorkerReadinessProbeResult({
-            readiness: info.readiness,
-            probe: info.readiness.probe,
-          });
-          if (probe === undefined) return;
-          readiness = probe.readiness;
-        }
-      } catch {
-        // A channel that cannot identify itself is already offline; the close
-        // listener re-projects. A just-accepted Worker may also still be
-        // starting its JSON-RPC server, so retry against this epoch only.
-        retryAfterWorkerStarts();
-        return;
-      }
-      if (readiness === undefined) {
-        retryAfterWorkerStarts();
-        return;
-      }
-      if (!isCurrent()) return;
-      await enrollments.observeWorkerReadiness(enrollment.id, readiness, {
-        enrollmentId: enrollment.id,
-        connectionEpoch: epoch.epoch,
-        // The service repeats this check immediately before durable storage. If
-        // a custom asynchronous store still races replacement, the old epoch
-        // stays explicitly non-authoritative to the catalog.
-        isCurrent,
-      });
-      await refreshEnvironmentCatalog();
-    };
     await refreshEnvironmentCatalog();
     /**
      * The observed readiness of the first currently-eligible enrolled instance.
@@ -1186,13 +1114,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(first.instanceId),
       };
     };
-    const requestWorkerProbe = createWorkerProbeRequester({
-      enrollments,
-      workerGateway,
-      workerEpochs,
-      environment: enrollmentEnvironment,
-      refreshEnvironmentCatalog,
-    });
+    const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
     const api = createRunApi({
       orchestrator,
@@ -1318,20 +1240,14 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         return result;
       },
 
-      /** Observe the live Worker's reported readiness onto one approved
-       * enrollment; the mapping stays honest by recording only what the Worker
-       * actually declared on `worker/info`. */
+      /**
+       * Transitional public entry point: observe the live Worker's readiness onto
+       * one approved enrollment. It delegates entirely to the one readiness
+       * workflow; remaining consumers are inventoried for the final cutover
+       * (#124).
+       */
       async observeWorkerReadiness(enrollmentId: string): Promise<void> {
-        const enrollment = await enrollments.get(enrollmentId);
-        if (enrollment === undefined) return;
-        const live = workerGateway.liveFor(enrollment.environmentInstanceId);
-        if (live === undefined) {
-          // No accepted gateway epoch means no authority to persist Worker
-          // facts, including on configured/development carriers.
-          return;
-        }
-        if (live.enrollment.id !== enrollmentId) return;
-        await observeAcceptedWorkerReadiness(live);
+        await readinessWorkflow.observeEnrollment(enrollmentId);
       },
 
       startupReport(boundPort: number): string {
