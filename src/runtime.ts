@@ -458,6 +458,14 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // definitions stay the M1 seed registry; the Agent service composes over
     // the same durable handle every other M2 domain uses.
     const agentService = new AgentService({ store: stores.agentIdentities });
+    const currentReadinessOptions = async () => {
+      const durable = (await agentService.list()).filter((agent) => agent.status !== 'archived');
+      const identities = new Set(durable.map((agent) => agent.id));
+      return [
+        ...agents.list().filter((agent) => !identities.has(agent.id)).flatMap(effectiveWorkOptions),
+        ...durable.flatMap((agent) => currentOptions(agent)),
+      ];
+    };
     // The bridge between the M2 Project authority and the M1 collaboration
     // machinery (#92, F1): authority Projects are projected into the registry
     // the wake contract and orchestrator read, so one Project identity routes
@@ -955,7 +963,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           ),
           currentEpoch: currentWorkerConnectionEpoch(enrollment.id),
           requiredEngines: [engineId],
-          requirements: readinessRequirements(agents.list().flatMap(effectiveWorkOptions), agents.list()),
+          requirements: readinessRequirements(await currentReadinessOptions()),
           supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
           now,
         });
@@ -1022,7 +1030,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // monotonic connection epoch. The gateway exclusively owns the mutable
     // registry; runtime projections consume only its read-only current-epoch
     // query, so composition cannot issue an accepted epoch itself.
-    const resolveRequirements = () => readinessRequirements(agents.list().flatMap(effectiveWorkOptions), agents.list());
+    const resolveRequirements = async () => readinessRequirements(await currentReadinessOptions());
     const workerGateway = new WorkerGateway({
       enrollments,
       epochStore: stores.workerConnectionEpochs,

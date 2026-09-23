@@ -1,6 +1,10 @@
 import { DEFAULT_PROBE_SUMMARY, sanitizeOperatorText, sanitizeProbeVersion } from '../environment/privacy.ts';
 import type { WorkerProbeFact, WorkerReadinessProbeResult, WorkerObservationEnvelope } from './protocol.ts';
 
+// Only values produced by this validator may cross the internal second
+// validation boundary. A peer cannot submit a wrapped v3 envelope directly.
+const canonicalResults = new WeakMap<object, string>();
+
 /**
  * Validate one authenticated Worker's readiness-probe JSON-RPC result.
  *
@@ -12,6 +16,7 @@ import type { WorkerProbeFact, WorkerReadinessProbeResult, WorkerObservationEnve
 export function validateWorkerReadinessProbeResult(
   value: unknown,
 ): WorkerReadinessProbeResult | undefined {
+  if (typeof value === 'object' && value !== null && canonicalResults.get(value) === JSON.stringify(value)) return value as WorkerReadinessProbeResult;
   if (isRecord(value) && value.protocolVersion === '3') {
     if (!hasOnlyKeys(value, ['protocolVersion', 'observedAt', 'engines', 'probe', 'attemptId']) ||
         !isWorkerProbe(value.probe) || !Array.isArray(value.engines) || !value.engines.every(isWorkerEngine) ||
@@ -19,8 +24,10 @@ export function validateWorkerReadinessProbeResult(
         (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !/^obs-[0-9a-f-]{36}$/.test(value.attemptId)))) return undefined;
     const envelope = value as unknown as WorkerObservationEnvelope & { attemptId?: string };
     const probe = sanitizeWorkerProbe(envelope.probe);
-    return { ...(envelope.attemptId !== undefined ? { attemptId: envelope.attemptId } : {}),
+    const canonical = { ...(envelope.attemptId !== undefined ? { attemptId: envelope.attemptId } : {}),
       readiness: { protocolVersion: '3', ...(envelope.observedAt !== undefined ? { observedAt: envelope.observedAt } : {}), engines: envelope.engines, probe }, probe };
+    canonicalResults.set(canonical, JSON.stringify(canonical));
+    return canonical;
   }
   if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe', 'attemptId']) || !isWorkerProbe(value.probe) ||
       (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !/^obs-[0-9a-f-]{36}$/.test(value.attemptId)))) {

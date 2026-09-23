@@ -226,6 +226,11 @@ export class EnvironmentWorker {
     }
     this.#readiness = result.readiness;
     if (result.readiness.protocolVersion === '3') {
+      // Legacy-shaped test adapters may still return two probe copies. Never
+      // discard a contradiction while translating to the single v3 wire fact.
+      if (JSON.stringify(result.readiness.probe) !== JSON.stringify(result.probe)) {
+        throw new Error('inconsistent Worker probe metadata');
+      }
       return { protocolVersion: '3', observedAt: result.readiness.observedAt,
         engines: result.readiness.engines, probe: result.probe,
         ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) } as unknown as WorkerReadinessProbeResult;

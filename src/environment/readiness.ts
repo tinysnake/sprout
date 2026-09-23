@@ -87,7 +87,7 @@ export interface ReadinessRequirementScope {
 }
 
 /** Stable only for changes to engine/model applicability, not agent metadata. */
-export function readinessRequirements(options: readonly { readonly engine: string; readonly workModel: string }[], revisionInputs: readonly { readonly id: string; readonly configurationVersion?: number }[] = []): ReadinessRequirementScope {
+export function readinessRequirements(options: readonly { readonly engine: string; readonly workModel: string }[], _revisionInputs: readonly { readonly id: string; readonly configurationVersion?: number }[] = []): ReadinessRequirementScope {
   const mapping: Record<string, string[]> = {};
   for (const option of options) {
     if (!option.engine) continue;
@@ -97,7 +97,7 @@ export function readinessRequirements(options: readonly { readonly engine: strin
   const engines = Object.keys(mapping).sort();
   const modelsByEngine = Object.fromEntries(engines.map((engine) => [engine, mapping[engine]!.sort()]));
   // The revision is a compact label; exact snapshot equality is checked at the gate.
-  const snapshot = JSON.stringify([modelsByEngine, revisionInputs.map((agent) => [agent.id, agent.configurationVersion ?? 1]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+  const snapshot = JSON.stringify(modelsByEngine);
   let hash = 2166136261;
   for (let i = 0; i < snapshot.length; i++) hash = Math.imul(hash ^ snapshot.charCodeAt(i), 16777619);
   const revision = `r${(hash >>> 0).toString(16)}`;

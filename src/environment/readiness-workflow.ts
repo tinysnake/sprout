@@ -93,7 +93,7 @@ export interface EnvironmentReadinessWorkflowOptions {
   readonly environment: ReadinessWorkerCollector;
   /** Re-project the catalog after a committed observation. */
   readonly refreshEnvironmentCatalog: () => Promise<unknown>;
-  readonly resolveRequirements?: () => ReadinessRequirementScope;
+  readonly resolveRequirements?: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
   /**
    * Schedule one bounded bootstrap retry. Injectable so a test needs no timers;
    * defaults to an unreferenced 10ms timer, exactly as before.
@@ -115,7 +115,7 @@ export class EnvironmentReadinessWorkflow {
   readonly #workerGateway: ReadinessLiveGateway;
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
-  readonly #resolveRequirements: () => ReadinessRequirementScope;
+  readonly #resolveRequirements: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
   readonly #collectingBootstrap = new Set<string>();
   readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
@@ -136,13 +136,13 @@ export class EnvironmentReadinessWorkflow {
 
   /** Begin the issue-order reservation at acceptance, before the Worker server starts. */
   reserveAccepted(acceptance: ReadinessAcceptance): void {
-    const requirements = this.#resolveRequirements();
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(acceptance.enrollment.environmentInstanceId);
     if (!authority || !authority.isCurrent()) return;
-    const reservation = this.#enrollments.issueReadinessAttempt(
-      acceptance.enrollment.id, authority, true, requirements.requiredModels ?? acceptance.requiredModels, requirements,
-    ).catch(() => false as const);
+    const reservation = Promise.resolve(this.#resolveRequirements()).then((requirements) =>
+      this.#enrollments.issueReadinessAttempt(
+        acceptance.enrollment.id, authority, true, requirements.requiredModels ?? [], requirements,
+      )).catch(() => false as const);
     this.#acceptanceReservations.set(acceptance.epoch.connectionId, reservation);
   }
 
@@ -170,11 +170,11 @@ export class EnvironmentReadinessWorkflow {
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
     if (authority === undefined || !authority.isCurrent()) return;
-    const requirements = this.#resolveRequirements();
+    const requirements = await this.#resolveRequirements();
     const mode: CollectionMode =
-      this.#targeted(requirements.requiredModels ?? acceptance.requiredModels) ? 'target-probe' : 'worker-info';
+      this.#targeted(requirements.requiredModels ?? []) ? 'target-probe' : 'worker-info';
     const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
-      this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, requirements.requiredModels ?? acceptance.requiredModels, requirements));
+      this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, requirements.requiredModels ?? [], requirements));
     if (!ticket) return;
     // A bootstrap is one adoption per acceptance, even across Runtime restart.
     // A reread is inspection, not another measurement.
@@ -257,8 +257,8 @@ export class EnvironmentReadinessWorkflow {
     const reservation = this.#acceptanceReservations.get(authority.connectionId);
     if (reservation) await reservation;
     if (!authority.isCurrent()) throw new Error('the Environment Worker is offline');
-    const requirements = this.#resolveRequirements();
-    const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? live.requiredModels, requirements);
+    const requirements = await this.#resolveRequirements();
+    const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
     if (!ticket) throw new Error('the Environment Worker is offline');
     const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId, ticket.requirements);
     if (rawResult === undefined) throw new Error('the Environment Worker is offline');

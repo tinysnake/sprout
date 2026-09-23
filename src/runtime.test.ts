@@ -2908,7 +2908,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               protocolVersion: WORKER_PROTOCOL_VERSION,
               engines: [
                 { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read' },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read', targetModels: params.requirements?.modelsByEngine?.codex ?? [], requirementRevision: params.requirements?.revision },
               ],
               probe,
             },
@@ -2919,10 +2919,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await waitFor(() => received !== undefined, 'the target probe to reach the Worker');
       assert.deepEqual(received?.requiredModels, ['gpt-6-astra'], 'targets are core-owned');
       assert.match(received?.attemptId ?? '', /^obs-/);
-      await waitFor(
-        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
-        'target-probe eligibility',
-      );
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(enrollmentId)).length > 0, 'target-probe receipt');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'unknown entitlement is not admissible');
       const readiness = await h.runtime.enrollments.readiness(enrollmentId);
       assert.equal(readiness.readiness.probe?.latencyMs, 8);
       const codex = readiness.readiness.engines.find((engine) => engine.engine === 'codex');
@@ -2948,10 +2946,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           probe: { at: Date.now(), latencyMs: 4, protocolOk: true, enginesOk: true, source: 'worker', version: '1.0.0', summary: 'bootstrap probe' },
         }),
       });
-      await waitFor(
-        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
-        'bootstrap eligibility',
-      );
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(enrollmentId)).length > 0, 'bootstrap receipt');
       const probes = await h.runtime.enrollments.listProbes(enrollmentId);
       assert.ok(probes.length >= 1, 'the bootstrap observation is durable');
       assert.equal(probes.at(-1)?.source, 'worker');

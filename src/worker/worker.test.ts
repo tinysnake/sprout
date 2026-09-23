@@ -718,7 +718,7 @@ test('worker/info reports neutral protocol and engine readiness without engine d
 
   const readiness = worker.info.readiness;
   assert.ok(readiness, 'the Worker reports a neutral readiness projection');
-  assert.equal(readiness.protocolVersion, '2');
+  assert.equal(readiness.protocolVersion, '3');
   // An adapter with no readiness source is honestly `unknown`, never falsely
   // ready, so an unverified engine cannot make an Environment look green.
   assert.deepEqual(readiness.engines, [
