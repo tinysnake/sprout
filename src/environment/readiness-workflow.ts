@@ -13,14 +13,15 @@
  *
  * 1. resolve the accepted Worker connection and its current lifecycle/epoch
  *    authority (`isCurrent`);
- * 2. **collect** the untrusted Worker result over the already-authenticated
+ * 2. reserve an immutable, durable attempt identity/order before collection;
+ * 3. **collect** the untrusted Worker result over the already-authenticated
  *    channel — an explicit target probe or the `worker/info` bootstrap fallback;
- * 3. **canonically validate and privacy-reduce** it through the shared ingress
+ * 4. **canonically validate and privacy-reduce** it through the shared ingress
  *    guard, so a missing/malformed/non-Worker/contradictory probe never reaches
  *    persistence;
- * 4. **persist** it atomically through the enrollment service's accepted-write
+ * 5. **persist** it atomically through the enrollment service's accepted-write
  *    primitive, which re-checks the same authority at the mutation boundary;
- * 5. **confirm response authority** before reporting a committed probe.
+ * 6. **confirm response authority** before reporting a committed probe.
  *
  * Startup, automatic target probing, empty-target bootstrap, and Human-requested
  * probes are trigger modes of this one workflow. Target presence changes only
@@ -37,6 +38,7 @@
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { EnrollmentError } from './enrollment.ts';
 import type { ReadinessReceipt } from './readiness.ts';
+import type { ReadinessAttempt } from './readiness-store.ts';
 import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 import type {
@@ -82,7 +84,7 @@ export interface ReadinessLiveGateway {
 /** The neutral Worker fact/probe collector over an accepted channel. */
 export interface ReadinessWorkerCollector {
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
-  probeReadiness?(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined>;
+  probeReadiness?(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined>;
 }
 
 export interface EnvironmentReadinessWorkflowOptions {
@@ -113,6 +115,8 @@ export class EnvironmentReadinessWorkflow {
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
+  readonly #collectingBootstrap = new Set<string>();
+  readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
 
   constructor(options: EnvironmentReadinessWorkflowOptions) {
     this.#enrollments = options.enrollments;
@@ -127,6 +131,21 @@ export class EnvironmentReadinessWorkflow {
       });
   }
 
+  /** Begin the issue-order reservation at acceptance, before the Worker server starts. */
+  reserveAccepted(acceptance: ReadinessAcceptance): void {
+    const authority = acceptance.authorizeObservation?.() ??
+      this.#workerGateway.authorizeObservation?.(acceptance.enrollment.environmentInstanceId);
+    if (!authority || !authority.isCurrent()) return;
+    const reservation = this.#enrollments.issueReadinessAttempt(
+      acceptance.enrollment.id, authority, true, acceptance.requiredModels,
+    ).catch(() => false as const);
+    this.#acceptanceReservations.set(acceptance.epoch.connectionId, reservation);
+  }
+
+  releaseAccepted(connectionId: string): void {
+    this.#acceptanceReservations.delete(connectionId);
+  }
+
   /**
    * Observe the readiness of a newly accepted Worker connection.
    *
@@ -134,7 +153,7 @@ export class EnvironmentReadinessWorkflow {
    * trigger. It never dials a Worker: the accepted connection is already
    * authenticated, and one of its collection modes is used.
    */
-  async observeAccepted(acceptance: ReadinessAcceptance, attempt = 0): Promise<void> {
+  async observeAccepted(acceptance: ReadinessAcceptance, attempt = 0, issued?: ReadinessAttempt): Promise<void> {
     if (this.#environment.info === undefined && this.#environment.probeReadiness === undefined) return;
     const { enrollment, epoch } = acceptance;
     if (!this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, epoch.connectionId)) return;
@@ -149,18 +168,30 @@ export class EnvironmentReadinessWorkflow {
     if (authority === undefined || !authority.isCurrent()) return;
     const mode: CollectionMode =
       this.#targeted(acceptance.requiredModels) ? 'target-probe' : 'worker-info';
+    const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
+      this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, acceptance.requiredModels));
+    if (!ticket) return;
+    // A bootstrap is one adoption per acceptance, even across Runtime restart.
+    // A reread is inspection, not another measurement.
+    if (await this.#enrollments.getReceipt(enrollment.id, ticket.observationId)) return;
+    const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
+    if (current !== undefined && current.sequence > ticket.sequence) return;
+    if (this.#collectingBootstrap.has(ticket.observationId)) return;
+    this.#collectingBootstrap.add(ticket.observationId);
     let outcome: CollectionOutcome;
     try {
-      outcome = await this.#collect(enrollment.environmentInstanceId, mode);
+      outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId);
     } catch {
+      this.#collectingBootstrap.delete(ticket.observationId);
       // A channel that cannot identify itself is already offline; the close
       // listener re-projects. A just-accepted Worker may also still be starting
       // its JSON-RPC server, so retry against this epoch only.
-      this.#retry(acceptance, attempt);
+      this.#retry(acceptance, attempt, ticket);
       return;
     }
+    this.#collectingBootstrap.delete(ticket.observationId);
     if (outcome.kind === 'not-ready') {
-      this.#retry(acceptance, attempt);
+      this.#retry(acceptance, attempt, ticket);
       return;
     }
     // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
@@ -171,6 +202,7 @@ export class EnvironmentReadinessWorkflow {
       enrollment.id,
       authority,
       outcome.result,
+      ticket,
     );
     await this.#refreshEnvironmentCatalog();
   }
@@ -215,18 +247,41 @@ export class EnvironmentReadinessWorkflow {
     if (authority === undefined || !authority.isCurrent()) {
       throw new Error('the Environment Worker is offline');
     }
-    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId);
+    const live = this.#workerGateway.liveFor(enrollment.environmentInstanceId);
+    if (live?.epoch.connectionId !== authority.connectionId) throw new Error('the Environment Worker is offline');
+    const reservation = this.#acceptanceReservations.get(authority.connectionId);
+    if (reservation) await reservation;
+    if (!authority.isCurrent()) throw new Error('the Environment Worker is offline');
+    const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, live.requiredModels);
+    if (!ticket) throw new Error('the Environment Worker is offline');
+    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId);
     if (rawResult === undefined) throw new Error('the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {
       throw new Error('the Environment Worker returned an invalid readiness probe result');
     }
+    const delivery = result.attemptId !== undefined && result.attemptId !== ticket.observationId
+      ? await this.#enrollments.getReadinessAttempt(enrollment.id, result.attemptId, authority)
+      : ticket;
+    if (!delivery || JSON.stringify(delivery.requiredModels ?? []) !== JSON.stringify(live.requiredModels)) {
+      throw new Error('the Environment Worker returned an unknown readiness attempt');
+    }
     if (!authority.isCurrent()) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
-    const receipt = await this.#persist(enrollment.id, authority, result);
+    const receipt = await this.#persist(enrollment.id, authority, result, delivery);
+    if (!receipt && authority.isCurrent()) {
+      const prior = await this.#enrollments.getReceipt(enrollment.id, delivery.observationId);
+      if (prior && authority.isCurrent()) {
+        throw new EnrollmentError('conflicting-observation', 'The Worker changed content for an issued readiness attempt.');
+      }
+      const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
+      if (current && current.sequence > delivery.sequence && authority.isCurrent()) {
+        throw new EnrollmentError('superseded-observation', 'A later-issued readiness observation superseded this attempt.');
+      }
+    }
     if (!receipt || !authority.isCurrent()) {
-      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+      throw new EnrollmentError('superseded-observation', 'The readiness receipt is no longer current.');
     }
     await this.#refreshEnvironmentCatalog();
     if (!authority.isCurrent()) {
@@ -234,10 +289,14 @@ export class EnvironmentReadinessWorkflow {
     }
     // Direct retrieval of the exact canonical committed observation by its receipt (#126):
     const committed = await this.#enrollments.getReceipt(enrollment.id, receipt.observationId);
+    const current = await this.#enrollments.readiness(enrollment.id);
     // Final authority check after the catalog refresh: a revoke/reset can land
     // inside that await, and a response must never carry a probe from an epoch
     // the lifecycle has since invalidated.
-    if (!authority.isCurrent() || committed === undefined) {
+    if (!authority.isCurrent() || committed === undefined || current.readiness.observationId !== receipt.observationId) {
+      if (authority.isCurrent() && committed !== undefined) {
+        throw new EnrollmentError('superseded-observation', 'The readiness receipt is no longer current.');
+      }
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
     return committed;
@@ -274,11 +333,13 @@ export class EnvironmentReadinessWorkflow {
   async #collect(
     environmentInstanceId: string,
     mode: CollectionMode,
+    attemptId: string,
   ): Promise<CollectionOutcome> {
     if (mode === 'target-probe') {
-      const rawProbe = await this.#environment.probeReadiness?.(environmentInstanceId);
+      const rawProbe = await this.#environment.probeReadiness?.(environmentInstanceId, attemptId);
       const result = validateWorkerReadinessProbeResult(rawProbe);
-      return result === undefined ? { kind: 'refused' } : { kind: 'collected', result };
+      return result === undefined || (result.attemptId !== undefined && result.attemptId !== attemptId)
+        ? { kind: 'refused' } : { kind: 'collected', result };
     }
     const info = await this.#environment.info?.(environmentInstanceId);
     if (info?.readiness === undefined) return { kind: 'not-ready' };
@@ -305,17 +366,18 @@ export class EnvironmentReadinessWorkflow {
     enrollmentId: string,
     authority: ReadinessObservationAuthority,
     result: WorkerReadinessProbeResult,
+    attempt: ReadinessAttempt,
   ): Promise<ReadinessReceipt | undefined> {
-    return this.#enrollments.recordReadinessObservation(enrollmentId, result, authority);
+    return this.#enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt });
   }
 
   /** Schedule one bounded bootstrap retry against the same accepted epoch. */
-  #retry(acceptance: ReadinessAcceptance, attempt: number): void {
+  #retry(acceptance: ReadinessAcceptance, attempt: number, issued: ReadinessAttempt): void {
     const { enrollment, epoch } = acceptance;
     if (attempt >= 2_000) return;
     if (!this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, epoch.connectionId)) return;
     this.#scheduleRetry(() => {
-      void this.observeAccepted(acceptance, attempt + 1).catch(() => undefined);
+      void this.observeAccepted(acceptance, attempt + 1, issued).catch(() => undefined);
     }, 10);
   }
 }

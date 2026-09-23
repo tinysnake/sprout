@@ -60,6 +60,7 @@ export type ReadinessWriteAuthority = ReadinessObservationAuthority;
 
 /** One durable, canonically validated observation with its receipt and provenance (#126). */
 export interface StoredReadinessObservation {
+  readonly workerObservedAt?: number;
   readonly observationId: string;
   readonly environmentInstanceId: string;
   readonly enrollmentId?: string | undefined;
@@ -81,6 +82,9 @@ export interface ReadinessHistoricalQuery {
 }
 
 export interface EnvironmentReadinessStore {
+  /** Reserve a durable issue order before asking the Worker to collect facts. */
+  issueAttempt(environmentInstanceId: string, authority: ReadinessWriteAuthority, bootstrap?: boolean, requiredModels?: readonly string[]): Promise<ReadinessAttempt | false>;
+  getAttempt(environmentInstanceId: string, observationId: string): Promise<ReadinessAttempt | undefined>;
   /**
    * Commit only an opaque, canonically validated readiness + required probe pair.
    *
@@ -88,6 +92,9 @@ export interface EnvironmentReadinessStore {
    * must call readReadinessObservation immediately before mutation; raw/forged
    * objects, a changed scope, or a stale authority leave both documents untouched.
    * Returns the committed receipt on success, or false on refusal (#126).
+   * For issued attempts, adapters fence against later committed issue order;
+   * Worker timestamps are never ordering keys. Exact redelivery returns the
+   * original receipt; conflicting content is refused without mutation.
    */
   commitObservation(
     environmentInstanceId: string,
@@ -113,6 +120,29 @@ export interface EnvironmentReadinessStore {
   ): Promise<readonly StoredReadinessObservation[]>;
 }
 
+export interface ReadinessAttempt {
+  readonly observationId: string;
+  readonly sequence: number;
+  readonly environmentInstanceId: string;
+  readonly enrollmentId: string;
+  readonly connectionEpoch: number;
+  readonly connectionId: string;
+  readonly lifecycleGeneration: number;
+  readonly requiredModels?: readonly string[];
+}
+
+export function attemptMatches(attempt: ReadinessAttempt, authority: ReadinessWriteAuthority, instance: string): boolean {
+  return attempt.environmentInstanceId === instance && attempt.enrollmentId === authority.enrollmentId &&
+    attempt.connectionEpoch === authority.connectionEpoch && attempt.connectionId === authority.connectionId &&
+    attempt.lifecycleGeneration === authority.lifecycleGeneration && Number.isSafeInteger(attempt.sequence) && attempt.sequence > 0;
+}
+
+/** The core observation clock is not Worker content on a redelivery. */
+export function sameObservationContent(left: ObservedReadiness, right: ObservedReadiness): boolean {
+  const withoutClock = (value: ObservedReadiness) => ({ ...value, connection: { ...value.connection, lastConfirmedAt: undefined } });
+  return JSON.stringify(withoutClock(left)) === JSON.stringify(withoutClock(right));
+}
+
 export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessStore {
   readonly #readiness = new Map<string, ObservedReadiness>();
   readonly #probes = new Map<string, ProbeResultFact[]>();
@@ -120,6 +150,27 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   readonly #instanceObservations = new Map<string, string[]>();
   readonly #currentObservations = new Map<string, string>();
   readonly #sequences = new Map<string, number>();
+  readonly #issued = new Map<string, ReadinessAttempt>();
+  readonly #bootstraps = new Map<string, ReadinessAttempt>();
+
+  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<ReadinessAttempt | false> {
+    if (!authority.isCurrent() || authority.environmentInstanceId !== instance) return false;
+    const key = JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requiredModels]);
+    if (bootstrap && this.#bootstraps.has(key)) return structuredClone(this.#bootstraps.get(key)!);
+    const sequence = (this.#sequences.get(instance) ?? 0) + 1;
+    this.#sequences.set(instance, sequence);
+    const attempt = { observationId: `obs-${crypto.randomUUID()}`, sequence, environmentInstanceId: instance,
+      enrollmentId: authority.enrollmentId, connectionEpoch: authority.connectionEpoch,
+      connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels] };
+    this.#issued.set(attempt.observationId, attempt);
+    if (bootstrap) this.#bootstraps.set(key, attempt);
+    return structuredClone(attempt);
+  }
+
+  async getAttempt(instance: string, id: string): Promise<ReadinessAttempt | undefined> {
+    const attempt = this.#issued.get(id);
+    return attempt?.environmentInstanceId === instance ? structuredClone(attempt) : undefined;
+  }
 
   async commitObservation(
     environmentInstanceId: string,
@@ -130,8 +181,17 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     if (pair === undefined) return false;
 
     // JavaScript's run-to-completion rule makes this an atomic in-memory commit.
-    const sequence = (this.#sequences.get(environmentInstanceId) ?? 0) + 1;
-    this.#sequences.set(environmentInstanceId, sequence);
+    const issued = this.#issued.get(pair.observationId);
+    if (pair.attempt !== undefined && (!issued || !attemptMatches(issued, authority, environmentInstanceId) ||
+        issued.sequence !== pair.attempt.sequence)) return false;
+    const previous = this.#observations.get(pair.observationId);
+    if (previous) return previous.workerObservedAt === pair.workerObservedAt &&
+      sameObservationContent(previous.readiness, pair.readiness) &&
+      JSON.stringify(previous.probe) === JSON.stringify(pair.probe) ? structuredClone(previous.receipt) : false;
+    const current = this.#currentObservations.get(environmentInstanceId);
+    if (pair.attempt && current && this.#observations.get(current)!.sequence > pair.attempt.sequence) return false;
+    const sequence = pair.attempt?.sequence ?? (this.#sequences.get(environmentInstanceId) ?? 0) + 1;
+    this.#sequences.set(environmentInstanceId, Math.max(this.#sequences.get(environmentInstanceId) ?? 0, sequence));
     const committedAt = Date.now();
 
     const receipt: ReadinessReceipt = {
@@ -155,6 +215,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     };
 
     const storedObservation: StoredReadinessObservation = {
+      ...(pair.workerObservedAt !== undefined ? { workerObservedAt: pair.workerObservedAt } : {}),
       observationId: pair.observationId,
       environmentInstanceId,
       enrollmentId: pair.readiness.enrollmentId,
@@ -188,7 +249,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   }
 
   async listProbes(environmentInstanceId: string): Promise<readonly ProbeResultFact[]> {
-    return structuredClone(this.#probes.get(environmentInstanceId) ?? []).sort((a, b) => a.at - b.at);
+    return structuredClone(this.#probes.get(environmentInstanceId) ?? []);
   }
 
   async getCurrentObservation(
@@ -230,6 +291,6 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       results.push(structuredClone(obs));
       if (query?.limit !== undefined && results.length >= query.limit) break;
     }
-    return results;
+    return results.sort((a, b) => a.sequence - b.sequence);
   }
 }

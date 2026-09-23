@@ -15,6 +15,7 @@ import {
   sanitizeOperatorText, sanitizeProbeVersion, sanitizeProtocolVersion,
 } from './privacy.ts';
 import type { ObservedReadiness, ReadinessWriteAuthority } from './readiness-store.ts';
+import type { ReadinessAttempt } from './readiness-store.ts';
 import {
   type ObservationAuthorityVerifier,
   type ReadinessObservationAuthority,
@@ -37,6 +38,8 @@ export interface ReadinessAuthorityScope {
 }
 
 export interface StoredObservationPair {
+  readonly workerObservedAt?: number;
+  readonly attempt?: ReadinessAttempt;
   readonly observationId: string;
   readonly readiness: ObservedReadiness;
   readonly probe: ProbeResultFact & WorkerProbeFact;
@@ -94,9 +97,12 @@ const observations = new WeakMap<object, {
     readonly readiness: ObservedReadiness;
     readonly probe: ProbeResultFact & WorkerProbeFact;
   };
+  readonly attempt?: ReadinessAttempt;
+  readonly workerObservedAt?: number;
 }>();
 
 export interface CreateObservationScope {
+  readonly attempt?: ReadinessAttempt;
   readonly environmentInstanceId: string;
   readonly authority: ReadinessObservationAuthority;
   readonly supported: ProtocolVersionRange;
@@ -122,7 +128,11 @@ export function createReadinessObservation(
   const requirements = scope.requirements;
   const requirementSnapshot = requirements === undefined ? undefined : validateRequirementScope(requirements);
   if (requirements !== undefined && requirementSnapshot === undefined) return undefined;
-  const observationId = createObservationId();
+  if (scope.attempt !== undefined && (scope.attempt.environmentInstanceId !== verified.environmentInstanceId ||
+      scope.attempt.enrollmentId !== verified.enrollmentId || scope.attempt.connectionId !== verified.connectionId ||
+      scope.attempt.connectionEpoch !== verified.connectionEpoch ||
+      scope.attempt.lifecycleGeneration !== verified.lifecycleGeneration)) return undefined;
+  const observationId = scope.attempt?.observationId ?? createObservationId();
   const authorityScope: ReadinessAuthorityScope = {
     environmentInstanceId: verified.environmentInstanceId,
     enrollmentId: verified.enrollmentId,
@@ -147,6 +157,8 @@ export function createReadinessObservation(
     verifyAuthority: scope.verifyAuthority,
     observationId,
     authorityScope,
+    ...(validated.readiness.observedAt !== undefined ? { workerObservedAt: validated.readiness.observedAt } : {}),
+    ...(scope.attempt !== undefined ? { attempt: scope.attempt } : {}),
     ...(requirementSnapshot !== undefined ? { requirements: requirementSnapshot } : {}),
     pair: { readiness, probe },
   });
@@ -177,6 +189,8 @@ export function readReadinessObservation(
   if (!authority.isCurrent()) return undefined;
   return structuredClone({
     observationId: write.observationId,
+    ...(write.workerObservedAt !== undefined ? { workerObservedAt: write.workerObservedAt } : {}),
+    ...(write.attempt !== undefined ? { attempt: write.attempt } : {}),
     authorityScope: write.authorityScope,
     readiness: write.pair.readiness,
     probe: write.pair.probe,

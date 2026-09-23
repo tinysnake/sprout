@@ -10,6 +10,7 @@ import type {
   StoredReadinessObservation,
 } from './readiness-store.ts';
 import { readReadinessObservation } from './readiness-observation.ts';
+import { attemptMatches, sameObservationContent, type ReadinessAttempt } from './readiness-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
@@ -69,6 +70,10 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       );
       CREATE INDEX IF NOT EXISTS environment_observations_instance_seq_idx
         ON environment_observations (environment_instance_id, sequence);
+      CREATE TABLE IF NOT EXISTS environment_readiness_attempts (
+        observation_id TEXT PRIMARY KEY, environment_instance_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL, bootstrap_key TEXT UNIQUE, document TEXT NOT NULL
+      );
     `);
     const columns = this.#db
       .prepare('PRAGMA table_info(environment_readiness)')
@@ -76,6 +81,37 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
     if (!columns.some((col) => col.name === 'current_observation_id')) {
       this.#db.exec('ALTER TABLE environment_readiness ADD COLUMN current_observation_id TEXT;');
     }
+  }
+
+  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<ReadinessAttempt | false> {
+    if (!authority.isCurrent() || authority.environmentInstanceId !== instance) return false;
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const key = bootstrap ? JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requiredModels]) : null;
+      if (key !== null) {
+        const existing = this.#db.prepare('SELECT document FROM environment_readiness_attempts WHERE bootstrap_key = ?')
+          .get(key) as { document: string } | undefined;
+        if (existing) { this.#db.exec('COMMIT'); return JSON.parse(existing.document) as ReadinessAttempt; }
+      }
+      if (!authority.isCurrent()) { this.#db.exec('ROLLBACK'); return false; }
+      const row = this.#db.prepare(`SELECT MAX(sequence) AS n FROM (
+        SELECT sequence FROM environment_readiness_attempts WHERE environment_instance_id = ?
+        UNION ALL SELECT sequence FROM environment_probes WHERE environment_instance_id = ?)`)
+        .get(instance, instance) as { n: number | null };
+      const attempt: ReadinessAttempt = { observationId: `obs-${crypto.randomUUID()}`, sequence: (row.n ?? 0) + 1,
+        environmentInstanceId: instance, enrollmentId: authority.enrollmentId, connectionEpoch: authority.connectionEpoch,
+        connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels] };
+      this.#db.prepare('INSERT INTO environment_readiness_attempts VALUES (?, ?, ?, ?, ?)')
+        .run(attempt.observationId, instance, attempt.sequence, key, JSON.stringify(attempt));
+      this.#db.exec('COMMIT');
+      return attempt;
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
+  }
+
+  async getAttempt(instance: string, id: string): Promise<ReadinessAttempt | undefined> {
+    const row = this.#db.prepare('SELECT document FROM environment_readiness_attempts WHERE environment_instance_id = ? AND observation_id = ?')
+      .get(instance, id) as { document: string } | undefined;
+    return row ? JSON.parse(row.document) as ReadinessAttempt : undefined;
   }
 
   async commitObservation(
@@ -92,7 +128,32 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
           'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?',
         )
         .get(environmentInstanceId) as { readonly sequence: number };
-      const sequence = next.sequence + 1;
+      const issued = pair.attempt === undefined ? undefined : this.#db.prepare(
+        'SELECT document FROM environment_readiness_attempts WHERE observation_id = ? AND environment_instance_id = ?',
+      ).get(pair.observationId, environmentInstanceId) as { document: string } | undefined;
+      if (pair.attempt !== undefined && (issued === undefined ||
+          !attemptMatches(JSON.parse(issued.document) as ReadinessAttempt, authority, environmentInstanceId) ||
+          (JSON.parse(issued.document) as ReadinessAttempt).sequence !== pair.attempt.sequence)) {
+        this.#db.exec('ROLLBACK'); return false;
+      }
+      const previous = this.#db.prepare('SELECT document FROM environment_observations WHERE observation_id = ?')
+        .get(pair.observationId) as { document: string } | undefined;
+      if (previous) {
+        this.#db.exec('COMMIT');
+        const stored = JSON.parse(previous.document) as StoredReadinessObservation;
+        return stored.workerObservedAt === pair.workerObservedAt &&
+          sameObservationContent(stored.readiness, pair.readiness) &&
+          JSON.stringify(stored.probe) === JSON.stringify(pair.probe) ? stored.receipt : false;
+      }
+      const current = this.#db.prepare(`SELECT o.sequence FROM environment_readiness r
+        JOIN environment_observations o ON o.observation_id = r.current_observation_id
+        WHERE r.environment_instance_id = ?`).get(environmentInstanceId) as { sequence: number } | undefined;
+      if (pair.attempt && current && current.sequence > pair.attempt.sequence) {
+        this.#db.exec('ROLLBACK'); return false;
+      }
+      const latestIssued = this.#db.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_readiness_attempts WHERE environment_instance_id = ?')
+        .get(environmentInstanceId) as { sequence: number };
+      const sequence = pair.attempt?.sequence ?? Math.max(next.sequence, latestIssued.sequence) + 1;
       const committedAt = Date.now();
 
       const receipt: ReadinessReceipt = {
@@ -116,6 +177,7 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       };
 
       const storedObservation: StoredReadinessObservation = {
+        ...(pair.workerObservedAt !== undefined ? { workerObservedAt: pair.workerObservedAt } : {}),
         observationId: pair.observationId,
         environmentInstanceId,
         enrollmentId: pair.readiness.enrollmentId,

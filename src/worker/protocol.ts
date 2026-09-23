@@ -104,11 +104,14 @@ export interface WorkerReadinessFacts {
 }
 
 export interface WorkerReadinessProbeParams {
+  /** Opaque core-issued attempt; never a Worker clock or browser input. */
+  readonly attemptId?: string;
   /** Deliberately empty today; the browser cannot submit readiness facts. */
   readonly requiredModels?: readonly string[];
 }
 
 export interface WorkerReadinessProbeResult {
+  readonly attemptId?: string;
   readonly readiness: WorkerReadinessFacts;
   readonly probe: WorkerProbeFact;
 }

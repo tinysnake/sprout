@@ -218,12 +218,12 @@ export class EnvironmentWorker {
     const requiredModels = params !== null && typeof params === 'object' && Array.isArray(params?.requiredModels)
       ? params.requiredModels.filter((model): model is string => typeof model === 'string')
       : [];
-    const result = await this.#options.readinessProbe?.({ requiredModels });
+    const result = await this.#options.readinessProbe?.({ requiredModels, ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
     if (result === undefined) {
       throw new Error('Worker has no non-inference readiness probe');
     }
     this.#readiness = result.readiness;
-    return result;
+    return params?.attemptId === undefined ? result : { ...result, attemptId: result.attemptId ?? params.attemptId };
   }
 
   async #startSession(params: StartSessionParams): Promise<StartSessionResult> {

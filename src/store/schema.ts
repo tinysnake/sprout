@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 15;
+export const CURRENT_SCHEMA_VERSION = 16;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 15;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 16;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -767,6 +767,19 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           db.exec('ALTER TABLE environment_readiness ADD COLUMN current_observation_id TEXT;');
         }
       }
+    },
+  },
+  {
+    fromVersion: 15,
+    toVersion: 16,
+    name: 'readiness_issued_attempt_order',
+    migrate: (db) => {
+      // Reserving before collection is durable even if the Worker never replies.
+      // Existing observations remain historical; no Worker time becomes an order key.
+      db.exec(`CREATE TABLE IF NOT EXISTS environment_readiness_attempts (
+        observation_id TEXT PRIMARY KEY, environment_instance_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL, bootstrap_key TEXT UNIQUE, document TEXT NOT NULL
+      );`);
     },
   },
 ];
