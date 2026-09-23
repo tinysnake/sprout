@@ -13,6 +13,7 @@ import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
+import { createReadinessAuthorityTestSeam } from '../environment/readiness-authority.test-support.ts';
 import { EnrollmentError } from '../environment/enrollment.ts';
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
@@ -88,6 +89,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
     enrollments: enrollmentsStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => 1,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     leases: () => pool.leases(),
     ...(options.requiredEngines !== undefined ? { requiredEngines: options.requiredEngines } : {}),
     clock: () => 10_000,
@@ -141,11 +143,11 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
           observedAt: at,
           engines: [],
           probe,
-        }, {
+        }, readinessAuthorityTestSeam.mint({
+          environmentInstanceId: enrollment?.environmentInstanceId ?? 'mac-mini-1',
           enrollmentId,
           connectionEpoch: 1,
-          isCurrent: () => true,
-        });
+        }));
         if (!recorded) throw new Error('synthetic Worker probe was rejected');
         return { ...probe, enrollmentId, connectionEpoch: 1 };
       },
@@ -163,6 +165,8 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
   const { csrfToken } = (await response.json()) as { csrfToken: string };
   return { api, base, cookie, csrf: csrfToken, enrollments, enrollmentsStore, pool, recovery, archive };
 }
+
+const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
 
 function command(
   base: string,
@@ -626,7 +630,11 @@ test('an empty engine configuration does not fabricate a dual-engine requirement
       engines: [
         { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       ],
-    }), { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
+    }), readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'mac-mini-1',
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 1,
+    }));
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {
@@ -678,7 +686,11 @@ test('an explicitly required engine is Red when unavailable, and only that one',
       engines: [
         { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       ],
-    }), { enrollmentId: 'enroll-1', connectionEpoch: 1, isCurrent: () => true });
+    }), readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'mac-mini-1',
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 1,
+    }));
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {

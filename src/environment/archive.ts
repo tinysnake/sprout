@@ -79,6 +79,8 @@ export interface EnvironmentArchiveServiceOptions {
   readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
   /** Optional shared lifecycle authority fence (R118-EPOCH-001). */
   readonly lifecycleAuthority?: EnrollmentLifecycleAuthority;
+  /** Optional callback when an archive/restore decision invalidates live authority (#125). */
+  readonly onAuthorityLost?: (enrollmentId: string) => void;
 }
 
 /**
@@ -95,6 +97,7 @@ export class EnvironmentArchiveService {
   readonly #clock: () => number;
   readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
   readonly #authority: EnrollmentLifecycleAuthority;
+  readonly #onAuthorityLost: ((enrollmentId: string) => void) | undefined;
 
   constructor(options: EnvironmentArchiveServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -103,6 +106,7 @@ export class EnvironmentArchiveService {
     this.#clock = options.clock ?? Date.now;
     this.#onMutation = options.onMutation;
     this.#authority = options.lifecycleAuthority ?? new EnrollmentLifecycleAuthority();
+    this.#onAuthorityLost = options.onAuthorityLost;
   }
 
   /** Announce a durable decision to the catalog observer, never throwing. */
@@ -154,6 +158,7 @@ export class EnvironmentArchiveService {
       ],
     };
     this.#authority.bump(enrollment.id);
+    this.#onAuthorityLost?.(enrollment.id);
     await this.#enrollments.save(archived);
     this.#announce(archived);
     return archived;
@@ -204,6 +209,7 @@ export class EnvironmentArchiveService {
       ],
     };
     this.#authority.bump(enrollment.id);
+    this.#onAuthorityLost?.(enrollment.id);
     await this.#enrollments.save(restored);
     this.#announce(restored);
     return restored;

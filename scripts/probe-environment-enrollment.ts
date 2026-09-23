@@ -21,6 +21,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { EnvironmentEnrollmentService } from '../src/environment/enrollment-service.ts';
 import { SqliteEnrollmentStore } from '../src/environment/sqlite-enrollment-store.ts';
 import { SqliteEnvironmentReadinessStore } from '../src/environment/sqlite-readiness-store.ts';
+import { diagnosticObservationAuthority, verifyDiagnosticObservationAuthority } from './readiness-diagnostic-seam.ts';
 import { workerIdentityFixture, proveChallenge } from '../src/environment/worker-identity-fixture.ts';
 import { generateWorkerIdentity } from '../src/environment/worker-proof.ts';
 import { workerReadinessProbeFixture } from '../src/worker/readiness-fixture.ts';
@@ -47,6 +48,7 @@ try {
     enrollments,
     readiness,
     currentConnectionEpoch: () => 1,
+    verifyObservationAuthority: verifyDiagnosticObservationAuthority,
     clock: () => 1_000,
     idFactory: () => 'enroll-probe',
   });
@@ -143,7 +145,11 @@ try {
     enginesOk: false,
     summary: `probe touched ${SENTINEL_ABSOLUTE_PATH} with ${SENTINEL_ENGINE_CREDENTIAL}`,
   });
-  const authority = { enrollmentId: 'enroll-probe', connectionEpoch: 1, isCurrent: () => true } as const;
+  const authority = diagnosticObservationAuthority({
+    environmentInstanceId: 'probe-instance',
+    enrollmentId: 'enroll-probe',
+    connectionEpoch: 1,
+  });
   await service.observeReadiness('enroll-probe', observedReadiness, authority);
   const assembled = await service.readiness('enroll-probe');
   check('enrollment remains approved while an engine needs login', assembled.readiness.enrollmentStatus === 'approved');

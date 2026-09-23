@@ -29,7 +29,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -41,6 +41,7 @@ import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
+import { EnvironmentArchiveService } from './environment/archive.ts';
 import { workerIdentityDigest } from './environment/enrollment-identity.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
@@ -52,8 +53,13 @@ import {
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
 } from './worker/protocol.ts';
-import type { EnvironmentWorker } from './worker/server.ts';
-import type { WorkerEnrollmentConnection } from './worker/enrollment-connector.ts';
+import { EnvironmentWorker } from './worker/server.ts';
+import {
+  connectWorkerEnrollment,
+  loadOrCreateWorkerIdentity,
+  workerPublicKey,
+  type WorkerEnrollmentConnection,
+} from './worker/enrollment-connector.ts';
 import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
@@ -62,6 +68,7 @@ import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
 import { InMemoryEnvironmentCatalogStore } from './environment/catalog-store.ts';
 import { InMemoryEnvironmentReadinessStore } from './environment/readiness-store.ts';
+import { createReadinessAuthorityTestSeam } from './environment/readiness-authority.test-support.ts';
 import { InMemoryWorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
@@ -79,16 +86,87 @@ import {
   type TaskContextWorker,
 } from './runtime.ts';
 
+const runtimeWorkerResources = new WeakMap<
+  SproutRuntime,
+  Array<{ readonly worker: EnvironmentWorker; readonly connection: WorkerEnrollmentConnection }>
+>();
+
+async function createRuntime(options: Parameters<typeof createSproutRuntime>[0]) {
+  const runtime = await createSproutRuntime(options);
+  const productionClose = runtime.close.bind(runtime);
+  Object.defineProperty(runtime, 'close', {
+    value: async () => {
+      for (const resource of runtimeWorkerResources.get(runtime) ?? []) {
+        await resource.worker.shutdown().catch(() => undefined);
+        resource.connection.close();
+      }
+      runtimeWorkerResources.delete(runtime);
+      await productionClose();
+    },
+  });
+  return runtime;
+}
+
 /** The environment instance this composition test serves. */
 const INSTANCE_ID = 'composition-instance';
 const PROJECT_ID = 'composition-project';
 
-function readinessAuthority(runtime: SproutRuntime, enrollmentId: string, connectionEpoch: number) {
-  return {
-    enrollmentId,
-    connectionEpoch,
-    isCurrent: () => runtime.workerEpochs.current(enrollmentId)?.epoch === connectionEpoch,
-  };
+function readinessAuthority(
+  runtime: SproutRuntime,
+  enrollmentId: string,
+  connectionEpoch: number,
+  environmentInstanceId?: string,
+) {
+  const instanceId =
+    environmentInstanceId ??
+    runtime.environmentCatalog.entries().find((e) => e.enrollmentId === enrollmentId)?.instanceId ??
+    INSTANCE_ID;
+  const authority = runtime.workerGateway.authorizeObservation(instanceId);
+  assert.ok(authority, 'an authenticated accepted Worker owns observation authority');
+  assert.equal(authority.enrollmentId, enrollmentId);
+  assert.equal(authority.connectionEpoch, connectionEpoch);
+  return authority;
+}
+
+const runtimePorts = new WeakMap<SproutRuntime, Promise<number>>();
+
+async function runtimePort(runtime: SproutRuntime): Promise<number> {
+  let port = runtimePorts.get(runtime);
+  if (port === undefined) {
+    port = runtime.api.listen(0, '127.0.0.1').then((listening) => listening.port);
+    runtimePorts.set(runtime, port);
+  }
+  return port;
+}
+
+/** Establish authority through the real authenticated WorkerGateway handshake. */
+async function connectRuntimeWorker(
+  runtime: SproutRuntime,
+  enrollmentId: string,
+  identityKeyPath: string,
+): Promise<WorkerEnrollmentConnection> {
+  const port = await runtimePort(runtime);
+  const connection = await connectWorkerEnrollment({
+    target: { enrollmentId, host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath },
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engineFacts: [{ engine: 'scripted', installed: true, authenticated: true, models: ['scripted-model'] }],
+  });
+  const enrollment = await runtime.enrollments.get(enrollmentId);
+  assert.ok(enrollment);
+  const worker = new EnvironmentWorker({
+    environmentInstanceId: enrollment.environmentInstanceId,
+    engines: new Map(),
+    input: connection.stream,
+    output: connection.stream,
+  });
+  const resources = runtimeWorkerResources.get(runtime) ?? [];
+  resources.push({ worker, connection });
+  runtimeWorkerResources.set(runtime, resources);
+  await waitFor(
+    () => runtime.workerGateway.liveFor(enrollment.environmentInstanceId) !== undefined,
+    'authenticated WorkerGateway connection',
+  );
+  return connection;
 }
 
 /** A complete typed host configuration for one synthetic local environment. */
@@ -261,7 +339,7 @@ async function build(
         ['scripted', new ScriptedEngineAdapter({ turns: options.turns ?? [scriptedTurn('ok')] })],
       ]),
     });
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration(options.configuration),
     projectRoot: '/synthetic/project-root',
     environment,
@@ -429,7 +507,7 @@ test('a misconfigured engine is refused at construction, before durable state is
   });
 
   await assert.rejects(
-    createSproutRuntime({
+    createRuntime({
       configuration: hostConfiguration({ engineId: 'missing-engine' }),
       projectRoot: '/synthetic/project-root',
       environment,
@@ -457,7 +535,7 @@ test('an unreachable environment port is closed and rethrown rather than left ru
   });
 
   await assert.rejects(
-    createSproutRuntime({
+    createRuntime({
       configuration: hostConfiguration(),
       projectRoot: '/synthetic/project-root',
       environment,
@@ -584,7 +662,7 @@ test('runtime construction failure closes environment and worker resources witho
   // 1. Missing engine closes environment
   await assert.rejects(
     () =>
-      createSproutRuntime({
+      createRuntime({
         configuration: hostConfiguration({ engineId: 'nonexistent-engine' }),
         projectRoot: '/synthetic/root',
         environment: env,
@@ -626,7 +704,7 @@ test('runtime construction failure closes environment and worker resources witho
 
   await assert.rejects(
     () =>
-      createSproutRuntime({
+      createRuntime({
         configuration: hostConfiguration(),
         projectRoot: '/synthetic/root',
         environment: env,
@@ -661,7 +739,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
 
   await assert.rejects(
     () =>
-      createSproutRuntime({
+      createRuntime({
         configuration: hostConfiguration({ databasePath }),
         projectRoot: '/synthetic/root',
         environment,
@@ -681,16 +759,18 @@ test('the composed runtime exposes durable enrollment and readiness through its 
   });
   // A real SQLite store, so this proves the enrollment domain is mounted on the
   // same durable handle as every other M2 domain rather than a test double.
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({ databasePath }),
     projectRoot: '/synthetic/project-root',
     environment,
   });
   try {
+    const keyPath = join(directory, 'worker-key.pem');
+    const identity = loadOrCreateWorkerIdentity(keyPath);
     const requested = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: INSTANCE_ID,
       displayName: 'Composed Environment',
-      publicKey: 'composed-public-key',
+      publicKey: workerPublicKey(identity.privateKey),
       platform: 'macos',
       protocolVersion: '2.1',
       capabilityRequests: ['agent-run'],
@@ -702,7 +782,8 @@ test('the composed runtime exposes durable enrollment and readiness through its 
       capabilityPermissions: { 'agent-run': true },
     });
     const now = Date.now();
-    const epoch = runtime.workerEpochs.accept(requested.enrollment.id);
+    await connectRuntimeWorker(runtime, requested.enrollment.id, keyPath);
+    const epoch = runtime.workerGateway.currentConnectionEpoch(requested.enrollment.id)!;
     // Only the engine this build's configured Agents actually run on is required,
     // so a single ready engine is a complete Environment.
     await runtime.enrollments.observeReadiness(requested.enrollment.id, workerReadinessProbeFixture({
@@ -717,7 +798,7 @@ test('the composed runtime exposes durable enrollment and readiness through its 
       protocolOk: true,
       enginesOk: true,
       summary: 'ready',
-    }), readinessAuthority(runtime, requested.enrollment.id, epoch.epoch));
+    }), readinessAuthority(runtime, requested.enrollment.id, epoch));
 
     const assembled = await runtime.enrollments.readiness(requested.enrollment.id);
     assert.equal(assembled.summary.level, 'green');
@@ -735,7 +816,7 @@ test('the composed runtime exposes durable enrollment and readiness through its 
     );
 
     // The same composition serves the router over HTTP.
-    const { port } = await runtime.api.listen(0);
+    const port = await runtimePort(runtime);
     const listing = await fetch(`http://127.0.0.1:${port}/api/environments/enrollments`);
     assert.equal(listing.status, 401, 'the enrollment route stays behind the #84 auth boundary');
   } finally {
@@ -771,7 +852,7 @@ test('the runtime refuses to observe readiness without an accepted Worker epoch 
       return workerInfo;
     },
   };
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({ databasePath }),
     projectRoot: '/synthetic/project-root',
     environment,
@@ -1387,24 +1468,24 @@ test('a composed run records the durable workspace binding it was admitted under
  * The composed runtime mounts the enrollment-backed outbound Worker gateway
  * (#115, ADR-0012).
  *
- * The pending enrollment, its one-use claim, the machine claim route, and the
- * epoch registry are all present on the one runtime object, so a host Worker can
- * connect without the core ever dialing it.
+ * The pending enrollment, its one-use claim, and the machine claim route are
+ * present on the one runtime object, while epoch issuance stays private to the
+ * gateway so a host Worker can connect without the core ever dialing it.
  */
-test('the composed runtime exposes the outbound Worker gateway and its epoch registry (#115)', async (t) => {
+test('the composed runtime exposes the outbound Worker gateway without its epoch issuer (#115)', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-gateway-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const environment = scriptedEnvironment({
     adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
   });
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({ databasePath: join(directory, 'sprout.db') }),
     projectRoot: '/synthetic/project-root',
     environment,
   });
   try {
     assert.notEqual(runtime.workerGateway, undefined);
-    assert.equal(runtime.workerEpochs, runtime.workerGateway.epochs);
+    assert.equal('epochs' in runtime.workerGateway, false, 'the mutable epoch issuer is not application-facing');
     assert.notEqual(runtime.enrollmentEnvironment, undefined);
 
     // A Web-created pending enrollment carries a one-use claim, and the machine
@@ -1419,6 +1500,7 @@ test('the composed runtime exposes the outbound Worker gateway and its epoch reg
     const secret = requested.claim?.secret ?? '';
     assert.notEqual(secret, '');
     const { port } = await runtime.api.listen(0);
+    runtimePorts.set(runtime, Promise.resolve(port));
     const claimed = await fetch(
       `http://127.0.0.1:${port}/api/worker/enrollments/${encodeURIComponent(requested.enrollment.id)}/claim`,
       {
@@ -1429,6 +1511,53 @@ test('the composed runtime exposes the outbound Worker gateway and its epoch reg
     );
     assert.equal(claimed.status, 200);
     assert.equal(claimed.headers.get('set-cookie'), null, 'the machine route sets no Human cookie');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('production Runtime rejects an isolated test verifier capability (R125-AUTH-001)', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-authority-boundary-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      databasePath: join(directory, 'sprout.db'),
+      environmentSource: 'enrollment',
+    }),
+    projectRoot: '/synthetic/project-root',
+    stores: inMemoryStores(),
+  });
+  try {
+    const keyPath = join(directory, 'worker-key.pem');
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const { enrollment } = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: 'authority-boundary-host',
+      displayName: 'Authority Boundary Host',
+      publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos',
+      capabilityRequests: [ADMISSION_CAPABILITY],
+      engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.id, {
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.id, keyPath);
+    const live = runtime.workerGateway.liveFor(enrollment.environmentInstanceId)!;
+    const foreignAuthority = createReadinessAuthorityTestSeam().mint({
+      environmentInstanceId: enrollment.environmentInstanceId,
+      enrollmentId: enrollment.id,
+      connectionId: live.epoch.connectionId,
+      connectionEpoch: live.epoch.epoch,
+      lifecycleGeneration: runtime.enrollments.lifecycleAuthority.generation(enrollment.id),
+      isCurrent: () => true,
+    });
+
+    assert.equal(
+      await runtime.enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), foreignAuthority),
+      false,
+      'production composition verifies only capabilities minted by its authenticated Gateway',
+    );
+    assert.equal(await runtime.stores.environmentReadiness.getReadiness(enrollment.environmentInstanceId), undefined);
   } finally {
     await runtime.close();
   }
@@ -1447,7 +1576,7 @@ test('the composed runtime exposes the outbound Worker gateway and its epoch reg
 test('the enrollment environment source composes without a configured carrier', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-enrollment-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1486,7 +1615,7 @@ test('production starts with zero Environments and admits an enrolled instance w
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-catalog-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const credential = 'e2-catalog-credential';
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1501,6 +1630,7 @@ test('production starts with zero Environments and admits an enrolled instance w
     assert.equal(runtime.environmentCatalog.entries().length, 0);
     assert.deepEqual(runtime.pool.leases(), []);
     const { port } = await runtime.api.listen(0);
+    runtimePorts.set(runtime, Promise.resolve(port));
     assert.ok(port > 0);
     const base = `http://127.0.0.1:${port}`;
     const signIn = await fetch(`${base}/api/auth/session`, {
@@ -1516,10 +1646,12 @@ test('production starts with zero Environments and admits an enrolled instance w
 
     // A Human creates and approves a pending enrollment with a pre-proven
     // identity; no Worker is dialed by the core.
+    const keyPath = join(directory, 'worker-key.pem');
+    const identity = loadOrCreateWorkerIdentity(keyPath);
     const requested = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: 'enrolled-host-1',
       displayName: 'Enrolled Host One',
-      publicKey: 'host-public-key-1',
+      publicKey: workerPublicKey(identity.privateKey),
       platform: 'macos',
       capabilityRequests: [ADMISSION_CAPABILITY],
       engineFacts: [],
@@ -1541,9 +1673,10 @@ test('production starts with zero Environments and admits an enrolled instance w
 
     // A current, authenticated connection and facts from that exact epoch are
     // required; production admits it without a restart.
-    const epoch = runtime.workerEpochs.accept(enrollmentId);
+    await connectRuntimeWorker(runtime, enrollmentId, keyPath);
+    const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentId, epoch.epoch));
+      readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, true);
     await runtime.refreshEnvironmentCatalog();
@@ -1565,7 +1698,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
     test(`exposed ${backend} readiness store refuses ${missing} probe without admitting work (R118-API-002)`, async (t) => {
       const directory = mkdtempSync(join(tmpdir(), 'sprout-store-ingress-'));
       t.after(() => rmSync(directory, { recursive: true, force: true }));
-      const runtime = await createSproutRuntime({
+      const runtime = await createRuntime({
         configuration: hostConfiguration({
           databasePath: join(directory, 'sprout.db'), environmentSource: 'enrollment',
         }),
@@ -1573,20 +1706,23 @@ for (const backend of ['memory', 'sqlite'] as const) {
         ...(backend === 'memory' ? { stores: inMemoryStores() } : {}),
       });
       try {
+        const keyPath = join(directory, 'worker-key.pem');
+        const identity = loadOrCreateWorkerIdentity(keyPath);
         const { enrollment } = await runtime.enrollments.requestEnrollment({
           environmentInstanceId: 'host-store-ingress', displayName: 'Store ingress',
-          publicKey: 'store-ingress-key', platform: 'macos',
+          publicKey: workerPublicKey(identity.privateKey), platform: 'macos',
           capabilityRequests: [ADMISSION_CAPABILITY], engineFacts: [],
         });
         await runtime.enrollments.approve(enrollment.id, {
           capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
         });
-        const epoch = runtime.workerEpochs.accept(enrollment.id);
-        const authority = readinessAuthority(runtime, enrollment.id, epoch.epoch);
+        await connectRuntimeWorker(runtime, enrollment.id, keyPath);
+        const epoch = runtime.workerGateway.currentConnectionEpoch(enrollment.id)!;
+        const authority = readinessAuthority(runtime, enrollment.id, epoch);
         assert.equal(authority.isCurrent(), true);
         const raw = {
           readiness: {
-            enrollmentId: enrollment.id, connectionEpoch: epoch.epoch,
+            enrollmentId: enrollment.id, connectionEpoch: epoch,
             connection: { state: 'online', lastConfirmedAt: Date.now() },
             compatibility: { state: 'compatible', workerProtocolVersion: '2' },
             engines: [{ engine: 'scripted', installed: true, readiness: 'ready', required: true,
@@ -1633,12 +1769,13 @@ for (const backend of ['memory', 'sqlite'] as const) {
 async function enrollEligibleInstance(
   runtime: SproutRuntime,
   instanceId: string,
-  publicKey: string,
+  identityKeyPath: string,
 ): Promise<string> {
+  const identity = loadOrCreateWorkerIdentity(identityKeyPath);
   const requested = await runtime.enrollments.requestEnrollment({
     environmentInstanceId: instanceId,
     displayName: instanceId,
-    publicKey,
+    publicKey: workerPublicKey(identity.privateKey),
     platform: 'macos',
     capabilityRequests: [ADMISSION_CAPABILITY],
     engineFacts: [],
@@ -1647,9 +1784,10 @@ async function enrollEligibleInstance(
   await runtime.enrollments.approve(enrollmentId, {
     capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
   });
-  const epoch = runtime.workerEpochs.accept(enrollmentId);
+  await connectRuntimeWorker(runtime, enrollmentId, identityKeyPath);
+  const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
   await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-    readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    readinessAuthority(runtime, enrollmentId, epoch));
   await runtime.refreshEnvironmentCatalog();
   return enrollmentId;
 }
@@ -1657,7 +1795,7 @@ async function enrollEligibleInstance(
 test('E2: a durable enrollment alone does not admit work; a current epoch and required facts do', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-eligibility-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1665,10 +1803,12 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     projectRoot: '/synthetic/project-root',
   });
   try {
+    const keyPath = join(directory, 'host-a-key.pem');
+    const identity = loadOrCreateWorkerIdentity(keyPath);
     const requested = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: 'host-a',
       displayName: 'Host A',
-      publicKey: 'host-a-key',
+      publicKey: workerPublicKey(identity.privateKey),
       platform: 'macos',
       capabilityRequests: [ADMISSION_CAPABILITY],
       engineFacts: [],
@@ -1684,13 +1824,14 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // A current epoch with no required readiness is still ineligible.
-    const emptyEpoch = runtime.workerEpochs.accept(enrollmentId);
+    await connectRuntimeWorker(runtime, enrollmentId, keyPath);
+    const emptyEpoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // Establishing the required readiness fact makes it eligible dynamically.
     await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentId, emptyEpoch.epoch));
+      readinessAuthority(runtime, enrollmentId, emptyEpoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
   } finally {
@@ -1701,7 +1842,7 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
 test('E2: two eligible instances stay independent and a lease conflict is observable', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-multi-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1710,8 +1851,8 @@ test('E2: two eligible instances stay independent and a lease conflict is observ
     // Deterministic lease identity so the conflict is asserted precisely.
   });
   try {
-    await enrollEligibleInstance(runtime, 'host-a', 'key-a');
-    await enrollEligibleInstance(runtime, 'host-b', 'key-b');
+    await enrollEligibleInstance(runtime, 'host-a', join(directory, 'host-a-key.pem'));
+    await enrollEligibleInstance(runtime, 'host-b', join(directory, 'host-b-key.pem'));
     assert.deepEqual(
       [...runtime.environmentCatalog.eligibleInstanceIds()].sort(),
       ['host-a', 'host-b'],
@@ -1751,7 +1892,7 @@ test('E2: two eligible instances stay independent and a lease conflict is observ
 test('E2: a disconnected instance loses eligibility but keeps its catalog record and lease', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-disconnect-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1759,7 +1900,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     projectRoot: '/synthetic/project-root',
   });
   try {
-    const enrollmentId = await enrollEligibleInstance(runtime, 'host-a', 'key-a');
+    const enrollmentId = await enrollEligibleInstance(runtime, 'host-a', join(directory, 'host-a-key.pem'));
     const lease = runtime.pool.acquireLease({
       instanceId: 'host-a',
       capability: ADMISSION_CAPABILITY,
@@ -1772,7 +1913,8 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     // The accepted connection ends: the epoch is invalidated and the catalog is
     // re-projected. The record and the active lease survive; the instance stops
     // admitting new work.
-    runtime.workerEpochs.invalidate(enrollmentId, runtime.workerEpochs.current(enrollmentId)!.connectionId);
+    runtime.workerGateway.liveFor('host-a')!.close();
+    await waitFor(() => runtime.workerGateway.liveFor('host-a') === undefined, 'disconnected Worker removal');
     await runtime.refreshEnvironmentCatalog();
     assert.ok(runtime.environmentCatalog.entry('host-a') !== undefined, 'offline never deletes');
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
@@ -1781,11 +1923,12 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
 
     // A newer epoch cannot reuse old readiness. It becomes eligible only after
     // fresh facts for that replacement epoch are stored; the lease is intact.
-    const replacement = runtime.workerEpochs.accept(enrollmentId);
+    await connectRuntimeWorker(runtime, enrollmentId, join(directory, 'host-a-key.pem'));
+    const replacement = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentId, replacement.epoch));
+      readinessAuthority(runtime, enrollmentId, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
     if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
@@ -1797,7 +1940,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
 test('E2: replacement and stale readiness ordering never re-admit a prior epoch in a multi-instance pool', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-epoch-order-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1805,18 +1948,20 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     projectRoot: '/synthetic/project-root',
   });
   try {
-    const enrollmentA = await enrollEligibleInstance(runtime, 'host-a', 'key-a');
-    await enrollEligibleInstance(runtime, 'host-b', 'key-b');
+    const enrollmentA = await enrollEligibleInstance(runtime, 'host-a', join(directory, 'host-a-key.pem'));
+    await enrollEligibleInstance(runtime, 'host-b', join(directory, 'host-b-key.pem'));
     const lease = runtime.pool.acquireLease({
       instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scout', runId: 'run-a', ttlMs: 60_000,
     });
     assert.equal(lease.ok, true);
-    const first = runtime.workerEpochs.current(enrollmentA)!;
+    const firstAuthority = runtime.workerGateway.authorizeObservation('host-a')!;
 
     // Loss followed by a replacement leaves host-b independently eligible but
     // removes host-a until the replacement itself supplies readiness.
-    runtime.workerEpochs.invalidate(enrollmentA, first.connectionId);
-    const replacement = runtime.workerEpochs.accept(enrollmentA);
+    runtime.workerGateway.liveFor('host-a')!.close();
+    await waitFor(() => runtime.workerGateway.liveFor('host-a') === undefined, 'prior Worker removal');
+    await connectRuntimeWorker(runtime, enrollmentA, join(directory, 'host-a-key.pem'));
+    const replacement = runtime.workerGateway.currentConnectionEpoch(enrollmentA)!;
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     assert.equal(runtime.environmentCatalog.entry('host-b')?.eligible, true);
@@ -1824,8 +1969,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
 
     // A delayed old-epoch observation is refused as non-authoritative and
     // cannot make the new connection eligible or release/conflict-bypass lease.
-    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentA, first.epoch));
+    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(), firstAuthority);
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     const blocked = runtime.pool.acquireLease({
@@ -1834,7 +1978,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     assert.equal(blocked.ok, false);
 
     await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentA, replacement.epoch));
+      readinessAuthority(runtime, enrollmentA, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
     const conflict = runtime.pool.acquireLease({
@@ -1852,17 +1996,19 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'sprout.db');
 
-  const first = await createSproutRuntime({
+  const first = await createRuntime({
     configuration: hostConfiguration({ databasePath, environmentSource: 'enrollment' }),
     projectRoot: '/synthetic/project-root',
   });
-  const enrollmentId = await enrollEligibleInstance(first, 'host-a', 'key-a');
-  const firstEpoch = first.workerEpochs.current(enrollmentId)!;
+  const keyPath = join(directory, 'host-a-key.pem');
+  const enrollmentId = await enrollEligibleInstance(first, 'host-a', keyPath);
+  const firstEpoch = first.workerGateway.currentConnectionEpoch(enrollmentId)!;
+  const firstAuthority = first.workerGateway.authorizeObservation('host-a')!;
   await first.close();
 
   // Reopen exactly as a restart would: no in-memory epoch survives, but the
   // enrolled instance and its durable catalog record remain inspectable.
-  const second = await createSproutRuntime({
+  const second = await createRuntime({
     configuration: hostConfiguration({ databasePath, environmentSource: 'enrollment' }),
     projectRoot: '/synthetic/project-root',
   });
@@ -1875,8 +2021,9 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
     // A restart must not restart the authority namespace at epoch 1. The new
     // authenticated connection receives a durable, strictly newer generation,
     // and the old persisted readiness cannot make that connection eligible.
-    const replacement = second.workerEpochs.accept(enrollmentId);
-    assert.ok(replacement.epoch > firstEpoch.epoch, 'restart keeps the epoch high-water mark');
+    await connectRuntimeWorker(second, enrollmentId, keyPath);
+    const replacement = second.workerGateway.currentConnectionEpoch(enrollmentId)!;
+    assert.ok(replacement > firstEpoch, 'restart keeps the epoch high-water mark');
     await second.refreshEnvironmentCatalog();
     assert.equal(
       second.environmentCatalog.entry('host-a')?.eligible,
@@ -1886,12 +2033,11 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
 
     // Delayed old facts remain non-authoritative; only readiness produced by
     // the replacement epoch restores admission.
-    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(second, enrollmentId, firstEpoch.epoch));
+    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), firstAuthority);
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false);
     await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(second, enrollmentId, replacement.epoch));
+      readinessAuthority(second, enrollmentId, replacement));
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, true);
   } finally {
@@ -1902,7 +2048,7 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
 test('E2: production composition exposes no configured path and no leaked host fact', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-privacy-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -1915,7 +2061,7 @@ test('E2: production composition exposes no configured path and no leaked host f
     assert.equal(runtime.instance, undefined);
     assert.equal(runtime.engines.size, 0);
 
-    await enrollEligibleInstance(runtime, 'host-a', 'key-a');
+    await enrollEligibleInstance(runtime, 'host-a', join(directory, 'host-a-key.pem'));
     const report = runtime.startupReport(41000);
     assert.match(report, /environment: enrollment catalog \(1 enrolled, 1 eligible\)/);
     assert.equal(report.includes('key-a'), false, 'no identity material leaks into the report');
@@ -1940,7 +2086,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-e2e-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
 
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -2138,7 +2284,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
 test('E2: a legacy same-instance enrollment cannot inherit stale readiness through gateway acceptance', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-instance-authority-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -2237,7 +2383,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
     connections.push(secondConnection);
     assert.equal(secondConnection.epoch, 1, 'the sibling has a fresh per-enrollment epoch');
     assert.equal(runtime.workerGateway.liveFor(instanceId)?.enrollment.id, legacySibling.id);
-    assert.equal(runtime.workerEpochs.isCurrent(first.enrollment.id, firstConnection.connectionId), false);
+    assert.equal(runtime.workerGateway.isCurrentConnection(first.enrollment.id, firstConnection.connectionId), false);
     assert.equal(runtime.environmentCatalog.entry(instanceId)?.eligible, false, 'acceptance clears stale facts before publishing epoch one');
     assert.equal(runtime.pool.requiresLease(instanceId, ADMISSION_CAPABILITY), undefined);
 
@@ -2327,7 +2473,7 @@ test('real Gateway startup rejects invalid target probes and empty-target worker
     const directory = mkdtempSync(join(tmpdir(), 'sprout-118-startup-ingress-'));
     const keyDirectory = mkdtempSync(join(tmpdir(), 'sprout-118-startup-key-'));
     const keyPath = join(keyDirectory, 'worker-key.pem');
-    const runtime = await createSproutRuntime({
+    const runtime = await createRuntime({
       configuration: hostConfiguration({
         databasePath: join(directory, 'sprout.db'),
         environmentSource: 'enrollment',
@@ -2450,7 +2596,7 @@ async function waitFor(predicate: () => boolean, description: string): Promise<v
 test('E2: approval and revocation re-project eligibility without a restart', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-e2-mutation-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -2458,20 +2604,24 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     projectRoot: '/synthetic/project-root',
   });
   try {
+    const keyPath = join(directory, 'host-a-key.pem');
+    const identity = loadOrCreateWorkerIdentity(keyPath);
     const requested = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: 'host-a',
       displayName: 'Host A',
-      publicKey: 'key-a',
+      publicKey: workerPublicKey(identity.privateKey),
       platform: 'macos',
       capabilityRequests: [ADMISSION_CAPABILITY],
       engineFacts: [],
     });
     const enrollmentId = requested.enrollment.id;
-    const epoch = runtime.workerEpochs.accept(enrollmentId);
-    // A pending enrollment may have an accepted-looking resolver epoch, but it
-    // has no fact-write authority until Human approval.
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentId, epoch.epoch));
+    // Application composition has no raw epoch issuer, and a pending enrollment
+    // cannot obtain Gateway observation authority.
+    assert.equal(runtime.workerGateway.authorizeObservation('host-a'), undefined);
+    assert.equal(
+      await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), {} as never),
+      false,
+    );
     // Still pending: no admission.
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible ?? false, false);
     assert.equal(await runtime.stores.environmentReadiness.getReadiness('host-a'), undefined);
@@ -2481,8 +2631,10 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     await runtime.enrollments.approve(enrollmentId, {
       capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
     });
+    await connectRuntimeWorker(runtime, enrollmentId, keyPath);
+    const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
-      readinessAuthority(runtime, enrollmentId, epoch.epoch));
+      readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     await waitFor(
       () => runtime.environmentCatalog.entry('host-a')?.eligible === true,
@@ -2539,7 +2691,7 @@ async function readinessWorkflowHarness(options: {
   const { WORKER_PROTOCOL_VERSION } = await import('./worker/protocol.ts');
   const { signWorkerChallenge } = await import('./environment/worker-proof.ts');
   const credential = randomBytes(16).toString('base64url');
-  const runtime = await createSproutRuntime({
+  const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(options.directory, 'sprout.db'),
       environmentSource: 'enrollment',
@@ -2917,6 +3069,476 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const assembled = await h.runtime.enrollments.readiness(enrollmentId);
       assert.equal(assembled.readiness.connection.state, 'never-connected');
       assert.deepEqual(assembled.probes, []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: authority substitution, forged capabilities, and caller callbacks are refused without mutation (Scenario 12)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-substitution-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 6, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '0.154.0', summary: 'real probe',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+            ],
+            probe: validProbe,
+          },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      const liveAuth = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
+      assert.ok(liveAuth !== undefined, 'owner issues scoped capability for live connection');
+      assert.equal(liveAuth.isCurrent(), true);
+
+      // Attempt authority substitution and forged capabilities:
+      // 1. Plain object literal imitating authority
+      const forgedLiteral = {
+        environmentInstanceId: INSTANCE_ID,
+        enrollmentId,
+        connectionId: liveAuth.connectionId,
+        connectionEpoch: liveAuth.connectionEpoch,
+        lifecycleGeneration: liveAuth.lifecycleGeneration,
+        isCurrent: () => true,
+      };
+      // 2. Copied capability via object spread
+      const spreadCopy = { ...liveAuth };
+      // 3. Copied capability via Object.assign
+      const assignedCopy = Object.assign({}, liveAuth);
+      const observationResult = {
+        readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
+        probe: validProbe,
+      };
+
+      for (const [label, forged] of [
+        ['forged object literal', forgedLiteral],
+        ['spread-copied capability', spreadCopy],
+        ['Object.assign copied capability', assignedCopy],
+      ] as const) {
+        assert.equal(
+          await h.runtime.enrollments.observeReadiness(enrollmentId, observationResult, forged as never),
+          false,
+          `${label} must be refused by observeReadiness`,
+        );
+      }
+
+      // Scope substitution: using authentic authority for another enrollment/instance
+      assert.equal(
+        await h.runtime.enrollments.observeReadiness('other-enrollment', observationResult, liveAuth),
+        false,
+        'scope substitution across enrollments must fail',
+      );
+
+      // Verify no mutation occurred
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID), []);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: post-commit-before-response loss preserves history while refusing current probe success and replacement does not inherit (Scenarios 4, 11)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-postcommit-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 6, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '0.154.0', summary: 'post-commit probe',
+      };
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: {
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            engines: [
+              { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
+            ],
+            probe: validProbe,
+          },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+
+      // Intercept store commit: capture when commit succeeds, hold before returning to caller,
+      // and disconnect the worker in that window.
+      const store = h.runtime.stores.environmentReadiness;
+      const origCommit = store.commitObservation.bind(store);
+      let committedSignal: (() => void) | undefined;
+      const committedPromise = new Promise<void>((resolve) => { committedSignal = resolve; });
+      let continueReturn: (() => void) | undefined;
+      const returnGate = new Promise<void>((resolve) => { continueReturn = resolve; });
+
+      store.commitObservation = async (...args) => {
+        const result = await origCommit(...args);
+        committedSignal?.();
+        await returnGate;
+        return result;
+      };
+
+      const pendingRequest = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+
+      await committedPromise;
+      // Close the channel (disconnect) after atomic commit but before response completion
+      h.runtime.workerGateway.liveFor(INSTANCE_ID)!.close();
+      continueReturn?.();
+
+      const response = await pendingRequest;
+      // Refuses current probe success!
+      assert.notEqual(response.status, 201, 'post-commit authority loss must refuse current probe success');
+
+      // But history is preserved: the atomic commit succeeded while live
+      const probes = await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID);
+      assert.equal(probes.length, 1, 'observation is preserved as durable history');
+      assert.equal(probes[0]?.summary, 'post-commit probe');
+
+      // Current query reports offline and no current probe facts
+      const currentReadiness = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.notEqual(currentReadiness.readiness.connection.state, 'online');
+      assert.equal(currentReadiness.readiness.probe, undefined);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+
+      // Replacement connection connects (epoch 2) using the same approved host key
+      const keyPath = join(directory, 'worker-key.pem');
+      await h.connect(enrollmentId, keyPath, {
+        readiness: () => ({
+          protocolVersion: WORKER_PROTOCOL_VERSION,
+          engines: [],
+          probe: { at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: false, source: 'worker', version: '2.0.0', summary: 'worker 2' },
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'replacement channel');
+      await h.runtime.refreshEnvironmentCatalog();
+
+      // Replacement connection cannot inherit current authority from predecessor
+      const afterReplacement = await h.runtime.enrollments.readiness(enrollmentId);
+      assert.equal(afterReplacement.readiness.probe?.summary, undefined, 'replacement cannot inherit predecessor probe as current');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'replacement is not eligible from old facts');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: pending and archived sessions cannot authorize observations or change identity (Scenarios 4, 12)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-pending-archive-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      // 1. Pending enrollment
+      const requestedPending = await h.runtime.enrollments.requestEnrollment({
+        environmentInstanceId: 'env-pending-test',
+        displayName: 'Pending Test',
+        publicKey: 'pending-key',
+        platform: 'macos',
+        capabilityRequests: [ADMISSION_CAPABILITY],
+        engineFacts: [],
+      });
+      const pendingId = requestedPending.enrollment.id;
+
+      // Pending session has no owner authority
+      assert.equal(
+        h.runtime.workerGateway.authorizeObservation('env-pending-test'),
+        undefined,
+        'pending instance cannot obtain observation authority',
+      );
+
+      // Attempting probe on pending enrollment fails
+      const probePendingRes = await fetch(`${h.base}/api/environments/enrollments/${pendingId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(probePendingRes.status, 201);
+
+      // Pending identity is unchanged
+      const pendingEnrollment = await h.runtime.enrollments.get(pendingId);
+      assert.equal(pendingEnrollment?.status, 'pending');
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness('env-pending-test'), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes('env-pending-test'), []);
+
+      // 2. Archived enrollment
+      const approvedId = (await h.runtime.enrollments.list())[0]!.id;
+      const validProbe = {
+        at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '1.0.0', summary: 'pre-archive probe',
+      };
+      await h.connect(approvedId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => ({
+          readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe: validProbe },
+          probe: validProbe,
+        }),
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+
+      // Archive the environment
+      const archiveService = new EnvironmentArchiveService({
+        enrollments: h.runtime.stores.enrollments,
+        leases: h.runtime.pool,
+        lifecycleAuthority: h.runtime.enrollments.lifecycleAuthority,
+        onAuthorityLost: (id) => h.runtime.workerGateway.invalidateEnrollment(id),
+      });
+      await archiveService.archive(approvedId, 'operator archiving');
+
+      // Live authority lost immediately
+      assert.equal(h.runtime.workerGateway.authorizeObservation(INSTANCE_ID), undefined);
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
+
+      // Probe request on archived enrollment fails
+      const probeArchivedRes = await fetch(`${h.base}/api/environments/enrollments/${approvedId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.notEqual(probeArchivedRes.status, 201);
+
+      // Archived identity is preserved
+      const archivedEnrollment = await h.runtime.enrollments.get(approvedId);
+      assert.equal(archivedEnrollment?.status, 'archived');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: reset raced before mutation leaves no observation mutation (Scenario 4)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-reset-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let started: (() => void) | undefined;
+      const startedProbe = new Promise<void>((resolve) => { started = resolve; });
+
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          started?.();
+          await gate;
+          const probe = {
+            at: Date.now(), latencyMs: 7, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: 'reset probe',
+          };
+          return {
+            readiness: {
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              engines: [],
+              probe,
+            },
+            probe,
+          };
+        },
+      });
+      await startedProbe;
+      const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+        method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      // Reset lands before mutation while probe collection is in flight
+      await h.runtime.enrollments.reset(enrollmentId, 'reset mid-collection');
+      release?.();
+      const response = await pending;
+      assert.notEqual(response.status, 201);
+      assert.equal(await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID), undefined);
+      assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#125 ${backend}: accepted Worker permission loss fences collection, mutation, current query, and response completion`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-permission-races-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const headers = (h: { readonly cookie: string; readonly csrf: string }) => ({
+      cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json',
+    });
+    const result = (summary: string) => {
+      const probe = { at: Date.now(), latencyMs: 5, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '2.0.0', summary };
+      return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+    };
+
+    mkdirSync(join(directory, 'mutation'));
+    mkdirSync(join(directory, 'response'));
+
+    // Collection: the real Worker JSON-RPC response is held before canonical
+    // validation; permission loss means no observation can reach storage.
+    {
+      const h = await readinessWorkflowHarness({ backend, directory });
+      try {
+        const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        let started!: () => void;
+        const startedProbe = new Promise<void>((resolve) => { started = resolve; });
+        await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+          readinessProbe: async () => { started(); await gate; return result('permission collection'); },
+        });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'collection accepted Worker');
+        const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+          method: 'POST', headers: headers(h), body: '{}',
+        });
+        await startedProbe;
+        await h.runtime.enrollments.setCapabilityPermission(enrollmentId, ADMISSION_CAPABILITY, false);
+        release();
+        assert.notEqual((await pending).status, 201);
+        assert.equal(await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID), undefined);
+        assert.deepEqual(await h.runtime.stores.environmentReadiness.listProbes(INSTANCE_ID), []);
+      } finally { await h.close(); }
+    }
+
+    // Mutation: hold the storage adapter immediately before its atomic commit.
+    {
+      const h = await readinessWorkflowHarness({ backend, directory: join(directory, 'mutation') });
+      try {
+        const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+        await h.connect(enrollmentId, join(directory, 'mutation', 'worker-key.pem'), {
+          readinessProbe: async () => result('permission mutation'),
+        });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'mutation accepted Worker');
+        const store = h.runtime.stores.environmentReadiness;
+        const original = store.commitObservation.bind(store);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        let entered!: () => void;
+        const enteredCommit = new Promise<void>((resolve) => { entered = resolve; });
+        store.commitObservation = async (...args) => { entered(); await gate; return original(...args); };
+        const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+          method: 'POST', headers: headers(h), body: '{}',
+        });
+        await enteredCommit;
+        await h.runtime.enrollments.setCapabilityPermission(enrollmentId, ADMISSION_CAPABILITY, false);
+        release();
+        assert.notEqual((await pending).status, 201);
+        assert.equal(await store.getReadiness(INSTANCE_ID), undefined, 'authority loss before commit mutates nothing');
+        assert.deepEqual(await store.listProbes(INSTANCE_ID), []);
+      } finally { await h.close(); }
+    }
+
+    // Response/current-query: a valid atomic commit stays historical, but
+    // permission loss before response completion refuses success and GET cannot
+    // project the old probe as current.
+    {
+      const h = await readinessWorkflowHarness({ backend, directory: join(directory, 'response') });
+      try {
+        const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+        await h.connect(enrollmentId, join(directory, 'response', 'worker-key.pem'), {
+          readinessProbe: async () => result('permission response'),
+        });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'response accepted Worker');
+        const store = h.runtime.stores.environmentReadiness;
+        const original = store.commitObservation.bind(store);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        let committed!: () => void;
+        const committedCommit = new Promise<void>((resolve) => { committed = resolve; });
+        store.commitObservation = async (...args) => {
+          const saved = await original(...args); committed(); await gate; return saved;
+        };
+        const pending = fetch(`${h.base}/api/environments/enrollments/${enrollmentId}/probes`, {
+          method: 'POST', headers: headers(h), body: '{}',
+        });
+        await committedCommit;
+        await h.runtime.enrollments.setCapabilityPermission(enrollmentId, ADMISSION_CAPABILITY, false);
+        release();
+        assert.notEqual((await pending).status, 201, 'post-commit authority loss refuses current success');
+        assert.equal((await store.listProbes(INSTANCE_ID)).length, 1, 'the valid commit remains history');
+        const current = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}`, { headers: { cookie: h.cookie } });
+        assert.equal(current.status, 200);
+        const body = await current.json() as { readiness?: { probe?: unknown } };
+        assert.equal(body.readiness?.probe, undefined, 'HTTP current query suppresses the invalidated probe');
+      } finally { await h.close(); }
+    }
+  });
+
+  test(`#125 ${backend}: Scenario 5 keeps accepted WorkerGateway authority fenced during a pre-epoch permission CAS race`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-125-cas-race-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'gpt-6-astra' }],
+    });
+    try {
+      const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      // Establish the real approval -> Gateway -> authenticated JSON-RPC
+      // authority before racing a replacement handshake's pre-epoch durable CAS.
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
+        readinessProbe: async () => {
+          const probe = { at: Date.now(), latencyMs: 4, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '2.0.0', summary: 'accepted Worker evidence' };
+          return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+        },
+      });
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'initial accepted WorkerGateway authority');
+
+      const store = h.runtime.stores.enrollments;
+      const originalSave = store.saveIfRevision.bind(store);
+      let capturedRevision = 0;
+      let permissionCompleted = false;
+      store.saveIfRevision = async (enrollment, expectedRevision) => {
+        if (!permissionCompleted && enrollment.id === enrollmentId && enrollment.status === 'approved') {
+          capturedRevision = expectedRevision;
+          // Mark before the nested CAS: permission loss itself also saves an
+          // enrollment revision and must not re-enter this interception.
+          permissionCompleted = true;
+          // This invocation is reached by the replacement's authenticated
+          // Gateway handshake, before it receives an epoch.
+          await h.runtime.enrollments.setCapabilityPermission(enrollmentId, ADMISSION_CAPABILITY, false);
+        }
+        return originalSave(enrollment, expectedRevision);
+      };
+
+      // The replacement also crosses the real connector/Gateway handshake. It
+      // is refused after the permission transition; the connector's rejection
+      // is the expected machine-boundary result, not a substitute for the CAS
+      // assertions below.
+      await h.connect(enrollmentId, join(directory, 'worker-key.pem')).catch(() => undefined);
+      assert.equal(permissionCompleted, true, 'the replacement reached the pre-epoch reconciliation CAS');
+      const finalEnrollment = await h.runtime.enrollments.get(enrollmentId);
+      assert.equal(finalEnrollment?.capabilityPermissions[ADMISSION_CAPABILITY], false);
+      assert.ok(finalEnrollment?.revision !== undefined && finalEnrollment.revision > capturedRevision);
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined, 'permission loss fences the accepted authority');
+
+      const response = await fetch(`${h.base}/api/environments/enrollments/${enrollmentId}`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(response.status, 200, 'the Human HTTP inspection seam remains available');
+      const body = await response.json() as { readiness?: { probe?: unknown } };
+      assert.equal(body.readiness?.probe, undefined, 'a pre-epoch race cannot leave current Worker facts');
     } finally {
       await h.close();
     }

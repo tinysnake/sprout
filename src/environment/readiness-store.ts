@@ -1,6 +1,8 @@
 import type { ConnectionFact, CompatibilityFact, EngineReadinessFact, ProbeResultFact } from './readiness.ts';
 import { readReadinessObservation, type ReadinessObservation } from './readiness-observation.ts';
+import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 export type { ReadinessObservation } from './readiness-observation.ts';
+export type { ReadinessObservationAuthority } from './readiness-authority.ts';
 
 /**
  * Durable storage for the observed Environment readiness facts (#87).
@@ -36,18 +38,15 @@ export interface ObservedReadiness {
 }
 
 /**
- * A live accepted-connection authority fence evaluated by the store immediately
- * before its one atomic mutation.
+ * An owner-issued scoped capability evaluated by the store immediately before
+ * its one atomic mutation (#125).
  *
  * Checking before an asynchronous store call is insufficient: a replacement
- * Worker can be accepted while that call is suspended.  The store owns this
- * final check so a stale epoch cannot cross the check/write boundary.
+ * Worker can be accepted while that call is suspended. The store owns this
+ * final synchronous check so a stale epoch or forged capability cannot cross
+ * the mutation boundary.
  */
-export interface ReadinessWriteAuthority {
-  readonly enrollmentId: string;
-  readonly connectionEpoch: number;
-  readonly isCurrent: () => boolean;
-}
+export type ReadinessWriteAuthority = ReadinessObservationAuthority;
 
 export interface EnvironmentReadinessStore {
   /**

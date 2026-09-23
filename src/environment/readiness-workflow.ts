@@ -26,8 +26,8 @@
  * probes are trigger modes of this one workflow. Target presence changes only
  * which collection command is used, never the validation or authority path.
  *
- * The Module owns no transport and no store. The gateway, the epoch registry,
- * the Worker collector, and the enrollment service arrive as explicit
+ * The Module owns no transport and no store. The gateway, the Worker collector,
+ * and the enrollment service arrive as explicit
  * dependencies, so the same logic runs in production and in the accepted-Worker
  * acceptance harness. It supersedes the former Worker-layer
  * `createWorkerProbeRequester`, whose explicit-probe orchestration is now the
@@ -37,7 +37,7 @@
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { EnrollmentError } from './enrollment.ts';
 import type { ProbeResultFact } from './readiness.ts';
-import type { ReadinessWriteAuthority } from './readiness-store.ts';
+import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 import type {
   WorkerInfo,
@@ -63,6 +63,7 @@ export interface ReadinessAcceptance {
   readonly epoch: { readonly connectionId: string; readonly epoch: number };
   /** Core-owned target models to compare locally; never browser input. */
   readonly requiredModels: readonly string[];
+  authorizeObservation?(): ReadinessObservationAuthority | undefined;
 }
 
 /** The accepted live connection for one instance, as the gateway reports it. */
@@ -75,11 +76,7 @@ export interface ReadinessLiveConnection {
 
 export interface ReadinessLiveGateway {
   liveFor(environmentInstanceId: string): ReadinessLiveConnection | undefined;
-}
-
-/** The monotonic epoch authority, so a replaced connection is not current. */
-export interface ReadinessEpochRegistry {
-  isCurrent(enrollmentId: string, connectionId: string): boolean;
+  authorizeObservation?(environmentInstanceId: string): ReadinessObservationAuthority | undefined;
 }
 
 /** The neutral Worker fact/probe collector over an accepted channel. */
@@ -91,7 +88,6 @@ export interface ReadinessWorkerCollector {
 export interface EnvironmentReadinessWorkflowOptions {
   readonly enrollments: EnvironmentEnrollmentService;
   readonly workerGateway: ReadinessLiveGateway;
-  readonly workerEpochs: ReadinessEpochRegistry;
   readonly environment: ReadinessWorkerCollector;
   /** Re-project the catalog after a committed observation. */
   readonly refreshEnvironmentCatalog: () => Promise<unknown>;
@@ -114,7 +110,6 @@ type CollectionOutcome =
 export class EnvironmentReadinessWorkflow {
   readonly #enrollments: EnvironmentEnrollmentService;
   readonly #workerGateway: ReadinessLiveGateway;
-  readonly #workerEpochs: ReadinessEpochRegistry;
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
@@ -122,7 +117,6 @@ export class EnvironmentReadinessWorkflow {
   constructor(options: EnvironmentReadinessWorkflowOptions) {
     this.#enrollments = options.enrollments;
     this.#workerGateway = options.workerGateway;
-    this.#workerEpochs = options.workerEpochs;
     this.#environment = options.environment;
     this.#refreshEnvironmentCatalog = options.refreshEnvironmentCatalog;
     this.#scheduleRetry =
@@ -150,6 +144,9 @@ export class EnvironmentReadinessWorkflow {
       currentEnrollment.status !== 'approved' ||
       !this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, epoch.connectionId)
     ) return;
+    const authority = acceptance.authorizeObservation?.() ??
+      this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
+    if (authority === undefined || !authority.isCurrent()) return;
     const mode: CollectionMode =
       this.#targeted(acceptance.requiredModels) ? 'target-probe' : 'worker-info';
     let outcome: CollectionOutcome;
@@ -169,11 +166,10 @@ export class EnvironmentReadinessWorkflow {
     // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
     // are refused before any mutation.
     if (outcome.kind === 'refused') return;
-    if (!this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, epoch.connectionId)) return;
+    if (!authority.isCurrent()) return;
     await this.#persist(
       enrollment.id,
-      epoch.epoch,
-      () => this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, epoch.connectionId),
+      authority,
       outcome.result,
     );
     await this.#refreshEnvironmentCatalog();
@@ -196,6 +192,7 @@ export class EnvironmentReadinessWorkflow {
       // Preserve the accepted connection's core-owned target models, so this
       // transitional entry point uses the same collection mode as acceptance.
       requiredModels: live.requiredModels,
+      authorizeObservation: () => this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId),
     });
   }
 
@@ -209,45 +206,46 @@ export class EnvironmentReadinessWorkflow {
    * layer maps every refusal to a non-success response.
    */
   async request(enrollmentId: string): Promise<ProbeResultFact> {
-    // Capture the lifecycle generation so the response can prove the enrollment
-    // was still approved when it was produced, not just when it began.
-    const lifecycleGeneration = this.#enrollments.lifecycleAuthority.generation(enrollmentId);
     const enrollment = await this.#enrollments.get(enrollmentId);
     if (enrollment === undefined) throw new EnrollmentError('unknown-enrollment', 'Unknown enrollment.');
     if (enrollment.status !== 'approved') {
       throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
     }
-    const live = this.#workerGateway.liveFor(enrollment.environmentInstanceId);
-    if (live === undefined) throw new Error('the Environment Worker is offline');
-    const isCurrent = (): boolean =>
-      this.#enrollments.lifecycleAuthority.generation(enrollment.id) === lifecycleGeneration &&
-      this.#isCurrent(enrollment.id, enrollment.environmentInstanceId, live.epoch.connectionId);
-    if (!isCurrent()) throw new Error('the Environment Worker is offline');
+    const authority = this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
+    if (authority === undefined || !authority.isCurrent()) {
+      throw new Error('the Environment Worker is offline');
+    }
     const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId);
     if (rawResult === undefined) throw new Error('the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {
       throw new Error('the Environment Worker returned an invalid readiness probe result');
     }
-    const recorded = await this.#persist(enrollment.id, live.epoch.epoch, isCurrent, result);
-    if (!recorded || !isCurrent()) {
+    if (!authority.isCurrent()) {
+      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+    }
+    const recorded = await this.#persist(enrollment.id, authority, result);
+    if (!recorded || !authority.isCurrent()) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
     await this.#refreshEnvironmentCatalog();
+    if (!authority.isCurrent()) {
+      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+    }
     // Read back the durable, ingress-sanitized fact. The Worker result itself
     // is untrusted runtime JSON-RPC input; returning it would allow a response
     // that was never committed or whose privacy reduction differs from GET.
     const committed = (await this.#enrollments.readiness(enrollment.id)).probes
       .filter((probe) =>
         probe.enrollmentId === enrollment.id &&
-        probe.connectionEpoch === live.epoch.epoch &&
+        probe.connectionEpoch === authority.connectionEpoch &&
         sameProbe(probe, result.probe),
       )
       .at(-1);
     // Final authority check after the catalog refresh: a revoke/reset can land
     // inside that await, and a response must never carry a probe from an epoch
     // the lifecycle has since invalidated.
-    if (!isCurrent() || committed === undefined) {
+    if (!authority.isCurrent() || committed === undefined) {
       throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
     }
     return committed;
@@ -268,7 +266,7 @@ export class EnvironmentReadinessWorkflow {
   /** Whether one accepted connection still owns the current instance authority. */
   #isCurrent(enrollmentId: string, environmentInstanceId: string, connectionId: string): boolean {
     return (
-      this.#workerEpochs.isCurrent(enrollmentId, connectionId) &&
+      this.#workerGateway.liveFor(environmentInstanceId)?.enrollment.id === enrollmentId &&
       this.#workerGateway.liveFor(environmentInstanceId)?.epoch.connectionId === connectionId
     );
   }
@@ -307,17 +305,15 @@ export class EnvironmentReadinessWorkflow {
    * The one persistence coordination point.
    *
    * The enrollment service re-validates the complete result, binds it to the
-   * accepted enrollment/epoch authority, and commits readiness plus its required
-   * probe atomically; the store re-checks the live authority at its mutation
+   * owner-issued capability, and commits readiness plus its required probe
+   * atomically; the store re-checks the live authority at its mutation
    * boundary, so a replacement/disconnect cannot cross the check/write window.
    */
   async #persist(
     enrollmentId: string,
-    connectionEpoch: number,
-    isCurrent: () => boolean,
+    authority: ReadinessObservationAuthority,
     result: WorkerReadinessProbeResult,
   ): Promise<boolean> {
-    const authority: ReadinessWriteAuthority = { enrollmentId, connectionEpoch, isCurrent };
     return this.#enrollments.observeReadiness(enrollmentId, result, authority);
   }
 

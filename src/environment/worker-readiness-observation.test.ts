@@ -15,6 +15,25 @@ import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { InMemoryEnrollmentStore } from './enrollment-store.ts';
 import type { EnvironmentEnrollment } from './enrollment.ts';
 import { workerIdentityFixture } from './worker-identity-fixture.ts';
+import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
+
+const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
+
+function testAuthority(overrides: {
+  readonly environmentInstanceId?: string;
+  readonly enrollmentId?: string;
+  readonly connectionEpoch?: number;
+  readonly lifecycleGeneration?: number;
+  readonly isCurrent?: () => boolean;
+} = {}) {
+  return readinessAuthorityTestSeam.mint({
+    environmentInstanceId: overrides.environmentInstanceId ?? 'env-1',
+    enrollmentId: overrides.enrollmentId ?? 'enroll-1',
+    connectionEpoch: overrides.connectionEpoch ?? 7,
+    lifecycleGeneration: overrides.lifecycleGeneration ?? 0,
+    isCurrent: overrides.isCurrent ?? (() => true),
+  });
+}
 
 class DelayedReadinessStore extends InMemoryEnvironmentReadinessStore {
   #signalStarted: (() => void) | undefined;
@@ -63,6 +82,7 @@ async function enrolled(
     enrollments: new InMemoryEnrollmentStore(),
     readiness,
     currentConnectionEpoch,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -106,7 +126,7 @@ for (const kind of ['omitted', 'undefined', 'non-worker'] as const) {
     };
     const args: unknown[] = [
       'enroll-1', observed,
-      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+      testAuthority(),
     ];
     if (kind !== 'omitted') {
       args.push(kind === 'undefined' ? undefined : { ...startupReadiness().probe, source: 'unknown' });
@@ -132,7 +152,7 @@ for (const persistent of [false, true]) {
     });
     const { service } = await enrolled(store);
     const commit = t.mock.method(store, 'commitObservation');
-    const authority = { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true };
+    const authority = testAuthority();
     const readiness = startupReadiness();
     const { probe, ...facts } = readiness;
     const invalid: readonly [string, unknown][] = [
@@ -202,11 +222,7 @@ for (const persistent of [false, true]) {
 
 test('startup Worker readiness persists one epoch-bound probe and its independent provenance facts', async () => {
   const { service } = await enrolled();
-  const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => true,
-  });
+  const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), testAuthority());
   assert.equal(recorded, true);
 
   const assembled = await service.readiness('enroll-1');
@@ -231,6 +247,7 @@ test('a pending enrollment cannot write readiness even when an epoch resolver re
     enrollments: new InMemoryEnrollmentStore(),
     readiness: store,
     currentConnectionEpoch: () => 7,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-pending',
   });
   await service.requestEnrollment({
@@ -241,11 +258,11 @@ test('a pending enrollment cannot write readiness even when an epoch resolver re
     capabilityRequests: ['agent-run'],
     engineFacts: [],
   });
-  const recorded = await service.observeWorkerReadiness('enroll-pending', startupReadiness(), {
-    enrollmentId: 'enroll-pending',
-    connectionEpoch: 7,
-    isCurrent: () => true,
-  });
+  const recorded = await service.observeWorkerReadiness(
+    'enroll-pending',
+    startupReadiness(),
+    testAuthority({ environmentInstanceId: 'env-pending', enrollmentId: 'enroll-pending' }),
+  );
   assert.equal(recorded, false);
   assert.equal(await store.getReadiness('env-pending'), undefined);
   assert.deepEqual(await store.listProbes('env-pending'), []);
@@ -255,11 +272,11 @@ test('a pending enrollment cannot write readiness even when an epoch resolver re
 
 test('a stale epoch is rejected before either readiness or probe persistence', async () => {
   const { service } = await enrolled();
-  const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => false,
-  });
+  const recorded = await service.observeWorkerReadiness(
+    'enroll-1',
+    startupReadiness(),
+    testAuthority({ isCurrent: () => false }),
+  );
   assert.equal(recorded, false);
   assert.equal((await service.readiness('enroll-1')).readiness.probe, undefined);
   assert.deepEqual(await service.listProbes('enroll-1'), []);
@@ -284,11 +301,7 @@ test('the store rejects raw mixed-epoch readiness and probe as one unit', async 
       enginesOk: true,
       summary: 'mixed authority must fail',
     },
-  } as never, {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => true,
-  });
+  } as never, testAuthority());
   assert.equal(committed, false);
   assert.equal(await store.getReadiness('env-1'), undefined);
   assert.deepEqual(await store.listProbes('env-1'), []);
@@ -298,11 +311,11 @@ test('disconnect while an atomic readiness/probe commit is waiting leaves neithe
   const store = new DelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => current,
-  });
+  const recording = service.observeWorkerReadiness(
+    'enroll-1',
+    startupReadiness(),
+    testAuthority({ isCurrent: () => current }),
+  );
   await store.commitStarted;
   current = false;
   store.continueCommit();
@@ -315,11 +328,11 @@ test('revoke fences a delayed accepted-epoch commit before durable lifecycle sav
   const store = new DelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => current,
-  });
+  const recording = service.observeWorkerReadiness(
+    'enroll-1',
+    startupReadiness(),
+    testAuthority({ isCurrent: () => current }),
+  );
   await store.commitStarted;
   await service.revoke('enroll-1', 'retired');
   current = false;
@@ -337,11 +350,11 @@ test('disconnect after the atomic commit cannot project the prior epoch as curre
   const store = new PostCommitDelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness('enroll-1', startupReadiness(), {
-    enrollmentId: 'enroll-1',
-    connectionEpoch: 7,
-    isCurrent: () => current,
-  });
+  const recording = service.observeWorkerReadiness(
+    'enroll-1',
+    startupReadiness(),
+    testAuthority({ isCurrent: () => current }),
+  );
   await store.committed;
   current = false;
   store.continueReturn();
@@ -394,6 +407,7 @@ test('a pre-epoch reconciliation cannot overwrite a revoke that lands during its
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -442,6 +456,7 @@ test('a pre-epoch reconciliation cannot overwrite a reset that lands during its 
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -474,6 +489,7 @@ test('a pre-epoch reconciliation cannot overwrite a permission update that lands
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -506,6 +522,7 @@ test('concurrent lifecycle decisions are serialized through the durable revision
     enrollments: store,
     readiness: new InMemoryEnvironmentReadinessStore(),
     currentConnectionEpoch: () => undefined,
+    verifyObservationAuthority: readinessAuthorityTestSeam.verify,
     idFactory: () => 'enroll-1',
     clock: () => 1_000,
   });
@@ -535,7 +552,7 @@ test('a Worker-declared provider/account identity never reaches the durable read
       engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [],
       authenticated: true, authMode: 'provider-account', authType: 'openai-codex', source: 'openai-codex',
     }],
-  }, { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true });
+  }, testAuthority());
   assert.equal(recorded, true);
   const stored = await store.getReadiness('env-1');
   const serialized = JSON.stringify(stored);
@@ -553,9 +570,7 @@ for (const missing of ['omitted', 'undefined'] as const) {
     const readiness = missing === 'omitted' ? facts : { ...facts, probe: undefined };
 
     // Explicit undefined is untyped caller input under exactOptionalPropertyTypes.
-    const recorded = await service.observeWorkerReadiness('enroll-1', readiness as never, {
-      enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true,
-    });
+    const recorded = await service.observeWorkerReadiness('enroll-1', readiness as never, testAuthority());
 
     assert.equal(recorded, false);
     assert.equal(commit.mock.callCount(), 0, 'incomplete observations never reach the mutation boundary');
@@ -573,7 +588,7 @@ test('direct service rejects malformed Worker readiness before commit (R118-API-
   for (const readiness of [undefined, null, {}, 'invalid']) {
     assert.equal(await service.observeWorkerReadiness(
       'enroll-1', readiness as never,
-      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+      testAuthority(),
     ), false);
     assert.equal(commit.mock.callCount(), 0);
     assert.equal(await store.getReadiness('env-1'), undefined);
@@ -588,7 +603,7 @@ test('direct service rejects malformed embedded probes before commit (R118-API-0
     const recorded = await service.observeWorkerReadiness(
       'enroll-1',
       { ...startupReadiness(), probe } as never,
-      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+      testAuthority(),
     );
     assert.equal(recorded, false);
     assert.equal(commit.mock.callCount(), 0);
@@ -611,7 +626,7 @@ test('direct service observations reject every non-worker probe source before du
       // `worker` literal cannot represent. The service, not the type system,
       // owns the durable privacy reduction.
       readiness as never,
-      { enrollmentId: 'enroll-1', connectionEpoch: 7, isCurrent: () => true },
+      testAuthority(),
     );
     assert.equal(recorded, false);
     assert.equal(commit.mock.callCount(), 0);
