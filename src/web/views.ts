@@ -22,6 +22,7 @@
  */
 
 import type { Message, WakeRequest } from '../collaboration/model.ts';
+import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
@@ -487,6 +488,8 @@ export interface ReadinessReceiptView {
   readonly sequence: number;
   readonly committedAt: number;
   readonly probe: ProbeResultView;
+  readonly readiness: import('../environment/readiness-store.ts').ObservedReadiness;
+  readonly authorityScope: import('../environment/readiness-observation.ts').ReadinessAuthorityScope;
 }
 
 export function toReadinessReceiptView(receipt: ReadinessReceipt | undefined): ReadinessReceiptView | undefined {
@@ -499,6 +502,8 @@ export function toReadinessReceiptView(receipt: ReadinessReceipt | undefined): R
     sequence: receipt.sequence,
     committedAt: receipt.committedAt,
     probe,
+    readiness: sanitizeObservedReadiness(receipt.readiness),
+    authorityScope: receipt.authorityScope,
   };
 }
 

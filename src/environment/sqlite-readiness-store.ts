@@ -103,6 +103,8 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         sequence,
         committedAt,
         probe: pair.probe,
+        authorityScope: pair.authorityScope,
+        readiness: pair.readiness,
         at: pair.probe.at,
         latencyMs: pair.probe.latencyMs,
         protocolOk: pair.probe.protocolOk,
@@ -123,6 +125,7 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         readiness: pair.readiness,
         probe: pair.probe,
         receipt,
+        authorityScope: pair.authorityScope,
         ...(pair.requirements !== undefined ? { requirements: pair.requirements } : {}),
       };
 

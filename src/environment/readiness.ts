@@ -96,6 +96,8 @@ export interface ReadinessReceipt extends ProbeResultFact {
   readonly sequence: number;
   readonly committedAt: number;
   readonly probe: ProbeResultFact;
+  readonly authorityScope: import('./readiness-observation.ts').ReadinessAuthorityScope;
+  readonly readiness: import('./readiness-store.ts').ObservedReadiness;
   readonly requirements?: ReadinessRequirementScope | undefined;
 }
 

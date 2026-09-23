@@ -46,8 +46,12 @@ for (const backend of ['memory', 'sqlite'] as const) {
     ]) {
       assert.equal(createReadinessObservation(invalid, scope), undefined, 'the only constructor validates complete pairs');
     }
-    const observation = createReadinessObservation(result, scope);
+    const requirements = { requiredModels: ['safe-model'] };
+    const observation = createReadinessObservation(result, { ...scope, observationId: '../unsafe/path', requirements } as typeof scope & { observationId: string; requirements: typeof requirements });
     assert.ok(observation);
+    requirements.requiredModels[0] = 'changed';
+    assert.notEqual(readReadinessObservation('env-1', observation, authority)?.observationId, '../unsafe/path');
+    assert.deepEqual(readReadinessObservation('env-1', observation, authority)?.requirements?.requiredModels, ['safe-model']);
     assert.equal(Reflect.set(observation, 'probe', undefined), false, 'the opaque handle is immutable');
     const pair = readReadinessObservation('env-1', observation, authority);
     assert.ok(pair);
@@ -253,11 +257,16 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const retrievedReceipt = await store.getReceipt('env-multi', receipt.observationId);
     assert.ok(retrievedReceipt);
     assert.deepEqual(retrievedReceipt, receipt);
+    assert.equal(retrievedReceipt.readiness.engines[0]?.version, 'unknown-version');
+    assert.equal(retrievedReceipt.authorityScope.connectionEpoch, receipt.connectionEpoch);
+    assert.equal(typeof retrievedReceipt.authorityScope.connectionId, 'string');
 
     // Direct retrieval of exact committed observation
     const retrievedObs = await store.getObservation('env-multi', receipt.observationId);
     assert.ok(retrievedObs);
     assert.equal(retrievedObs.observationId, receipt.observationId);
+    assert.deepEqual(retrievedObs.readiness, receipt.readiness);
+    assert.deepEqual(retrievedObs.probe, receipt.probe);
     assert.equal(retrievedObs.readiness.engines.length, 2);
     assert.equal(retrievedObs.readiness.engines[0]?.version, 'unknown-version');
     assert.equal(retrievedObs.readiness.engines[1]?.version, '0.86.1');

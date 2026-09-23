@@ -347,7 +347,10 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
           if (receiptView === undefined) {
             return json(context, 404, { error: 'observation receipt not found' });
           }
-          return json(context, 200, { receipt: receiptView });
+          return json(context, 200, {
+            receipt: receiptView,
+            authorityCurrent: (await enrollments.readiness(segments[3] ?? '')).receipt?.observationId === receipt.observationId,
+          });
         } catch (error) {
           return enrollmentFailure(context, error);
         }
@@ -375,6 +378,9 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
               environmentInstanceId: obs.environmentInstanceId,
               sequence: obs.sequence,
               committedAt: obs.committedAt,
+              readiness: receiptView?.readiness,
+              authorityScope: receiptView?.authorityScope,
+              authorityCurrent: (await enrollments.readiness(segments[3] ?? '')).receipt?.observationId === obs.observationId,
               ...(receiptView !== undefined ? { receipt: receiptView } : {}),
               ...(probeView !== undefined ? { probe: probeView } : {}),
             },
@@ -398,16 +404,16 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             // Ignore the body entirely. A client can request a probe, but only
             // the authenticated Worker may supply its measured observations.
             const recorded = await requestProbe(segments[3] ?? '');
-            const probeFact: ReadinessProbeFact = 'probe' in recorded && recorded.probe !== undefined
-              ? (recorded.probe as ReadinessProbeFact)
-              : recorded;
             const receipt = 'receipt' in recorded && recorded.receipt !== undefined
               ? (recorded.receipt as ReadinessReceipt)
               : ('observationId' in recorded && recorded.observationId !== undefined ? recorded as unknown as ReadinessReceipt : undefined);
-            const receiptView = toReadinessReceiptView(receipt);
+            if (receipt?.observationId === undefined) return json(context, 503, { error: 'committed receipt unavailable' });
+            const committed = await enrollments.getReceipt(segments[3] ?? '', receipt.observationId);
+            if (committed === undefined) return json(context, 503, { error: 'committed receipt unavailable' });
+            const receiptView = toReadinessReceiptView(committed);
             return json(context, 201, {
-              probe: toProbeResultView(probeFact),
-              ...(receiptView !== undefined ? { receipt: receiptView } : {}),
+              probe: toProbeResultView(committed.probe),
+              receipt: receiptView,
             });
           }
           return json(context, 503, { error: 'the Environment Worker probe is unavailable' });

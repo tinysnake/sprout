@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
 import type { WorkerProbeFact } from '../worker/protocol.ts';
 import {
@@ -42,11 +41,12 @@ export interface StoredObservationPair {
   readonly readiness: ObservedReadiness;
   readonly probe: ProbeResultFact & WorkerProbeFact;
   readonly requirements?: ReadinessRequirementScope;
+  readonly authorityScope: ReadinessAuthorityScope;
 }
 
 /** Generate an opaque, non-sensitive observation identity (#126). */
 export function createObservationId(): string {
-  return `obs-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+  return `obs-${crypto.randomUUID()}`;
 }
 
 // A type assertion, object spread, or copied brand cannot forge this identity.
@@ -57,6 +57,7 @@ const observations = new WeakMap<object, {
   readonly verifyAuthority: ObservationAuthorityVerifier;
   readonly observationId: string;
   readonly requirements?: ReadinessRequirementScope;
+  readonly authorityScope: ReadinessAuthorityScope;
   readonly pair: {
     readonly readiness: ObservedReadiness;
     readonly probe: ProbeResultFact & WorkerProbeFact;
@@ -69,7 +70,6 @@ export interface CreateObservationScope {
   readonly supported: ProtocolVersionRange;
   readonly at: number;
   readonly verifyAuthority: ObservationAuthorityVerifier;
-  readonly observationId?: string;
   readonly requirements?: ReadinessRequirementScope;
 }
 
@@ -87,7 +87,22 @@ export function createReadinessObservation(
   const { authority } = scope;
   const { enrollmentId, connectionEpoch } = verified;
   if (!Number.isSafeInteger(connectionEpoch) || connectionEpoch <= 0) return undefined;
-  const observationId = scope.observationId ?? createObservationId();
+  const observationId = createObservationId();
+  const requirements = scope.requirements;
+  if (requirements !== undefined && (
+    (requirements.revision !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(requirements.revision)) ||
+    [requirements.requiredEngines, requirements.requiredModels].some((values) =>
+      values !== undefined && (!Array.isArray(values) || values.some((value) =>
+        typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value))))
+  )) return undefined;
+  const requirementSnapshot = requirements === undefined ? undefined : structuredClone(requirements);
+  const authorityScope: ReadinessAuthorityScope = {
+    environmentInstanceId: verified.environmentInstanceId,
+    enrollmentId: verified.enrollmentId,
+    connectionId: verified.connectionId,
+    connectionEpoch: verified.connectionEpoch,
+    lifecycleGeneration: verified.lifecycleGeneration,
+  };
   const readiness = sanitizeObservedReadiness({
     ...observedFactsFromWorkerReadiness({
       ...validated.readiness, at: scope.at, supported: scope.supported,
@@ -104,7 +119,8 @@ export function createReadinessObservation(
     authority,
     verifyAuthority: scope.verifyAuthority,
     observationId,
-    ...(scope.requirements !== undefined ? { requirements: scope.requirements } : {}),
+    authorityScope,
+    ...(requirementSnapshot !== undefined ? { requirements: requirementSnapshot } : {}),
     pair: { readiness, probe },
   });
   return observation;
@@ -129,9 +145,12 @@ export function readReadinessObservation(
       write.authority !== authority ||
       write.pair.readiness.enrollmentId !== verified.enrollmentId ||
       write.pair.readiness.connectionEpoch !== verified.connectionEpoch) return undefined;
+  if (write.authorityScope.connectionId !== verified.connectionId ||
+      write.authorityScope.lifecycleGeneration !== verified.lifecycleGeneration) return undefined;
   if (!authority.isCurrent()) return undefined;
   return structuredClone({
     observationId: write.observationId,
+    authorityScope: write.authorityScope,
     readiness: write.pair.readiness,
     probe: write.pair.probe,
     ...(write.requirements !== undefined ? { requirements: write.requirements } : {}),

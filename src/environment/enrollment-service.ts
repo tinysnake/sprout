@@ -454,7 +454,8 @@ export class EnvironmentEnrollmentService {
     observationId: string,
   ): Promise<StoredReadinessObservation | undefined> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    return this.#readiness.getObservation(enrollment.environmentInstanceId, observationId);
+    const observation = await this.#readiness.getObservation(enrollment.environmentInstanceId, observationId);
+    return observation?.enrollmentId === enrollmentId ? observation : undefined;
   }
 
   async getReceipt(
@@ -462,7 +463,8 @@ export class EnvironmentEnrollmentService {
     observationId: string,
   ): Promise<ReadinessReceipt | undefined> {
     const enrollment = await this.#requireEnrollment(enrollmentId);
-    return this.#readiness.getReceipt(enrollment.environmentInstanceId, observationId);
+    const receipt = await this.#readiness.getReceipt(enrollment.environmentInstanceId, observationId);
+    return receipt?.enrollmentId === enrollmentId ? receipt : undefined;
   }
 
   async listProbes(enrollmentId: string): Promise<readonly ProbeResultFact[]> {
@@ -615,7 +617,8 @@ export class EnvironmentEnrollmentService {
     // Facts and probe metadata must come from the same current observation (#126).
     const observationCurrent = liveEpochCurrent && currentObs !== undefined &&
       currentObs.enrollmentId === currentEnrollment.id &&
-      currentObs.connectionEpoch === currentEpoch;
+      currentObs.connectionEpoch === currentEpoch &&
+      currentObs.authorityScope?.lifecycleGeneration === generation;
 
     const observed = observationCurrent
       ? sanitizeObservedReadiness(currentObs.readiness)

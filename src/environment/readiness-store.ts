@@ -69,6 +69,7 @@ export interface StoredReadinessObservation {
   readonly readiness: ObservedReadiness;
   readonly probe: ProbeResultFact;
   readonly receipt: ReadinessReceipt;
+  readonly authorityScope: import('./readiness-observation.ts').ReadinessAuthorityScope;
   readonly requirements?: ReadinessRequirementScope | undefined;
 }
 
@@ -141,6 +142,8 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       sequence,
       committedAt,
       probe: pair.probe,
+      authorityScope: pair.authorityScope,
+      readiness: pair.readiness,
       at: pair.probe.at,
       latencyMs: pair.probe.latencyMs,
       protocolOk: pair.probe.protocolOk,
@@ -161,6 +164,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       readiness: pair.readiness,
       probe: pair.probe,
       receipt,
+      authorityScope: pair.authorityScope,
       ...(pair.requirements !== undefined ? { requirements: pair.requirements } : {}),
     };
 

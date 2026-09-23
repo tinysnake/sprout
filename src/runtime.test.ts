@@ -3723,6 +3723,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.equal(directReceiptRes.status, 200);
       const directReceiptBody = (await directReceiptRes.json()) as { readonly receipt: { readonly observationId: string } };
       assert.equal(directReceiptBody.receipt.observationId, observationId);
+      assert.deepEqual((directReceiptBody.receipt as unknown as { readiness: unknown }).readiness,
+        (postBody.receipt as unknown as { readiness: unknown }).readiness);
 
       // Unknown observation id returns 404
       const notFoundReceipt = await fetch(
