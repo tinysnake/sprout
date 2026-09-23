@@ -37,8 +37,31 @@ import { createPendingEnrollment, type EnvironmentEnrollment } from './enrollmen
 import type { ConnectionFact, EngineReadinessFact, WorkSafetyState } from './readiness.ts';
 import type { ObservedReadiness } from './readiness-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './enrollment-service.ts';
+import { readinessRequirements } from './readiness.ts';
 
 const NOW = 1_700_000_000_000;
+
+test('#128: Pi-only and multi-engine targets bind applicable measured evidence, not aggregate availability', () => {
+  const pi = readinessRequirements([{ engine: 'pi', workModel: 'pi-model' }]);
+  assert.deepEqual(pi.modelsByEngine, { pi: ['pi-model'] });
+  const both = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'pi-model' }]);
+  const base = observed();
+  const evidence = (scope: typeof both, engines: ObservedReadiness['engines']) => input({
+    requirements: scope,
+    observed: { ...base, requirements: scope, engines },
+  });
+  const codex = { ...base.engines[0]!, modelIdPresent: true, targetModels: ['codex-model'], requirementRevision: both.revision! };
+  const piEngine = { ...codex, engine: 'pi', models: { state: 'available' as const, models: ['pi-model'] }, targetModels: ['pi-model'] };
+  assert.equal(projectCatalogEntry(evidence(both, [codex])).eligible, false, 'missing applicable engine blocks');
+  assert.equal(projectCatalogEntry(evidence(both, [codex, { ...piEngine, targetModels: [] }])).eligible, false, 'Pi auth alone cannot prove a local model');
+  assert.equal(projectCatalogEntry(evidence(both, [codex, piEngine])).eligible, true);
+  assert.equal(projectCatalogEntry(evidence(both, [{ ...codex, targetModels: [] }, piEngine])).eligible, false, 'aggregate available cannot bypass target proof');
+  const changed = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'pi-model' }], [{ id: 'agent', configurationVersion: 2 }]);
+  assert.equal(projectCatalogEntry({ ...evidence(both, [codex, piEngine]), requirements: changed }).eligible, false, 'same targets with a new revision invalidate');
+  const unrelated = readinessRequirements([{ engine: 'codex', workModel: 'codex-model' }, { engine: 'pi', workModel: 'pi-model' }]);
+  assert.equal(unrelated.revision, both.revision);
+  assert.equal(projectCatalogEntry(evidence(pi, [{ ...piEngine, requirementRevision: pi.revision! }])).eligible, true);
+});
 
 function enrollment(overrides: {
   readonly id?: string;
@@ -108,6 +131,7 @@ function input(overrides: Partial<EnvironmentCatalogInput> & {
       : observed({ enrollmentId: selectedEnrollment.id }),
     workSafety: overrides.workSafety ?? ('clear' as WorkSafetyState),
     requiredEngines: overrides.requiredEngines ?? ['codex'],
+    ...(overrides.requirements !== undefined ? { requirements: overrides.requirements } : {}),
     supportedProtocol: overrides.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL,
     now: overrides.now ?? NOW,
   };

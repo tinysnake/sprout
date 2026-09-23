@@ -43,9 +43,10 @@ async function runWorker(): Promise<void> {
   // cannot submit or manufacture any of these facts.
   const startupProbe = await probeEnvironmentReadiness(engineConfigurations);
   let workerReadiness: WorkerReadinessFacts = startupProbe.readiness;
-  const runProbe = async (params: { readonly requiredModels?: readonly string[] } = {}) => {
+  const runProbe = async (params: { readonly requiredModels?: readonly string[]; readonly requirements?: import('../environment/readiness.ts').ReadinessRequirementScope } = {}) => {
     const result = await probeEnvironmentReadiness(engineConfigurations, {
       ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
+      ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
     });
     workerReadiness = result.readiness;
     return result;

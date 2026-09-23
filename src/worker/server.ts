@@ -218,11 +218,18 @@ export class EnvironmentWorker {
     const requiredModels = params !== null && typeof params === 'object' && Array.isArray(params?.requiredModels)
       ? params.requiredModels.filter((model): model is string => typeof model === 'string')
       : [];
-    const result = await this.#options.readinessProbe?.({ requiredModels, ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
+    const result = await this.#options.readinessProbe?.({ requiredModels,
+      ...(params?.requirements !== undefined ? { requirements: params.requirements } : {}),
+      ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
     if (result === undefined) {
       throw new Error('Worker has no non-inference readiness probe');
     }
     this.#readiness = result.readiness;
+    if (result.readiness.protocolVersion === '3') {
+      return { protocolVersion: '3', observedAt: result.readiness.observedAt,
+        engines: result.readiness.engines, probe: result.probe,
+        ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) } as unknown as WorkerReadinessProbeResult;
+    }
     return params?.attemptId === undefined ? result : { ...result, attemptId: result.attemptId ?? params.attemptId };
   }
 

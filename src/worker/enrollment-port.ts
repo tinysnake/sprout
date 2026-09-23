@@ -220,7 +220,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
   }
 
   /** Request a probe from the already accepted Worker; never accepts browser facts. */
-  async probeReadiness(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined> {
+  async probeReadiness(environmentInstanceId: string, attemptId?: string, requirements?: import('../environment/readiness.ts').ReadinessRequirementScope): Promise<WorkerReadinessProbeResult | undefined> {
     if (this.#closed) return undefined;
     const connection = await this.#connection(environmentInstanceId);
     if (connection === undefined || !connection.alive) return undefined;
@@ -230,9 +230,8 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     const acceptance = this.#accepted.get(environmentInstanceId);
     return connection.readiness?.probe({
       ...(attemptId !== undefined ? { attemptId } : {}),
-      ...(acceptance !== undefined && acceptance.requiredModels.length > 0
-        ? { requiredModels: acceptance.requiredModels }
-        : {}),
+      ...(requirements !== undefined ? { requirements, requiredModels: requirements.requiredModels ?? [] } :
+        acceptance !== undefined ? { requiredModels: acceptance.requiredModels } : {}),
     });
   }
 

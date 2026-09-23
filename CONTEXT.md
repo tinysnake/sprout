@@ -241,11 +241,11 @@ The monotonic authority generation of one authenticated Environment worker conne
 _Avoid_: Session key, reconnect count
 
 **Environment readiness probe**:
-A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
+A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts, scoped by the core's current engine-to-model requirements. A v3 complete envelope carries measured target evidence and a requirement revision; supported v2 complete observations remain inspectable but aggregate model availability alone cannot prove current targets. Unsupported model measurement stays unknown. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
 _Avoid_: Heartbeat, smoke run, hidden model call
 
 **Readiness observation receipt**:
-A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, and `requiredModels` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Probe-history ordering is not specified here (#127).
+A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, `requiredModels`, and `modelsByEngine` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Issue-order precedence and identical redelivery are governed by #127.
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:

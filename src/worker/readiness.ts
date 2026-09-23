@@ -7,6 +7,7 @@ import type {
   WorkerEngineReadinessFact,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
+import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -121,6 +122,7 @@ export interface ReadinessProbeOptions {
    * local presence.
    */
   readonly requiredModels?: readonly string[];
+  readonly requirements?: ReadinessRequirementScope;
 }
 
 /** Versions whose non-inference contracts were pinned and verified by #114. */
@@ -298,6 +300,10 @@ async function probePi(
     readiness: ready ? 'ready' : 'login-required',
     modelAvailability: 'unknown',
     models: [],
+    // The pinned Pi auth contract does not expose a local model catalog.
+    // Keep requested targets visible but never claim they were measured.
+    targetModels: [],
+    ...(options.requirements?.revision !== undefined ? { requirementRevision: options.requirements.revision } : {}),
     authenticated: ready,
     ...(authType !== undefined ? { authType } : {}),
     probedAt: at,
@@ -353,6 +359,8 @@ async function probeCodex(
     authenticated: ready,
     ...(parsed.authMode !== undefined ? { authMode: parsed.authMode } : {}),
     ...(modelIdPresent !== undefined ? { modelIdPresent } : {}),
+    targetModels: modelIdPresent !== undefined ? [...requiredModels] : [],
+    ...(options.requirements?.revision !== undefined ? { requirementRevision: options.requirements.revision } : {}),
     probedAt: at,
     probeExitCode: account.exitCode,
     source: 'codex-account-read',
@@ -433,9 +441,10 @@ export async function probeEnvironmentReadiness(
   );
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
+    const engineModels = options.requirements?.modelsByEngine?.[configuration.engine] ?? requiredModels;
     try {
       engines.push(configuration.engine === 'codex'
-        ? await probeCodex(configuration, { ...options, clock, commandRunner, requiredModels })
+        ? await probeCodex(configuration, { ...options, clock, commandRunner, requiredModels: engineModels })
         : configuration.engine === 'pi'
           ? await probePi(configuration, { ...options, clock, commandRunner })
           : unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
@@ -459,7 +468,7 @@ export async function probeEnvironmentReadiness(
   };
   return {
     readiness: {
-      protocolVersion: '2',
+      protocolVersion: '3',
       observedAt: at,
       engines,
       probe,

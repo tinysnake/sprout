@@ -22,6 +22,7 @@ export type { ReadinessReceipt, ReadinessRequirementScope } from './readiness.ts
  * value without erasing what was observed before.
  */
 export interface ObservedReadiness {
+  readonly requirements?: ReadinessRequirementScope;
   /** The opaque non-sensitive observation identity (#126). */
   readonly observationId?: string;
   /**
@@ -83,7 +84,7 @@ export interface ReadinessHistoricalQuery {
 
 export interface EnvironmentReadinessStore {
   /** Reserve a durable issue order before asking the Worker to collect facts. */
-  issueAttempt(environmentInstanceId: string, authority: ReadinessWriteAuthority, bootstrap?: boolean, requiredModels?: readonly string[]): Promise<ReadinessAttempt | false>;
+  issueAttempt(environmentInstanceId: string, authority: ReadinessWriteAuthority, bootstrap?: boolean, requiredModels?: readonly string[], requirements?: ReadinessRequirementScope): Promise<ReadinessAttempt | false>;
   getAttempt(environmentInstanceId: string, observationId: string): Promise<ReadinessAttempt | undefined>;
   /**
    * Commit only an opaque, canonically validated readiness + required probe pair.
@@ -129,6 +130,7 @@ export interface ReadinessAttempt {
   readonly connectionId: string;
   readonly lifecycleGeneration: number;
   readonly requiredModels?: readonly string[];
+  readonly requirements?: ReadinessRequirementScope;
 }
 
 export function attemptMatches(attempt: ReadinessAttempt, authority: ReadinessWriteAuthority, instance: string): boolean {
@@ -153,15 +155,16 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   readonly #issued = new Map<string, ReadinessAttempt>();
   readonly #bootstraps = new Map<string, ReadinessAttempt>();
 
-  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<ReadinessAttempt | false> {
+  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = [], requirements?: ReadinessRequirementScope): Promise<ReadinessAttempt | false> {
     if (!authority.isCurrent() || authority.environmentInstanceId !== instance) return false;
-    const key = JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requiredModels]);
+    const key = JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requirements ?? requiredModels]);
     if (bootstrap && this.#bootstraps.has(key)) return structuredClone(this.#bootstraps.get(key)!);
     const sequence = (this.#sequences.get(instance) ?? 0) + 1;
     this.#sequences.set(instance, sequence);
     const attempt = { observationId: `obs-${crypto.randomUUID()}`, sequence, environmentInstanceId: instance,
       enrollmentId: authority.enrollmentId, connectionEpoch: authority.connectionEpoch,
-      connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels] };
+      connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels],
+      ...(requirements !== undefined ? { requirements: structuredClone(requirements) } : {}) };
     this.#issued.set(attempt.observationId, attempt);
     if (bootstrap) this.#bootstraps.set(key, attempt);
     return structuredClone(attempt);

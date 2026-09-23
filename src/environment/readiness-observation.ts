@@ -57,7 +57,7 @@ function validateRequirementScope(value: unknown): ReadinessRequirementScope | u
   if (typeof value !== 'object' || value === null || Array.isArray(value) ||
       Object.getPrototypeOf(value) !== Object.prototype) return undefined;
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const allowed = ['revision', 'requiredEngines', 'requiredModels'];
+  const allowed = ['revision', 'requiredEngines', 'requiredModels', 'modelsByEngine'];
   if (Reflect.ownKeys(value).some((key) => typeof key !== 'string' || !allowed.includes(key))) return undefined;
   const field = (key: string): unknown => descriptors[key]?.value;
   if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) return undefined;
@@ -77,10 +77,15 @@ function validateRequirementScope(value: unknown): ReadinessRequirementScope | u
     return true;
   };
   if (!validList('requiredEngines') || !validList('requiredModels')) return undefined;
+  const mapping = field('modelsByEngine');
+  if (mapping !== undefined && (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping) ||
+      Object.entries(mapping).some(([engine, models]) => !/^[A-Za-z0-9_.-]{1,128}$/.test(engine) ||
+        !Array.isArray(models) || models.some((model) => typeof model !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(model))))) return undefined;
   return {
     ...('revision' in descriptors ? { revision: revision as string } : {}),
     ...('requiredEngines' in descriptors ? { requiredEngines: [...field('requiredEngines') as string[]] } : {}),
     ...('requiredModels' in descriptors ? { requiredModels: [...field('requiredModels') as string[]] } : {}),
+    ...(mapping !== undefined ? { modelsByEngine: Object.fromEntries(Object.entries(mapping).map(([engine, models]) => [engine, [...models as string[]]])) } : {}),
   };
 }
 
@@ -145,6 +150,7 @@ export function createReadinessObservation(
       ...validated.readiness, at: scope.at, supported: scope.supported,
     }),
     enrollmentId, connectionEpoch,
+    ...(requirementSnapshot !== undefined ? { requirements: requirementSnapshot } : {}),
     observationId,
   });
   // The canonical validator already reduced the complete Worker probe. Unlike
@@ -208,6 +214,8 @@ function sanitizeEngineVersion(value: string): string | undefined {
 export function sanitizeObservedReadiness(observed: ObservedReadiness): ObservedReadiness {
   const protocolVersion = sanitizeProtocolVersion(observed.compatibility.workerProtocolVersion);
   return {
+    ...(observed.requirements !== undefined && validateRequirementScope(observed.requirements) !== undefined
+      ? { requirements: validateRequirementScope(observed.requirements)! } : {}),
     ...(observed.observationId !== undefined ? { observationId: observed.observationId } : {}),
     // Authority keys come from the core, never Worker text; preserve them exactly.
     ...(observed.enrollmentId !== undefined ? { enrollmentId: observed.enrollmentId } : {}),
@@ -249,6 +257,9 @@ export function sanitizeObservedReadiness(observed: ObservedReadiness): Observed
         ...(authMode !== undefined ? { authMode } : {}),
         ...(authType !== undefined ? { authType } : {}),
         ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+        ...(engine.targetModels !== undefined ? { targetModels: engine.targetModels.map((model) => sanitizeIdentifier(model, { fallback: 'unknown-model', kind: 'model' })) } : {}),
+        ...(engine.requirementRevision !== undefined && /^[A-Za-z0-9_-]{1,128}$/.test(engine.requirementRevision)
+          ? { requirementRevision: engine.requirementRevision } : {}),
         ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
         ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
         ...(source !== undefined ? { source } : {}),

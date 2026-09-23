@@ -48,7 +48,7 @@ export const WORKER_NOTIFICATIONS = {
  * Reported on `worker/info` so the core can derive compatibility without
  * guessing. It is a Sprout protocol fact, not an engine fact (ADR-0003).
  */
-export const WORKER_PROTOCOL_VERSION = '2';
+export const WORKER_PROTOCOL_VERSION = '3';
 
 /**
  * One engine's neutral readiness fact, as the Environment Worker sees it.
@@ -71,6 +71,8 @@ export interface WorkerEngineReadinessFact {
   readonly authMode?: string;
   readonly authType?: string;
   readonly modelIdPresent?: boolean;
+  readonly targetModels?: readonly string[];
+  readonly requirementRevision?: string;
   readonly probedAt?: number;
   readonly probeExitCode?: number;
   readonly source?: 'codex-account-read' | 'pi-auth-check' | 'unknown';
@@ -108,6 +110,14 @@ export interface WorkerReadinessProbeParams {
   readonly attemptId?: string;
   /** Deliberately empty today; the browser cannot submit readiness facts. */
   readonly requiredModels?: readonly string[];
+  readonly requirements?: import('../environment/readiness.ts').ReadinessRequirementScope;
+}
+
+export interface WorkerObservationEnvelope {
+  readonly protocolVersion: '3';
+  readonly observedAt?: number;
+  readonly engines: readonly WorkerEngineReadinessFact[];
+  readonly probe: WorkerProbeFact;
 }
 
 export interface WorkerReadinessProbeResult {

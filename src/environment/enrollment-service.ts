@@ -56,7 +56,7 @@ import {
  * Worker facts and produces product facts.
  */
 
-export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 2 };
+export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 3 };
 
 export interface EnvironmentEnrollmentServiceOptions {
   readonly enrollments: EnrollmentStore;
@@ -436,7 +436,8 @@ export class EnvironmentEnrollmentService {
       at: this.#clock(),
       verifyAuthority: this.#verifyObservationAuthority,
       ...(options?.attempt !== undefined ? { attempt: options.attempt } : {}),
-      ...(options?.requirements !== undefined ? { requirements: options.requirements } : {}),
+      ...(options?.attempt?.requirements !== undefined ? { requirements: options.attempt.requirements } :
+        options?.requirements !== undefined ? { requirements: options.requirements } : {}),
     });
     if (observation === undefined) return undefined;
     // Store adapters re-check the live authority guard at their mutation
@@ -450,14 +451,14 @@ export class EnvironmentEnrollmentService {
     return recorded;
   }
 
-  async issueReadinessAttempt(enrollmentId: string, authority: ReadinessObservationAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<import('./readiness-store.ts').ReadinessAttempt | false> {
+  async issueReadinessAttempt(enrollmentId: string, authority: ReadinessObservationAuthority, bootstrap = false, requiredModels: readonly string[] = [], requirements?: ReadinessRequirementScope): Promise<import('./readiness-store.ts').ReadinessAttempt | false> {
     const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
     if (!verified || !authority.isCurrent()) return false;
     const enrollment = await this.#requireEnrollment(enrollmentId);
     if (enrollment.status !== 'approved' || enrollment.environmentInstanceId !== verified.environmentInstanceId ||
         verified.lifecycleGeneration !== this.#authority.generation(enrollmentId) ||
         verified.connectionEpoch !== this.#currentConnectionEpoch(enrollmentId) || !authority.isCurrent()) return false;
-    return this.#readiness.issueAttempt(enrollment.environmentInstanceId, authority, bootstrap, requiredModels);
+    return this.#readiness.issueAttempt(enrollment.environmentInstanceId, authority, bootstrap, requiredModels, requirements);
   }
 
   async getReadinessAttempt(enrollmentId: string, observationId: string, authority: ReadinessObservationAuthority): Promise<import('./readiness-store.ts').ReadinessAttempt | undefined> {
