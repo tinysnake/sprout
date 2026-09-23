@@ -12,7 +12,8 @@ import type { WorkerProbeFact, WorkerReadinessProbeResult } from './protocol.ts'
 export function validateWorkerReadinessProbeResult(
   value: unknown,
 ): WorkerReadinessProbeResult | undefined {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe']) || !isWorkerProbe(value.probe)) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe', 'attemptId']) || !isWorkerProbe(value.probe) ||
+      (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !/^obs-[0-9a-f-]{36}$/.test(value.attemptId)))) {
     return undefined;
   }
   const readiness = value.readiness;
@@ -30,6 +31,7 @@ export function validateWorkerReadinessProbeResult(
   // sanitizer, and readback all compare the same privacy-reduced fact.
   const probe = sanitizeWorkerProbe(value.probe);
   return {
+    ...(value.attemptId !== undefined ? { attemptId: value.attemptId as string } : {}),
     readiness: {
       protocolVersion: readiness.protocolVersion,
       ...(readiness.observedAt !== undefined ? { observedAt: readiness.observedAt } : {}),

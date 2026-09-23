@@ -446,7 +446,7 @@ test('sqlite additive migration preserves legacy history and reopen requires fre
 
   // 2. Open via SqliteStore (applies migration 14 -> 15)
   const store = new SqliteStore({ filename: dbPath });
-  assert.equal(store.schemaVersion, 15);
+  assert.equal(store.schemaVersion, 16);
 
   // Legacy rows are preserved as historical; getCurrentObservation returns undefined
   // because unscoped legacy rows cannot establish a current observation
@@ -493,7 +493,7 @@ test('sqlite additive migration preserves legacy history and reopen requires fre
   store.close();
   const reopened = new SqliteStore({ filename: dbPath });
   try {
-    assert.equal(reopened.schemaVersion, 15);
+    assert.equal(reopened.schemaVersion, 16);
     const retrievedReceipt = await reopened.environmentReadiness.getReceipt('env-leg', receipt.observationId);
     assert.ok(retrievedReceipt);
     assert.equal(retrievedReceipt.observationId, receipt.observationId);

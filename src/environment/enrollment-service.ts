@@ -415,7 +415,7 @@ export class EnvironmentEnrollmentService {
     enrollmentId: string,
     result: unknown,
     authority: ReadinessObservationAuthority,
-    options?: { readonly requirements?: ReadinessRequirementScope },
+    options?: { readonly requirements?: ReadinessRequirementScope; readonly attempt?: import('./readiness-store.ts').ReadinessAttempt },
   ): Promise<ReadinessReceipt | undefined> {
     const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
     if (verified === undefined) return undefined;
@@ -435,6 +435,7 @@ export class EnvironmentEnrollmentService {
       supported: this.#supportedProtocol,
       at: this.#clock(),
       verifyAuthority: this.#verifyObservationAuthority,
+      ...(options?.attempt !== undefined ? { attempt: options.attempt } : {}),
       ...(options?.requirements !== undefined ? { requirements: options.requirements } : {}),
     });
     if (observation === undefined) return undefined;
@@ -447,6 +448,25 @@ export class EnvironmentEnrollmentService {
     );
     if (!recorded) return undefined;
     return recorded;
+  }
+
+  async issueReadinessAttempt(enrollmentId: string, authority: ReadinessObservationAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<import('./readiness-store.ts').ReadinessAttempt | false> {
+    const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
+    if (!verified || !authority.isCurrent()) return false;
+    const enrollment = await this.#requireEnrollment(enrollmentId);
+    if (enrollment.status !== 'approved' || enrollment.environmentInstanceId !== verified.environmentInstanceId ||
+        verified.lifecycleGeneration !== this.#authority.generation(enrollmentId) ||
+        verified.connectionEpoch !== this.#currentConnectionEpoch(enrollmentId) || !authority.isCurrent()) return false;
+    return this.#readiness.issueAttempt(enrollment.environmentInstanceId, authority, bootstrap, requiredModels);
+  }
+
+  async getReadinessAttempt(enrollmentId: string, observationId: string, authority: ReadinessObservationAuthority): Promise<import('./readiness-store.ts').ReadinessAttempt | undefined> {
+    const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
+    if (!verified || !authority.isCurrent()) return undefined;
+    const attempt = await this.#readiness.getAttempt(verified.environmentInstanceId, observationId);
+    return attempt && attempt.enrollmentId === verified.enrollmentId &&
+      attempt.connectionId === verified.connectionId && attempt.connectionEpoch === verified.connectionEpoch &&
+      attempt.lifecycleGeneration === verified.lifecycleGeneration && authority.isCurrent() ? attempt : undefined;
   }
 
   async getObservation(

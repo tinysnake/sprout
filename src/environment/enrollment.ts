@@ -158,6 +158,8 @@ export interface EnrollmentConnectionOutcome {
 }
 
 export type EnrollmentErrorCode =
+  | 'superseded-observation'
+  | 'conflicting-observation'
   | 'unknown-enrollment'
   /** An existing enrollment owns this Environment instance; reset it instead. */
   | 'duplicate-instance'

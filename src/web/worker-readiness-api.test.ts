@@ -321,7 +321,8 @@ test('the authenticated JSON-RPC probe receives only core-configured target mode
   });
   await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
   assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes', { requiredModels: ['browser-forgery'] })).status, 201);
-  assert.deepEqual(received, { requiredModels: ['gpt-6-astra'] });
+  assert.deepEqual(received?.requiredModels, ['gpt-6-astra']);
+  assert.match(received?.attemptId ?? '', /^obs-/);
 });
 
 test('missing or mismatched JSON-RPC probe facts are never committed or returned (R118-API-002)', async (t) => {

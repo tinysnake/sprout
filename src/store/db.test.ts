@@ -46,6 +46,13 @@ interface ColumnShape {
 
 /** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  environment_readiness_attempts: [
+    { name: 'observation_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'bootstrap_key', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   operator_identity: [
     { name: 'singleton', type: 'INTEGER', notnull: 0, pk: 1 },
     { name: 'credential_hash', type: 'TEXT', notnull: 1, pk: 0 },
@@ -363,6 +370,8 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'environment_observations',
         'environment_probes',
         'environment_readiness',
+        'environment_readiness_attempts',
+        'environment_readiness_attempts',
         'environment_recovery',
         'project_authorities',
         'project_environment_access',

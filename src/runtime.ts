@@ -184,7 +184,7 @@ export interface RuntimeEnvironment {
    */
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
   /** Execute a non-inference probe on an already accepted Worker. */
-  probeReadiness?(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined>;
+  probeReadiness?(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined>;
   /** End the port and fail anything still in flight. */
   close(): Promise<void>;
 }
@@ -1064,6 +1064,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // offline again. Neither path creates a catalog entry: only a durable
     // enrollment does. Each re-projects the catalog and republishes eligibility.
     workerGateway.onAccept((acceptance) => {
+      readinessWorkflow.reserveAccepted(acceptance);
       // Invalidate an in-flight source snapshot before publishing the accepted
       // epoch synchronously. Only a later refresh may replace this projection.
       catalogProjectionRevision += 1;
@@ -1082,6 +1083,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       timer.unref();
     });
     workerGateway.onConnectionClosed((closed) => {
+      readinessWorkflow.releaseAccepted(closed.epoch.connectionId);
       // Disconnect detection is the admission fence. Clear this exact epoch and
       // republish synchronously before any store-backed refresh crosses an await,
       // so resolution cannot select an offline instance in the propagation
@@ -1436,11 +1438,11 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     return target.info === undefined ? Promise.resolve(undefined) : target.info(environmentInstanceId);
   }
 
-  probeReadiness(environmentInstanceId: string): Promise<WorkerReadinessProbeResult | undefined> {
+  probeReadiness(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined> {
     const target = this.#require();
     return target.probeReadiness === undefined
       ? Promise.resolve(undefined)
-      : target.probeReadiness(environmentInstanceId);
+      : target.probeReadiness(environmentInstanceId, attemptId);
   }
 
   async close(): Promise<void> {
