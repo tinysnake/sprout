@@ -4,8 +4,9 @@
  * These tests replace the synthetic `requestProbe` seam with the **real**
  * production chain: a real `EnvironmentEnrollmentService`, the real
  * `WorkerGateway` accepting a real outbound Worker connection, the real
- * `EnrollmentWorkerPort`, the real `createWorkerProbeRequester`, and the real
- * HTTP `EnvironmentRouter` behind the Human auth boundary. The Worker's neutral
+ * `EnrollmentWorkerPort`, the real `EnvironmentReadinessWorkflow` explicit
+ * `request()` trigger (the Human-requested probe mode), and the real HTTP
+ * `EnvironmentRouter` behind the Human auth boundary. The Worker's neutral
  * JSON-RPC server runs over the accepted channel and its probe can be delayed,
  * so a revoke/reset/disconnect can be interleaved into the response window.
  *
@@ -35,7 +36,7 @@ import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { WorkerGateway } from '../worker/gateway.ts';
 import { EnrollmentWorkerPort } from '../worker/enrollment-port.ts';
-import { createWorkerProbeRequester } from '../worker/readiness-requester.ts';
+import { EnvironmentReadinessWorkflow } from '../environment/readiness-workflow.ts';
 import { EnvironmentWorker } from '../worker/server.ts';
 import { WORKER_PROTOCOL_VERSION, type WorkerReadinessFacts, type WorkerReadinessProbeParams, type WorkerReadinessProbeResult } from '../worker/protocol.ts';
 import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } from '../worker/enrollment-connector.ts';
@@ -94,13 +95,14 @@ async function harness(): Promise<Harness> {
   gateways.current = gateway;
   const port = new EnrollmentWorkerPort({ gateway });
 
-  const requestProbe = createWorkerProbeRequester({
+  const workflow = new EnvironmentReadinessWorkflow({
     enrollments,
     workerGateway: gateway,
     workerEpochs: gateway.epochs,
     environment: port,
     refreshEnvironmentCatalog: async () => undefined,
   });
+  const requestProbe = (enrollmentId: string) => workflow.request(enrollmentId);
   const api = createRunApi({
     orchestrator: { subscribe: () => () => undefined, load: async () => undefined } as never,
     agents: { list: () => [], get: () => undefined } as never,
