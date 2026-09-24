@@ -11,6 +11,7 @@ import {
   enrollEligibleInstance,
   hostConfiguration,
   observeSyntheticReady,
+  testComposition,
   readinessAuthority,
   scriptedReadinessProbe,
   waitFor,
@@ -137,7 +138,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     // The accepted connection ends: the epoch is invalidated and the catalog is
     // re-projected. The record and the active lease survive; the instance stops
     // admitting new work.
-    runtime.workerGateway.liveFor('host-a')!.close();
+    testComposition(runtime).workerGateway.liveFor('host-a')!.close();
     await waitFor(() => runtime.workerGateway.liveFor('host-a') === undefined, 'disconnected Worker removal');
     await runtime.refreshEnvironmentCatalog();
     assert.ok(runtime.environmentCatalog.entry('host-a') !== undefined, 'offline never deletes');
@@ -178,11 +179,11 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
       instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scout', runId: 'run-a', ttlMs: 60_000,
     });
     assert.equal(lease.ok, true);
-    const firstAuthority = runtime.workerGateway.authorizeObservation('host-a')!;
+    const firstAuthority = testComposition(runtime).workerGateway.authorizeObservation('host-a')!;
 
     // Loss followed by a replacement leaves host-b independently eligible but
     // removes host-a until the replacement itself supplies readiness.
-    runtime.workerGateway.liveFor('host-a')!.close();
+    testComposition(runtime).workerGateway.liveFor('host-a')!.close();
     await waitFor(() => runtime.workerGateway.liveFor('host-a') === undefined, 'prior Worker removal');
     await connectRuntimeWorker(runtime, enrollmentA, join(directory, 'host-a-key.pem'));
     const replacement = runtime.workerGateway.currentConnectionEpoch(enrollmentA)!;
@@ -271,9 +272,9 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     const enrollmentId = requested.enrollment.id;
     // Application composition has no raw epoch issuer, and a pending enrollment
     // cannot obtain Gateway observation authority.
-    assert.equal(runtime.workerGateway.authorizeObservation('host-a'), undefined);
+    assert.equal(testComposition(runtime).workerGateway.authorizeObservation('host-a'), undefined);
     assert.equal(
-      await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), {} as never),
+      await testComposition(runtime).enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), {} as never),
       false,
     );
     // Still pending: no admission.

@@ -9,6 +9,7 @@ import {
   INSTANCE_ID,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -42,7 +43,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
       // An empty-target worker/info bootstrap uses its own complete v3
       // envelope; v2 translation is exercised by the explicit request below.
-      await h.runtime.observeWorkerReadiness(id);
+      await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'accepted bootstrap');
       assert.equal(calls, 0, 'empty-target bootstrap comes from worker/info, not a fabricated request');
       await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined,
         'empty-target bootstrap receipt');
@@ -107,7 +108,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
       try {
         const id = (await h.runtime.enrollments.list())[0]!.id;
-        const store = h.runtime.stores.environmentReadiness;
+        const store = testComposition(h.runtime).stores.environmentReadiness;
         // Count every mutation attempt so a refused envelope is proven to reach
         // no commit at all, rather than inferred from a fixed sleep.
         let commitAttempts = 0;
@@ -260,7 +261,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const h = await readinessWorkflowHarness({ backend, directory });
       try {
         const id = (await h.runtime.enrollments.list())[0]!.id;
-        const store = h.runtime.stores.environmentReadiness;
+        const store = testComposition(h.runtime).stores.environmentReadiness;
         let commitAttempts = 0;
         const originalCommit = store.commitObservation.bind(store);
         store.commitObservation = async (...args) => { commitAttempts += 1; return originalCommit(...args); };
@@ -271,7 +272,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               version: '1', summary: 'bootstrap envelope' } }),
         });
         await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
-        await h.runtime.observeWorkerReadiness(id);
+        if (wireCase.commits) await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'accepted bootstrap commit');
         if (wireCase.commits) {
           await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'bootstrap commit');
           const current = (await store.getCurrentObservation(INSTANCE_ID))!;
@@ -281,7 +282,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           // Deterministic: the observation path is idempotent and already
           // settled, so a second observe transitions nothing and proves the
           // refused envelope never reaches a commit without a timer as evidence.
-          await h.runtime.observeWorkerReadiness(id);
+          await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted Worker');
           assert.equal(commitAttempts, 0, `${wireCase.name}: the unsupported envelope never attempts a mutation`);
           assert.equal((await store.getCurrentObservation(INSTANCE_ID)), undefined, `${wireCase.name}: no bootstrap observation commits`);
         }

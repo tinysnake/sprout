@@ -11,6 +11,7 @@ import {
   INSTANCE_ID,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -41,7 +42,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         }),
       });
       await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
-      const liveAuth = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
+      const liveAuth = testComposition(h.runtime).workerGateway.authorizeObservation(INSTANCE_ID);
       assert.ok(liveAuth !== undefined, 'owner issues scoped capability for live connection');
       assert.equal(liveAuth.isCurrent(), true);
 
@@ -70,7 +71,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         ['Object.assign copied capability', assignedCopy],
       ] as const) {
         assert.equal(
-          await h.runtime.enrollments.observeReadiness(enrollmentId, observationResult, forged as never),
+          await testComposition(h.runtime).enrollments.observeReadiness(enrollmentId, observationResult, forged as never),
           false,
           `${label} must be refused by observeReadiness`,
         );
@@ -78,7 +79,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
 
       // Scope substitution: using authentic authority for another enrollment/instance
       assert.equal(
-        await h.runtime.enrollments.observeReadiness('other-enrollment', observationResult, liveAuth),
+        await testComposition(h.runtime).enrollments.observeReadiness('other-enrollment', observationResult, liveAuth),
         false,
         'scope substitution across enrollments must fail',
       );
@@ -122,7 +123,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
 
       // Intercept store commit: capture when commit succeeds, hold before returning to caller,
       // and disconnect the worker in that window.
-      const store = h.runtime.stores.environmentReadiness;
+      const store = testComposition(h.runtime).stores.environmentReadiness;
       const origCommit = store.commitObservation.bind(store);
       let committedSignal: (() => void) | undefined;
       const committedPromise = new Promise<void>((resolve) => { committedSignal = resolve; });
@@ -144,7 +145,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
 
       await committedPromise;
       // Close the channel (disconnect) after atomic commit but before response completion
-      h.runtime.workerGateway.liveFor(INSTANCE_ID)!.close();
+      testComposition(h.runtime).workerGateway.liveFor(INSTANCE_ID)!.close();
       continueReturn?.();
 
       const response = await pendingRequest;
@@ -205,7 +206,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
 
       // Pending session has no owner authority
       assert.equal(
-        h.runtime.workerGateway.authorizeObservation('env-pending-test'),
+        testComposition(h.runtime).workerGateway.authorizeObservation('env-pending-test'),
         undefined,
         'pending instance cannot obtain observation authority',
       );
@@ -242,13 +243,13 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const archiveService = new EnvironmentArchiveService({
         enrollments: h.runtime.stores.enrollments,
         leases: h.runtime.pool,
-        lifecycleAuthority: h.runtime.enrollments.lifecycleAuthority,
-        onAuthorityLost: (id) => h.runtime.workerGateway.invalidateEnrollment(id),
+        lifecycleAuthority: testComposition(h.runtime).enrollments.lifecycleAuthority,
+        onAuthorityLost: (id) => testComposition(h.runtime).workerGateway.invalidateEnrollment(id),
       });
       await archiveService.archive(approvedId, 'operator archiving');
 
       // Live authority lost immediately
-      assert.equal(h.runtime.workerGateway.authorizeObservation(INSTANCE_ID), undefined);
+      assert.equal(testComposition(h.runtime).workerGateway.authorizeObservation(INSTANCE_ID), undefined);
       assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
 
       // Probe request on archived enrollment fails

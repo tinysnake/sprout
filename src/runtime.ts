@@ -168,7 +168,12 @@ export type EnrollmentLifecycle = Pick<EnvironmentEnrollmentService,
   'getObservation' | 'getReceipt' | 'listProbes' | 'readiness'>;
 
 /** Inspection of accepted Workers, not their observation authority issuer. */
-export type WorkerGatewayView = Pick<WorkerGateway, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
+export interface WorkerGatewayView {
+  liveFor(instanceId: string): Pick<import('./worker/gateway.ts').WorkerGatewayAcceptance,
+    'accepted' | 'enrollment' | 'epoch' | 'requiredModels'> | undefined;
+  currentConnectionEpoch(enrollmentId: string): number | undefined;
+  isCurrentConnection: WorkerGateway['isCurrentConnection'];
+}
 
 /**
  * The environment execution port the runtime crosses for one instance.
@@ -342,6 +347,7 @@ export interface SproutRuntimeOptions {
     stores: RuntimeStores;
     enrollments: EnvironmentEnrollmentService;
     workerGateway: WorkerGateway;
+    readinessWorkflow: EnvironmentReadinessWorkflow;
   }) => void;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
@@ -1278,7 +1284,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     /** The last reconciliation result, so `startupReport` reports what ran. */
     let lastReconciliation: SproutReconciliation | undefined;
 
-    options.onTestComposition?.({ stores, enrollments, workerGateway });
+    options.onTestComposition?.({ stores, enrollments, workerGateway, readinessWorkflow });
     const activeStores = stores;
     const { environmentReadiness: readinessWriter, ...otherStores } = activeStores;
     const applicationStores: RuntimeStoreViews = { ...otherStores, environmentReadiness: {
@@ -1307,7 +1313,11 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       readiness: (...args) => enrollments.readiness(...args),
     };
     const gatewayView: WorkerGatewayView = {
-      liveFor: (instanceId) => workerGateway.liveFor(instanceId),
+      liveFor: (instanceId) => {
+        const live = workerGateway.liveFor(instanceId);
+        return live === undefined ? undefined : { accepted: true, enrollment: live.enrollment,
+          epoch: live.epoch, requiredModels: live.requiredModels };
+      },
       currentConnectionEpoch: (enrollmentId) => workerGateway.currentConnectionEpoch(enrollmentId),
       isCurrentConnection: (...args) => workerGateway.isCurrentConnection(...args),
     };

@@ -162,14 +162,14 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
           version: '0.154.0',
           summary: 'Worker non-inference readiness probe completed.',
         };
+        const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: enrollment.environmentInstanceId,
+          enrollmentId, connectionEpoch: 1 });
+        const attempt = await enrollments.issueReadinessAttempt(enrollmentId, authority);
+        assert.ok(attempt);
         const recorded = await enrollments.recordReadinessObservation(enrollmentId, {
           readiness: { protocolVersion: '2', observedAt: at, engines: [], probe },
           probe,
-        }, readinessAuthorityTestSeam.mint({
-          environmentInstanceId: enrollment?.environmentInstanceId ?? 'mac-mini-1',
-          enrollmentId,
-          connectionEpoch: 1,
-        }));
+        }, authority, { attempt });
         if (!recorded) throw new Error('synthetic Worker probe was rejected');
         return recorded;
       },

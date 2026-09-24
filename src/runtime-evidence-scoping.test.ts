@@ -13,13 +13,14 @@ import {
   hostConfiguration,
   inMemoryStores,
   INSTANCE_ID,
-  observeSyntheticReady,
   readinessAuthority,
   readinessWorkflowHarness,
   scriptedReadinessProbe,
   scriptedScope,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
+import { ReadinessOutcomeError } from './environment/readiness-workflow.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
   test(`#127 ${backend}: delayed acceptance probe cannot overwrite later HTTP evidence`, async (t) => {
@@ -91,7 +92,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         },
       });
       await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true, 'bootstrap');
-      await h.runtime.observeWorkerReadiness(id);
+      await waitFor(async () => (await h.runtime.enrollments.readiness(id)).receipt !== undefined, 'accepted bootstrap receipt');
       assert.equal((await h.runtime.enrollments.listProbes(id)).length, 1, 'worker/info reread is inspection only');
       const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
         method: 'POST', headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}',
@@ -114,7 +115,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.equal((await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))?.observationId,
         observations[1]!.observationId);
       assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
-      await h.runtime.observeWorkerReadiness(id);
+      await waitFor(async () => (await h.runtime.enrollments.readiness(id)).receipt !== undefined, 'accepted bootstrap settlement');
       assert.equal((await h.runtime.stores.environmentReadiness.listObservations(INSTANCE_ID)).length, 2,
         'bootstrap reread cannot supersede a later targeted negative');
       assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
@@ -128,6 +129,9 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const conflict = await post();
       assert.equal(conflict.status, 409, 'changed content under committed identity is refused');
       assert.equal(((await conflict.json()) as { code?: string }).code, 'conflicting-observation');
+      await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(id),
+        (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'superseded' &&
+          error.code === 'conflicting-observation');
       assert.equal((await h.runtime.stores.environmentReadiness.listObservations(INSTANCE_ID)).length, 2);
     } finally { release?.(); await h.close(); }
   });
@@ -153,7 +157,12 @@ for (const backend of ['memory', 'sqlite'] as const) {
         await runtime.enrollments.approve(enrollment.id, {
           capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
         });
-        await connectRuntimeWorker(runtime, enrollment.id, keyPath);
+        const unknown = scriptedReadinessProbe();
+        Reflect.set(unknown.readiness.engines[0]!, 'modelAvailability', 'unknown');
+        await connectRuntimeWorker(runtime, enrollment.id, keyPath, () => ({ ...unknown.readiness,
+          protocolVersion: WORKER_PROTOCOL_VERSION, probe: unknown.probe }));
+        await waitFor(async () => (await runtime.enrollments.readiness(enrollment.id)).receipt !== undefined,
+          'unknown Worker bootstrap receipt');
         const epoch = runtime.workerGateway.currentConnectionEpoch(enrollment.id)!;
         const authority = readinessAuthority(runtime, enrollment.id, epoch);
         assert.equal(authority.isCurrent(), true);
@@ -167,19 +176,19 @@ for (const backend of ['memory', 'sqlite'] as const) {
           },
           ...(missing === 'undefined' ? { probe: undefined } : {}),
         };
-        const store = runtime.stores.environmentReadiness;
+        const store = testComposition(runtime).stores.environmentReadiness;
+        const beforeRaw = await store.getReadiness(enrollment.environmentInstanceId);
+        const beforeProbes = await store.listProbes(enrollment.environmentInstanceId);
         const recorded = await store.commitObservation(enrollment.environmentInstanceId, raw as never, authority);
         await runtime.refreshEnvironmentCatalog();
         assert.equal(recorded, false);
-        assert.equal(await store.getReadiness(enrollment.environmentInstanceId), undefined);
-        assert.deepEqual(await store.listProbes(enrollment.environmentInstanceId), []);
+        assert.deepEqual(await store.getReadiness(enrollment.environmentInstanceId), beforeRaw);
+        assert.deepEqual(await store.listProbes(enrollment.environmentInstanceId), beforeProbes);
         assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, false);
 
         // Read methods are not a raw write seam either. Mutating a returned
         // unknown observation must not silently turn the instance admissible.
-        const unknown = scriptedReadinessProbe();
-        Reflect.set(unknown.readiness.engines[0]!, 'modelAvailability', 'unknown');
-        assert.equal(await runtime.enrollments.observeReadiness(enrollment.id, unknown, authority), true);
+        assert.equal(await testComposition(runtime).enrollments.observeReadiness(enrollment.id, unknown, authority), false);
         const readback = await store.getReadiness(enrollment.environmentInstanceId);
         assert.ok(readback);
         Reflect.set(readback.engines[0]!.models, 'state', 'available');
@@ -191,7 +200,11 @@ for (const backend of ['memory', 'sqlite'] as const) {
         assert.equal((await store.listProbes(enrollment.environmentInstanceId))[0]?.source, 'worker');
 
         // The refusal is input validation, not a broken authority/admission path.
-        assert.ok(await observeSyntheticReady(runtime, enrollment.id, authority));
+        testComposition(runtime).workerGateway.liveFor(enrollment.environmentInstanceId)?.close();
+        await waitFor(() => runtime.workerGateway.liveFor(enrollment.environmentInstanceId) === undefined, 'old Worker closed');
+        await connectRuntimeWorker(runtime, enrollment.id, keyPath);
+        await waitFor(async () => (await store.listProbes(enrollment.environmentInstanceId)).length === 2,
+          'new accepted Worker ready receipt');
         await runtime.refreshEnvironmentCatalog();
         assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, true);
         assert.equal((await store.listProbes(enrollment.environmentInstanceId)).length, 2);

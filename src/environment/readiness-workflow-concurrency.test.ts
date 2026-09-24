@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EnvironmentReadinessWorkflow } from './readiness-workflow.ts';
+import { EnvironmentReadinessWorkflow, ReadinessOutcomeError } from './readiness-workflow.ts';
+import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import type { ReadinessLiveGateway } from './readiness-workflow.ts';
 
@@ -70,5 +71,30 @@ for (const failure of [false, true]) {
       assert.equal(projected, true);
     }
     assert.equal(writes, 1);
+
+    // The request vocabulary distinguishes malformed input from a persistence
+    // refusal, including supersession with and without a prior committed receipt.
+    const requestTicket = { ...ticket, requirements: { requiredModels: [] } };
+    const result = workerReadinessProbeFixture({ protocolVersion: '2', engines: [] });
+    let requestWrites = 0;
+    const requestEnrollment = {
+      get: async () => ({ id: 'enroll', environmentInstanceId: 'env', status: 'approved' }),
+      issueReadinessAttempt: async () => requestTicket,
+      getReceipt: async () => !failure ? { observationId: requestTicket.observationId } : undefined,
+      readiness: async () => ({ currentObservation: failure ? { sequence: 2 } : undefined }),
+      recordReadinessObservation: async () => { requestWrites++; return undefined; },
+    } as unknown as EnvironmentEnrollmentService;
+    const requestGateway = { liveFor: gateway.liveFor, authorizeObservation: () => authority } as unknown as ReadinessLiveGateway;
+    const request = (probe: unknown) => new EnvironmentReadinessWorkflow({
+      enrollments: requestEnrollment, workerGateway: requestGateway,
+      environment: { probeReadiness: async () => probe as never },
+      refreshEnvironmentCatalog: async () => undefined,
+    });
+    await assert.rejects(request({ malformed: true }).request('enroll'),
+      (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'malformed');
+    assert.equal(requestWrites, 0);
+    await assert.rejects(request(result).request('enroll'),
+      (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'superseded');
+    assert.equal(requestWrites, 1);
   });
 }

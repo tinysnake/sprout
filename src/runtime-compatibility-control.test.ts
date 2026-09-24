@@ -11,6 +11,7 @@ import {
   INSTANCE_ID,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -181,7 +182,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
 
       // 3c. Current authority / disconnect block
       const accepted = h.runtime.workerGateway.liveFor(INSTANCE_ID);
-      if (accepted !== undefined) accepted.close();
+      if (accepted !== undefined) testComposition(h.runtime).workerGateway.liveFor(INSTANCE_ID)?.close();
       assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
 
       // 3d. Lifecycle revocation block

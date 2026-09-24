@@ -113,9 +113,12 @@ test('sqlite additive migration preserves legacy history and reopen requires fre
     observedAt: 1_500,
     engines: [{ engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5'] }],
   });
+  const attempt = await store.environmentReadiness.issueAttempt('env-leg', freshAuthority);
+  assert.ok(attempt);
   const freshObs = createReadinessObservation(freshResult, {
     environmentInstanceId: 'env-leg',
     authority: freshAuthority,
+    attempt,
     supported: { minMajor: 2, maxMajor: 2 },
     at: 1_500,
     verifyAuthority: readinessAuthorityTestSeam.verify,

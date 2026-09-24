@@ -12,7 +12,9 @@ import {
   INSTANCE_ID,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
+import { ReadinessOutcomeError } from './environment/readiness-workflow.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
   test(`#124 ${backend}: startup and automatic target probes cross one workflow and commit canonical facts`, async (t) => {
@@ -67,6 +69,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const h = await readinessWorkflowHarness({ backend, directory });
     try {
       const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+      await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(enrollmentId),
+        (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'unavailable');
       await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
         readiness: () => ({
           protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -134,6 +138,9 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.equal(text.includes('browser fact'), false);
       const returned = JSON.parse(text) as { probe: { source?: string } };
       assert.equal(returned.probe.source, 'worker');
+      const committed = await testComposition(h.runtime).readinessWorkflow.request(enrollmentId);
+      assert.match(committed.observationId, /^obs-/);
+      assert.ok(await h.runtime.enrollments.getReceipt(enrollmentId, committed.observationId));
     } finally {
       await h.close();
     }
@@ -270,7 +277,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       // Automatic trigger: the transitional entry point delegates to the one
       // composed workflow. Await it so the refusal is deterministic rather than
       // inferred from an absent store row.
-      await h.runtime.observeWorkerReadiness(enrollmentId);
+      await waitFor(() => calls >= 1, 'automatic accepted-Worker probe');
       assert.ok(calls >= 1, 'the real Worker JSON-RPC probe was exercised');
       assert.equal(
         await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID),

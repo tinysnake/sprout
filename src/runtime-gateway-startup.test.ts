@@ -9,6 +9,7 @@ import {
   createRuntime,
   hostConfiguration,
   project,
+  waitFor,
 } from './runtime-test-harness.ts';
 
 test('real Gateway startup rejects invalid target probes and empty-target worker/info probes before durable commit (R118-API-002, R118-BOUNDARY-003)', async () => {
@@ -147,7 +148,7 @@ test('real Gateway startup rejects invalid target probes and empty-target worker
 
       // Invoke the same automatic observer that acceptance schedules, but await
       // it so absence from the store is deterministic rather than timer-based.
-      await runtime.observeWorkerReadiness(enrollmentId);
+      await waitFor(() => calls > 0, 'accepted Worker automatic collection');
       assert.ok(calls > 0, `${fixture.name}: the real Worker JSON-RPC probe was exercised`);
       assert.equal(
         await runtime.stores.environmentReadiness.getReadiness('startup-invalid-host'),

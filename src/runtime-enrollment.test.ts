@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { createReadinessAuthorityTestSeam } from './environment/readiness-authority.test-support.ts';
-import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 import {
   type WorkerInfo,
 } from './worker/protocol.ts';
@@ -26,6 +25,8 @@ import {
   runtimePorts,
   scriptedEnvironment,
   scriptedReadinessProbe,
+  testComposition,
+  waitFor,
 } from './runtime-test-harness.ts';
 
 test('the composed runtime exposes durable enrollment and readiness through its router and SQLite store (#87)', async (t) => {
@@ -60,27 +61,14 @@ test('the composed runtime exposes durable enrollment and readiness through its 
     await runtime.enrollments.approve(requested.enrollment.id, {
       capabilityPermissions: { 'agent-run': true },
     });
-    const now = Date.now();
     await connectRuntimeWorker(runtime, requested.enrollment.id, keyPath);
-    const epoch = runtime.workerGateway.currentConnectionEpoch(requested.enrollment.id)!;
     // Only the engine this build's configured Agents actually run on is required,
     // so a single ready engine is a complete Environment.
-    await runtime.enrollments.observeReadiness(requested.enrollment.id, workerReadinessProbeFixture({
-      observedAt: now,
-      protocolVersion: '2',
-      engines: [
-        { engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-      ],
-    }, {
-      at: now,
-      latencyMs: 5,
-      protocolOk: true,
-      enginesOk: true,
-      summary: 'ready',
-    }), readinessAuthority(runtime, requested.enrollment.id, epoch));
+    await waitFor(async () => (await runtime.enrollments.readiness(requested.enrollment.id)).receipt !== undefined,
+      'accepted Worker bootstrap receipt');
 
     const assembled = await runtime.enrollments.readiness(requested.enrollment.id);
-    assert.equal(assembled.summary.level, 'green');
+    assert.equal(assembled.summary.level, 'green', assembled.summary.reason);
     assert.ok(assembled.summary.reason.length > 0);
     // The configured engine is the one required engine; no second engine is
     // fabricated as required by an empty configuration.
@@ -149,11 +137,11 @@ test('the runtime refuses to observe readiness without an accepted Worker epoch 
     const enrollmentId = requested.enrollment.id;
 
     // A pending enrollment is not observed: authority comes first.
-    await runtime.observeWorkerReadiness(enrollmentId);
+    // No accepted Worker exists: approval alone is not evidence.
     assert.equal(infoReads, 0, 'no Worker info is read before approval');
 
     await runtime.enrollments.approve(enrollmentId, { capabilityPermissions: { 'agent-run': true } });
-    await runtime.observeWorkerReadiness(enrollmentId);
+    // Approval alone cannot collect Worker facts.
     assert.equal(infoReads, 0, 'approval alone cannot mint Worker observation authority');
 
     const assembled = await runtime.enrollments.readiness(enrollmentId);
@@ -169,7 +157,7 @@ test('the runtime refuses to observe readiness without an accepted Worker epoch 
     // A revoked enrollment stops being observed; the last approved observation
     // is never overwritten by an unapproved Worker.
     await runtime.enrollments.revoke(enrollmentId, 'rotated');
-    await runtime.observeWorkerReadiness(enrollmentId);
+    // Revocation cannot collect Worker facts.
     assert.equal(infoReads, 0, 'no Worker info is read after revocation');
   } finally {
     await runtime.close();
@@ -252,12 +240,12 @@ test('production Runtime rejects an isolated test verifier capability (R125-AUTH
       enrollmentId: enrollment.id,
       connectionId: live.epoch.connectionId,
       connectionEpoch: live.epoch.epoch,
-      lifecycleGeneration: runtime.enrollments.lifecycleAuthority.generation(enrollment.id),
+      lifecycleGeneration: testComposition(runtime).enrollments.lifecycleAuthority.generation(enrollment.id),
       isCurrent: () => true,
     });
 
     assert.equal(
-      await runtime.enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), foreignAuthority),
+      await testComposition(runtime).enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), foreignAuthority),
       false,
       'production composition verifies only capabilities minted by its authenticated Gateway',
     );
