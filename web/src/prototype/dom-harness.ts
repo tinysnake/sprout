@@ -1,3 +1,4 @@
+// @ts-nocheck -- Test-only JSDOM module (production typecheck excludes test files).
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
