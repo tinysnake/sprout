@@ -380,12 +380,28 @@ export async function waitFor(predicate: () => boolean | Promise<boolean>, descr
   // The complete suite exercises browser builds alongside this real WS
   // composition. Keep the assertion bounded, but leave enough scheduler room
   // for the Worker to install its JSON-RPC server after the accepted transport.
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 60_000;
+  let delayMs = 10;
+  const timeout = () => new Error(`timed out waiting for ${description}`);
   while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const remainingMs = deadline - Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(predicate),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(timeout()), remainingMs);
+        }),
+      ]);
+      if (Date.now() >= deadline) throw timeout();
+      if (result) return;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, Math.max(1, deadline - Date.now()))));
+    delayMs = Math.min(delayMs * 2, 250);
   }
-  throw new Error(`timed out waiting for ${description}`);
+  throw timeout();
 }
 
 export async function readinessWorkflowHarness(options: {
