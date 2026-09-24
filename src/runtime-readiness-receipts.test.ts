@@ -1,5 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { SproutRuntime } from './runtime.ts';
+import type { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
+import { ReadinessOutcomeError } from './environment/readiness-workflow.ts';
+import { createReadinessObservation } from './environment/readiness-observation.ts';
+
+/** Checked by tsc: normal application callers cannot issue, authorize or write evidence. */
+function applicationSurfaceCannotWrite(runtime: SproutRuntime, workflow: EnvironmentReadinessWorkflow): void {
+  // @ts-expect-error application store view has no writer
+  runtime.stores.environmentReadiness.commitObservation;
+  // @ts-expect-error application store view has no attempt issuer
+  runtime.stores.environmentReadiness.issueAttempt;
+  // @ts-expect-error lifecycle view has no observation writer
+  runtime.enrollments.recordReadinessObservation;
+  // @ts-expect-error lifecycle view has no observation wrapper
+  runtime.enrollments.observeReadiness;
+  // @ts-expect-error lifecycle view has no Worker-result wrapper
+  runtime.enrollments.observeWorkerReadiness;
+  // @ts-expect-error lifecycle view has no attempt issuer
+  runtime.enrollments.issueReadinessAttempt;
+  // @ts-expect-error gateway view has no authority issuer
+  runtime.workerGateway.authorizeObservation;
+  // @ts-expect-error a live connection view has no nested authority issuer
+  runtime.workerGateway.liveFor('instance')?.authorizeObservation;
+  // @ts-expect-error a live connection view has no raw transport
+  runtime.workerGateway.liveFor('instance')?.transport;
+  // @ts-expect-error transitional runtime observer removed
+  runtime.observeWorkerReadiness;
+  // @ts-expect-error transitional workflow observer removed
+  workflow.observeEnrollment;
+}
+void applicationSurfaceCannotWrite;
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +40,7 @@ import {
   INSTANCE_ID,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -26,27 +58,57 @@ for (const backend of ['memory', 'sqlite'] as const) {
         }),
       });
       await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
-      const authority = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
+      const authority = testComposition(h.runtime).workerGateway.authorizeObservation(INSTANCE_ID);
       assert.ok(authority);
       const result = { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe };
       const store = h.runtime.stores.environmentReadiness;
+      const injectedStore = testComposition(h.runtime).stores.environmentReadiness;
+      const originalCommit = injectedStore.commitObservation.bind(injectedStore);
+      injectedStore.commitObservation = async () => false;
+      try {
+        await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(enrollmentId),
+          (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'superseded');
+      } finally {
+        injectedStore.commitObservation = originalCommit;
+      }
+      assert.deepEqual(await store.listObservations(INSTANCE_ID), [], 'uncommitted refusal has no history');
       const before = await store.getCurrentObservation(INSTANCE_ID);
       const history = await store.listObservations(INSTANCE_ID);
       const probes = await store.listProbes(INSTANCE_ID);
+      const admission = h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible;
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
+        enrollmentId, result, authority), undefined, 'live authority alone cannot write');
+      const unreserved = createReadinessObservation(result, { environmentInstanceId: INSTANCE_ID,
+        authority, supported: { minMajor: 2, maxMajor: 3 }, at: Date.now(),
+        verifyAuthority: (candidate, scope) => testComposition(h.runtime).workerGateway.verifyObservationAuthority(candidate, scope),
+      });
+      assert.ok(unreserved);
+      assert.equal(await injectedStore.commitObservation(INSTANCE_ID, unreserved, authority), false,
+        'raw adapter refuses a canonical but unreserved observation');
       for (const requirements of [null, [], 1, 'bad', { unknown: true },
         { revision: 'bad/revision' }, { requiredModels: [null] }, { requiredModels: ['bad/model'] }]) {
-        assert.equal(await h.runtime.enrollments.recordReadinessObservation(
+        assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
           enrollmentId, result, authority, { requirements } as never,
         ), undefined);
         assert.deepEqual(await store.getCurrentObservation(INSTANCE_ID), before);
         assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
         assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
       }
-      const receipt = await h.runtime.enrollments.recordReadinessObservation(
-        enrollmentId, result, authority, { requirements: { revision: 'r1', requiredModels: ['safe-model'] } },
-      );
+      const ticket = await testComposition(h.runtime).enrollments.issueReadinessAttempt(enrollmentId, authority, false, [], { requiredModels: [] });
+      assert.ok(ticket);
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
+        enrollmentId, result, { ...authority } as never, { attempt: ticket }), undefined, 'copied live authority refused');
+      const wrong = { ...ticket, sequence: ticket.sequence + 1 };
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: wrong }), undefined);
+      const substituted = { ...ticket, requirements: { revision: 'r1', requiredModels: ['safe-model'] } };
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: substituted }), undefined);
+      assert.deepEqual(await store.getCurrentObservation(INSTANCE_ID), before);
+      assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
+      assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, admission);
+      const receipt = await testComposition(h.runtime).enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: ticket });
       assert.ok(receipt);
-      assert.deepEqual(receipt.requirements, { revision: 'r1', requiredModels: ['safe-model'] });
+      assert.deepEqual(receipt.requirements, { requiredModels: [] });
     } finally {
       await h.close();
     }
@@ -90,7 +152,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       );
 
       // Intercept store commit to hold during the second probe commit
-      const store = h.runtime.stores.environmentReadiness;
+      const store = testComposition(h.runtime).stores.environmentReadiness;
       const origCommit = store.commitObservation.bind(store);
       let commitStartedSignal!: () => void;
       const commitStartedPromise = new Promise<void>((r) => { commitStartedSignal = r; });

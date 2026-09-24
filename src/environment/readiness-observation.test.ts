@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import { createReadinessObservation, readReadinessObservation } from './readiness-observation.ts';
 
-import { InMemoryEnvironmentReadinessStore } from './readiness-store.ts';
+import { InMemoryEnvironmentReadinessStore, type EnvironmentReadinessStore } from './readiness-store.ts';
 
 import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 
@@ -26,6 +26,15 @@ import { createPendingEnrollment } from './enrollment.ts';
 
 
 const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
+
+/** Private adapter fixtures reserve the same durable scope that a workflow would issue. */
+async function issued(store: EnvironmentReadinessStore, result: unknown,
+  scope: Parameters<typeof createReadinessObservation>[1]) {
+  const attempt = await store.issueAttempt(scope.environmentInstanceId, scope.authority, false,
+    scope.requirements?.requiredModels ?? [], scope.requirements);
+  assert.ok(attempt);
+  return createReadinessObservation(result, { ...scope, attempt });
+}
 
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -47,18 +56,18 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const project = async (current = requirements) => projectCatalogEntry({ enrollment, observed: await store.getReadiness('env-1'),
       workSafety: 'clear', currentEpoch: 7, requiredEngines: ['codex'], requirements: current,
       supportedProtocol: scope.supported, now: 100 });
-    const old = createReadinessObservation({ readiness: { protocolVersion: '2', engines: [engine], probe }, probe }, scope);
+    const old = await issued(store, { readiness: { protocolVersion: '2', engines: [engine], probe }, probe }, scope);
     assert.ok(old);
     assert.ok(await store.commitObservation('env-1', old, authority));
     assert.equal((await project()).eligible, false, 'old aggregate available lacks measured targets');
-    const fresh = createReadinessObservation({ protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
+    const fresh = await issued(store, { protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
       targetModels: ['target'], requirementRevision: requirements.revisionsByEngine!.codex }], probe }, scope);
     assert.ok(fresh);
     assert.ok(await store.commitObservation('env-1', fresh, authority));
     assert.equal((await project()).eligible, true);
     const changed = readinessRequirements([{ engine: 'codex', workModel: 'target' }], [{ id: 'agent', configurationVersion: 2 }]);
     assert.equal((await project(changed)).eligible, false, 'same target under a new revision requires fresh evidence');
-    const missing = createReadinessObservation({ protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
+    const missing = await issued(store, { protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
       targetModels: ['target'] }], probe }, { ...scope, requirements: changed });
     assert.ok(missing);
     assert.ok(await store.commitObservation('env-1', missing, authority));
@@ -97,7 +106,9 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.equal(createReadinessObservation(invalid, scope), undefined, 'the only constructor validates complete pairs');
     }
     const requirements = { requiredModels: ['safe-model'] };
-    const observation = createReadinessObservation(result, { ...scope, observationId: '../unsafe/path', requirements } as typeof scope & { observationId: string; requirements: typeof requirements });
+    const attempt = await store.issueAttempt('env-1', authority, false, requirements.requiredModels, requirements);
+    assert.ok(attempt);
+    const observation = createReadinessObservation(result, { ...scope, attempt, observationId: '../unsafe/path', requirements } as typeof scope & { observationId: string; requirements: typeof requirements });
     assert.ok(observation);
     requirements.requiredModels[0] = 'changed';
     assert.notEqual(readReadinessObservation('env-1', observation, authority)?.observationId, '../unsafe/path');
@@ -225,7 +236,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       observedAt: 1_000,
       engines: [{ engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['model-a'] }],
     });
-    const obs1 = createReadinessObservation(result1, scope);
+    const obs1 = await issued(store, result1, scope);
     assert.ok(obs1);
     const receipt1 = await store.commitObservation('env-1', obs1, authority);
     assert.ok(receipt1);
@@ -244,7 +255,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       observedAt: 2_000,
       engines: [{ engine: 'pi', installed: true, readiness: 'login-required', modelAvailability: 'unknown', models: [] }],
     });
-    const obs2 = createReadinessObservation(result2, { ...scope, at: 2_000 });
+    const obs2 = await issued(store, result2, { ...scope, at: 2_000 });
     assert.ok(obs2);
     const receipt2 = await store.commitObservation('env-1', obs2, authority);
     assert.ok(receipt2);
@@ -326,7 +337,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       ],
     });
 
-    const observation = createReadinessObservation(result, scope);
+    const observation = await issued(store, result, scope);
     assert.ok(observation);
     const receipt = await store.commitObservation('env-multi', observation, authority);
     assert.ok(receipt);
@@ -383,7 +394,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       observedAt: 4_000,
       engines: [{ engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [] }],
     });
-    const observation = createReadinessObservation(result, scope);
+    const observation = await issued(store, result, scope);
     assert.ok(observation);
     const receipt = await store.commitObservation('env-def', observation, authority);
     assert.ok(receipt);

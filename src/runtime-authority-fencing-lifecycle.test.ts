@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { testComposition } from './runtime-test-harness.ts';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -114,7 +115,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           readinessProbe: async () => result('permission mutation'),
         });
         await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'mutation accepted Worker');
-        const store = h.runtime.stores.environmentReadiness;
+        const store = testComposition(h.runtime).stores.environmentReadiness;
         const original = store.commitObservation.bind(store);
         let release!: () => void;
         const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -144,7 +145,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           readinessProbe: async () => result('permission response'),
         });
         await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'response accepted Worker');
-        const store = h.runtime.stores.environmentReadiness;
+        const store = testComposition(h.runtime).stores.environmentReadiness;
         const original = store.commitObservation.bind(store);
         let release!: () => void;
         const gate = new Promise<void>((resolve) => { release = resolve; });

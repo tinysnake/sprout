@@ -17,6 +17,7 @@ import {
   readinessAuthority,
   readinessWorkflowHarness,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 test('E2: the catalog, its records, and Project access survive a SQLite reopen', async (t) => {
@@ -31,7 +32,7 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
   const keyPath = join(directory, 'host-a-key.pem');
   const enrollmentId = await enrollEligibleInstance(first, 'host-a', keyPath);
   const firstEpoch = first.workerGateway.currentConnectionEpoch(enrollmentId)!;
-  const firstAuthority = first.workerGateway.authorizeObservation('host-a')!;
+  const firstAuthority = testComposition(first).workerGateway.authorizeObservation('host-a')!;
   await first.close();
 
   // Reopen exactly as a restart would: no in-memory epoch survives, but the

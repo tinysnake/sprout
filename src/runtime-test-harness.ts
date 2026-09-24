@@ -44,6 +44,8 @@ import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
 import {
   createSproutRuntime,
+  createSproutRuntimeForTest,
+  type SproutTestComposition,
   type RuntimeEnvironment,
   type RuntimeStores,
   type SproutRuntime,
@@ -55,8 +57,21 @@ export const runtimeWorkerResources = new WeakMap<
   Array<{ readonly worker: EnvironmentWorker; readonly connection: WorkerEnrollmentConnection }>
 >();
 
+type TestComposition = SproutTestComposition;
+const compositions = new WeakMap<SproutRuntime, TestComposition>();
+
+/** Explicit private adapter injection, unavailable from the application-facing Runtime. */
+export function testComposition(runtime: SproutRuntime): TestComposition {
+  const composition = compositions.get(runtime);
+  assert.ok(composition, 'test composition was injected');
+  return composition;
+}
+
 export async function createRuntime(options: Parameters<typeof createSproutRuntime>[0]) {
-  const runtime = await createSproutRuntime(options);
+  let composition: TestComposition | undefined;
+  const runtime = await createSproutRuntimeForTest(options, (value) => { composition = value; });
+  assert.ok(composition);
+  compositions.set(runtime, composition);
   const productionClose = runtime.close.bind(runtime);
   Object.defineProperty(runtime, 'close', {
     value: async () => {
@@ -85,7 +100,7 @@ export function readinessAuthority(
     environmentInstanceId ??
     runtime.environmentCatalog.entries().find((e) => e.enrollmentId === enrollmentId)?.instanceId ??
     INSTANCE_ID;
-  const authority = runtime.workerGateway.authorizeObservation(instanceId);
+  const authority = testComposition(runtime).workerGateway.authorizeObservation(instanceId);
   assert.ok(authority, 'an authenticated accepted Worker owns observation authority');
   assert.equal(authority.enrollmentId, enrollmentId);
   assert.equal(authority.connectionEpoch, connectionEpoch);
@@ -108,6 +123,7 @@ export async function connectRuntimeWorker(
   runtime: SproutRuntime,
   enrollmentId: string,
   identityKeyPath: string,
+  readiness: () => WorkerReadinessFacts = scriptedStartupReadiness,
 ): Promise<WorkerEnrollmentConnection> {
   const port = await runtimePort(runtime);
   const connection = await connectWorkerEnrollment({
@@ -120,6 +136,7 @@ export async function connectRuntimeWorker(
   const worker = new EnvironmentWorker({
     environmentInstanceId: enrollment.environmentInstanceId,
     engines: new Map(),
+    readiness,
     input: connection.stream,
     output: connection.stream,
   });
@@ -340,12 +357,16 @@ export function targetBoundScriptedProbe() {
 
 export function scriptedStartupReadiness() {
   return { ...targetBoundScriptedProbe().readiness, protocolVersion: WORKER_PROTOCOL_VERSION,
-    probe: startupWorkerProbe() };
+    probe: { ...startupWorkerProbe(), at: Date.now() } };
 }
 
-export async function observeSyntheticReady(runtime: SproutRuntime, enrollmentId: string, authority: ReadinessObservationAuthority) {
-  return runtime.enrollments.recordReadinessObservation(enrollmentId, targetBoundScriptedProbe(), authority,
-    { requirements: scriptedScope });
+export async function observeSyntheticReady(runtime: SproutRuntime, enrollmentId: string, _authority: ReadinessObservationAuthority) {
+  if (!_authority.isCurrent()) return undefined;
+  const enrollment = await runtime.enrollments.get(enrollmentId);
+  assert.ok(enrollment);
+  await waitFor(async () => (await runtime.enrollments.readiness(enrollmentId)).receipt !== undefined,
+    'accepted Worker bootstrap readiness');
+  return (await runtime.enrollments.readiness(enrollmentId)).receipt;
 }
 
 /** A helper that enrolls, approves, and makes eligible one instance. */

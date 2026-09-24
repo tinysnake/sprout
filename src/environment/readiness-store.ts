@@ -185,8 +185,11 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
 
     // JavaScript's run-to-completion rule makes this an atomic in-memory commit.
     const issued = this.#issued.get(pair.observationId);
-    if (pair.attempt !== undefined && (!issued || !attemptMatches(issued, authority, environmentInstanceId) ||
-        issued.sequence !== pair.attempt.sequence)) return false;
+    if (!pair.attempt || !issued || !attemptMatches(issued, authority, environmentInstanceId) ||
+        issued.sequence !== pair.attempt.sequence ||
+        JSON.stringify(issued.requirements) !== JSON.stringify(pair.requirements) ||
+        JSON.stringify(issued.requiredModels) !== JSON.stringify(pair.attempt.requiredModels) ||
+        JSON.stringify(issued.requirements) !== JSON.stringify(pair.attempt.requirements)) return false;
     const previous = this.#observations.get(pair.observationId);
     if (previous) return previous.workerObservedAt === pair.workerObservedAt &&
       sameObservationContent(previous.readiness, pair.readiness) &&

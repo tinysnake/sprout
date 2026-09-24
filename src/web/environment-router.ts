@@ -7,6 +7,7 @@ import {
   type EnrollmentEngineFact,
 } from '../environment/enrollment.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import { ReadinessOutcomeError } from '../environment/readiness-workflow.ts';
 import type { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
 import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
 import type { RetainedEvidence } from '../environment/recovery.ts';
@@ -662,6 +663,9 @@ function json(context: ApiRequestContext, status: number, payload: unknown): tru
 }
 
 function enrollmentFailure(context: ApiRequestContext, error: unknown): true {
+  if (error instanceof ReadinessOutcomeError && error.code !== undefined) {
+    return json(context, 409, { error: error.message, code: error.code });
+  }
   if (error instanceof EnrollmentError) {
     let status = 409;
     if (error.code === 'unknown-enrollment') status = 404;

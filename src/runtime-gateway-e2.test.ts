@@ -14,6 +14,7 @@ import {
   scriptedStartupReadiness,
   scriptedTurn,
   waitFor,
+  testComposition,
 } from './runtime-test-harness.ts';
 
 test('E2: an authenticated inbound connection admits a run on the enrolled instance', async (t) => {
@@ -149,7 +150,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
     // in that exact window must fail closed while the durable entry remains.
     const accepted = runtime.workerGateway.liveFor('enrolled-host-1');
     assert.ok(accepted !== undefined);
-    accepted.close();
+    testComposition(runtime).workerGateway.liveFor('enrolled-host-1')!.close();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, false);
     assert.ok(runtime.environmentCatalog.entry('enrolled-host-1') !== undefined, 'offline stays inspectable');
     assert.equal(runtime.pool.requiresLease('enrolled-host-1', ADMISSION_CAPABILITY), undefined);

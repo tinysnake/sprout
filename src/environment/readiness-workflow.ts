@@ -3,9 +3,8 @@
  *
  * Before this Module, readiness observation was orchestrated in three separate
  * places: Runtime's accept-time observer (startup / automatic target probe /
- * empty-target bootstrap), the Worker-layer `createWorkerProbeRequester`
- * (Human-requested probe), and the transitional `runtime.observeWorkerReadiness`
- * entry point. Each re-derived accepted authority, re-validated the untrusted
+ * empty-target bootstrap) and the Worker-layer `createWorkerProbeRequester`
+ * (Human-requested probe). Each re-derived accepted authority, re-validated the untrusted
  * Worker result, and re-checked the lifecycle fence, so a later fix had to be
  * applied at every interface.
  *
@@ -36,6 +35,21 @@
  */
 
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
+
+/** Internal outcome vocabulary. Never serialized into a Worker response. */
+export type ReadinessDisposition = 'committed' | 'malformed' | 'superseded' | 'unavailable';
+
+export class ReadinessOutcomeError extends Error {
+  readonly disposition: Exclude<ReadinessDisposition, 'committed'>;
+  readonly code: 'conflicting-observation' | 'superseded-observation' | undefined;
+  constructor(disposition: Exclude<ReadinessDisposition, 'committed'>, message: string,
+    code?: 'conflicting-observation' | 'superseded-observation') {
+    super(message);
+    this.name = 'ReadinessOutcomeError';
+    this.disposition = disposition;
+    this.code = code;
+  }
+}
 import { EnrollmentError } from './enrollment.ts';
 import type { ReadinessReceipt, ReadinessRequirementScope } from './readiness.ts';
 import type { ReadinessAttempt } from './readiness-store.ts';
@@ -72,7 +86,7 @@ export interface ReadinessAcceptance {
 export interface ReadinessLiveConnection {
   readonly enrollment: { readonly id: string };
   readonly epoch: { readonly connectionId: string; readonly epoch: number };
-  /** Core-owned target models, so the transitional entry point probes the same way. */
+  /** Core-owned target models for the accepted connection. */
   readonly requiredModels: readonly string[];
 }
 
@@ -233,27 +247,6 @@ export class EnvironmentReadinessWorkflow {
   }
 
   /**
-   * Transitional public entry point: observe the live accepted Worker for one
-   * enrollment. Delegates entirely to the one workflow; it is retained only for
-   * callers that hold an enrollment id instead of an acceptance.
-   */
-  async observeEnrollment(enrollmentId: string): Promise<void> {
-    const enrollment = await this.#enrollments.get(enrollmentId);
-    if (enrollment === undefined) return;
-    const live = this.#workerGateway.liveFor(enrollment.environmentInstanceId);
-    if (live === undefined) return;
-    if (live.enrollment.id !== enrollmentId) return;
-    await this.observeAccepted({
-      enrollment: { id: enrollmentId, environmentInstanceId: enrollment.environmentInstanceId },
-      epoch: live.epoch,
-      // Preserve the accepted connection's core-owned target models, so this
-      // transitional entry point uses the same collection mode as acceptance.
-      requiredModels: live.requiredModels,
-      authorizeObservation: () => this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId),
-    });
-  }
-
-  /**
    * The Human-requested probe trigger.
    *
    * Resolves the live accepted Worker epoch, collects one explicit target probe
@@ -270,49 +263,56 @@ export class EnvironmentReadinessWorkflow {
     }
     const authority = this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
     if (authority === undefined || !authority.isCurrent()) {
-      throw new Error('the Environment Worker is offline');
+      throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
     }
     const live = this.#workerGateway.liveFor(enrollment.environmentInstanceId);
-    if (live?.epoch.connectionId !== authority.connectionId) throw new Error('the Environment Worker is offline');
+    if (live?.epoch.connectionId !== authority.connectionId) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
     const reservation = this.#acceptanceReservations.get(authority.connectionId);
     if (reservation) await reservation;
-    if (!authority.isCurrent()) throw new Error('the Environment Worker is offline');
+    if (!authority.isCurrent()) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
     const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: live?.requiredModels ?? [] };
     const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
-    if (!ticket) throw new Error('the Environment Worker is offline');
-    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
-      this.#hasRequirementResolver ? ticket.requirements : undefined);
-    if (rawResult === undefined) throw new Error('the Environment Worker is offline');
+    if (!ticket) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
+    let rawResult: WorkerReadinessProbeResult | undefined;
+    try {
+      rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
+        this.#hasRequirementResolver ? ticket.requirements : undefined);
+    } catch {
+      // The channel may have closed or the Worker may have refused the RPC.
+      // Transport diagnostics never become an internal observation disposition.
+      throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
+    }
+    if (rawResult === undefined) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {
-      throw new Error('the Environment Worker returned an invalid readiness probe result');
+      throw new ReadinessOutcomeError('malformed', 'the Environment Worker returned an invalid readiness probe result');
     }
     const delivery = result.attemptId !== undefined && result.attemptId !== ticket.observationId
       ? await this.#enrollments.getReadinessAttempt(enrollment.id, result.attemptId, authority)
       : ticket;
     if (!delivery || !delivery.requirements || JSON.stringify(delivery.requirements) !== JSON.stringify(ticket.requirements)) {
-      throw new Error('the Environment Worker returned an unknown readiness attempt');
+      throw new ReadinessOutcomeError('malformed', 'the Environment Worker returned an unknown readiness attempt');
     }
     if (!authority.isCurrent()) {
-      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+      throw new ReadinessOutcomeError('superseded', 'the readiness probe result belongs to a superseded Worker connection epoch');
     }
     const receipt = await this.#persist(enrollment.id, authority, result, delivery);
     if (!receipt && authority.isCurrent()) {
       const prior = await this.#enrollments.getReceipt(enrollment.id, delivery.observationId);
       if (prior && authority.isCurrent()) {
-        throw new EnrollmentError('conflicting-observation', 'The Worker changed content for an issued readiness attempt.');
+        throw new ReadinessOutcomeError('superseded', 'The Worker changed content for an issued readiness attempt.', 'conflicting-observation');
       }
       const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
       if (current && current.sequence > delivery.sequence && authority.isCurrent()) {
-        throw new EnrollmentError('superseded-observation', 'A later-issued readiness observation superseded this attempt.');
+        throw new ReadinessOutcomeError('superseded', 'A later-issued readiness observation superseded this attempt.', 'superseded-observation');
       }
     }
     if (!receipt || !authority.isCurrent()) {
-      throw new EnrollmentError('superseded-observation', 'The readiness receipt is no longer current.');
+      throw new ReadinessOutcomeError('superseded', 'The readiness receipt is no longer current.', 'superseded-observation');
     }
     await this.#refreshEnvironmentCatalog();
     if (!authority.isCurrent()) {
-      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+      throw new ReadinessOutcomeError('superseded', 'the readiness probe result belongs to a superseded Worker connection epoch');
     }
     // Direct retrieval of the exact canonical committed observation by its receipt (#126):
     const committed = await this.#enrollments.getReceipt(enrollment.id, receipt.observationId);
@@ -322,9 +322,9 @@ export class EnvironmentReadinessWorkflow {
     // the lifecycle has since invalidated.
     if (!authority.isCurrent() || committed === undefined || current.readiness.observationId !== receipt.observationId) {
       if (authority.isCurrent() && committed !== undefined) {
-        throw new EnrollmentError('superseded-observation', 'The readiness receipt is no longer current.');
+        throw new ReadinessOutcomeError('superseded', 'The readiness receipt is no longer current.', 'superseded-observation');
       }
-      throw new Error('the readiness probe result belongs to a superseded Worker connection epoch');
+      throw new ReadinessOutcomeError('superseded', 'the readiness probe result belongs to a superseded Worker connection epoch');
     }
     return committed;
   }

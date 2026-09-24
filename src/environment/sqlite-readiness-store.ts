@@ -132,9 +132,13 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       const issued = pair.attempt === undefined ? undefined : this.#db.prepare(
         'SELECT document FROM environment_readiness_attempts WHERE observation_id = ? AND environment_instance_id = ?',
       ).get(pair.observationId, environmentInstanceId) as { document: string } | undefined;
-      if (pair.attempt !== undefined && (issued === undefined ||
-          !attemptMatches(JSON.parse(issued.document) as ReadinessAttempt, authority, environmentInstanceId) ||
-          (JSON.parse(issued.document) as ReadinessAttempt).sequence !== pair.attempt.sequence)) {
+      const reserved = issued === undefined ? undefined : JSON.parse(issued.document) as ReadinessAttempt;
+      if (!pair.attempt || !reserved ||
+          !attemptMatches(reserved, authority, environmentInstanceId) ||
+          reserved.sequence !== pair.attempt.sequence ||
+          JSON.stringify(reserved.requirements) !== JSON.stringify(pair.requirements) ||
+          JSON.stringify(reserved.requiredModels) !== JSON.stringify(pair.attempt.requiredModels) ||
+          JSON.stringify(reserved.requirements) !== JSON.stringify(pair.attempt.requirements)) {
         this.#db.exec('ROLLBACK'); return false;
       }
       const previous = this.#db.prepare('SELECT document FROM environment_observations WHERE observation_id = ?')

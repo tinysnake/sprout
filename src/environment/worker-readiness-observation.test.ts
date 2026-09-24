@@ -111,6 +111,15 @@ async function enrolled(
   return { service, store: readiness };
 }
 
+/** Private service fixture: reserve an immutable scope before the synthetic result arrives. */
+async function recordIssued(service: EnvironmentEnrollmentService, readiness: Parameters<EnvironmentEnrollmentService['observeWorkerReadiness']>[1],
+  authority: ReturnType<typeof testAuthority>): Promise<boolean> {
+  const attempt = await service.issueReadinessAttempt('enroll-1', authority);
+  if (!attempt) return false;
+  return (await service.recordReadinessObservation('enroll-1', { readiness, probe: readiness.probe }, authority,
+    { attempt })) !== undefined;
+}
+
 
 function startupReadiness() {
   return {
@@ -205,9 +214,11 @@ for (const persistent of [false, true]) {
     // A complete pair is projected and privacy-reduced, not stored as caller-
     // supplied product readiness; later invalid writes cannot overwrite it.
     const unknownVersionProbe = { ...probe, version: 'unknown' };
-    assert.equal(await service.observeReadiness('enroll-1', {
+    const issued = await service.issueReadinessAttempt('enroll-1', authority);
+    assert.ok(issued);
+    assert.ok(await service.recordReadinessObservation('enroll-1', {
       readiness: { ...facts, probe: unknownVersionProbe }, probe: unknownVersionProbe,
-    }, authority), true);
+    }, authority, { attempt: issued }));
     assert.equal(commit.mock.callCount(), 1);
     const acceptedReadiness = await store.getReadiness('env-1');
     const acceptedHistory = await store.listProbes('env-1');
@@ -239,7 +250,7 @@ for (const persistent of [false, true]) {
 
 test('startup Worker readiness persists one epoch-bound probe and its independent provenance facts', async () => {
   const { service } = await enrolled();
-  const recorded = await service.observeWorkerReadiness('enroll-1', startupReadiness(), testAuthority());
+  const recorded = await recordIssued(service, startupReadiness(), testAuthority());
   assert.equal(recorded, true);
 
   const assembled = await service.readiness('enroll-1');
@@ -332,8 +343,7 @@ test('disconnect while an atomic readiness/probe commit is waiting leaves neithe
   const store = new DelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness(
-    'enroll-1',
+  const recording = recordIssued(service,
     startupReadiness(),
     testAuthority({ isCurrent: () => current }),
   );
@@ -350,8 +360,7 @@ test('revoke fences a delayed accepted-epoch commit before durable lifecycle sav
   const store = new DelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness(
-    'enroll-1',
+  const recording = recordIssued(service,
     startupReadiness(),
     testAuthority({ isCurrent: () => current }),
   );
@@ -373,8 +382,7 @@ test('disconnect after the atomic commit cannot project the prior epoch as curre
   const store = new PostCommitDelayedReadinessStore();
   let current = true;
   const { service } = await enrolled(store, () => current ? 7 : undefined);
-  const recording = service.observeWorkerReadiness(
-    'enroll-1',
+  const recording = recordIssued(service,
     startupReadiness(),
     testAuthority({ isCurrent: () => current }),
   );

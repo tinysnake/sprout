@@ -44,7 +44,13 @@ test('the complete runtime graph is constructible over in-memory collaborators a
   assert.deepEqual(runtime.agents.list().map((definition) => definition.id).sort(), ['scout', 'scribe']);
   assert.deepEqual(runtime.projects.list().map((registered) => registered.id), [PROJECT_ID]);
   assert.deepEqual([...runtime.engines.keys()], ['scripted']);
-  assert.equal(runtime.stores, stores);
+  assert.notEqual(runtime.stores, stores, 'application view does not expose injected store writers');
+  assert.equal('commitObservation' in runtime.stores.environmentReadiness, false);
+  assert.equal('issueAttempt' in runtime.stores.environmentReadiness, false);
+  assert.equal('authorizeObservation' in runtime.workerGateway, false);
+  assert.equal('authorizeObservation' in (runtime.workerGateway.liveFor(INSTANCE_ID) ?? {}), false);
+  assert.equal('recordReadinessObservation' in runtime.enrollments, false);
+  assert.equal('observeWorkerReadiness' in runtime, false);
 
   // The Web transport is created but not listening until the caller asks, which
   // is the boundary the host entrypoint crosses with `listen`.

@@ -166,14 +166,15 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
           version: '0.154.0',
           summary: 'Worker non-inference readiness probe completed.',
         };
+        const authority = readinessAuthorityTestSeam.mint({
+          environmentInstanceId: enrollment.environmentInstanceId, enrollmentId, connectionEpoch: 1,
+        });
+        const attempt = await enrollments.issueReadinessAttempt(enrollmentId, authority);
+        assert.ok(attempt);
         const recorded = await enrollments.recordReadinessObservation(enrollmentId, {
           readiness: { protocolVersion: '2', observedAt: at, engines: [], probe },
           probe,
-        }, readinessAuthorityTestSeam.mint({
-          environmentInstanceId: enrollment?.environmentInstanceId ?? 'mac-mini-1',
-          enrollmentId,
-          connectionEpoch: 1,
-        }));
+        }, authority, { attempt });
         if (!recorded) throw new Error('synthetic Worker probe was rejected');
         return recorded;
       },
@@ -385,16 +386,15 @@ test('an empty engine configuration does not fabricate a dual-engine requirement
         { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
       ],
     });
-    await runtime.enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+    const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: 'mac-mini-1', enrollmentId: 'enroll-1', connectionEpoch: 1 });
+    const attempt = await runtime.enrollments.issueReadinessAttempt('enroll-1', authority);
+    assert.ok(attempt);
+    await runtime.enrollments.recordReadinessObservation('enroll-1', workerReadinessProbeFixture({
       protocolVersion: '2.1',
       engines: [
         { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       ],
-    }), readinessAuthorityTestSeam.mint({
-      environmentInstanceId: 'mac-mini-1',
-      enrollmentId: 'enroll-1',
-      connectionEpoch: 1,
-    }));
+    }), authority, { attempt });
     const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
     const body = (await readiness.json()) as {
       readonly readiness: {

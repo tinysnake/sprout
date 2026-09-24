@@ -262,14 +262,17 @@ test('a Worker-declared provider/account identity never reaches the durable read
   const { service, store } = await enrolled();
   // A Worker over the authenticated channel tries to smuggle provider identity
   // into the structured fields. The service sanitizes on the way in.
-  const recorded = await service.observeWorkerReadiness('enroll-1', {
+  const authority = testAuthority();
+  const attempt = await service.issueReadinessAttempt('enroll-1', authority);
+  assert.ok(attempt);
+  const recorded = await service.recordReadinessObservation('enroll-1', { readiness: {
     ...startupReadiness(),
     engines: [{
       engine: 'pi', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [],
       authenticated: true, authMode: 'provider-account', authType: 'openai-codex', source: 'openai-codex',
     }],
-  }, testAuthority());
-  assert.equal(recorded, true);
+  }, probe: startupReadiness().probe }, authority, { attempt });
+  assert.ok(recorded);
   const stored = await store.getReadiness('env-1');
   const serialized = JSON.stringify(stored);
   assert.equal(serialized.includes('openai-codex'), false, 'no provider identity is persisted');

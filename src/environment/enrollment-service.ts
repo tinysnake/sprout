@@ -440,6 +440,9 @@ export class EnvironmentEnrollmentService {
     authority: ReadinessObservationAuthority,
     options?: { readonly requirements?: ReadinessRequirementScope; readonly attempt?: import('./readiness-store.ts').ReadinessAttempt },
   ): Promise<ReadinessReceipt | undefined> {
+    // A live authority is not itself evidence that collection was issued by
+    // the core. The adapter checks the durable reservation again at commit.
+    if (!options?.attempt || options.requirements !== undefined) return undefined;
     const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
     if (verified === undefined) return undefined;
     const enrollment = await this.#requireEnrollment(enrollmentId);
@@ -458,9 +461,8 @@ export class EnvironmentEnrollmentService {
       supported: this.#supportedProtocol,
       at: this.#clock(),
       verifyAuthority: this.#verifyObservationAuthority,
-      ...(options?.attempt !== undefined ? { attempt: options.attempt } : {}),
-      ...(options?.attempt?.requirements !== undefined ? { requirements: options.attempt.requirements } :
-        options?.requirements !== undefined ? { requirements: options.requirements } : {}),
+      attempt: options.attempt,
+      ...(options.attempt.requirements !== undefined ? { requirements: options.attempt.requirements } : {}),
     });
     if (observation === undefined) return undefined;
     // Store adapters re-check the live authority guard at their mutation
