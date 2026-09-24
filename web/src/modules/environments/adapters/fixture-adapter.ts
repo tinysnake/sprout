@@ -413,6 +413,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
       env.leaseRecovery.reconciledEvidence = {
         retainedEventsCount: 4,
         engineStoppedProof: true,
+        turnSettlementObserved: true,
       };
       env.trafficLightReason = 'Evidence reconciled (4 events, engine stopped proof) · Ready for Human recovery decision';
     }
