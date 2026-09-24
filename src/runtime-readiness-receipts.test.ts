@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { SproutRuntime } from './runtime.ts';
 import type { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { ReadinessOutcomeError } from './environment/readiness-workflow.ts';
+import { createReadinessObservation } from './environment/readiness-observation.ts';
 
 /** Checked by tsc: normal application callers cannot issue, authorize or write evidence. */
 function applicationSurfaceCannotWrite(runtime: SproutRuntime, workflow: EnvironmentReadinessWorkflow): void {
@@ -74,6 +75,16 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const before = await store.getCurrentObservation(INSTANCE_ID);
       const history = await store.listObservations(INSTANCE_ID);
       const probes = await store.listProbes(INSTANCE_ID);
+      const admission = h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible;
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
+        enrollmentId, result, authority), undefined, 'live authority alone cannot write');
+      const unreserved = createReadinessObservation(result, { environmentInstanceId: INSTANCE_ID,
+        authority, supported: { minMajor: 2, maxMajor: 3 }, at: Date.now(),
+        verifyAuthority: (candidate, scope) => testComposition(h.runtime).workerGateway.verifyObservationAuthority(candidate, scope),
+      });
+      assert.ok(unreserved);
+      assert.equal(await injectedStore.commitObservation(INSTANCE_ID, unreserved, authority), false,
+        'raw adapter refuses a canonical but unreserved observation');
       for (const requirements of [null, [], 1, 'bad', { unknown: true },
         { revision: 'bad/revision' }, { requiredModels: [null] }, { requiredModels: ['bad/model'] }]) {
         assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
@@ -85,6 +96,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
       }
       const ticket = await testComposition(h.runtime).enrollments.issueReadinessAttempt(enrollmentId, authority, false, [], { requiredModels: [] });
       assert.ok(ticket);
+      assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(
+        enrollmentId, result, { ...authority } as never, { attempt: ticket }), undefined, 'copied live authority refused');
       const wrong = { ...ticket, sequence: ticket.sequence + 1 };
       assert.equal(await testComposition(h.runtime).enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: wrong }), undefined);
       const substituted = { ...ticket, requirements: { revision: 'r1', requiredModels: ['safe-model'] } };
@@ -92,6 +105,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.deepEqual(await store.getCurrentObservation(INSTANCE_ID), before);
       assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
       assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, admission);
       const receipt = await testComposition(h.runtime).enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: ticket });
       assert.ok(receipt);
       assert.deepEqual(receipt.requirements, { requiredModels: [] });
