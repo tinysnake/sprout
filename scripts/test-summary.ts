@@ -24,6 +24,7 @@ const child = spawn(
   process.execPath,
   [
     '--test',
+    '--test-concurrency=4',
     '--test-reporter=tap',
     `--test-reporter-destination=${reportPath}`,
     ...targets,
