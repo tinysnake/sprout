@@ -118,7 +118,7 @@ export class EnvironmentReadinessWorkflow {
   readonly #resolveRequirements: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
   readonly #hasRequirementResolver: boolean;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
-  readonly #collectingBootstrap = new Set<string>();
+  readonly #collectingBootstrap = new Map<string, Promise<void>>();
   readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
 
   constructor(options: EnvironmentReadinessWorkflowOptions) {
@@ -183,35 +183,44 @@ export class EnvironmentReadinessWorkflow {
     if (await this.#enrollments.getReceipt(enrollment.id, ticket.observationId)) return;
     const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
     if (current !== undefined && current.sequence > ticket.sequence) return;
-    if (this.#collectingBootstrap.has(ticket.observationId)) return;
-    this.#collectingBootstrap.add(ticket.observationId);
-    let outcome: CollectionOutcome;
+    const inFlight = this.#collectingBootstrap.get(ticket.observationId);
+    if (inFlight !== undefined) {
+      await inFlight;
+      return;
+    }
+    let resolveInFlight!: () => void;
+    const inFlightPromise = new Promise<void>((resolve) => { resolveInFlight = resolve; });
+    this.#collectingBootstrap.set(ticket.observationId, inFlightPromise);
     try {
-      outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
-    } catch {
+      let outcome: CollectionOutcome;
+      try {
+        outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
+      } catch {
+        // A channel that cannot identify itself is already offline; the close
+        // listener re-projects. A just-accepted Worker may also still be starting
+        // its JSON-RPC server, so retry against this epoch only.
+        this.#retry(acceptance, attempt, ticket);
+        return;
+      }
+      if (outcome.kind === 'not-ready') {
+        this.#retry(acceptance, attempt, ticket);
+        return;
+      }
+      // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
+      // are refused before any mutation.
+      if (outcome.kind === 'refused') return;
+      if (!authority.isCurrent()) return;
+      await this.#persist(
+        enrollment.id,
+        authority,
+        outcome.result,
+        ticket,
+      );
+      await this.#refreshEnvironmentCatalog();
+    } finally {
       this.#collectingBootstrap.delete(ticket.observationId);
-      // A channel that cannot identify itself is already offline; the close
-      // listener re-projects. A just-accepted Worker may also still be starting
-      // its JSON-RPC server, so retry against this epoch only.
-      this.#retry(acceptance, attempt, ticket);
-      return;
+      resolveInFlight();
     }
-    this.#collectingBootstrap.delete(ticket.observationId);
-    if (outcome.kind === 'not-ready') {
-      this.#retry(acceptance, attempt, ticket);
-      return;
-    }
-    // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
-    // are refused before any mutation.
-    if (outcome.kind === 'refused') return;
-    if (!authority.isCurrent()) return;
-    await this.#persist(
-      enrollment.id,
-      authority,
-      outcome.result,
-      ticket,
-    );
-    await this.#refreshEnvironmentCatalog();
   }
 
   /**

@@ -681,20 +681,41 @@ class FrameReader {
   }
 
   dispose(): void {
+    if (this.#ended) return;
+    this.#ended = true;
     this.#stream.removeAllListeners('data');
     this.#stream.removeAllListeners('end');
     this.#stream.removeAllListeners('close');
     this.#stream.removeAllListeners('error');
+    this.#stream.pause();
+    const remainder = this.#buffer;
+    this.#buffer = '';
+    this.#queue = [];
+    if (remainder.length > 0) {
+      this.#stream.unshift(remainder);
+    }
+    this.#stream.once('newListener', (event) => {
+      if (event === 'data') {
+        process.nextTick(() => this.#stream.resume());
+      }
+    });
   }
 
   #receive(chunk: string): void {
+    if (this.#ended) return;
     this.#buffer += chunk;
     let newline = this.#buffer.indexOf('\n');
     while (newline !== -1) {
       const line = this.#buffer.slice(0, newline);
       this.#buffer = this.#buffer.slice(newline + 1);
       const frame = decodeGatewayFrame(line);
-      if (frame !== undefined) this.#deliver(frame);
+      if (frame !== undefined) {
+        this.#deliver(frame);
+        if (frame.type === 'worker/ready') {
+          this.dispose();
+          return;
+        }
+      }
       newline = this.#buffer.indexOf('\n');
     }
   }
