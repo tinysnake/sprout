@@ -299,6 +299,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
       });
       assert.notEqual(response.status, 201, 'a malformed engine fact is never a successful probe');
       assert.equal(((await response.json()) as { probe?: unknown }).probe, undefined);
+      await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(enrollmentId),
+        (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'malformed');
       assert.equal(
         await h.runtime.stores.environmentReadiness.getReadiness(INSTANCE_ID),
         undefined,
