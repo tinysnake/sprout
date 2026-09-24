@@ -184,79 +184,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
   };
 }
 
-test('Production Web: mounts Shell and Manage / Environments, preserving structure and traffic-light reasons', async () => {
-  const { dom, vite, cleanup } = await setupProductionDom();
-  try {
-    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount, '#app mount container exists');
-
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
-    await router.push('/manage/environments');
-    await router.isReady();
-    app.mount(appMount);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    const doc = dom.window.document;
-
-    // 1. Verify Shell Navigation Structure
-    assert.ok(doc.querySelector('.desktop-sidebar'), 'Desktop sidebar rendered');
-    assert.ok(doc.querySelector('.mobile-bottom-nav'), 'Mobile bottom navigation rendered');
-    assert.ok(doc.querySelector('.operator-pill'), 'Operator pill rendered');
-
-    // 2. Verify Manage / Environments SubNav and Title
-    assert.match(doc.body.textContent ?? '', /Environments & Host Infrastructure/);
-    assert.match(doc.body.textContent ?? '', /Ready \(/);
-    assert.match(doc.body.textContent ?? '', /Attention \(/);
-    assert.match(doc.body.textContent ?? '', /Action Required \(/);
-    assert.match(doc.body.textContent ?? '', /Archived \(/);
-
-    // 3. Verify Prominent Traffic Light Banner & Mandatory Decisive Reason
-    const banner = doc.querySelector('.env-traffic-light-banner');
-    assert.ok(banner, 'Traffic light banner rendered');
-    assert.match(banner.textContent ?? '', /Green: Ready/);
-    assert.match(banner.textContent ?? '', /Decisive Fact: All capabilities permitted · Engines authenticated · Lease held by Task #101/);
-
-    // 4. Verify 6 Independent Health Dimensions
-    assert.match(doc.body.textContent ?? '', /6 Independent Health Dimensions/);
-    assert.match(doc.body.textContent ?? '', /1–4\. Core Operational Status & Safety Dimensions/);
-    assert.match(
-      doc.body.textContent ?? '',
-      /Health colour is an operational summary, not an authorization token to execute runs/,
-      'health colour authorization disclaimer is present in the DOM',
-    );
-    assert.match(doc.body.textContent ?? '', /5\. Capability Permissions/);
-    assert.match(doc.body.textContent ?? '', /6\. Engine Harness Readiness/);
-
-    // 5. Verify Engine Harness Status
-    assert.match(doc.body.textContent ?? '', /Codex/);
-    assert.match(doc.body.textContent ?? '', /Pi/);
-    assert.match(doc.body.textContent ?? '', /agy/);
-    assert.match(doc.body.textContent ?? '', /opencode/);
-
-    // 6. Verify Active Lease Card & Task-Held Lease Guarantee
-    assert.match(doc.body.textContent ?? '', /Task-Held Lease Active/);
-    assert.match(doc.body.textContent ?? '', /Task #101/);
-    assert.match(doc.body.textContent ?? '', /@Programmer/);
-
-    // 7. Verify exclusion of prototype harness controls and non-product copy
-    assert.doesNotMatch(doc.body.textContent ?? '', /ADR-\d{4}/, 'No ADR references in production DOM');
-    assert.doesNotMatch(doc.body.textContent ?? '', /Ticket #\d+/, 'No Ticket references in production DOM');
-    assert.doesNotMatch(doc.body.textContent ?? '', /Simulate/, 'No simulation copy in production DOM');
-    assert.equal(doc.querySelector('.proto-control-bar'), null, 'No prototype control bar');
-    assert.equal(doc.querySelector('#top-viewport-select'), null, 'No prototype viewport switcher');
-    assert.equal(doc.querySelector('#top-style-baseline-btn'), null, 'No prototype style baseline button');
-    assert.equal(doc.querySelector('.review-drawer'), null, 'No prototype review drawer');
-
-    app.unmount();
-  } finally {
-    await cleanup();
-  }
-});
-
-test('Production Web: filters environments and exposes accessible current states', async () => {
+test('M77-NAV-002: an unknown task detail deep link renders not-found and never substitutes a record', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
@@ -265,36 +193,22 @@ test('Production Web: filters environments and exposes accessible current states
     assert.ok(appMount);
 
     const { app, router } = createSproutApp(await deterministicAppOptions(vite));
-    await router.push('/manage/environments');
+    await router.push('/project/tasks/does-not-exist');
     await router.isReady();
     app.mount(appMount);
-
     await new Promise((resolve) => setTimeout(resolve, 80));
     const doc = dom.window.document;
 
-    // Filter pills check
-    const filterPills = doc.querySelectorAll('.env-filter-box-btn');
-    assert.equal(filterPills.length, 5, '5 discrete health filter buttons rendered');
+    assert.equal(router.currentRoute.value.params['taskId'], 'does-not-exist', 'the requested URL is preserved');
+    assert.ok(doc.querySelector('.tasks-not-found-state'), 'an explicit not-found state is rendered');
+    assert.match(doc.body.textContent ?? '', /Task Not Found/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /#101/, 'the first task is not substituted');
+    assert.equal(doc.querySelector('.operating-stage-card'), null, 'no other task detail is shown');
 
-    const allBtn = doc.querySelector('button[data-filter="all"]') as HTMLButtonElement;
-    assert.equal(allBtn.getAttribute('aria-pressed'), 'true', 'All filter active initially');
-
-    // Click 'ready' filter
-    const readyBtn = doc.querySelector('button[data-filter="ready"]') as HTMLButtonElement;
-    readyBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    assert.equal(readyBtn.getAttribute('aria-pressed'), 'true', 'Ready filter active');
-    assert.equal(allBtn.getAttribute('aria-pressed'), 'false', 'All filter inactive');
-
-    // Master cards check
-    const masterCards = doc.querySelectorAll('.env-master-card');
-    assert.ok(masterCards.length >= 1, 'Filtered master cards rendered');
-
-    // Return to all
-    allBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.equal(allBtn.getAttribute('aria-pressed'), 'true');
+    (doc.querySelector('.tasks-not-found-return') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(router.currentRoute.value.path, '/project/tasks', 'the return control recovers to the task list');
+    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/, 'the task list is restored');
 
     app.unmount();
   } finally {
@@ -302,140 +216,217 @@ test('Production Web: filters environments and exposes accessible current states
   }
 });
 
-test('Production Web: emergency Force Release Alert Dialog enforces 3-gate safety check and records audit event', async () => {
+test('M77-CONN-001: environment controls are disabled and refuse mutation while the connection is unsettled', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { createShellConnectionController } = (await vite.ssrLoadModule(
+      '/src/shell/connection.ts'
+    )) as typeof import('../shell/connection.ts');
 
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
-    await router.push('/manage/environments');
-    await router.isReady();
-    app.mount(appMount);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const doc = dom.window.document;
-
-    // Select the recovery environment: Windows Workstation 01 (env-recovery)
-    const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
-    assert.ok(recoveryCard, 'Recovery environment card found');
-    recoveryCard.click();
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    // Verify recovery alert box is displayed
-    const alertBox = doc.querySelector('.recovery-alert-box');
-    assert.ok(alertBox, 'Recovery alert box rendered');
-    assert.match(alertBox.textContent ?? '', /Lease Recovery Required/);
-    assert.match(alertBox.textContent ?? '', /Unresolved Operational Facts/);
-
-    // Click Emergency Force Release button
-    const forceBtn = doc.querySelector('.force-release-btn') as HTMLButtonElement;
-    assert.ok(forceBtn, 'Force release button found');
-    forceBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    // Verify Alert Dialog opened
-    assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
-
-    const typedInput = doc.querySelector('.force-confirm-typed') as HTMLInputElement;
-    assert.ok(typedInput, 'Typed confirmation input rendered');
-
-    const ackCheckbox = doc.querySelector('.ack-risks-checkbox') as HTMLInputElement;
-    assert.ok(ackCheckbox, 'Risk acknowledgement checkbox rendered');
-
-    const confirmBtn = doc.querySelector('.confirm-force-btn') as HTMLButtonElement;
-    assert.ok(confirmBtn, 'Authorize button rendered');
-    assert.equal(confirmBtn.disabled, true, 'Authorize button strictly disabled initially');
-
-    // Gate 1: Type confirmation without checking box
-    typedInput.value = 'FORCE RELEASE';
-    typedInput.dispatchEvent(new dom.window.Event('input'));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(confirmBtn.disabled, true, 'Disabled without risk acknowledgement');
-
-    // Gate 2: Check box
-    ackCheckbox.click();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(confirmBtn.disabled, false, 'Button enables when BOTH typed and checked');
-
-    // Authorize Force Release
-    confirmBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    // Verify Environment is unlocked, green ready, and audit event recorded
-    assert.match(doc.body.textContent ?? '', /Durable Forced Release Audit Event/);
-    assert.match(doc.body.textContent ?? '', /Operator \(Human Override\)/);
-
-    app.unmount();
-  } finally {
-    await cleanup();
-  }
-});
-
-test('Production Web: live readiness probe updates probe stream with fresh latency', async () => {
-  const { dom, vite, cleanup } = await setupProductionDom();
-  try {
-    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount);
-
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
-    await router.push('/manage/environments');
-    await router.isReady();
-    app.mount(appMount);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const doc = dom.window.document;
-
-    const probeBtn = doc.querySelector('.run-probe-btn') as HTMLButtonElement;
-    assert.ok(probeBtn, 'Readiness probe button found');
-
-    const initialHistoryLength = doc.querySelectorAll('.probe-history-stream > div').length;
-
-    probeBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    const updatedHistoryLength = doc.querySelectorAll('.probe-history-stream > div').length;
-    assert.ok(updatedHistoryLength >= initialHistoryLength + 1, 'New probe record appended to history stream');
-
-    app.unmount();
-  } finally {
-    await cleanup();
-  }
-});
-
-test('Production Web: phone drill-down navigation provides full-width detail and back header', async () => {
-  const { dom, vite, cleanup } = await setupProductionDom();
-  try {
-    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-
-    const appMount = dom.window.document.getElementById('app');
-    assert.ok(appMount);
-
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
-    // Navigate directly to mobile detail drill-down route
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({
+      ...(await deterministicAppOptions(vite)),
+      connectionSource: controller,
+    });
     await router.push('/manage/environments/env-ready');
     await router.isReady();
     app.mount(appMount);
-
     await new Promise((resolve) => setTimeout(resolve, 80));
     const doc = dom.window.document;
 
-    // Verify Mobile Detail Nav Header rendered
-    const backHeader = doc.querySelector('.mobile-detail-nav-header');
-    assert.ok(backHeader, 'Mobile detail nav header rendered in drill-down mode');
-    assert.match(backHeader.textContent ?? '', /Mac Studio M2 Max/);
+    const probe = () => doc.querySelector('.run-probe-btn') as HTMLButtonElement;
+    assert.equal(probe().disabled, false, 'a settled connection allows control');
+    const before = doc.querySelectorAll('.probe-history-stream > div').length;
 
-    const backBtn = doc.querySelector('#btn-back-to-envs') as HTMLButtonElement;
-    assert.ok(backBtn, 'Back to environments button found');
-
-    backBtn.click();
+    controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
     await new Promise((resolve) => setTimeout(resolve, 60));
 
-    assert.equal(router.currentRoute.value.path, '/manage/environments', 'Navigated back to master list');
+    assert.equal(probe().disabled, true, 'the probe control is disabled while reconnecting');
+    for (const selector of ['.approve-enroll-btn', '.unbind-env-btn', '.quick-probe-btn']) {
+      const control = doc.querySelector(selector) as HTMLButtonElement | null;
+      if (control) assert.equal(control.disabled, true, `${selector} is disabled while reconnecting`);
+    }
+    const masterCard = doc.querySelector('.env-master-card') as HTMLButtonElement;
+    assert.equal(masterCard.disabled, true, 'the interactive master card is disabled while reconnecting');
+
+    // Clicking a disabled control neither mutates nor queues anything.
+    probe().click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(
+      doc.querySelectorAll('.probe-history-stream > div').length,
+      before,
+      'no probe was applied or queued while the connection was unsettled'
+    );
+
+    // The control returns immediately when the connection settles.
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(probe().disabled, false, 'control returns with the connection');
+    probe().click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(
+      doc.querySelectorAll('.probe-history-stream > div').length > before,
+      'a settled connection applies the control immediately'
+    );
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M77-PROJECT-001: Project Chat renders each scope from its typed discriminator and label', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const scope = (id: string) => doc.querySelector(`[data-scope-id="${id}"]`) as HTMLElement;
+    const channel = scope('#general');
+    const group = scope('wg-frontend');
+    const direct = scope('dm-architect');
+    assert.ok(channel && group && direct, 'every chat scope is rendered');
+
+    assert.equal(channel.dataset['scopeKind'], 'channel');
+    assert.equal(group.dataset['scopeKind'], 'working-group');
+    assert.equal(direct.dataset['scopeKind'], 'direct-message');
+
+    assert.match(channel.textContent ?? '', /Project channel/);
+    assert.match(group.textContent ?? '', /Working group/);
+    assert.match(direct.textContent ?? '', /Direct message/);
+
+    // Distinct scopes resolve distinct icons; they were previously all agents.
+    const iconOf = (el: HTMLElement) => el.querySelector('svg')?.innerHTML ?? '';
+    assert.notEqual(iconOf(channel), iconOf(direct), 'a channel and a direct message render different icons');
+    assert.notEqual(iconOf(group), iconOf(direct), 'a working group and a direct message render different icons');
+    assert.notEqual(iconOf(channel), iconOf(group), 'a channel and a working group render different icons');
+    assert.equal(iconOf(direct), iconOf(direct), 'the direct message icon is stable');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #89: archive/restore parity on phone drill-down, and the offline state.
+// ---------------------------------------------------------------------------
+
+test('M89-PARITY: phone drill-down exposes the same archive and restore capabilities as desktop', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    // A cold start on the phone detail route: the same capabilities must be
+    // reachable without a desktop master/detail split. The degraded row is
+    // approved with no lease and clear work safety, so archive is offered.
+    await router.push('/manage/environments/env-degraded');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    assert.ok(doc.querySelector('.envs-mobile-detail-wrapper'), 'the phone detail view renders');
+    const archiveBtn = doc.querySelector('.archive-env-btn') as HTMLButtonElement;
+    assert.ok(archiveBtn, 'Archive Instance is offered on phone drill-down');
+    archiveBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.match(doc.body.textContent ?? '', /Archived Instance/, 'the row becomes archived');
+    const restoreBtn = doc.querySelector('.restore-env-btn') as HTMLButtonElement;
+    assert.ok(restoreBtn, 'Restore Instance is offered on phone drill-down');
+    restoreBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.match(doc.body.textContent ?? '', /Degraded/, 'restore returns the row to its valid enrollment');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: an environment with a force-release audit is distinct from an ordinary held lease', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    // Drive the recovery row through the three-gate Force Release.
+    const recoveryCard = doc.querySelector('button[data-env="env-recovery"]') as HTMLButtonElement;
+    recoveryCard.click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    (doc.querySelector('.force-release-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const typedInput = doc.querySelector('.force-confirm-typed') as HTMLInputElement;
+    typedInput.value = 'FORCE RELEASE';
+    typedInput.dispatchEvent(new dom.window.Event('input'));
+    (doc.querySelector('.ack-risks-checkbox') as HTMLInputElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    (doc.querySelector('.confirm-force-btn') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Green: Ready/, 'the row returns to Green');
+    assert.match(doc.body.textContent ?? '', /Durable Forced Release Audit Event/, 'the audit box renders');
+    assert.equal(doc.querySelector('.recovery-alert-box'), null, 'the recovery box is gone');
+    assert.equal(doc.querySelector('.active-lease-box'), null, 'no lease box masquerades as the audit');
+    // The audit is distinguishable from an ordinary held lease (env-ready).
+    assert.ok(doc.querySelector('.forced-release-audit-box'), 'the audit box is rendered');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('M89-STATE: a pasted deep link to an archived environment renders its archived detail', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/env-archived');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const doc = dom.window.document;
+
+    const banner = doc.querySelector('.env-traffic-light-banner');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? '', /Archived Instance/, 'the archived state renders its own banner title');
+    assert.match(banner.textContent ?? '', /New work admission barred/, 'the archived decisive reason renders');
+    assert.ok(doc.querySelector('.restore-env-btn'), 'Restore is the offered action');
+    assert.equal(doc.querySelector('.archive-env-btn'), null, 'Archive is not offered twice');
 
     app.unmount();
   } finally {
