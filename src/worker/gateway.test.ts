@@ -766,6 +766,32 @@ test('a delayed older epoch cannot become live after a newer epoch wins the barr
   }
 });
 
+test('gateway handoff preserves a pipelined JSON-RPC notification across a partial line', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    let received!: (method: string) => void;
+    const notification = new Promise<string>((resolve) => { received = resolve; });
+    const remove = h.gateway.onAccept((acceptance) => {
+      if (acceptance.accepted) acceptance.transport.onNotification((message) => received(message.method));
+    });
+    const raw = await openRawWorker(h, key.path, '');
+    assert.equal(raw.frame.type, 'worker/accepted');
+    const rpc = JSON.stringify({ jsonrpc: '2.0', method: 'handoff/check', params: null }) + '\n';
+    raw.stream.write(JSON.stringify({ type: 'worker/ready' }) + '\n' + rpc.slice(0, 17));
+    assert.equal((await raw.next()).type, 'worker/listening');
+    raw.stream.write(rpc.slice(17));
+    assert.equal(await Promise.race([notification, new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 500))]), 'handoff/check');
+    remove();
+    raw.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
 test('channel loss invalidates the cached enrollment port facts and commands', async () => {
   const h = await harness();
   const key = tmpKey();

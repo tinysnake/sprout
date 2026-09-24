@@ -269,6 +269,7 @@ class CoreFrameReader {
   #queue: WorkerGatewayServerFrame[] = [];
   #waiters: ((frame: WorkerGatewayServerFrame | undefined) => void)[] = [];
   #ended = false;
+  #disposed = false;
   #onData: (chunk: Buffer | string) => void;
   #onEnd: () => void;
   #onClose: () => void;
@@ -297,12 +298,15 @@ class CoreFrameReader {
   dispose(): void {
     // The stream now carries JSON-RPC; stop consuming and detach so the Worker
     // server owns every subsequent line.
-    if (this.#ended) return;
+    if (this.#disposed) return;
+    this.#disposed = true;
+    const finished = this.#ended;
     this.#ended = true;
     this.#stream.removeListener('data', this.#onData);
     this.#stream.removeListener('end', this.#onEnd);
     this.#stream.removeListener('close', this.#onClose);
     this.#stream.removeListener('error', this.#onError);
+    if (finished) return; // EOF/error still needs listener cleanup, not a handoff.
     this.#stream.pause();
     const remainder = this.#buffer;
     this.#buffer = '';

@@ -178,49 +178,58 @@ export class EnvironmentReadinessWorkflow {
     const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
       this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, requirements.requiredModels ?? [], requirements));
     if (!ticket) return;
-    // A bootstrap is one adoption per acceptance, even across Runtime restart.
-    // A reread is inspection, not another measurement.
-    if (await this.#enrollments.getReceipt(enrollment.id, ticket.observationId)) return;
-    const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
-    if (current !== undefined && current.sequence > ticket.sequence) return;
     const inFlight = this.#collectingBootstrap.get(ticket.observationId);
     if (inFlight !== undefined) {
       await inFlight;
       return;
     }
-    let resolveInFlight!: () => void;
-    const inFlightPromise = new Promise<void>((resolve) => { resolveInFlight = resolve; });
-    this.#collectingBootstrap.set(ticket.observationId, inFlightPromise);
+    // Share the actual leader outcome from receipt inspection through persistence
+    // AND catalog projection. Waiters see failures; a scheduled not-ready retry
+    // remains best-effort and is not part of this settlement window.
+    const leader = this.#settleBootstrap(acceptance, attempt, ticket, authority, mode, requirements);
+    this.#collectingBootstrap.set(ticket.observationId, leader);
     try {
-      let outcome: CollectionOutcome;
-      try {
-        outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
-      } catch {
-        // A channel that cannot identify itself is already offline; the close
-        // listener re-projects. A just-accepted Worker may also still be starting
-        // its JSON-RPC server, so retry against this epoch only.
-        this.#retry(acceptance, attempt, ticket);
-        return;
-      }
-      if (outcome.kind === 'not-ready') {
-        this.#retry(acceptance, attempt, ticket);
-        return;
-      }
-      // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
-      // are refused before any mutation.
-      if (outcome.kind === 'refused') return;
-      if (!authority.isCurrent()) return;
-      await this.#persist(
-        enrollment.id,
-        authority,
-        outcome.result,
-        ticket,
-      );
-      await this.#refreshEnvironmentCatalog();
+      await leader;
     } finally {
       this.#collectingBootstrap.delete(ticket.observationId);
-      resolveInFlight();
     }
+  }
+
+  async #settleBootstrap(
+    acceptance: ReadinessAcceptance, attempt: number, ticket: ReadinessAttempt,
+    authority: ReadinessObservationAuthority, mode: CollectionMode, requirements: ReadinessRequirementScope,
+  ): Promise<void> {
+    const { enrollment } = acceptance;
+    // A bootstrap is one adoption per acceptance, even across Runtime restart.
+    // A reread is inspection, not another measurement.
+    if (await this.#enrollments.getReceipt(enrollment.id, ticket.observationId)) return;
+    const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
+    if (current !== undefined && current.sequence > ticket.sequence) return;
+    let outcome: CollectionOutcome;
+    try {
+      outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
+    } catch {
+      // A channel that cannot identify itself is already offline; the close
+      // listener re-projects. A just-accepted Worker may also still be starting
+      // its JSON-RPC server, so retry against this epoch only.
+      this.#retry(acceptance, attempt, ticket);
+      return;
+    }
+    if (outcome.kind === 'not-ready') {
+      this.#retry(acceptance, attempt, ticket);
+      return;
+    }
+    // Missing, malformed, non-Worker, disallowed, or contradictory probe copies
+    // are refused before any mutation.
+    if (outcome.kind === 'refused') return;
+    if (!authority.isCurrent()) return;
+    await this.#persist(
+      enrollment.id,
+      authority,
+      outcome.result,
+      ticket,
+    );
+    await this.#refreshEnvironmentCatalog();
   }
 
   /**

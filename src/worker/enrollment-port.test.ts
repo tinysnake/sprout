@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { JsonRpcTransport } from '../engine/jsonrpc.ts';
+import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { EnrollmentWorkerPort } from './enrollment-port.ts';
 import type { WorkerGateway, WorkerGatewayAcceptance } from './gateway.ts';
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
@@ -57,7 +58,6 @@ test('connectWorkerEnrollment preserves downstream stream data arriving alongsid
 
   const wss = new WebSocketServer({ port: 0 });
   const port = (wss.address() as { port: number }).port;
-  let receivedRpc = false;
 
   wss.on('connection', (ws) => {
     const stream = createWebSocketStream(ws);
@@ -78,7 +78,7 @@ test('connectWorkerEnrollment preserves downstream stream data arriving alongsid
         // Server writes worker/listening AND downstream JSON-RPC line together in one segment/stream write
         stream.write(
           JSON.stringify({ type: 'worker/listening', epoch: 1 }) + '\n' +
-          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'worker/info', params: null }) + '\n'
+          JSON.stringify({ jsonrpc: '2.0', method: 'handoff/check', params: { ok: true } }) + '\n'
         );
       }
     });
@@ -93,18 +93,18 @@ test('connectWorkerEnrollment preserves downstream stream data arriving alongsid
       engineFacts: [],
     });
 
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => resolve(), 300);
-      connection.stream.on('data', (chunk) => {
-        if (chunk.toString().includes('worker/info')) receivedRpc = true;
+    const transport = new LineJsonRpcTransport({ input: connection.stream, output: connection.stream });
+    const receivedRpc = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 300);
+      transport.onNotification((notice) => {
         clearTimeout(timer);
-        resolve();
+        resolve(notice.method === 'handoff/check');
       });
     });
 
     connection.close();
     wss.close();
-    assert.equal(receivedRpc, true, 'the downstream JSON-RPC request must not be swallowed by the handshake reader');
+    assert.equal(receivedRpc, true, 'the downstream JSON-RPC notification must not be swallowed by the handshake reader');
   } finally {
     wss.close();
     rmSync(dir, { recursive: true, force: true });

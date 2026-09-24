@@ -664,13 +664,18 @@ class FrameReader {
   #queue: WorkerGatewayClientFrame[] = [];
   #waiters: ((frame: WorkerGatewayClientFrame | undefined) => void)[] = [];
   #ended = false;
+  #disposed = false;
+  readonly #onData: (chunk: Buffer | string) => void;
+  readonly #onEnd: () => void;
 
   constructor(stream: Duplex) {
     this.#stream = stream;
-    stream.on('data', (chunk: Buffer | string) => this.#receive(chunk.toString()));
-    stream.on('end', () => this.#finish());
-    stream.on('close', () => this.#finish());
-    stream.on('error', () => this.#finish());
+    this.#onData = (chunk) => this.#receive(chunk.toString());
+    this.#onEnd = () => this.#finish();
+    stream.on('data', this.#onData);
+    stream.on('end', this.#onEnd);
+    stream.on('close', this.#onEnd);
+    stream.on('error', this.#onEnd);
   }
 
   next(): Promise<WorkerGatewayClientFrame | undefined> {
@@ -681,12 +686,15 @@ class FrameReader {
   }
 
   dispose(): void {
-    if (this.#ended) return;
+    if (this.#disposed) return;
+    this.#disposed = true;
+    const finished = this.#ended;
     this.#ended = true;
-    this.#stream.removeAllListeners('data');
-    this.#stream.removeAllListeners('end');
-    this.#stream.removeAllListeners('close');
-    this.#stream.removeAllListeners('error');
+    this.#stream.removeListener('data', this.#onData);
+    this.#stream.removeListener('end', this.#onEnd);
+    this.#stream.removeListener('close', this.#onEnd);
+    this.#stream.removeListener('error', this.#onEnd);
+    if (finished) return; // No JSON-RPC handoff after EOF/error.
     this.#stream.pause();
     const remainder = this.#buffer;
     this.#buffer = '';
