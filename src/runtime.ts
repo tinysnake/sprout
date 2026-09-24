@@ -1150,6 +1150,71 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         void readinessWorkflow.observeAccepted(acceptance).catch(() => undefined);
       }, 10);
       timer.unref();
+
+      // Recovery is a machine-channel workflow, not a Web action. Serialize
+      // snapshots with live notifications; the SQLite receipt commits before
+      // acknowledging the Worker outbox. Failed sync leaves the outbox intact.
+      let synchronizing = Promise.resolve();
+      const observedRecoveries = new Set<string>();
+      const current = () => workerGateway.liveFor(acceptance.enrollment.environmentInstanceId)
+        ?.epoch.connectionId === acceptance.epoch.connectionId;
+      const synchronize = () => {
+        synchronizing = synchronizing.then(async () => {
+          if (!current() || durableStores.recovery.receiveWorkerTurn === undefined) return;
+          const snapshot = await acceptance.transport.request<import('./worker/recovery-journal.ts').JournalSnapshot | null>(
+            'recovery/snapshot');
+          if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
+          const receipts: { turnId: string; sequence: number; settlement: boolean; eventCount: number }[] = [];
+          for (const turn of snapshot.turns) {
+            if (!current()) return;
+            const receipt = await durableStores.recovery.receiveWorkerTurn(acceptance.enrollment.id, turn);
+            receipts.push({ turnId: turn.turnId, ...receipt });
+          }
+          const records = (await recovery.listForEnvironment(acceptance.enrollment.environmentInstanceId))
+            .filter((record) => record.phase !== 'resolved');
+          for (const record of records) {
+            if (!current() || acceptance.enrollment.capabilityPermissions['agent-run'] !== true) return;
+            const newlyObserved = !observedRecoveries.has(record.leaseId);
+            if (newlyObserved) {
+              await recovery.observeReconnect(record.leaseId, {
+                enrollmentId: acceptance.enrollment.id,
+                environmentInstanceId: acceptance.enrollment.environmentInstanceId,
+                identityVerified: true, protocolCompatible: true, permissionsAllowed: true,
+                hadActiveRun: true,
+              });
+              observedRecoveries.add(record.leaseId);
+            }
+            if (!current()) return;
+            if (!newlyObserved && record.phase === 'recovery') continue;
+            await recovery.synchronizeEvidence(record.leaseId, {
+              hadActiveRun: true, // never infer idle from an empty outbox
+              evidence: {
+                retainedEventCount: receipts.reduce((sum, receipt) => sum + receipt.eventCount, 0),
+                turnSettlementObserved: receipts.length > 0 && receipts.every((receipt) => receipt.settlement),
+                engineSessionStopped: snapshot.engineStopped,
+                taskContextRecycled: record.taskId !== undefined && snapshot.taskContexts[record.taskId] === 'recycled',
+              },
+            });
+          }
+          for (const receipt of receipts) {
+            if (!current()) return;
+            await acceptance.transport.request('recovery/acknowledge', {
+              epoch: snapshot.epoch, turnId: receipt.turnId, sequence: receipt.sequence,
+              settlement: receipt.settlement,
+            });
+          }
+        }).catch(() => {
+          // Never leak event payload or host paths through operational logs.
+          // No ack on failure: the next connection must redeliver the outbox.
+          options.onWorkerLog?.('Worker recovery evidence incomplete; retained events remain unacknowledged.');
+        });
+      };
+      const off = acceptance.transport.onNotification((notification) => {
+        if (notification.method === 'turn/event' || notification.method === 'turn/settled') synchronize();
+      });
+      acceptance.onChannelClosed(off);
+      const syncTimer = setTimeout(synchronize, 15);
+      syncTimer.unref();
     });
     workerGateway.onConnectionClosed((closed) => {
       readinessWorkflow.releaseAccepted(closed.epoch.connectionId);

@@ -14,7 +14,7 @@
  * file, and the final path is never briefly more permissive than 0600.
  */
 
-import { chmodSync, closeSync, mkdirSync, openSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Owner-only permissions for a file that holds identity or configuration. */
@@ -38,10 +38,17 @@ export function writePrivateFile(filePath: string, content: string): void {
   const descriptor = openSync(staged, 'w', PRIVATE_FILE_MODE);
   try {
     writeFileSync(descriptor, content, 'utf8');
+    fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
   }
   chmodSync(staged, PRIVATE_FILE_MODE);
   renameSync(staged, filePath);
   chmodSync(filePath, PRIVATE_FILE_MODE);
+  // Persist the directory entry too: a successful rename alone does not survive
+  // every power loss on POSIX filesystems.
+  if (process.platform !== 'win32') {
+    const directory = openSync(dirname(filePath), 'r');
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  }
 }

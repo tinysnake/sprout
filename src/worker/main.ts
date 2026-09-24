@@ -54,6 +54,7 @@ async function runWorker(): Promise<void> {
 
   if (enrollmentTarget !== undefined) {
     const { connectWorkerEnrollment } = await import('./enrollment-connector.ts');
+    const { WorkerRecoveryJournal } = await import('./recovery-journal.ts');
     let connection;
     try {
       connection = await connectWorkerEnrollment({
@@ -75,11 +76,13 @@ async function runWorker(): Promise<void> {
       return;
     }
     log(WORKER_DIAGNOSTICS.outboundConnected);
+    const recoveryJournal = new WorkerRecoveryJournal(`${enrollmentTarget.identityKeyPath}.recovery`, connection.epoch);
     const worker = new EnvironmentWorker({
       environmentInstanceId,
       engines,
       input: connection.stream,
       output: connection.stream,
+      recoveryJournal,
       onLog: log,
       workspaceRoot,
       readiness: () => workerReadiness,

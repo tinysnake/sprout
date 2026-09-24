@@ -259,7 +259,7 @@ export async function recoveryApi(options: { readonly requiredEngines?: readonly
 test('Force Release over HTTP requires the full manifest and records the permanent outcome', async () => {
   const runtime = await recoveryApi();
   try {
-    await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/reconnect`, runtime, {
+    await runtime.recovery.observeReconnect(runtime.leaseId, {
       enrollmentId: 'enroll-1',
       environmentInstanceId: 'mac-mini-1',
       identityVerified: true,
@@ -267,7 +267,7 @@ test('Force Release over HTTP requires the full manifest and records the permane
       permissionsAllowed: true,
       hadActiveRun: true,
     });
-    await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/evidence`, runtime, {
+    await runtime.recovery.synchronizeEvidence(runtime.leaseId, {
       hadActiveRun: true,
       evidence: {
         retainedEventCount: 2,

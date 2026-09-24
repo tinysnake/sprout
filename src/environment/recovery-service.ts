@@ -543,6 +543,13 @@ export class EnvironmentRecoveryService {
         'An ordinary decision requires synchronized retained evidence.',
       );
     }
+    if (!record.evidence.engineSessionStopped || !record.evidence.turnSettlementObserved ||
+        (record.runId !== undefined && record.evidence.retainedEventCount === 0)) {
+      throw new EnvironmentRecoveryError(
+        'evidence-not-synchronized',
+        'Ordinary recovery requires an acknowledged terminal outcome and engine fence.',
+      );
+    }
     return record;
   }
 

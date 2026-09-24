@@ -238,6 +238,20 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'phase', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  worker_recovery_receipts: [
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'turn_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'settlement', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'event_count', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'settlement_payload', type: 'TEXT', notnull: 0, pk: 0 },
+  ],
+  worker_recovery_events: [
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'turn_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 3 },
+    { name: 'payload', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_force_releases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },

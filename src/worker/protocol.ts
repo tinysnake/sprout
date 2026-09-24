@@ -33,6 +33,8 @@ export const WORKER_METHODS = {
   recycleTaskContext: 'context/recycle',
   /** Validate or prepare one Project workspace selection (#93). */
   validateWorkspace: 'workspace/validate',
+  recoverySnapshot: 'recovery/snapshot',
+  recoveryAcknowledge: 'recovery/acknowledge',
 } as const;
 
 export const WORKER_NOTIFICATIONS = {

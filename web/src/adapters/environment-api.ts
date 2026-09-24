@@ -215,21 +215,6 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly recovery: readonly EnvironmentRecoveryView[];
     readonly forceReleases: readonly ForceReleaseView[];
   }>;
-  /** Record a verified same-identity reconnect; moves the record to reconciling. */
-  observeReconnect(leaseId: string, input: {
-    readonly enrollmentId: string;
-    readonly environmentInstanceId: string;
-    readonly identityVerified: boolean;
-    readonly protocolCompatible: boolean;
-    readonly permissionsAllowed: boolean;
-    readonly hadActiveRun: boolean;
-    readonly evidence?: RetainedEvidenceView;
-  }): Promise<EnvironmentRecoveryView>;
-  /** Synchronize retained evidence; the only path that can resolve or reach recovery. */
-  synchronizeEvidence(leaseId: string, input: {
-    readonly evidence: RetainedEvidenceView;
-    readonly hadActiveRun: boolean;
-  }): Promise<EnvironmentRecoveryView>;
   /** Ordinary Resume: keep the interrupted run as history on the same lease. */
   resumeRecovery(leaseId: string, reason?: string): Promise<EnvironmentRecoveryView>;
   /** Ordinary Discard: safe Task end that recycles context before release. */
@@ -342,20 +327,6 @@ export function createEnvironmentEnrollmentBrowserAdapter(
     },
     recovery: (id) =>
       transport.request(`/api/environments/enrollments/${encodeURIComponent(id)}/recovery`),
-    async observeReconnect(leaseId, input) {
-      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
-        `/api/environments/recovery/${encodeURIComponent(leaseId)}/reconnect`,
-        jsonCommand(input),
-      );
-      return response.recovery;
-    },
-    async synchronizeEvidence(leaseId, input) {
-      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
-        `/api/environments/recovery/${encodeURIComponent(leaseId)}/evidence`,
-        jsonCommand(input),
-      );
-      return response.recovery;
-    },
     async resumeRecovery(leaseId, reason) {
       const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
         `/api/environments/recovery/${encodeURIComponent(leaseId)}/resume`,

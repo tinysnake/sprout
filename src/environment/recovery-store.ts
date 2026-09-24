@@ -1,4 +1,11 @@
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.ts';
+import type { JournalTurn } from '../worker/recovery-journal.ts';
+
+export interface RecoveryReceipt {
+  readonly sequence: number;
+  readonly settlement: boolean;
+  readonly eventCount: number;
+}
 
 /**
  * Durable storage for Environment recovery records and Force Release outcomes (#88).
@@ -14,6 +21,8 @@ import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.t
  * Environment returns to Green.
  */
 export interface RecoveryStore {
+  /** Optional only for legacy in-memory adapters; production must fail closed without it. */
+  receiveWorkerTurn?(enrollmentId: string, turn: JournalTurn): Promise<RecoveryReceipt>;
   save(record: EnvironmentRecoveryRecord): Promise<void>;
   get(recordId: string): Promise<EnvironmentRecoveryRecord | undefined>;
   /** The open (non-resolved) record protecting one lease, if any. */

@@ -31,6 +31,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
   contractDeliveryDiagnostic,
   sanitizeEngineTurnResult,
@@ -73,6 +74,7 @@ export interface EnvironmentWorkerOptions {
   readonly readinessProbe?: (
     params: WorkerReadinessProbeParams,
   ) => Promise<WorkerReadinessProbeResult>;
+  readonly recoveryJournal?: WorkerRecoveryJournal;
 }
 interface LiveSession {
   readonly engine: string;
@@ -145,6 +147,15 @@ export class EnvironmentWorker {
         case WORKER_METHODS.info:
           this.#transport.respond(id, this.#info());
           return;
+        case WORKER_METHODS.recoverySnapshot:
+          this.#transport.respond(id, this.#options.recoveryJournal?.snapshot() ?? null);
+          return;
+        case WORKER_METHODS.recoveryAcknowledge: {
+          const ack = params as { epoch: number; turnId: string; sequence: number; settlement: boolean };
+          this.#options.recoveryJournal?.acknowledge(ack.epoch, ack.turnId, ack.sequence, ack.settlement);
+          this.#transport.respond(id, {});
+          return;
+        }
         case WORKER_METHODS.readinessProbe:
           this.#transport.respond(id, await this.#probeReadiness(params as WorkerReadinessProbeParams));
           return;
@@ -248,6 +259,9 @@ export class EnvironmentWorker {
       throw new Error(`worker does not host engine: ${params.engine}`);
     }
 
+    // Fence conservatively before an engine can start, not after it returns.
+    this.#options.recoveryJournal?.engineStarted();
+
     const session = await adapter.startSession({
       agentId: params.agentId,
       workingDirectory: params.projectWorkspaceId === undefined
@@ -265,7 +279,7 @@ export class EnvironmentWorker {
         : {}),
     });
 
-    const sessionId = `session-${++this.#counter}`;
+    const sessionId = `session-${this.#options.recoveryJournal?.snapshot().epoch ?? 'local'}-${++this.#counter}`;
     // Every contract delivery is reported, not just a refusal. An operator must
     // be able to tell from the log whether the contract reached the engine and
     // through which mechanism, for every mechanism — including the two ordinary
@@ -280,19 +294,23 @@ export class EnvironmentWorker {
       session,
       turnId: undefined,
       events: {
-        event: (turnId, event) =>
+        event: (turnId, event) => {
+          this.#options.recoveryJournal?.event(turnId, event);
           this.#transport.notify(WORKER_NOTIFICATIONS.event, {
             sessionId,
             turnId,
             event,
-          }),
-        settled: (turnId, result, engineSessionKey) =>
+          });
+        },
+        settled: (turnId, result, engineSessionKey) => {
+          this.#options.recoveryJournal?.settled(turnId, result);
           this.#transport.notify(WORKER_NOTIFICATIONS.settled, {
             sessionId,
             turnId,
             result,
             ...(engineSessionKey !== undefined ? { engineSessionKey } : {}),
-          }),
+          });
+        },
       },
     });
     return {
@@ -303,12 +321,15 @@ export class EnvironmentWorker {
     };
   }
 
-  #prepareTaskContext(params: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
-    return this.#requireWorkspace().prepare(params);
+  async #prepareTaskContext(params: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
+    const prepared = await this.#requireWorkspace().prepare(params);
+    this.#options.recoveryJournal?.context(params.taskId, 'prepared');
+    return prepared;
   }
 
-  #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
-    return this.#requireWorkspace().recycle(params);
+  async #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
+    await this.#requireWorkspace().recycle(params);
+    this.#options.recoveryJournal?.context(params.taskId, 'recycled');
   }
 
   #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
@@ -328,6 +349,7 @@ export class EnvironmentWorker {
   #run(params: RunParams): RunResult {
     const live = this.#require(params.sessionId);
     const turnId = `${params.sessionId}-turn-${++this.#counter}`;
+    this.#options.recoveryJournal?.begin(params.sessionId, turnId);
     live.turnId = turnId;
 
     void (async () => {
@@ -372,6 +394,7 @@ export class EnvironmentWorker {
     if (live) {
       this.#sessions.delete(params.sessionId);
       await live.session.close();
+      if (this.#sessions.size === 0) this.#options.recoveryJournal?.engineStopped();
     }
     return {};
   }
@@ -389,9 +412,11 @@ export class EnvironmentWorker {
   async shutdown(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    let fenced = true;
     for (const [sessionId, live] of this.#sessions) {
       this.#sessions.delete(sessionId);
-      await live.session.close().catch(() => undefined);
+      await live.session.close().catch(() => { fenced = false; });
     }
+    if (fenced) this.#options.recoveryJournal?.engineStopped();
   }
 }
