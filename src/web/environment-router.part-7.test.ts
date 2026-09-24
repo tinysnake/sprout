@@ -41,8 +41,6 @@ import { EnvironmentArchiveService } from '../environment/archive.ts';
 
 import { workerIdentityFixture } from '../environment/worker-identity-fixture.ts';
 
-import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
-
 import { createRunApi } from './api.ts';
 
 import { createEnvironmentRouter } from './environment-router.ts';
@@ -212,34 +210,6 @@ function command(
 }
 
 
-function read(
-  base: string,
-  path: string,
-  session: { readonly cookie: string },
-): Promise<Response> {
-  return fetch(`${base}${path}`, { headers: { cookie: session.cookie } });
-}
-
-
-/** Obtain a challenge over HTTP and answer it as the Worker would. */
-async function proveWorker(
-  runtime: EnrollmentRuntime,
-  identity: ReturnType<typeof workerIdentityFixture>,
-): Promise<WorkerIdentityProof> {
-  const challengeResponse = await command(
-    runtime.base,
-    '/api/environments/enrollments/enroll-1/challenge',
-    runtime,
-    {},
-  );
-  assert.equal(challengeResponse.status, 200);
-  const { challenge } = (await challengeResponse.json()) as {
-    readonly challenge: { readonly id: string; readonly enrollmentId: string; readonly nonce: string };
-  };
-  return identity.sign(challenge);
-}
-
-
 /** A helper that drives an approved enrollment and one protected Task lease over HTTP. */
 export async function recoveryApi(options: { readonly requiredEngines?: readonly string[] } = {}): Promise<
   EnrollmentRuntime & { readonly leaseId: string }
@@ -275,155 +245,36 @@ export async function recoveryApi(options: { readonly requiredEngines?: readonly
 }
 
 
-test('an anonymous caller cannot reach any Environment enrollment route', async () => {
+test('a machine claim route is separate from the Human browser session', async () => {
   const runtime = await enrollmentApi();
   try {
-    assert.equal((await fetch(`${runtime.base}/api/environments/enrollments`)).status, 401);
-    assert.equal(
-      (await fetch(`${runtime.base}/api/environments/enrollments`, { method: 'POST' })).status,
-      401,
-    );
-    // The proof challenge is authority-adjacent, so it must not be mintable
-    // anonymously even though it grants nothing by itself.
-    assert.equal(
-      (
-        await fetch(`${runtime.base}/api/environments/enrollments/enroll-1/challenge`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        })
-      ).status,
-      401,
-    );
-  } finally {
-    await runtime.api.close();
-  }
-});
-
-
-test('the enrollment lifecycle proves identity, then requires Human approval', async () => {
-  const runtime = await enrollmentApi();
-  try {
-    const identity = workerIdentityFixture();
     const requested = await command(runtime.base, '/api/environments/enrollments', runtime, {
       environmentInstanceId: 'mac-mini-1',
       displayName: 'Local Mac',
-      publicKey: identity.publicKey,
-      platform: 'macos',
-      protocolVersion: '2.1',
-      capabilityRequests: ['agent-run'],
-      engines: [{ engine: 'codex', installed: true, authenticated: true, models: ['gpt-5-codex'] }],
-    });
-    assert.equal(requested.status, 201);
-    const requestedBody = (await requested.json()) as {
-      readonly enrollment: { readonly status: string };
-      readonly bootstrap: { readonly instructions: readonly string[] };
-    };
-    assert.equal(requestedBody.enrollment.status, 'pending');
-    assert.ok(requestedBody.bootstrap.instructions.length > 0);
-    assert.equal(JSON.stringify(requestedBody).includes(identity.publicKey), false, 'the public key is never echoed');
-
-    // A bare public key with no proof is refused: presenting a key is not proof.
-    const bare = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      publicKey: identity.publicKey,
-      connection: { state: 'online', lastConfirmedAt: 10_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [],
-    });
-    assert.equal(bare.status, 400, 'a connect without a proof is refused');
-
-    // A signed challenge response is a verified proof and keeps it pending.
-    const connect = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: await proveWorker(runtime, identity),
-      connection: { state: 'online', lastConfirmedAt: 10_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
-      ],
-    });
-    assert.equal(connect.status, 200);
-    assert.equal(((await connect.json()) as { outcome: string }).outcome, 'duplicate-same-key');
-
-    // Human approval grants the requested capability.
-    const approved = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
-      capabilityPermissions: { 'agent-run': true },
-    });
-    assert.equal(approved.status, 200);
-    assert.equal(
-      ((await approved.json()) as { enrollment: { status: string } }).enrollment.status,
-      'approved',
-    );
-
-    // Even a proof-bearing legacy browser connect request cannot impersonate
-    // the Gateway's protocol negotiation and publish its refusal diagnostic.
-    const browserSkew = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: await proveWorker(runtime, identity),
-      connection: { state: 'reconnecting' },
-      compatibility: { state: 'incompatible', workerProtocolVersion: '99' },
-      engines: [],
-      gatewayProtocolNegotiation: 'incompatible',
-    });
-    assert.equal(browserSkew.status, 200);
-    assert.equal(((await browserSkew.json()) as { outcome: string }).outcome, 'reconnected');
-
-    const readiness = await read(
-      runtime.base,
-      '/api/environments/enrollments/enroll-1/readiness',
-      runtime,
-    );
-    assert.equal(readiness.status, 200);
-    const readinessBody = (await readiness.json()) as {
-      readonly readiness: { readonly summary: { readonly level: string; readonly reason: string } };
-    };
-    assert.equal(readinessBody.readiness.summary.reason.length > 0, true);
-    assert.equal(['green', 'yellow', 'red'].includes(readinessBody.readiness.summary.level), true);
-    assert.equal((readinessBody as { connectionAttempt?: unknown }).connectionAttempt, undefined);
-  } finally {
-    await runtime.api.close();
-  }
-});
-
-
-test('a forged signature cannot reconnect, and a real one can', async () => {
-  const runtime = await enrollmentApi();
-  try {
-    const identity = workerIdentityFixture();
-    await command(runtime.base, '/api/environments/enrollments', runtime, {
-      environmentInstanceId: 'mac-mini-1',
-      displayName: 'Local Mac',
-      publicKey: identity.publicKey,
       platform: 'macos',
       capabilityRequests: ['agent-run'],
       engines: [],
     });
-
-    // The signature is over the wrong nonce, so it must be refused before any
-    // identity is reconciled.
-    const challengeResponse = await command(
-      runtime.base,
-      '/api/environments/enrollments/enroll-1/challenge',
-      runtime,
-      {},
+    const body = (await requested.json()) as { readonly claim: { readonly secret: string } };
+    // The Worker claims without any browser cookie or CSRF token.
+    const claimed = await fetch(
+      `${runtime.base}/api/worker/enrollments/enroll-1/claim`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ claimSecret: body.claim.secret }),
+      },
     );
-    const { challenge } = (await challengeResponse.json()) as {
-      readonly challenge: { readonly id: string; readonly enrollmentId: string; readonly nonce: string };
-    };
-    const forged = identity.sign({ ...challenge, nonce: `${challenge.nonce}-tampered` });
-    const refused = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: forged,
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [],
+    assert.equal(claimed.status, 200);
+    // A browser session cannot manufacture a Worker claim, and the machine route
+    // does not set or accept a Human cookie.
+    assert.equal(claimed.headers.get('set-cookie'), null);
+    const replay = await fetch(`${runtime.base}/api/worker/enrollments/enroll-1/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claimSecret: body.claim.secret }),
     });
-    assert.equal(refused.status, 401, 'an invalid signature is unauthorized');
-
-    const accepted = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: await proveWorker(runtime, identity),
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [],
-    });
-    assert.equal(accepted.status, 200);
+    assert.equal(replay.status, 409);
   } finally {
     await runtime.api.close();
   }

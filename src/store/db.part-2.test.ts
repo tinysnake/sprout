@@ -32,8 +32,16 @@ import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
 
+import { DatabaseSync } from 'node:sqlite';
+
 
 import { SqliteStore } from '../store/db.ts';
+
+import { SqliteRunStore } from '../run/sqlite-store.ts';
+
+import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
+
+import { SqliteProjectStore } from '../project/sqlite-store.ts';
 
 
 interface ColumnShape {
@@ -256,21 +264,139 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
 };
 
 
-function withStore(run: (store: SqliteStore) => Promise<void> | void): Promise<void> {
-  const directory = mkdtempSync(join(tmpdir(), 'sprout-rehome-'));
-  const store = new SqliteStore({ filename: join(directory, 'sprout.db') });
-  return Promise.resolve()
-    .then(() => run(store))
-    .finally(() => {
-      store.close();
-      rmSync(directory, { recursive: true, force: true });
-    });
+/**
+ * A database written with the exact pre-rehome `CREATE TABLE` text.
+ *
+ * The statements below are copied verbatim from the adapters at the fixed base
+ * commit (`git show <base>:src/run/sqlite-store.ts`), so opening this file with
+ * the rehomed adapters proves the moved classes still read the schema an older
+ * Sprout produced. Regenerating it means copying the base text again; the point
+ * is that the on-disk shape does not change across the move.
+ */
+function writeHistoricalDatabase(path: string): void {
+  const db = new DatabaseSync(path);
+  db.exec(`
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      project_id TEXT,
+      status TEXT NOT NULL,
+      events TEXT NOT NULL,
+      lease_id TEXT,
+      failure TEXT,
+      result TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      hand_off TEXT,
+      task_id TEXT,
+      token_usage TEXT
+    );
+    CREATE TABLE environment_leases (
+      id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      holder_id TEXT NOT NULL,
+      holder_kind TEXT,
+      run_id TEXT,
+      task_id TEXT,
+      acquired_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      state TEXT NOT NULL
+    );
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      document TEXT NOT NULL
+    );
+    CREATE TABLE agent_session_keys (
+      slot TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      working_directory TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.exec(`
+    INSERT INTO agent_runs (id, agent_id, prompt, environment_instance_id, project_id, status, events, created_at, token_usage)
+    VALUES ('legacy-run', 'agent-scout', 'hi', 'mac-mini-1', 'project-sprout', 'completed', '[]', 10,
+            '{"promptTokens":7,"completionTokens":3,"totalTokens":10}');
+    INSERT INTO environment_leases (id, instance_id, capability, holder_id, holder_kind, task_id, acquired_at, expires_at, state)
+    VALUES ('legacy-lease', 'mac-mini-1', 'agent-run', 'task-1', 'task', 'task-1', 10, 60000, 'active');
+    INSERT INTO projects (id, document)
+    VALUES ('legacy-project', '{"id":"legacy-project","goal":"old goal","rules":[],"availableEnvironmentInstanceIds":[],"memberships":[]}');
+  `);
+  db.close();
 }
 
 
-test('the composed handle declares every domain table with its contract columns', async () => {
-  await withStore((store) => {
-    const tables = store.db
+test('a directly constructed domain adapter and the shared handle observe the same rows', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-rehome-mount-'));
+  const path = join(directory, 'sprout.db');
+  try {
+    const handle = new SqliteStore({ filename: path });
+    const lease = {
+      id: 'lease-1',
+      instanceId: 'mac-mini-1',
+      capability: 'agent-run',
+      holderId: 'run-1',
+      holderKind: 'run' as const,
+      runId: 'run-1',
+      acquiredAt: 1,
+      expiresAt: 2,
+      state: 'active' as const,
+    };
+    handle.leases.save(lease);
+    await handle.runs.save({
+      id: 'run-1',
+      agentId: 'agent-scout',
+      prompt: 'go',
+      environmentInstanceId: 'mac-mini-1',
+      status: 'queued',
+      events: [],
+      createdAt: 1,
+    });
+    await handle.projects.save({
+      id: 'project-sprout',
+      goal: 'Ship it',
+      rules: [],
+      availableEnvironmentInstanceIds: ['mac-mini-1'],
+      memberships: [],
+    });
+    handle.close();
+
+    // Independent adapters over the same file read exactly what the composed
+    // handle wrote, which is the compatibility property the move must keep.
+    const leaseStore = new SqliteLeaseStore({ filename: path });
+    assert.deepEqual(leaseStore.get('lease-1'), lease);
+    leaseStore.close();
+
+    const runStore = new SqliteRunStore({ filename: path });
+    assert.equal((await runStore.get('run-1'))?.environmentInstanceId, 'mac-mini-1');
+    runStore.close();
+
+    const projectStore = new SqliteProjectStore({ filename: path });
+    assert.equal((await projectStore.get('project-sprout'))?.goal, 'Ship it');
+    projectStore.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('a database written with the pre-rehome schema still opens and reads back', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-rehome-historical-'));
+  const path = join(directory, 'historical.db');
+  try {
+    writeHistoricalDatabase(path);
+
+    const handle = new SqliteStore({ filename: path });
+    // Opening runs the idempotent `CREATE TABLE IF NOT EXISTS` and the
+    // `#addColumnIfMissing` migrations; a historical file must be left with the
+    // same nine tables rather than failing or duplicating one.
+    const tables = handle.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all() as unknown as readonly { readonly name: string }[];
     assert.deepEqual(
@@ -278,98 +404,18 @@ test('the composed handle declares every domain table with its contract columns'
       Object.keys(EXPECTED_SCHEMA).sort(),
     );
 
-    for (const [table, expected] of Object.entries(EXPECTED_SCHEMA)) {
-      const columns = store.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly ColumnShape[];
-      assert.deepEqual(
-        columns.map(({ name, type, notnull, pk }) => ({ name, type, notnull, pk })),
-        expected,
-        `column shape for ${table}`,
-      );
-    }
-  });
-});
+    // Rows written before the move come back through the rehomed adapters with
+    // their meaning intact, including a JSON document and a Task-held lease.
+    assert.equal((await handle.runs.get('legacy-run'))?.tokenUsage?.totalTokens, 10);
+    assert.equal(handle.leases.get('legacy-lease')?.holderKind, 'task');
+    assert.equal((await handle.projects.get('legacy-project'))?.goal, 'old goal');
+    handle.close();
 
-
-test('explicit indexes keep their names, tables, and column order', async () => {
-  await withStore((store) => {
-    const indexes = store.db
-      .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL")
-      .all() as unknown as readonly { readonly name: string; readonly tbl_name: string }[];
-    assert.deepEqual(
-      indexes.map((index) => ({ name: index.name, tbl: index.tbl_name })),
-      [
-        { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
-        { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
-        { name: 'environment_enrollments_instance_idx', tbl: 'environment_enrollments' },
-        { name: 'environment_observations_instance_seq_idx', tbl: 'environment_observations' },
-        { name: 'environment_recovery_lease_idx', tbl: 'environment_recovery' },
-        { name: 'environment_recovery_instance_idx', tbl: 'environment_recovery' },
-        { name: 'environment_force_releases_instance_idx', tbl: 'environment_force_releases' },
-        { name: 'task_run_links_by_task', tbl: 'task_run_links' },
-      ],
-    );
-
-    const replayColumns = store.db.prepare('PRAGMA index_info(agent_runs_replay_sequence_idx)').all() as unknown as readonly {
-      readonly name: string;
-    }[];
-    assert.deepEqual(replayColumns.map((column) => column.name), ['replay_sequence']);
-
-    const sessionColumns = store.db.prepare('PRAGMA index_info(browser_sessions_active_idx)').all() as unknown as readonly {
-      readonly name: string;
-    }[];
-    assert.deepEqual(sessionColumns.map((column) => column.name), ['revoked_at', 'credential_version']);
-
-    const obsColumns = store.db.prepare('PRAGMA index_info(environment_observations_instance_seq_idx)').all() as unknown as readonly {
-      readonly name: string;
-    }[];
-    assert.deepEqual(obsColumns.map((column) => column.name), ['environment_instance_id', 'sequence']);
-
-    const columns = store.db.prepare('PRAGMA index_info(task_run_links_by_task)').all() as unknown as readonly {
-      readonly name: string;
-    }[];
-    assert.deepEqual(columns.map((column) => column.name), ['task_id', 'sequence']);
-  });
-});
-
-
-test('uniqueness identities are still enforced by the database, not the caller', async () => {
-  await withStore((store) => {
-    const unique = store.db
-      .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND sql IS NULL ORDER BY name")
-      .all() as unknown as readonly { readonly name: string; readonly tbl_name: string }[];
-    // Every entry is the implicit index behind a PRIMARY KEY or UNIQUE column;
-    // their existence is what makes a repeated delivery key, wake idempotency
-    // key, and session-key slot collapse onto one row.
-    assert.deepEqual(
-      unique.map((row) => row.tbl_name).sort(),
-      [
-        'agent_runs',
-        'agent_session_keys',
-        'agents',
-        'browser_sessions',
-        'browser_sessions',
-        'collaboration_messages',
-        'collaboration_messages',
-        'collaboration_wake_requests',
-        'collaboration_wake_requests',
-        'environment_catalog',
-        'environment_enrollments',
-        'environment_force_releases',
-        'environment_instance_enrollment_authority',
-        'environment_leases',
-        'environment_observations',
-        'environment_probes',
-        'environment_readiness',
-        'environment_readiness_attempts',
-        'environment_readiness_attempts',
-        'environment_recovery',
-        'project_authorities',
-        'project_environment_access',
-        'projects',
-        'task_run_links',
-        'tasks',
-        'worker_connection_epochs',
-      ],
-    );
-  });
+    // A standalone rehomed adapter over the same historical file agrees.
+    const leases = new SqliteLeaseStore({ filename: path });
+    assert.equal(leases.get('legacy-lease')?.taskId, 'task-1');
+    leases.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

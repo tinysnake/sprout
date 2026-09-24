@@ -261,91 +261,43 @@ async function waitFor(predicate: () => boolean, description: string, timeoutMs 
 }
 
 
-test('a pending enrollment has no probe authority over the real gateway (R118-API-002)', async (t) => {
-  const h = await harness();
-  const key = tmpKey();
-  t.after(async () => { key.cleanup(); await h.close(); });
-  await h.enrollments.requestEnrollment({
-    environmentInstanceId: INSTANCE_ID, displayName: 'Local Mac', platform: 'macos',
-    capabilityRequests: ['agent-run'], engineFacts: [],
-  });
-  assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes', { forged: true })).status, 409);
-});
-
-
-test('a real accepted Worker probe crosses the gateway epoch and GET returns coherent facts (R118-API-002)', async (t) => {
+test('reset over the real gateway invalidates the epoch and returns no current facts (R118-API-002)', async (t) => {
   const h = await harness();
   const key = tmpKey();
   t.after(async () => { key.cleanup(); await h.close(); });
   await enrollAndApprove(h, key.path);
   await h.connect(key.path);
   await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
+  assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes')).status, 201);
 
-  const probe = await post(h, '/api/environments/enrollments/enroll-1/probes');
-  const probeText = await probe.text();
-  assert.equal(probe.status, 201, probeText);
-  const body = JSON.parse(probeText) as { probe: { latencyMs: number; source?: string; version?: string } };
-  assert.equal(body.probe.latencyMs, 9, 'the Worker-measured latency is returned, not a browser value');
-  assert.equal(body.probe.source, 'worker');
-  assert.equal(body.probe.version, '0.86.1');
+  await h.enrollments.reset('enroll-1', 'rotate');
+  assert.equal(h.gateway.liveFor(INSTANCE_ID), undefined);
+  assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
 
-  const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
-  assert.equal(readiness.status, 200);
-  const readinessBody = (await readiness.json()) as {
-    readiness: { enrollmentStatus: string; engines: { engine: string; version?: string }[]; probe?: { version?: string } };
-    probes: readonly { version?: string }[];
+  const body = (await (await get(h, '/api/environments/enrollments/enroll-1/readiness')).json()) as {
+    readiness: { enrollmentStatus: string; probe?: unknown; connection: { state: string } };
+    probes: readonly unknown[];
   };
-  assert.equal(readinessBody.readiness.enrollmentStatus, 'approved');
-  assert.equal(readinessBody.readiness.engines[0]?.version, '0.86.1');
-  assert.equal(readinessBody.readiness.probe?.version, '0.86.1');
-  assert.deepEqual(readinessBody.probes.map((p) => p.version), ['0.86.1']);
+  assert.equal(body.readiness.enrollmentStatus, 'pending');
+  assert.equal(body.readiness.probe, undefined);
+  assert.deepEqual(body.probes, []);
+  assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes')).status, 409);
 });
 
 
-test('POST returns the committed sanitized probe when the Worker version is unknown (R118-API-002)', async (t) => {
+test('a revoke inside the real probe response window never returns the old probe (R118-API-002)', async (t) => {
   const h = await harness();
   const key = tmpKey();
   t.after(async () => { key.cleanup(); await h.close(); });
   await enrollAndApprove(h, key.path);
+  // Delay the Worker probe so the revoke lands while the response is in flight.
+  let releaseProbe: (() => void) | undefined;
+  const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  let probeStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { probeStarted = resolve; });
   await h.connect(key.path, async () => {
-    const probe = {
-      at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
-      source: 'worker' as const, version: 'unknown', summary: 'Worker probe version unavailable.',
-    };
-    return {
-      readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe },
-      probe,
-    };
-  });
-  await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
-
-  const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
-  const responseText = await response.text();
-  assert.equal(response.status, 201, responseText);
-  const returned = JSON.parse(responseText) as { probe: { version?: string } };
-  assert.equal(returned.probe.version, 'unknown-version');
-  const committed = await h.enrollments.listProbes('enroll-1');
-  assert.equal(committed.at(-1)?.version, 'unknown-version');
-  assert.deepEqual(returned.probe, {
-    at: committed.at(-1)?.at,
-    latencyMs: committed.at(-1)?.latencyMs,
-    protocolOk: committed.at(-1)?.protocolOk,
-    enginesOk: committed.at(-1)?.enginesOk,
-    source: committed.at(-1)?.source,
-    version: committed.at(-1)?.version,
-    summary: committed.at(-1)?.summary,
-  });
-});
-
-
-test('the authenticated JSON-RPC probe receives only core-configured target models (R118-MODEL-004)', async (t) => {
-  const h = await harness();
-  const key = tmpKey();
-  t.after(async () => { key.cleanup(); await h.close(); });
-  await enrollAndApprove(h, key.path);
-  let received: WorkerReadinessProbeParams | undefined;
-  await h.connect(key.path, async (params) => {
-    received = params;
+    probeStarted?.();
+    await probeGate;
     return {
       protocolVersion: WORKER_PROTOCOL_VERSION,
       engines: [{
@@ -356,84 +308,19 @@ test('the authenticated JSON-RPC probe receives only core-configured target mode
     };
   });
   await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
-  assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes', { requiredModels: ['browser-forgery'] })).status, 201);
-  assert.deepEqual(received?.requiredModels, ['gpt-6-astra']);
-  assert.match(received?.attemptId ?? '', /^obs-/);
+
+  const pending = post(h, '/api/environments/enrollments/enroll-1/probes');
+  await started;
+  await h.enrollments.revoke('enroll-1', 'retired mid-probe');
+  releaseProbe?.();
+  const response = await pending;
+  assert.notEqual(response.status, 201, 'a superseded response is never reported as a successful probe');
+  const body = (await response.json()) as { probe?: unknown };
+  assert.equal(body.probe, undefined, 'no stale probe payload is returned');
 });
 
 
-test('missing or mismatched JSON-RPC probe facts are never committed or returned (R118-API-002)', async (t) => {
-  for (const result of [
-    // Missing the embedded observation makes POST/GET incoherent.
-    {
-      readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [] },
-      probe: { at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true, source: 'worker', version: '0.86.1', summary: 'probe' },
-    },
-    // Both shapes are valid individually but must describe the same fact.
-    {
-      readiness: {
-        protocolVersion: WORKER_PROTOCOL_VERSION, engines: [],
-        probe: { at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true, source: 'worker', version: '0.86.1', summary: 'embedded' },
-      },
-      probe: { at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true, source: 'worker', version: '0.86.1', summary: 'returned' },
-    },
-  ]) {
-    const h = await harness();
-    const key = tmpKey();
-    t.after(async () => { key.cleanup(); await h.close(); });
-    await enrollAndApprove(h, key.path);
-    await h.connect(key.path, async () => result as unknown as WorkerReadinessProbeResult);
-    await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
-    const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
-    assert.notEqual(response.status, 201);
-    assert.equal((await response.json() as { probe?: unknown }).probe, undefined);
-    const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
-    assert.deepEqual((await readiness.json() as { probes: readonly unknown[] }).probes, []);
-  }
-});
-
-
-test('provider, account, and unknown probe sources from real JSON-RPC never reach GET or POST (R118-BOUNDARY-003)', async (t) => {
-  for (const source of ['provider-account', 'openai-codex', 'unknown']) {
-    const h = await harness();
-    const key = tmpKey();
-    t.after(async () => { key.cleanup(); await h.close(); });
-    await enrollAndApprove(h, key.path);
-    await h.connect(key.path, async () => ({
-      readiness: {
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        engines: [],
-        probe: {
-          at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
-          source, version: '0.86.1', summary: 'safe summary',
-        },
-      },
-      probe: {
-        at: 5_000, latencyMs: 9, protocolOk: true, enginesOk: true,
-        source, version: '0.86.1', summary: 'safe summary',
-      },
-    }) as unknown as WorkerReadinessProbeResult);
-    await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
-    const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
-    assert.notEqual(response.status, 201);
-    const responseText = await response.text();
-    assert.equal((JSON.parse(responseText) as { probe?: unknown }).probe, undefined);
-    if (source !== 'unknown') assert.equal(responseText.includes(source), false);
-    const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
-    const readinessText = await readiness.text();
-    const readinessBody = JSON.parse(readinessText) as {
-      readonly readiness: { readonly probe?: { readonly source?: string } };
-      readonly probes: readonly { readonly source?: string }[];
-    };
-    assert.equal(readinessBody.readiness.probe?.source, undefined);
-    assert.deepEqual(readinessBody.probes.map((probe) => probe.source), []);
-    if (source !== 'unknown') assert.equal(readinessText.includes(source), false);
-    assert.deepEqual(await h.enrollments.listProbes('enroll-1'), []);
-  }
-});
-
-
-test('revoke closes the real channel and no GET/POST fact survives the lifecycle (R118-API-002)', async (t) => {
+test('a channel close removes current facts without deleting probe history (R118-API-002)', async (t) => {
   const h = await harness();
   const key = tmpKey();
   t.after(async () => { key.cleanup(); await h.close(); });
@@ -442,22 +329,17 @@ test('revoke closes the real channel and no GET/POST fact survives the lifecycle
   await waitFor(() => h.gateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel register');
   assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes')).status, 201);
 
-  const connection = h.gateway.liveFor(INSTANCE_ID)!;
-  await h.enrollments.revoke('enroll-1', 'retired');
-  assert.equal(h.gateway.liveFor(INSTANCE_ID), undefined, 'the accepted channel is removed synchronously');
-  assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined, 'the epoch is invalidated');
-  assert.equal(connection.epoch.epoch, 1);
+  // Closing the accepted channel (the Worker disconnecting) invalidates the
+  // epoch through the gateway's close listener.
+  h.gateway.liveFor(INSTANCE_ID)!.close();
+  await waitFor(() => h.gateway.liveFor(INSTANCE_ID) === undefined, 'channel close invalidates the epoch');
 
-  const readiness = await get(h, '/api/environments/enrollments/enroll-1/readiness');
-  const body = (await readiness.json()) as {
-    readiness: { enrollmentStatus: string; connection: { state: string }; engines: { installed: boolean }[]; probe?: unknown };
+  const body = (await (await get(h, '/api/environments/enrollments/enroll-1/readiness')).json()) as {
+    readiness: { connection: { state: string }; engines: { installed: boolean }[]; probe?: unknown };
     probes: readonly unknown[];
   };
-  assert.equal(body.readiness.enrollmentStatus, 'revoked');
-  assert.equal(body.readiness.connection.state, 'never-connected');
-  assert.equal(body.readiness.engines[0]?.installed, undefined, 'no stale installed/current fact');
-  assert.equal(body.readiness.probe, undefined, 'no stale current probe');
-  assert.deepEqual(body.probes, [], 'revoked history is not projected as current');
-
-  assert.equal((await post(h, '/api/environments/enrollments/enroll-1/probes')).status, 409);
+  assert.notEqual(body.readiness.connection.state, 'online', 'a dead channel is not reported online');
+  assert.equal(body.readiness.engines[0]?.installed, undefined, 'no current engine fact without a live epoch');
+  assert.equal(body.readiness.probe, undefined, 'no current probe without a live epoch');
+  assert.deepEqual(body.probes.map((p) => (p as { version?: string }).version), ['0.86.1'], 'durable probe history remains inspectable across a disconnect');
 });

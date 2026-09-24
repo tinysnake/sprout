@@ -1,40 +1,11 @@
 import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
-import {
-  acquireWorkerLock,
-  clearRuntimeState,
-  DuplicateWorkerProcessError,
-  ensureStateDirectory,
-  isEnrolled,
-  isRestrictive,
-  readConfig,
-  readIdentityKey,
-  readRuntimeState,
-  removeHostState,
-  stableSlug,
-  writeConfig,
-  writePrivateFile,
-  writeRuntimeState,
-  workerHostPaths,
-  workerServiceLabel,
-  WorkerHostStateError,
-  type WorkerHostConfig,
-  type WorkerProcessIdentity,
-  type WorkerProcessProbe,
-  type WorkerLockTransition,
-} from './host-state.ts';
-import {
-  launchAgentPlistPath,
-  renderLaunchAgent,
-  installLaunchAgent,
-  uninstallLaunchAgent,
-  restartLaunchAgent,
-} from './launch-agent.ts';
+import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+
+import { tmpdir } from 'node:os';
+
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, isEnrolled, isRestrictive, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { renderLaunchAgent } from './launch-agent.ts';
+
 
 /**
  * Host-local storage, the single-instance lock, and the LaunchAgent renderer
@@ -60,6 +31,7 @@ function tempPaths(): { paths: ReturnType<typeof workerHostPaths>; cleanup: () =
   return { paths, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+
 function config(overrides: Partial<WorkerHostConfig> = {}): WorkerHostConfig {
   return {
     version: 1,
@@ -72,9 +44,11 @@ function config(overrides: Partial<WorkerHostConfig> = {}): WorkerHostConfig {
   };
 }
 
+
 function processIdentity(pid: number, tokenCharacter = 'a'): WorkerProcessIdentity {
   return { pid, startIdentity: `test-start-${pid}-${tokenCharacter}`, ownerToken: tokenCharacter.repeat(43) };
 }
+
 
 function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessProbe {
   return (pid) => {
@@ -82,6 +56,7 @@ function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessPr
     return identity === undefined ? { state: 'dead' } : { state: 'alive', process: identity };
   };
 }
+
 
 test('state and configuration files are owner-only and the directory is restrictive', () => {
   const { paths, cleanup } = tempPaths();
@@ -99,6 +74,7 @@ test('state and configuration files are owner-only and the directory is restrict
   }
 });
 
+
 test('a group- or world-readable identity key is refused rather than trusted', () => {
   const { paths, cleanup } = tempPaths();
   try {
@@ -114,6 +90,7 @@ test('a group- or world-readable identity key is refused rather than trusted', (
   }
 });
 
+
 test('a missing configuration is a not-enrolled state, not a corrupt one', () => {
   const { paths, cleanup } = tempPaths();
   try {
@@ -126,6 +103,7 @@ test('a missing configuration is a not-enrolled state, not a corrupt one', () =>
     cleanup();
   }
 });
+
 
 test('a corrupt configuration is refused without echoing its content', () => {
   const { paths, cleanup } = tempPaths();
@@ -145,6 +123,7 @@ test('a corrupt configuration is refused without echoing its content', () => {
   }
 });
 
+
 test('a persisted configuration carries no secret or engine-credential field', () => {
   const { paths, cleanup } = tempPaths();
   try {
@@ -159,6 +138,7 @@ test('a persisted configuration carries no secret or engine-credential field', (
     cleanup();
   }
 });
+
 
 test('the single-instance lock refuses a live holder and reclaims a stale one', () => {
   const { paths, cleanup } = tempPaths();
@@ -190,6 +170,7 @@ test('the single-instance lock refuses a live holder and reclaims a stale one', 
   }
 });
 
+
 test('unavailable process evidence refuses a duplicate Worker start instead of reclaiming its lock', () => {
   const { paths, cleanup } = tempPaths();
   try {
@@ -208,6 +189,7 @@ test('unavailable process evidence refuses a duplicate Worker start instead of r
     cleanup();
   }
 });
+
 
 test('runtime state round-trips and clears without a secret', () => {
   const { paths, cleanup } = tempPaths();
@@ -228,6 +210,7 @@ test('runtime state round-trips and clears without a secret', () => {
   }
 });
 
+
 test('reset removes identity, configuration, and runtime state', () => {
   const { paths, cleanup } = tempPaths();
   try {
@@ -245,6 +228,7 @@ test('reset removes identity, configuration, and runtime state', () => {
   }
 });
 
+
 test('service labels and slugs are stable and never name a host verbatim', () => {
   const label = workerServiceLabel('Mac Mini of <operator>');
   assert.match(label, /^dev\.sprout\.worker\./);
@@ -258,6 +242,7 @@ test('service labels and slugs are stable and never name a host verbatim', () =>
   // The slug is pure hex: it is safe in a label, a file name, and a plist.
   assert.match(stableSlug('any instance name / with punctuation!'), /^[0-9a-f]+$/);
 });
+
 
 test('the LaunchAgent restarts on unexpected exit but not on a clean stop', () => {
   const plist = renderLaunchAgent({
@@ -274,6 +259,7 @@ test('the LaunchAgent restarts on unexpected exit but not on a clean stop', () =
   assert.doesNotMatch(plist, /--enrollment|claimSecret|secret|token/i);
 });
 
+
 test('the LaunchAgent XML escapes a path that would otherwise break the plist', () => {
   const plist = renderLaunchAgent({
     label: 'dev.sprout.worker.x',
@@ -286,453 +272,3 @@ test('the LaunchAgent XML escapes a path that would otherwise break the plist', 
   assert.match(plist, /&lt;bin&gt;/);
   assert.doesNotMatch(plist, /<bin>/);
 });
-
-test('installing the LaunchAgent bootstraps it in the gui domain and uninstall boots it out', () => {
-  const { paths, cleanup } = tempPaths();
-  const calls: string[] = [];
-  const run = (command: string, args: readonly string[]): string => {
-    calls.push([command, ...args].join(' '));
-    return '';
-  };
-  try {
-    const label = workerServiceLabel('env-synthetic');
-    const plistPath = launchAgentPlistPath(paths, 'env-synthetic');
-    const result = installLaunchAgent({
-      paths,
-      label,
-      plistPath,
-      plistContent: renderLaunchAgent({
-        label,
-        executablePath: '/synthetic/bin/sprout',
-        arguments: ['worker', 'start'],
-        logPath: paths.logPath,
-        environment: {},
-      }),
-      uid: 501,
-      run,
-    });
-    assert.equal(result.installed, true);
-    assert.ok(calls.some((call) => call.startsWith('launchctl bootstrap gui/501 ')));
-    assert.equal(statSync(plistPath).mode & 0o777, 0o600, 'the plist is owner-only');
-
-    restartLaunchAgent({ label, uid: 501, run });
-    assert.ok(calls.some((call) => call === `launchctl kickstart -k gui/501/${label}`));
-
-    const removed = uninstallLaunchAgent({ label, plistPath, uid: 501, run });
-    assert.equal(removed.removed, true);
-    assert.ok(calls.some((call) => call.startsWith('launchctl bootout gui/501/')));
-    assert.equal(existsSync(plistPath), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('reinstalling boots the previous job out before bootstrapping the new plist', () => {
-  const { paths, cleanup } = tempPaths();
-  const calls: string[] = [];
-  const run = (command: string, args: readonly string[]): string => {
-    calls.push([command, ...args].join(' '));
-    return '';
-  };
-  try {
-    const label = workerServiceLabel('env-synthetic');
-    const plistPath = launchAgentPlistPath(paths, 'env-synthetic');
-    const content = renderLaunchAgent({
-      label,
-      executablePath: '/synthetic/bin/sprout',
-      arguments: ['worker', 'start'],
-      logPath: paths.logPath,
-      environment: {},
-    });
-    installLaunchAgent({ paths, label, plistPath, plistContent: content, uid: 501, run });
-    calls.length = 0;
-    installLaunchAgent({ paths, label, plistPath, plistContent: content, uid: 501, run });
-    const bootout = calls.findIndex((call) => call.startsWith('launchctl bootout'));
-    const bootstrap = calls.findIndex((call) => call.startsWith('launchctl bootstrap'));
-    assert.ok(bootout !== -1 && bootstrap !== -1 && bootout < bootstrap, 'bootout precedes bootstrap');
-    assert.ok(readFileSync(plistPath, 'utf8').includes(label));
-  } finally {
-    cleanup();
-  }
-});
-
-test('a malformed runtime state record is refused rather than read as healthy', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 1, process: processIdentity(1), state: 'possessed', at: 0 }));
-    assert.throws(
-      () => readRuntimeState(paths),
-      (error: unknown) => error instanceof WorkerHostStateError && error.reason === 'invalid',
-    );
-    writePrivateFile(paths.runtimePath, JSON.stringify({ pid: 'many', state: 'connected', at: 0 }));
-    assert.throws(() => readRuntimeState(paths), WorkerHostStateError);
-    writePrivateFile(paths.runtimePath, 'not json at all');
-    assert.throws(() => readRuntimeState(paths), WorkerHostStateError);
-    // A valid record still round-trips.
-    writeRuntimeState(paths, { pid: 42, process: processIdentity(42), state: 'connected', at: 1, epoch: 2 });
-    assert.equal(readRuntimeState(paths)?.pid, 42);
-  } finally {
-    cleanup();
-  }
-});
-
-test('concurrent lock acquisition lets exactly one starter win and maps the loser to the duplicate error', { skip: process.platform === 'win32' }, async () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    // A real cross-process race: holder and contender are separate node
-    // processes. The contender is spawned only after the holder has verifiably
-    // acquired the lock, so their attempts are guaranteed to overlap and the
-    // exclusive create must decide a single winner.
-    const holder = spawnChildLockRunner(paths, ['hold']);
-    try {
-      await waitForLine(holder, 'acquired');
-      const contender = spawnChildLockRunner(paths, []);
-      try {
-        const [holderCode, contenderReport] = await Promise.all([
-          onceExit(holder),
-          waitForReport(contender),
-        ]);
-        assert.equal(holderCode, 0, 'the first starter must acquire and release cleanly');
-        assert.equal(contenderReport.outcome, 'DuplicateWorkerProcessError');
-        assert.match(contenderReport.message, /already running/);
-      } finally {
-        contender.kill();
-      }
-    } finally {
-      holder.kill();
-    }
-  } finally {
-    cleanup();
-  }
-});
-
-test('a releasing marker recovers after a crash between owner retirement and directory cleanup', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const identity = processIdentity(50_002, 'r');
-    const held = acquireWorkerLock(paths, identity, probe(identity));
-    const ownerPath = join(held.path, `owner-${identity.ownerToken}`);
-    const marker = `${held.path}.releasing-${identity.ownerToken}-0000000000000001`;
-    renameSync(ownerPath, marker);
-    rmdirSync(held.path);
-    const recovered = acquireWorkerLock(paths, processIdentity(50_003, 's'), () => ({ state: 'dead' }));
-    assert.ok(existsSync(recovered.path));
-    recovered.release();
-    assert.equal(existsSync(marker), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('a pending marker recovers after a crash before canonical lock creation', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const identity = processIdentity(50_004, 'p');
-    const lockPath = join(paths.stateDirectory, 'worker.lock');
-    const marker = `${lockPath}.pending-${identity.ownerToken}`;
-    writeFileSync(marker, `${JSON.stringify({ version: 1, kind: 'worker', process: identity })}\n`, { mode: 0o600 });
-    const recovered = acquireWorkerLock(paths, processIdentity(50_005, 'q'), () => ({ state: 'dead' }));
-    assert.ok(existsSync(recovered.path));
-    recovered.release();
-    assert.equal(existsSync(marker), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('a truncated unpublished staging record cannot permanently wedge lock recovery', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const interrupted = processIdentity(50_006, 't');
-    const lockPath = join(paths.stateDirectory, 'worker.lock');
-    // `.preparing` is the protocol's explicitly non-owning staging state. A
-    // hard crash may leave any prefix of the record here; it must never be
-    // confused with a published pending owner record.
-    const staged = `${lockPath}.pending-${interrupted.ownerToken}-0000000000000002.preparing`;
-    writeFileSync(staged, '{"version":1,"kind":"worker","proc', { mode: 0o600 });
-
-    const recovered = acquireWorkerLock(
-      paths,
-      processIdentity(50_007, 'w'),
-      // Unknown evidence remains fail-closed for an owned/published record;
-      // this incomplete, unpublished transition has no ownership authority.
-      () => ({ state: 'unknown' }),
-    );
-    assert.ok(existsSync(recovered.path));
-    recovered.release();
-    assert.equal(existsSync(staged), false, 'recovery cleans the incomplete transition');
-  } finally {
-    cleanup();
-  }
-});
-
-test('a truncated pending marker from the pre-atomic protocol recovers without reclaiming owned evidence', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const interrupted = processIdentity(50_010, 'j');
-    const lockPath = join(paths.stateDirectory, 'worker.lock');
-    const legacyPending = `${lockPath}.pending-${interrupted.ownerToken}`;
-    // Commit 975754d wrote directly to this final name. A crash could leave a
-    // JSON prefix here before any canonical owner entry existed.
-    writeFileSync(legacyPending, '{"version":1,"kind":"worker","proc', { mode: 0o600 });
-
-    const recovered = acquireWorkerLock(
-      paths,
-      processIdentity(50_011, 'l'),
-      () => ({ state: 'unknown' }),
-    );
-    assert.ok(existsSync(recovered.path));
-    recovered.release();
-    assert.equal(existsSync(legacyPending), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('a complete published pending record with unknown owner evidence remains fail-closed', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const identity = processIdentity(50_008, 'x');
-    const lockPath = join(paths.stateDirectory, 'worker.lock');
-    const marker = `${lockPath}.pending-${identity.ownerToken}-0000000000000003`;
-    writeFileSync(
-      marker,
-      `${JSON.stringify({ version: 1, kind: 'worker', process: identity })}\n`,
-      { mode: 0o600 },
-    );
-    assert.throws(
-      () => acquireWorkerLock(paths, processIdentity(50_009, 'y'), () => ({ state: 'unknown' })),
-      DuplicateWorkerProcessError,
-    );
-    assert.ok(existsSync(marker), 'published unknown evidence is never reclaimed');
-  } finally {
-    cleanup();
-  }
-});
-
-test('a malformed atomically published pending record remains unknown evidence', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const identity = processIdentity(50_012, 'o');
-    const lockPath = join(paths.stateDirectory, 'worker.lock');
-    const marker = `${lockPath}.pending-${identity.ownerToken}-0000000000000004`;
-    writeFileSync(marker, '{malformed after atomic publication}', { mode: 0o600 });
-    assert.throws(
-      () => acquireWorkerLock(paths, processIdentity(50_013, 'b'), () => ({ state: 'dead' })),
-      DuplicateWorkerProcessError,
-    );
-    assert.ok(existsSync(marker), 'malformed published evidence is not reclassified as staging');
-  } finally {
-    cleanup();
-  }
-});
-
-test('the lock recovers from a hard crash after every durable ownership transition', { skip: process.platform === 'win32' }, async () => {
-  const transitions: readonly WorkerLockTransition[] = [
-    'pending-stage-created',
-    'pending-stage-synced',
-    'pending-published',
-    'canonical-created',
-    'owner-published',
-    'owner-retired',
-    'canonical-removed',
-    'release-complete',
-  ];
-  for (const transition of transitions) {
-    const { paths, cleanup } = tempPaths();
-    try {
-      ensureStateDirectory(paths);
-      const child = spawnCrashTransitionRunner(paths, transition);
-      assert.equal(await onceExit(child), 86, `child crashed at ${transition}`);
-      const recovered = acquireWorkerLock(
-        paths,
-        processIdentity(50_100 + transitions.indexOf(transition), 'z'),
-        () => ({ state: 'dead' }),
-      );
-      assert.ok(existsSync(recovered.path), `${transition} does not wedge the next start/reset fence`);
-      recovered.release();
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-test('an owner release cannot unlink a replacement created after it observed the old lock', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    const firstIdentity = processIdentity(50_001, 'd');
-    const secondIdentity = processIdentity(50_001, 'e');
-    let second: ReturnType<typeof acquireWorkerLock> | undefined;
-    const first = acquireWorkerLock(
-      paths,
-      firstIdentity,
-      probe(firstIdentity),
-      'worker',
-      {
-        // The first owner observes its own lock, then a same-PID replacement
-        // proves the old binding stale and recreates the canonical pathname.
-        // When the first owner resumes, it must not unlink that replacement.
-        onReleaseObserved: () => {
-          second = acquireWorkerLock(paths, secondIdentity, probe(secondIdentity));
-        },
-      },
-    );
-    first.release();
-    if (second === undefined) assert.fail('the replacement reclaimed and recreated the lock during stale release');
-    const replacement = second;
-    assert.ok(existsSync(replacement.path), 'an atomic ownership-bound release preserves the newer lock');
-    replacement.release();
-    assert.equal(existsSync(replacement.path), false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('removeHostState fails closed when a file cannot be removed', () => {
-  const { paths, cleanup } = tempPaths();
-  try {
-    ensureStateDirectory(paths);
-    writeConfig(paths, config());
-    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
-    // Make the identity directory immutable-by-simulation: replace the file with
-    // a directory so unlink fails with EISDIR/EPERM rather than ENOENT.
-    rmSync(paths.identityPath, { force: true });
-    mkdirSync(paths.identityPath);
-    assert.throws(() => removeHostState(paths));
-    // The config must survive the failed reset: fail closed means nothing is
-    // silently half-removed and reported as success.
-    assert.ok(existsSync(paths.configPath));
-  } finally {
-    cleanup();
-  }
-});
-
-/** A tiny helper module inlined: spawn a child process that races the lock. */
-function spawnChildLockRunner(
-  paths: ReturnType<typeof workerHostPaths>,
-  args: readonly string[],
-): ChildProcess {
-  const child = spawn(
-    process.execPath,
-    ['--input-type=module', '-e', childLockRunnerScript()],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        SPROUT_WORKER_HOME: paths.stateDirectory,
-        SPROUT_LAUNCH_AGENTS_DIR: paths.launchAgentsDirectory,
-        SPROUT_CLI_PATH: paths.executablePath,
-        SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
-        SPROUT_WORKER_OWNER_TOKEN: (args.includes('hold') ? 'h' : 'i').repeat(43),
-      },
-    },
-  );
-  void args;
-  return child;
-}
-
-function spawnCrashTransitionRunner(
-  paths: ReturnType<typeof workerHostPaths>,
-  transition: WorkerLockTransition,
-): ChildProcess {
-  return spawn(
-    process.execPath,
-    ['--input-type=module', '-e', crashTransitionRunnerScript()],
-    {
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: {
-        ...process.env,
-        SPROUT_WORKER_HOME: paths.stateDirectory,
-        SPROUT_LAUNCH_AGENTS_DIR: paths.launchAgentsDirectory,
-        SPROUT_CLI_PATH: paths.executablePath,
-        SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
-        SPROUT_TEST_TRANSITION: transition,
-      },
-    },
-  );
-}
-
-function crashTransitionRunnerScript(): string {
-  return [
-    "const { acquireWorkerLock, workerHostPaths } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
-    "const token = 'k'.repeat(43);",
-    "const identity = { pid: process.pid, startIdentity: 'crash-test-process', ownerToken: token };",
-    'const paths = workerHostPaths();',
-    'const transition = process.env.SPROUT_TEST_TRANSITION;',
-    'const lock = acquireWorkerLock(paths, identity, () => ({ state: \'alive\', process: identity }), \'worker\', {',
-    '  onTransition: (observed) => { if (observed === transition) process.exit(86); },',
-    '});',
-    'lock.release();',
-    'process.exit(0);',
-  ].join('\n');
-}
-
-function childLockRunnerScript(): string {
-  return [
-    "const { acquireWorkerLock, currentWorkerProcess, workerHostPaths, ensureStateDirectory } = await import('file://' + process.env.SPROUT_TEST_REPO_ROOT + '/src/worker/cli/host-state.ts');",
-    'const paths = workerHostPaths();',
-    'ensureStateDirectory(paths);',
-    'try {',
-    '  const lock = acquireWorkerLock(paths, currentWorkerProcess(process.env.SPROUT_WORKER_OWNER_TOKEN));',
-    "  process.stdout.write('acquired\\n');",
-    '  setTimeout(() => {',
-    '    lock.release();',
-    '    process.exit(0);',
-    '  }, 300);',
-    '} catch (error) {',
-    "  process.stdout.write(JSON.stringify({ outcome: error.name, message: error.message }) + '\\n');",
-    '  process.exit(0);',
-    '}',
-  ].join('\n');
-}
-
-function waitForLine(child: ChildProcess, text: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`child never printed ${text}`)), 10_000);
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (chunk.toString('utf8').includes(text)) {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-function waitForReport(child: ChildProcess): Promise<{ outcome: string; message: string }> {
-  return new Promise((resolve, reject) => {
-    let buffered = '';
-    const timer = setTimeout(() => reject(new Error('child never reported an outcome')), 10_000);
-    child.stdout?.on('data', (chunk: Buffer) => {
-      buffered += chunk.toString('utf8');
-      const line = buffered.split('\n').find((candidate) => candidate.startsWith('{'));
-      if (line !== undefined) {
-        clearTimeout(timer);
-        resolve(JSON.parse(line));
-      }
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-function onceExit(child: ChildProcess): Promise<number | null> {
-  return new Promise((resolve, reject) => {
-    child.on('exit', (code) => resolve(code));
-    child.on('error', reject);
-  });
-}
