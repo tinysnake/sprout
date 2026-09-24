@@ -275,6 +275,26 @@ test('the Pi adapter never executes --list-models and reports no local catalog f
   for (const args of calls) assert.equal(args.includes('--list-models'), false);
 });
 
+test('#128: Worker measures only applicable engine targets and leaves Pi model scope unknown', async () => {
+  const { readinessRequirements } = await import('../environment/readiness.ts');
+  const requirements = readinessRequirements([{ engine: 'codex', workModel: 'codex-target' }, { engine: 'pi', workModel: 'pi-target' }]);
+  const result = await probeEnvironmentReadiness(configurations, {
+    requirements,
+    commandRunner: {
+      async run(_binary, args) {
+        if (args[0] === '--version') return { stdout: _binary.includes('codex') ? 'codex-cli 0.154.0' : 'pi 0.86.1', exitCode: 0 };
+        return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+      },
+      async accountRead() { return { stdout: JSON.stringify({ account: { type: 'apiKey' }, requiresOpenaiAuth: true }), exitCode: 0 }; },
+      async bundledModels() { return { stdout: JSON.stringify({ models: [{ slug: 'codex-target' }] }), exitCode: 0 }; },
+    },
+  });
+  assert.deepEqual(result.readiness.engines.find((engine) => engine.engine === 'codex')?.targetModels, ['codex-target']);
+  assert.deepEqual(result.readiness.engines.find((engine) => engine.engine === 'pi')?.targetModels, []);
+  assert.equal(result.readiness.engines.find((engine) => engine.engine === 'pi')?.modelIdPresent, undefined);
+  assert.equal(result.readiness.engines[0]?.requirementRevision, requirements.revisionsByEngine?.[result.readiness.engines[0]!.engine]);
+});
+
 test('a Worker-declared provider or account identity is dropped at the readiness ingress boundary (#114 C6, R118-BOUNDARY-003)', async () => {
   // A proven Worker is still not allowed to widen the persisted vocabulary. An
   // unknown authMode/authType/source must be dropped rather than pass a generic

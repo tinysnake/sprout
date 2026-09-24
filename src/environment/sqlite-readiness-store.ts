@@ -83,11 +83,11 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
     }
   }
 
-  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<ReadinessAttempt | false> {
+  async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = [], requirements?: import('./readiness.ts').ReadinessRequirementScope): Promise<ReadinessAttempt | false> {
     if (!authority.isCurrent() || authority.environmentInstanceId !== instance) return false;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      const key = bootstrap ? JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requiredModels]) : null;
+      const key = bootstrap ? JSON.stringify([instance, authority.enrollmentId, authority.connectionId, requirements ?? requiredModels]) : null;
       if (key !== null) {
         const existing = this.#db.prepare('SELECT document FROM environment_readiness_attempts WHERE bootstrap_key = ?')
           .get(key) as { document: string } | undefined;
@@ -100,7 +100,8 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         .get(instance, instance) as { n: number | null };
       const attempt: ReadinessAttempt = { observationId: `obs-${crypto.randomUUID()}`, sequence: (row.n ?? 0) + 1,
         environmentInstanceId: instance, enrollmentId: authority.enrollmentId, connectionEpoch: authority.connectionEpoch,
-        connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels] };
+        connectionId: authority.connectionId, lifecycleGeneration: authority.lifecycleGeneration, requiredModels: [...requiredModels],
+        ...(requirements !== undefined ? { requirements: structuredClone(requirements) } : {}) };
       this.#db.prepare('INSERT INTO environment_readiness_attempts VALUES (?, ?, ?, ?, ?)')
         .run(attempt.observationId, instance, attempt.sequence, key, JSON.stringify(attempt));
       this.#db.exec('COMMIT');

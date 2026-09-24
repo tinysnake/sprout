@@ -21,6 +21,7 @@ import {
   assembleEnvironmentReadiness,
   type AssembledReadiness,
 } from './readiness-service.ts';
+import { PROTOCOL_INCOMPATIBLE_DETAIL } from './readiness.ts';
 import type {
   CompatibilityFact,
   ConnectionFact,
@@ -56,7 +57,7 @@ import {
  * Worker facts and produces product facts.
  */
 
-export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 2 };
+export const SUPPORTED_WORKER_PROTOCOL: ProtocolVersionRange = { minMajor: 2, maxMajor: 3 };
 
 export interface EnvironmentEnrollmentServiceOptions {
   readonly enrollments: EnrollmentStore;
@@ -161,6 +162,13 @@ export class EnvironmentEnrollmentService {
   /** Local lifecycle generation checked at the store mutation boundary. */
   readonly #authority: EnrollmentLifecycleAuthority;
   readonly #verifyObservationAuthority: ObservationAuthorityVerifier;
+  /** Proven pre-epoch refusal: diagnostic only, never current Worker authority. */
+  readonly #connectionAttempts = new Map<string, {
+    readonly generation: number;
+    readonly outcome: 'incompatible';
+    readonly reason: string;
+    readonly at: number;
+  }>();
 
   constructor(options: EnvironmentEnrollmentServiceOptions) {
     this.#enrollments = options.enrollments;
@@ -337,6 +345,8 @@ export class EnvironmentEnrollmentService {
     readonly connection: ConnectionFact;
     readonly compatibility: CompatibilityFact;
     readonly engines: readonly EngineReadinessFact[];
+    /** Set only by the Gateway after deriving protocol compatibility itself. */
+    readonly gatewayProtocolNegotiation?: 'incompatible' | 'compatible';
   }): Promise<EnrollmentConnectionOutcome> {
     const enrollment = await this.#requireEnrollment(input.enrollmentId);
     const at = this.#clock();
@@ -390,6 +400,19 @@ export class EnvironmentEnrollmentService {
     if (saved === undefined) {
       return { ...outcome, authoritySuperseded: true };
     }
+    // Only a proved, approved identity may leave a diagnostic. Do not attach
+    // Worker-supplied text/version or mint an epoch/observation for this refusal.
+    if (outcome.outcome === 'reconnected' && saved.status === 'approved' &&
+        this.#authority.generation(enrollment.id) === lifecycleGeneration) {
+      if (input.gatewayProtocolNegotiation === 'incompatible' && input.compatibility.state === 'incompatible') {
+        this.#connectionAttempts.set(enrollment.id, {
+          generation: lifecycleGeneration, outcome: 'incompatible',
+          reason: PROTOCOL_INCOMPATIBLE_DETAIL, at,
+        });
+      } else if (input.gatewayProtocolNegotiation === 'compatible') {
+        this.#connectionAttempts.delete(enrollment.id);
+      }
+    }
     return outcome;
   }
 
@@ -436,7 +459,8 @@ export class EnvironmentEnrollmentService {
       at: this.#clock(),
       verifyAuthority: this.#verifyObservationAuthority,
       ...(options?.attempt !== undefined ? { attempt: options.attempt } : {}),
-      ...(options?.requirements !== undefined ? { requirements: options.requirements } : {}),
+      ...(options?.attempt?.requirements !== undefined ? { requirements: options.attempt.requirements } :
+        options?.requirements !== undefined ? { requirements: options.requirements } : {}),
     });
     if (observation === undefined) return undefined;
     // Store adapters re-check the live authority guard at their mutation
@@ -450,14 +474,14 @@ export class EnvironmentEnrollmentService {
     return recorded;
   }
 
-  async issueReadinessAttempt(enrollmentId: string, authority: ReadinessObservationAuthority, bootstrap = false, requiredModels: readonly string[] = []): Promise<import('./readiness-store.ts').ReadinessAttempt | false> {
+  async issueReadinessAttempt(enrollmentId: string, authority: ReadinessObservationAuthority, bootstrap = false, requiredModels: readonly string[] = [], requirements?: ReadinessRequirementScope): Promise<import('./readiness-store.ts').ReadinessAttempt | false> {
     const verified = this.#verifyObservationAuthority(authority, { enrollmentId });
     if (!verified || !authority.isCurrent()) return false;
     const enrollment = await this.#requireEnrollment(enrollmentId);
     if (enrollment.status !== 'approved' || enrollment.environmentInstanceId !== verified.environmentInstanceId ||
         verified.lifecycleGeneration !== this.#authority.generation(enrollmentId) ||
         verified.connectionEpoch !== this.#currentConnectionEpoch(enrollmentId) || !authority.isCurrent()) return false;
-    return this.#readiness.issueAttempt(enrollment.environmentInstanceId, authority, bootstrap, requiredModels);
+    return this.#readiness.issueAttempt(enrollment.environmentInstanceId, authority, bootstrap, requiredModels, requirements);
   }
 
   async getReadinessAttempt(enrollmentId: string, observationId: string, authority: ReadinessObservationAuthority): Promise<import('./readiness-store.ts').ReadinessAttempt | undefined> {
@@ -607,6 +631,7 @@ export class EnvironmentEnrollmentService {
     readonly currentObservation?: StoredReadinessObservation;
     readonly receipt?: ReadinessReceipt;
     readonly authorityCurrent: boolean;
+    readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number };
   }> {
     // Capture authority before the durable reads and re-check it synchronously
     // after them. A revoke/reset/archive bumps this generation before its own
@@ -668,6 +693,8 @@ export class EnvironmentEnrollmentService {
       probes,
       ...(currentObs !== undefined ? { currentObservation: currentObs } : {}),
       ...(receipt !== undefined ? { receipt } : {}),
+      ...(!liveEpochCurrent && lifecycleApproved && this.#connectionAttempts.get(enrollmentId)?.generation === generation
+        ? { connectionAttempt: this.#connectionAttempts.get(enrollmentId)! } : {}),
       authorityCurrent: observationCurrent,
     };
   }
@@ -729,6 +756,7 @@ export class EnvironmentEnrollmentService {
   /** Fence local lifecycle authority before the durable decision is published. */
   #loseAuthority(enrollmentId: string): void {
     this.#authority.bump(enrollmentId);
+    this.#connectionAttempts.delete(enrollmentId);
     this.#onAuthorityLost?.(enrollmentId);
   }
 }

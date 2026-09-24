@@ -37,7 +37,7 @@
 
 import type { EnvironmentEnrollmentService } from './enrollment-service.ts';
 import { EnrollmentError } from './enrollment.ts';
-import type { ReadinessReceipt } from './readiness.ts';
+import type { ReadinessReceipt, ReadinessRequirementScope } from './readiness.ts';
 import type { ReadinessAttempt } from './readiness-store.ts';
 import type { ReadinessObservationAuthority } from './readiness-authority.ts';
 import { validateWorkerReadinessProbeResult } from '../worker/readiness-ingress.ts';
@@ -84,7 +84,7 @@ export interface ReadinessLiveGateway {
 /** The neutral Worker fact/probe collector over an accepted channel. */
 export interface ReadinessWorkerCollector {
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
-  probeReadiness?(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined>;
+  probeReadiness?(environmentInstanceId: string, attemptId?: string, requirements?: ReadinessRequirementScope): Promise<WorkerReadinessProbeResult | undefined>;
 }
 
 export interface EnvironmentReadinessWorkflowOptions {
@@ -93,6 +93,7 @@ export interface EnvironmentReadinessWorkflowOptions {
   readonly environment: ReadinessWorkerCollector;
   /** Re-project the catalog after a committed observation. */
   readonly refreshEnvironmentCatalog: () => Promise<unknown>;
+  readonly resolveRequirements?: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
   /**
    * Schedule one bounded bootstrap retry. Injectable so a test needs no timers;
    * defaults to an unreferenced 10ms timer, exactly as before.
@@ -114,6 +115,8 @@ export class EnvironmentReadinessWorkflow {
   readonly #workerGateway: ReadinessLiveGateway;
   readonly #environment: ReadinessWorkerCollector;
   readonly #refreshEnvironmentCatalog: () => Promise<unknown>;
+  readonly #resolveRequirements: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
+  readonly #hasRequirementResolver: boolean;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
   readonly #collectingBootstrap = new Set<string>();
   readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
@@ -123,6 +126,8 @@ export class EnvironmentReadinessWorkflow {
     this.#workerGateway = options.workerGateway;
     this.#environment = options.environment;
     this.#refreshEnvironmentCatalog = options.refreshEnvironmentCatalog;
+    this.#resolveRequirements = options.resolveRequirements ?? (() => ({ requiredModels: [] }));
+    this.#hasRequirementResolver = options.resolveRequirements !== undefined;
     this.#scheduleRetry =
       options.scheduleRetry ??
       ((run, delayMs) => {
@@ -136,9 +141,10 @@ export class EnvironmentReadinessWorkflow {
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(acceptance.enrollment.environmentInstanceId);
     if (!authority || !authority.isCurrent()) return;
-    const reservation = this.#enrollments.issueReadinessAttempt(
-      acceptance.enrollment.id, authority, true, acceptance.requiredModels,
-    ).catch(() => false as const);
+    const reservation = Promise.resolve(this.#hasRequirementResolver ? this.#resolveRequirements() : { requiredModels: acceptance.requiredModels }).then((requirements) =>
+      this.#enrollments.issueReadinessAttempt(
+        acceptance.enrollment.id, authority, true, requirements.requiredModels ?? [], requirements,
+      )).catch(() => false as const);
     this.#acceptanceReservations.set(acceptance.epoch.connectionId, reservation);
   }
 
@@ -166,10 +172,11 @@ export class EnvironmentReadinessWorkflow {
     const authority = acceptance.authorizeObservation?.() ??
       this.#workerGateway.authorizeObservation?.(enrollment.environmentInstanceId);
     if (authority === undefined || !authority.isCurrent()) return;
+    const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: acceptance.requiredModels };
     const mode: CollectionMode =
-      this.#targeted(acceptance.requiredModels) ? 'target-probe' : 'worker-info';
+      this.#targeted(requirements.requiredModels ?? []) ? 'target-probe' : 'worker-info';
     const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
-      this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, acceptance.requiredModels));
+      this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, requirements.requiredModels ?? [], requirements));
     if (!ticket) return;
     // A bootstrap is one adoption per acceptance, even across Runtime restart.
     // A reread is inspection, not another measurement.
@@ -180,7 +187,7 @@ export class EnvironmentReadinessWorkflow {
     this.#collectingBootstrap.add(ticket.observationId);
     let outcome: CollectionOutcome;
     try {
-      outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId);
+      outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
     } catch {
       this.#collectingBootstrap.delete(ticket.observationId);
       // A channel that cannot identify itself is already offline; the close
@@ -252,9 +259,11 @@ export class EnvironmentReadinessWorkflow {
     const reservation = this.#acceptanceReservations.get(authority.connectionId);
     if (reservation) await reservation;
     if (!authority.isCurrent()) throw new Error('the Environment Worker is offline');
-    const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, live.requiredModels);
+    const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: live?.requiredModels ?? [] };
+    const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
     if (!ticket) throw new Error('the Environment Worker is offline');
-    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId);
+    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
+      this.#hasRequirementResolver ? ticket.requirements : undefined);
     if (rawResult === undefined) throw new Error('the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {
@@ -263,7 +272,7 @@ export class EnvironmentReadinessWorkflow {
     const delivery = result.attemptId !== undefined && result.attemptId !== ticket.observationId
       ? await this.#enrollments.getReadinessAttempt(enrollment.id, result.attemptId, authority)
       : ticket;
-    if (!delivery || JSON.stringify(delivery.requiredModels ?? []) !== JSON.stringify(live.requiredModels)) {
+    if (!delivery || !delivery.requirements || JSON.stringify(delivery.requirements) !== JSON.stringify(ticket.requirements)) {
       throw new Error('the Environment Worker returned an unknown readiness attempt');
     }
     if (!authority.isCurrent()) {
@@ -334,9 +343,10 @@ export class EnvironmentReadinessWorkflow {
     environmentInstanceId: string,
     mode: CollectionMode,
     attemptId: string,
+    requirements?: ReadinessRequirementScope,
   ): Promise<CollectionOutcome> {
     if (mode === 'target-probe') {
-      const rawProbe = await this.#environment.probeReadiness?.(environmentInstanceId, attemptId);
+      const rawProbe = await this.#environment.probeReadiness?.(environmentInstanceId, attemptId, requirements);
       const result = validateWorkerReadinessProbeResult(rawProbe);
       return result === undefined || (result.attemptId !== undefined && result.attemptId !== attemptId)
         ? { kind: 'refused' } : { kind: 'collected', result };
@@ -347,10 +357,8 @@ export class EnvironmentReadinessWorkflow {
     // authenticated `worker/info` fallback. Reconstruct its complete probe
     // result from the embedded fact so it crosses the exact same closed-shape
     // validator and sanitizer as an explicit POST.
-    const result = validateWorkerReadinessProbeResult({
-      readiness: info.readiness,
-      probe: info.readiness.probe,
-    });
+    const result = validateWorkerReadinessProbeResult(info.readiness.protocolVersion === '3'
+      ? info.readiness : { readiness: info.readiness, probe: info.readiness.probe });
     return result === undefined ? { kind: 'refused' } : { kind: 'collected', result };
   }
 

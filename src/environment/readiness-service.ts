@@ -115,6 +115,8 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
       ...(observed?.authMode !== undefined ? { authMode: observed.authMode } : {}),
       ...(observed?.authType !== undefined ? { authType: observed.authType } : {}),
       ...(observed?.modelIdPresent !== undefined ? { modelIdPresent: observed.modelIdPresent } : {}),
+      ...(observed?.targetModels !== undefined ? { targetModels: observed.targetModels } : {}),
+      ...(observed?.requirementRevision !== undefined ? { requirementRevision: observed.requirementRevision } : {}),
       ...(observed?.probedAt !== undefined ? { probedAt: observed.probedAt } : {}),
       ...(observed?.probeExitCode !== undefined ? { probeExitCode: observed.probeExitCode } : {}),
       ...(observed?.source !== undefined ? { source: observed.source } : {}),

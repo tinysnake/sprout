@@ -23,6 +23,7 @@ import { toAgentView, toRunWorkOptionAttribution } from './views.ts';
 
 export interface AgentRouterOptions {
   readonly agents: AgentService;
+  readonly onMutation?: () => void;
   /**
    * The per-run work-option attribution reader (#90).
    *
@@ -135,6 +136,7 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
             ...(instructions !== undefined ? { instructions } : {}),
             workOptions,
           });
+          options.onMutation?.();
           return json(context, 201, { agent: toAgentView(agent) });
         } catch (error) {
           return agentFailure(context, error);
@@ -202,6 +204,7 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
             ...(instructions !== undefined ? { instructions } : {}),
             ...(reason !== undefined ? { reason } : {}),
           });
+          options.onMutation?.();
           return json(context, 200, { agent: toAgentView(agent) });
         } catch (error) {
           return agentFailure(context, error);
@@ -218,6 +221,7 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
       ) {
         try {
           const agent = await agents.archive(segments[2] ?? '');
+          options.onMutation?.();
           return json(context, 200, { agent: toAgentView(agent) });
         } catch (error) {
           return agentFailure(context, error);
@@ -234,6 +238,7 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
       ) {
         try {
           const agent = await agents.restore(segments[2] ?? '');
+          options.onMutation?.();
           return json(context, 200, { agent: toAgentView(agent) });
         } catch (error) {
           return agentFailure(context, error);

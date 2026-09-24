@@ -10,10 +10,48 @@ import { SqliteEnvironmentReadinessStore } from './sqlite-readiness-store.ts';
 import { SqliteStore } from '../store/db.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
+import { readinessRequirements } from './readiness.ts';
+import { projectCatalogEntry } from './catalog.ts';
+import { createPendingEnrollment } from './enrollment.ts';
 
 const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#128 ${backend}: committed old aggregate and new revision-bound target evidence remain distinct`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-scope-'));
+    const store = backend === 'memory' ? new InMemoryEnvironmentReadinessStore() :
+      new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => { if (store instanceof SqliteEnvironmentReadinessStore) store.close(); rmSync(directory, { recursive: true, force: true }); });
+    const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 7 });
+    const requirements = readinessRequirements([{ engine: 'codex', workModel: 'target' }]);
+    const enrollment = { ...createPendingEnrollment({ id: 'enroll-1', environmentInstanceId: 'env-1', displayName: 'Host',
+      identityDigest: 'digest', platform: 'macos', capabilityRequests: ['agent-run'], engineFacts: [], at: 1 }),
+      status: 'approved' as const, everApproved: true, capabilityPermissions: { 'agent-run': true } };
+    const probe = { at: 100, latencyMs: 1, protocolOk: true, enginesOk: true, source: 'worker' as const, version: '2', summary: 'ready' };
+    const engine = { engine: 'codex', installed: true, readiness: 'ready' as const, modelAvailability: 'available' as const,
+      models: ['target'], authenticated: true };
+    const scope = { environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 3 }, at: 100,
+      verifyAuthority: readinessAuthorityTestSeam.verify, requirements };
+    const project = async (current = requirements) => projectCatalogEntry({ enrollment, observed: await store.getReadiness('env-1'),
+      workSafety: 'clear', currentEpoch: 7, requiredEngines: ['codex'], requirements: current,
+      supportedProtocol: scope.supported, now: 100 });
+    const old = createReadinessObservation({ readiness: { protocolVersion: '2', engines: [engine], probe }, probe }, scope);
+    assert.ok(old);
+    assert.ok(await store.commitObservation('env-1', old, authority));
+    assert.equal((await project()).eligible, false, 'old aggregate available lacks measured targets');
+    const fresh = createReadinessObservation({ protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
+      targetModels: ['target'], requirementRevision: requirements.revisionsByEngine!.codex }], probe }, scope);
+    assert.ok(fresh);
+    assert.ok(await store.commitObservation('env-1', fresh, authority));
+    assert.equal((await project()).eligible, true);
+    const changed = readinessRequirements([{ engine: 'codex', workModel: 'target' }], [{ id: 'agent', configurationVersion: 2 }]);
+    assert.equal((await project(changed)).eligible, false, 'same target under a new revision requires fresh evidence');
+    const missing = createReadinessObservation({ protocolVersion: '3', engines: [{ ...engine, modelIdPresent: true,
+      targetModels: ['target'] }], probe }, { ...scope, requirements: changed });
+    assert.ok(missing);
+    assert.ok(await store.commitObservation('env-1', missing, authority));
+    assert.equal((await project(changed)).eligible, false, 'missing Worker revision cannot satisfy core scope');
+  });
   test(`${backend} mutation accepts only scoped opaque canonical observations (R118-API-002)`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-opaque-readiness-'));
     const store = backend === 'memory'

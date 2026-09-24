@@ -74,6 +74,7 @@ export interface AgentDefinition {
 
 export class AgentRegistry {
   readonly #agents = new Map<string, AgentDefinition>();
+  #onChange?: () => void;
 
   constructor(agents: readonly AgentDefinition[]) {
     for (const agent of agents) this.#agents.set(agent.id, agent);
@@ -86,4 +87,11 @@ export class AgentRegistry {
   list(): readonly AgentDefinition[] {
     return [...this.#agents.values()];
   }
+
+  register(agent: AgentDefinition): void {
+    this.#agents.set(agent.id, agent);
+    this.#onChange?.();
+  }
+
+  onChange(callback: () => void): void { this.#onChange = callback; }
 }

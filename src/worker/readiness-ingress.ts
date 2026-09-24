@@ -1,5 +1,9 @@
 import { DEFAULT_PROBE_SUMMARY, sanitizeOperatorText, sanitizeProbeVersion } from '../environment/privacy.ts';
-import type { WorkerProbeFact, WorkerReadinessProbeResult } from './protocol.ts';
+import type { WorkerProbeFact, WorkerReadinessProbeResult, WorkerObservationEnvelope } from './protocol.ts';
+
+// Only values produced by this validator may cross the internal second
+// validation boundary. A peer cannot submit a wrapped v3 envelope directly.
+const canonicalResults = new WeakMap<object, string>();
 
 /**
  * Validate one authenticated Worker's readiness-probe JSON-RPC result.
@@ -12,6 +16,19 @@ import type { WorkerProbeFact, WorkerReadinessProbeResult } from './protocol.ts'
 export function validateWorkerReadinessProbeResult(
   value: unknown,
 ): WorkerReadinessProbeResult | undefined {
+  if (typeof value === 'object' && value !== null && canonicalResults.get(value) === JSON.stringify(value)) return value as WorkerReadinessProbeResult;
+  if (isRecord(value) && value.protocolVersion === '3') {
+    if (!hasOnlyKeys(value, ['protocolVersion', 'observedAt', 'engines', 'probe', 'attemptId']) ||
+        !isWorkerProbe(value.probe) || !Array.isArray(value.engines) || !value.engines.every(isWorkerEngine) ||
+        (value.observedAt !== undefined && !isNonNegativeInteger(value.observedAt)) ||
+        (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !/^obs-[0-9a-f-]{36}$/.test(value.attemptId)))) return undefined;
+    const envelope = value as unknown as WorkerObservationEnvelope & { attemptId?: string };
+    const probe = sanitizeWorkerProbe(envelope.probe);
+    const canonical = { ...(envelope.attemptId !== undefined ? { attemptId: envelope.attemptId } : {}),
+      readiness: { protocolVersion: '3', ...(envelope.observedAt !== undefined ? { observedAt: envelope.observedAt } : {}), engines: envelope.engines, probe }, probe };
+    canonicalResults.set(canonical, JSON.stringify(canonical));
+    return canonical;
+  }
   if (!isRecord(value) || !hasOnlyKeys(value, ['readiness', 'probe', 'attemptId']) || !isWorkerProbe(value.probe) ||
       (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !/^obs-[0-9a-f-]{36}$/.test(value.attemptId)))) {
     return undefined;
@@ -20,7 +37,7 @@ export function validateWorkerReadinessProbeResult(
   if (!isRecord(readiness) || !hasOnlyKeys(readiness, ['protocolVersion', 'observedAt', 'engines', 'probe'])) {
     return undefined;
   }
-  if (typeof readiness.protocolVersion !== 'string' || readiness.protocolVersion === '') return undefined;
+  if (typeof readiness.protocolVersion !== 'string' || !/^v?2(?:[.\-]|$)/.test(readiness.protocolVersion)) return undefined;
   if (readiness.observedAt !== undefined && !isNonNegativeInteger(readiness.observedAt)) return undefined;
   if (!Array.isArray(readiness.engines) || !readiness.engines.every(isWorkerEngine)) return undefined;
   if (!isWorkerProbe(readiness.probe) || !sameWorkerProbe(readiness.probe, value.probe)) return undefined;
@@ -58,7 +75,7 @@ export function sanitizeWorkerProbe(probe: WorkerProbeFact): WorkerProbeFact {
 function isWorkerEngine(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'engine', 'version', 'installed', 'readiness', 'modelAvailability', 'models',
-    'authenticated', 'authMode', 'authType', 'modelIdPresent', 'probedAt', 'probeExitCode', 'source',
+    'authenticated', 'authMode', 'authType', 'modelIdPresent', 'targetModels', 'requirementRevision', 'probedAt', 'probeExitCode', 'source',
   ])) return false;
   return typeof value.engine === 'string' && value.engine !== '' &&
     (value.version === undefined || typeof value.version === 'string') &&
@@ -70,6 +87,8 @@ function isWorkerEngine(value: unknown): boolean {
     (value.authMode === undefined || typeof value.authMode === 'string') &&
     (value.authType === undefined || typeof value.authType === 'string') &&
     (value.modelIdPresent === undefined || typeof value.modelIdPresent === 'boolean') &&
+    (value.targetModels === undefined || (Array.isArray(value.targetModels) && value.targetModels.every((model) => typeof model === 'string'))) &&
+    (value.requirementRevision === undefined || (typeof value.requirementRevision === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value.requirementRevision))) &&
     (value.probedAt === undefined || isNonNegativeInteger(value.probedAt)) &&
     (value.probeExitCode === undefined || Number.isSafeInteger(value.probeExitCode)) &&
     (value.source === undefined || typeof value.source === 'string');

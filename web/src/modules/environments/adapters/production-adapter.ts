@@ -201,7 +201,7 @@ function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance
 
 /** Compose one page row from the production facts. */
 function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInstance {
-  const { enrollment, readiness, probes, recovery, forceReleases } = facts;
+  const { enrollment, readiness, probes, recovery, forceReleases, connectionAttempt } = facts;
   const openLease = leaseHolderOf(recovery);
   const ageSec = connectionAgeSec(readiness.connection.lastConfirmedAt, now);
   return {
@@ -223,6 +223,7 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     protocolVersion: readiness.compatibility.workerProtocolVersion ?? 'unknown',
     protocolCompatibility: compatibilityOf(readiness.compatibility.state),
     protocolMismatchDetail: readiness.compatibility.detail,
+    ...(connectionAttempt !== undefined ? { connectionAttempt } : {}),
     workSafety: workSafetyOf(readiness.workSafety.state),
     activeLeaseHolder: openLease,
     capabilityPermissions: capabilityRows(enrollment),

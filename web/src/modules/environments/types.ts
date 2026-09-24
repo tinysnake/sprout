@@ -105,6 +105,8 @@ export interface EnvironmentInstance {
   protocolVersion: string;
   protocolCompatibility: ProtocolCompatibility;
   protocolMismatchDetail?: string | undefined;
+  /** A proved, refused connection attempt; never current compatibility. */
+  connectionAttempt?: { outcome: 'incompatible'; reason: string; at: number } | undefined;
   workSafety: WorkSafety;
   activeLeaseHolder?: ActiveLeaseHolder | undefined;
   capabilityPermissions: CapabilityPermissions;

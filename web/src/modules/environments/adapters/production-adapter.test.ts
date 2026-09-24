@@ -78,6 +78,17 @@ test('the bridge projects the backend summary as the traffic-light authority', a
   assert.equal(env.capabilityPermissions['fileReadWrite'], false);
 });
 
+test('a refused connection attempt is displayed separately from current compatibility', async () => {
+  const facts = enrollmentFacts({ connectionAttempt: {
+    outcome: 'incompatible', reason: 'the Worker protocol is incompatible with this Sprout build', at: 1200,
+  } });
+  facts.readiness = { ...facts.readiness, compatibility: { state: 'unknown' },
+    connection: { state: 'never-connected' } };
+  const env = await new ProductionEnvironmentService(adapter(facts)).getEnvironment('enroll-1');
+  assert.equal(env?.protocolCompatibility, 'unknown');
+  assert.deepEqual(env?.connectionAttempt, facts.connectionAttempt);
+});
+
 test('the bridge renders Worker source, version, observation time, auth, and model facts without inventing them', async () => {
   const facts = enrollmentFacts();
   facts.readiness = {

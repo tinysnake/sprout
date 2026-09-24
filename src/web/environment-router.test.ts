@@ -287,6 +287,18 @@ test('the enrollment lifecycle proves identity, then requires Human approval', a
       'approved',
     );
 
+    // Even a proof-bearing legacy browser connect request cannot impersonate
+    // the Gateway's protocol negotiation and publish its refusal diagnostic.
+    const browserSkew = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
+      proof: await proveWorker(runtime, identity),
+      connection: { state: 'reconnecting' },
+      compatibility: { state: 'incompatible', workerProtocolVersion: '99' },
+      engines: [],
+      gatewayProtocolNegotiation: 'incompatible',
+    });
+    assert.equal(browserSkew.status, 200);
+    assert.equal(((await browserSkew.json()) as { outcome: string }).outcome, 'reconnected');
+
     const readiness = await read(
       runtime.base,
       '/api/environments/enrollments/enroll-1/readiness',
@@ -298,6 +310,7 @@ test('the enrollment lifecycle proves identity, then requires Human approval', a
     };
     assert.equal(readinessBody.readiness.summary.reason.length > 0, true);
     assert.equal(['green', 'yellow', 'red'].includes(readinessBody.readiness.summary.level), true);
+    assert.equal((readinessBody as { connectionAttempt?: unknown }).connectionAttempt, undefined);
   } finally {
     await runtime.api.close();
   }

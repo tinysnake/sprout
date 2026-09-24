@@ -69,6 +69,9 @@ const emit = defineEmits<{
             {{ env.protocolCompatibility.toUpperCase() }}
           </Badge>
         </div>
+        <p v-if="env.connectionAttempt?.outcome === 'incompatible'" class="text-xs text-[var(--text-muted)]">
+          Last refused connection: {{ env.connectionAttempt.reason }}. No current Worker evidence.
+        </p>
       </div>
 
       <!-- 4. Work Safety & Lease -->

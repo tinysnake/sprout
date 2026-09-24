@@ -218,11 +218,27 @@ export class EnvironmentWorker {
     const requiredModels = params !== null && typeof params === 'object' && Array.isArray(params?.requiredModels)
       ? params.requiredModels.filter((model): model is string => typeof model === 'string')
       : [];
-    const result = await this.#options.readinessProbe?.({ requiredModels, ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
+    const result = await this.#options.readinessProbe?.({ requiredModels,
+      ...(params?.requirements !== undefined ? { requirements: params.requirements } : {}),
+      ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
     if (result === undefined) {
       throw new Error('Worker has no non-inference readiness probe');
     }
     this.#readiness = result.readiness;
+    if (result.readiness.protocolVersion === '3') {
+      // Legacy-shaped test adapters may still return two probe copies. Never
+      // discard a contradiction while translating to the single v3 wire fact.
+      if (JSON.stringify(result.readiness.probe) !== JSON.stringify(result.probe)) {
+        throw new Error('inconsistent Worker probe metadata');
+      }
+      // Preserve the identity of a deliberately redelivered attempt. Replacing
+      // it with the request's new identity would append instead of replaying
+      // the original receipt after flattening the v3 wire envelope.
+      const attemptId = result.attemptId ?? params?.attemptId;
+      return { protocolVersion: '3', observedAt: result.readiness.observedAt,
+        engines: result.readiness.engines, probe: result.probe,
+        ...(attemptId !== undefined ? { attemptId } : {}) } as unknown as WorkerReadinessProbeResult;
+    }
     return params?.attemptId === undefined ? result : { ...result, attemptId: result.attemptId ?? params.attemptId };
   }
 

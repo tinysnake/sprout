@@ -79,6 +79,7 @@ import {
 } from './worker/environment-worker.ts';
 import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
+import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
@@ -184,7 +185,7 @@ export interface RuntimeEnvironment {
    */
   info?(environmentInstanceId: string): Promise<WorkerInfo | undefined>;
   /** Execute a non-inference probe on an already accepted Worker. */
-  probeReadiness?(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined>;
+  probeReadiness?(environmentInstanceId: string, attemptId?: string, requirements?: import('./environment/readiness.ts').ReadinessRequirementScope): Promise<WorkerReadinessProbeResult | undefined>;
   /** End the port and fail anything still in flight. */
   close(): Promise<void>;
 }
@@ -457,6 +458,19 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // definitions stay the M1 seed registry; the Agent service composes over
     // the same durable handle every other M2 domain uses.
     const agentService = new AgentService({ store: stores.agentIdentities });
+    const currentRequirements = async () => {
+      const durable = (await agentService.list()).filter((agent) => agent.status !== 'archived');
+      const identities = new Set(durable.map((agent) => agent.id));
+      const options = [
+        ...agents.list().filter((agent) => !identities.has(agent.id)).flatMap((agent) =>
+          effectiveWorkOptions(agent).map((option) => ({ ...option, id: agent.id }))),
+        ...durable.flatMap((agent) => currentOptions(agent).map((option) => ({ ...option, id: agent.id }))),
+      ];
+      // A version bump can edit instructions or effort without changing the
+      // model a Worker must measure. Applicability is the target set, not the
+      // Agent document's unrelated revision.
+      return readinessRequirements(options);
+    };
     // The bridge between the M2 Project authority and the M1 collaboration
     // machinery (#92, F1): authority Projects are projected into the registry
     // the wake contract and orchestrator read, so one Project identity routes
@@ -954,6 +968,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           ),
           currentEpoch: currentWorkerConnectionEpoch(enrollment.id),
           requiredEngines: [engineId],
+          requirements: await currentRequirements(),
           supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
           now,
         });
@@ -1001,6 +1016,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     scheduleCatalogRefresh = () => {
       void refreshEnvironmentCatalog().catch(() => undefined);
     };
+    agents.onChange(scheduleCatalogRefresh);
     // Non-destructive archive/restore (#89, ADR-0008). It reads the same lease
     // registry and open recovery records, so an Environment with dependent work
     // can never be archived, and its decisions are ordinary durable enrollment
@@ -1019,6 +1035,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     // monotonic connection epoch. The gateway exclusively owns the mutable
     // registry; runtime projections consume only its read-only current-epoch
     // query, so composition cannot issue an accepted epoch itself.
+    const resolveRequirements = currentRequirements;
     const workerGateway = new WorkerGateway({
       enrollments,
       epochStore: stores.workerConnectionEpochs,
@@ -1027,12 +1044,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // catalog probe; do not feed a Pi-only target to Codex and claim a false
       // target absence. The Worker may only compare these locally and must not
       // infer account entitlement.
-      requiredModels: () => [...new Set(
-        agents.list().flatMap((agent) => effectiveWorkOptions(agent)
-          .filter((option) => option.engine === 'codex')
-          .map((option) => option.workModel))
-          .filter((model) => model !== ''),
-      )],
+      requiredModels: async () => (await currentRequirements()).modelsByEngine?.codex ?? [],
     });
     invalidateWorkerAuthority = (enrollmentId) => workerGateway.invalidateEnrollment(enrollmentId);
     verifyWorkerObservationAuthority = (authority, scope) =>
@@ -1058,6 +1070,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       workerGateway,
       environment: enrollmentEnvironment,
       refreshEnvironmentCatalog,
+      resolveRequirements,
     });
     // A newly accepted connection is a *fact* on an already-existing enrollment,
     // never a reason to create or dial a Worker; a lost channel makes that fact
@@ -1159,6 +1172,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         // never disagree about what the Environments support.
         createAgentRouter({
           agents: agentService,
+          onMutation: scheduleCatalogRefresh,
           compatibility: async (agent: Agent) => {
             // The compatibility projection is per-eligible-instance under the
             // dynamic catalog (E2). It reports the first eligible enrolled
@@ -1438,11 +1452,11 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     return target.info === undefined ? Promise.resolve(undefined) : target.info(environmentInstanceId);
   }
 
-  probeReadiness(environmentInstanceId: string, attemptId?: string): Promise<WorkerReadinessProbeResult | undefined> {
+  probeReadiness(environmentInstanceId: string, attemptId?: string, requirements?: import('./environment/readiness.ts').ReadinessRequirementScope): Promise<WorkerReadinessProbeResult | undefined> {
     const target = this.#require();
     return target.probeReadiness === undefined
       ? Promise.resolve(undefined)
-      : target.probeReadiness(environmentInstanceId, attemptId);
+      : target.probeReadiness(environmentInstanceId, attemptId, requirements);
   }
 
   async close(): Promise<void> {

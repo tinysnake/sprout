@@ -36,10 +36,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 
 import type { AgentDefinition } from './agent/registry.ts';
+import { currentOptions, effectiveWorkOptions } from './agent/model.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
+import { readinessRequirements, targetEvidenceSatisfiesRequirements } from './environment/readiness.ts';
+import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import { workerIdentityDigest } from './environment/enrollment-identity.ts';
@@ -1675,7 +1678,7 @@ test('production starts with zero Environments and admits an enrolled instance w
     // required; production admits it without a restart.
     await connectRuntimeWorker(runtime, enrollmentId, keyPath);
     const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, true);
@@ -1691,6 +1694,27 @@ function scriptedReadinessProbe() {
     observedAt: Date.now(),
     engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
   });
+}
+
+/** Synthetic gate control only: not evidence of a live account entitlement. */
+const scriptedScope = readinessRequirements([{ engine: 'scripted', workModel: '' }]);
+function targetBoundScriptedProbe() {
+  const result = scriptedReadinessProbe();
+  return {
+    ...result,
+    readiness: { ...result.readiness, engines: result.readiness.engines.map((engine) => ({
+      ...engine, targetModels: [], modelIdPresent: true,
+      ...(scriptedScope.revisionsByEngine?.scripted !== undefined ? { requirementRevision: scriptedScope.revisionsByEngine.scripted } : {}),
+    })) },
+  };
+}
+function scriptedStartupReadiness() {
+  return { ...targetBoundScriptedProbe().readiness, protocolVersion: WORKER_PROTOCOL_VERSION,
+    probe: startupWorkerProbe() };
+}
+async function observeSyntheticReady(runtime: SproutRuntime, enrollmentId: string, authority: ReadinessObservationAuthority) {
+  return runtime.enrollments.recordReadinessObservation(enrollmentId, targetBoundScriptedProbe(), authority,
+    { requirements: scriptedScope });
 }
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -1749,7 +1773,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
         return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION,
           engines: [{ engine: 'scripted', version: '1.0.0', installed: state === 'ready', readiness: state,
             modelAvailability: state === 'ready' ? 'available' as const : 'none' as const,
-            models: state === 'ready' ? ['scripted-model'] : [] }], probe }, probe };
+            models: state === 'ready' ? ['scripted-model'] : [], targetModels: [], modelIdPresent: state === 'ready',
+            ...(scriptedScope.revisionsByEngine?.scripted !== undefined ? { requirementRevision: scriptedScope.revisionsByEngine.scripted } : {}) }], probe }, probe };
       };
       await h.connect(id, join(directory, 'worker-key.pem'), {
         readiness: () => fact('ready', 100).readiness,
@@ -1862,7 +1887,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         assert.equal((await store.listProbes(enrollment.environmentInstanceId))[0]?.source, 'worker');
 
         // The refusal is input validation, not a broken authority/admission path.
-        assert.equal(await runtime.enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), authority), true);
+        assert.ok(await observeSyntheticReady(runtime, enrollment.id, authority));
         await runtime.refreshEnvironmentCatalog();
         assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, true);
         assert.equal((await store.listProbes(enrollment.environmentInstanceId)).length, 2);
@@ -1894,7 +1919,7 @@ async function enrollEligibleInstance(
   });
   await connectRuntimeWorker(runtime, enrollmentId, identityKeyPath);
   const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-  await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+  await observeSyntheticReady(runtime, enrollmentId,
     readinessAuthority(runtime, enrollmentId, epoch));
   await runtime.refreshEnvironmentCatalog();
   return enrollmentId;
@@ -1938,7 +1963,7 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // Establishing the required readiness fact makes it eligible dynamically.
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, emptyEpoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2035,7 +2060,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     const replacement = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2077,7 +2102,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
 
     // A delayed old-epoch observation is refused as non-authoritative and
     // cannot make the new connection eligible or release/conflict-bypass lease.
-    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(), firstAuthority);
+    await observeSyntheticReady(runtime, enrollmentA, firstAuthority);
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     const blocked = runtime.pool.acquireLease({
@@ -2085,7 +2110,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     });
     assert.equal(blocked.ok, false);
 
-    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentA,
       readinessAuthority(runtime, enrollmentA, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2141,10 +2166,10 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
 
     // Delayed old facts remain non-authoritative; only readiness produced by
     // the replacement epoch restores admission.
-    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), firstAuthority);
+    await observeSyntheticReady(second, enrollmentId, firstAuthority);
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false);
-    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(second, enrollmentId,
       readinessAuthority(second, enrollmentId, replacement));
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2282,19 +2307,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       // The Worker declares its own neutral, non-inference readiness facts
       // (ADR-0013). A real probe implementation is E4 (#118); here the Worker
       // states what it verified so the catalog can reach eligibility.
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [
-          {
-            engine: 'scripted',
-            installed: true,
-            readiness: 'ready',
-            modelAvailability: 'available',
-            models: ['scripted-model'],
-          },
-        ],
-      }),
+      readiness: scriptedStartupReadiness,
     });
 
     // The acceptance observer records the delegated readiness; wait for the
@@ -2369,14 +2382,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       input: replacement.stream,
       output: replacement.stream,
       workspaceRoot,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{
-          engine: 'scripted', installed: true, readiness: 'ready',
-          modelAvailability: 'available', models: ['scripted-model'],
-        }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry('enrolled-host-1')?.eligible === true,
@@ -2445,11 +2451,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       engines: new Map(),
       input: firstConnection.stream,
       output: firstConnection.stream,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
@@ -2503,11 +2505,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       engines: new Map(),
       input: secondConnection.stream,
       output: secondConnection.stream,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
@@ -2741,7 +2739,7 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     });
     await connectRuntimeWorker(runtime, enrollmentId, keyPath);
     const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     await waitFor(
@@ -2772,11 +2770,662 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
  * readiness seeding stands in for it.
  */
 
+for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#128 ${backend}: an unrelated Pi edit retains Codex target evidence on the accepted channel`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-independent-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory, agents: [
+      { ...agent('codex-agent'), engine: 'codex', model: 'codex-model' },
+      { ...agent('pi-agent'), engine: 'pi', model: 'pi-old' },
+    ] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.runtime.agentService.create({ id: 'pi-agent', displayName: 'Pi Agent',
+        workOptions: [{ engine: 'pi', workModel: 'pi-old', effort: 'medium' }] });
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        const probe = { at: 42_000 + requests.length, latencyMs: 2, protocolOk: true,
+          enginesOk: true, source: 'worker' as const, version: '3', summary: 'scoped evidence' };
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+          { engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+            modelAvailability: 'available', models: ['codex-model'], targetModels: ['codex-model'],
+            modelIdPresent: true, requirementRevision: params.requirements!.revisionsByEngine!.codex! },
+          { engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown',
+            models: [], targetModels: [], modelIdPresent: false,
+            requirementRevision: params.requirements!.revisionsByEngine!.pi! },
+        ] }, probe };
+      } });
+      await waitFor(() => requests.length > 0, 'initial scoped request');
+      const post = (path: string, body: object) => fetch(`${h.base}${path}`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      assert.equal((await post(`/api/environments/enrollments/${id}/probes`, {})).status, 201);
+      const old = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      const codex = old.readiness.engines.find((engine) => engine.engine === 'codex')!;
+      assert.equal(codex.requirementRevision, old.requirements?.revisionsByEngine?.codex);
+      const edit = await post('/api/agents/pi-agent/configuration', { displayName: 'Pi Agent',
+        workOptions: [{ engine: 'pi', workModel: 'pi-new', effort: 'medium' }] });
+      assert.equal(edit.status, 200);
+      await h.runtime.refreshEnvironmentCatalog();
+
+      // Before any fresh probe: resolve current core-owned requirements the same
+      // way the runtime does (durable Agents over the configured seed), then prove
+      // the committed pre-edit Codex evidence is still applicable to the
+      // *current* Codex scope while the Pi revision has moved. This is a composed
+      // read projection, not a raw current-readiness seed.
+      const durableAgents = (await h.runtime.agentService.list()).filter((agent) => agent.status !== 'archived');
+      const durableIds = new Set(durableAgents.map((agent) => agent.id));
+      const currentScope = readinessRequirements([
+        ...h.runtime.agents.list().filter((a) => !durableIds.has(a.id))
+          .flatMap((a) => effectiveWorkOptions(a).map((option) => ({ ...option, id: a.id }))),
+        ...durableAgents.flatMap((a) => currentOptions(a).map((option) => ({ ...option, id: a.id }))),
+      ]);
+      assert.deepEqual(currentScope.modelsByEngine, { codex: ['codex-model'], pi: ['pi-new'] },
+        'the post-edit core-held scope is current');
+      assert.equal(codex.requirementRevision, currentScope.revisionsByEngine?.codex,
+        'pre-edit Codex evidence still matches the current Codex scope revision');
+      assert.ok(targetEvidenceSatisfiesRequirements({ ...codex, required: true }, currentScope),
+        'pre-edit Codex target evidence remains applicable before a fresh probe');
+      assert.notEqual(old.requirements?.revisionsByEngine?.pi, currentScope.revisionsByEngine?.pi,
+        'only the changed Pi revision moved');
+      const catalogBeforeProbe = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.ok(catalogBeforeProbe.observed?.engines?.some((engine) => engine.engine === 'codex'),
+        'the composed catalog projection still carries the pre-edit Codex evidence');
+
+      const result = await post(`/api/environments/enrollments/${id}/probes`, {});
+      assert.equal(result.status, 201);
+      const fresh = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine, {
+        codex: ['codex-model'], pi: ['pi-new'],
+      });
+      assert.equal(fresh.requirements?.revisionsByEngine?.codex, old.requirements?.revisionsByEngine?.codex);
+      assert.equal(fresh.readiness.engines.find((engine) => engine.engine === 'codex')?.requirementRevision,
+        codex.requirementRevision, 'the independent Codex target remains applicable');
+      assert.notEqual(fresh.requirements?.revisionsByEngine?.pi, old.requirements?.revisionsByEngine?.pi);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false,
+        'neutral Pi measurement cannot be promoted by Codex evidence');
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: Pi-only and mixed targets stay engine-scoped and unsupported`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-pi-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'pi', model: 'pi-model' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'Pi unsupported measurement' };
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+          { engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [],
+            targetModels: [], modelIdPresent: false,
+            ...(params.requirements?.revisionsByEngine?.pi !== undefined ? { requirementRevision: params.requirements.revisionsByEngine.pi } : {}) },
+          ...(params.requirements?.modelsByEngine?.codex?.length ? [{ engine: 'codex', installed: true,
+            readiness: 'ready' as const, modelAvailability: 'available' as const,
+            models: [...params.requirements.modelsByEngine.codex], targetModels: [...params.requirements.modelsByEngine.codex],
+            modelIdPresent: true, ...(params.requirements.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) }] : []),
+        ] }, probe };
+      } });
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.pi, ['pi-model']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      const add = await fetch(`${h.base}/api/agents`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'codex-agent', displayName: 'Codex Agent',
+          workOptions: [{ engine: 'codex', workModel: 'codex-model', effort: 'medium' }] }) });
+      assert.equal(add.status, 201);
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.pi, ['pi-model']);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.codex, ['codex-model']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false,
+        'Codex local catalog cannot turn unsupported Pi measurement into eligibility');
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: an unrequired degraded engine stays inspectable and does not reject the required Codex option`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-unrequired-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    // Only Codex is a configured work option, so Pi is measured but unrequired.
+    const h = await readinessWorkflowHarness({ backend, directory, engineId: 'codex',
+      agents: [{ ...agent('codex-agent'), engine: 'codex', model: 'codex-model' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        const probe = { at: 97_000, latencyMs: 2, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '0.154.0', summary: 'required Codex plus unrequired Pi' };
+        const codexTargets = params.requirements?.modelsByEngine?.codex ?? [];
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+          { engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+            modelAvailability: 'available', models: [...codexTargets], targetModels: [...codexTargets],
+            modelIdPresent: codexTargets.length > 0, probedAt: 5, probeExitCode: 0, source: 'codex-account-read',
+            ...(params.requirements?.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) },
+          // A degraded, unrequired engine: installed but its login is unverified,
+          // so its readiness is honestly `unknown` and no model is claimed.
+          { engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown',
+            models: [], targetModels: [], modelIdPresent: false },
+        ] }, probe };
+      } });
+      await waitFor(() => requests.length > 0, 'scoped target request');
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ requiredModels: ['forged'], probe: { source: 'browser' } }) });
+      const response = await post();
+      const responseText = await response.text();
+      assert.equal(response.status, 201, responseText);
+      // The core never asks the Worker for an unrequired engine target, and never
+      // asks it to enumerate Pi models (no Pi model-list operation).
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine, { codex: ['codex-model'] },
+        'only the required Codex engine carries a target');
+
+      // HTTP inspection keeps the independent Pi degradation visible.
+      const get = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+      assert.equal(get.status, 200);
+      const body = (await get.json()) as {
+        readiness: { summary: { level: string; reason: string }; engines: readonly {
+          engine: string; required: boolean; readiness: string; modelIdPresent?: boolean }[] } };
+      const codex = body.readiness.engines.find((engine) => engine.engine === 'codex')!;
+      const pi = body.readiness.engines.find((engine) => engine.engine === 'pi')!;
+      assert.equal(codex.required, true, 'Codex is the required engine');
+      assert.equal(codex.readiness, 'ready');
+      assert.equal(pi.required, false, 'Pi is measured but unrequired');
+      assert.equal(pi.readiness, 'unknown', 'Pi degradation stays an independent inspectable fact');
+      assert.equal(pi.modelIdPresent, false, 'the Worker measured no Pi target presence; no entitlement is inferred');
+      // A non-required degradation may be Yellow without blocking the option.
+      assert.equal(body.readiness.summary.level, 'yellow', body.readiness.summary.reason);
+
+      // The required Codex option admits despite the unrequired Pi degradation.
+      const entry = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.equal(entry.eligible, true, 'the required Codex option remains eligible');
+      // Synthetic target-bound known-ready gate control only, not live entitlement.
+      assert.equal(entry.readiness.readiness.engines.find((engine) => engine.engine === 'pi')?.required, false);
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: authenticated v2/v3 probes and incompatible wire keep one receipt history`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-wire-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      let mode: 'v2' | 'v3' | 'duplicate' | 'incompatible' = 'v2';
+      const workerTime = { v2: 51_000, v3: 52_000, duplicate: 53_000, incompatible: 54_000 };
+      let calls = 0;
+      await h.connect(id, join(directory, 'worker-key.pem'), {
+        readiness: () => ({ protocolVersion: WORKER_PROTOCOL_VERSION, engines: [{ engine: 'scripted', installed: true,
+          readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+          probe: { at: workerTime.v2, latencyMs: 3, protocolOk: true, enginesOk: true,
+            source: 'worker', version: '1', summary: 'bootstrap wire control' } }),
+        readinessProbe: async (params) => {
+        calls += 1;
+        const probe = { at: workerTime[mode], latencyMs: 3, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '1', summary: 'synthetic wire control' };
+        const engines = [{ engine: 'scripted', installed: true, readiness: 'ready' as const,
+          modelAvailability: 'available' as const, models: ['scripted-model'], targetModels: [], modelIdPresent: true,
+          ...(params.requirements?.revisionsByEngine?.scripted !== undefined
+            ? { requirementRevision: params.requirements.revisionsByEngine.scripted } : {}) }];
+        return { readiness: { protocolVersion: mode === 'v2' || mode === 'duplicate' ? '2' : mode === 'v3' ? '3' : '4',
+          engines, probe: mode === 'duplicate' ? { ...probe, summary: 'contradictory' } : probe }, probe };
+        },
+      });
+      const store = h.runtime.stores.environmentReadiness;
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      // An empty-target worker/info bootstrap uses its own complete v3
+      // envelope; v2 translation is exercised by the explicit request below.
+      await h.runtime.observeWorkerReadiness(id);
+      assert.equal(calls, 0, 'empty-target bootstrap comes from worker/info, not a fabricated request');
+      await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined,
+        'empty-target bootstrap receipt');
+      assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.probe.at, workerTime.v2);
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
+          probe: { source: 'browser', summary: 'forged' } }) });
+      const before = (await store.listObservations(INSTANCE_ID)).length;
+      const old = await post();
+      assert.equal(old.status, 201);
+      const oldReceipt = (await old.json()) as { receipt: { observationId: string; probe: { source: string } } };
+      assert.equal(oldReceipt.receipt.probe.source, 'worker');
+      assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.probe.at, workerTime.v2);
+      mode = 'v3';
+      const fresh = await post();
+      assert.equal(fresh.status, 201);
+      const freshReceipt = (await fresh.json()) as { receipt: { observationId: string } };
+      assert.notEqual(oldReceipt.receipt.observationId, freshReceipt.receipt.observationId);
+      assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.observationId, freshReceipt.receipt.observationId);
+      assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.probe.at, workerTime.v3);
+      assert.equal((await store.listObservations(INSTANCE_ID)).length, before + 2);
+      const get = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(get.status, 200);
+      const current = (await get.json()) as { receipt?: { observationId: string; probe: { at: number } };
+        readiness: { probe?: { at: number } } };
+      assert.equal(current.receipt?.observationId, freshReceipt.receipt.observationId);
+      assert.equal(current.receipt?.probe.at, workerTime.v3);
+      assert.equal(current.readiness.probe?.at, workerTime.v3);
+      const historical = await fetch(`${h.base}/api/environments/enrollments/${id}/receipts/${oldReceipt.receipt.observationId}`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(historical.status, 200);
+      const history = (await historical.json()) as { receipt: { observationId: string; probe: { at: number } } };
+      assert.equal(history.receipt.observationId, oldReceipt.receipt.observationId);
+      assert.equal(history.receipt.probe.at, workerTime.v2);
+      for (const rejected of ['duplicate', 'incompatible'] as const) {
+        mode = rejected;
+        assert.notEqual((await post()).status, 201);
+        assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.observationId, freshReceipt.receipt.observationId);
+        assert.equal((await store.listObservations(INSTANCE_ID)).length, before + 2);
+      }
+    } finally { await h.close(); }
+  });
+
+  /**
+   * #128 F2: one compact shared wire/inspection matrix.
+   *
+   * The same scenario table runs the automatic target trigger and the Human
+   * trigger for supported-v2, current-v3, incompatible-v4, and contradictory
+   * envelopes. The existing bootstrap/Human test above covers the empty-target
+   * `worker/info` trigger for v2; this adds the positive automatic/Human path and
+   * the no-write neutral path without duplicating a full Cartesian suite.
+   */
+  test(`#128 ${backend}: composed wire matrix keeps receipts, neutral refusal, and privacy`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'sprout-128-matrix-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const privacyMarker = 'SPROUT_SYNTHETIC_MATRIX_SENTINEL_7f3a9c1e5d2b4806a1c9e7f3b5d2084c';
+    const hostileSummary = `probe at /synthetic-private/${privacyMarker}/worker.sock`;
+    const wireCases = [
+      { name: 'supported-v2', version: '2', contradictory: false, commits: true },
+      { name: 'current-v3', version: '3', contradictory: false, commits: true },
+      { name: 'incompatible-v4', version: '4', contradictory: false, commits: false },
+      { name: 'contradictory-v2', version: '2', contradictory: true, commits: false },
+    ] as const;
+
+    for (const wire of wireCases) {
+      const directory = join(root, wire.name);
+      mkdirSync(directory, { recursive: true });
+      const h = await readinessWorkflowHarness({ backend, directory,
+        agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
+      try {
+        const id = (await h.runtime.enrollments.list())[0]!.id;
+        const store = h.runtime.stores.environmentReadiness;
+        // Count every mutation attempt so a refused envelope is proven to reach
+        // no commit at all, rather than inferred from a fixed sleep.
+        let commitAttempts = 0;
+        const originalCommit = store.commitObservation.bind(store);
+        store.commitObservation = async (...args) => { commitAttempts += 1; return originalCommit(...args); };
+        let calls = 0;
+        let settledCalls = 0;
+        await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+          calls += 1;
+          const probe = { at: 90_000 + calls * 1_000, latencyMs: 7, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: hostileSummary };
+          const revision = params.requirements?.revisionsByEngine?.codex;
+          const targets = params.requirements?.modelsByEngine?.codex ?? [];
+          const engines = [{ engine: 'codex', installed: true, authenticated: true, readiness: 'ready' as const,
+            modelAvailability: 'available' as const, models: [...targets], targetModels: [...targets],
+            modelIdPresent: targets.length > 0, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' as const,
+            ...(revision !== undefined ? { requirementRevision: revision } : {}) }];
+          settledCalls += 1;
+          return { readiness: { protocolVersion: wire.version, engines,
+            probe: wire.contradictory ? { ...probe, summary: 'contradictory copy' } : probe }, probe };
+        } });
+        const human = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+          headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+          body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
+            probe: { source: 'browser', summary: 'forged' } }) });
+        const get = async () => fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+          { headers: { cookie: h.cookie } });
+        // The automatic target trigger fires on acceptance.
+        await waitFor(() => calls > 0, `${wire.name} automatic target probe`);
+        await waitFor(() => settledCalls >= 1, `${wire.name} automatic Worker response`);
+        if (wire.commits) {
+          await waitFor(async () => (await store.listObservations(INSTANCE_ID)).length === 1, `${wire.name} commit`);
+          await h.runtime.refreshEnvironmentCatalog();
+          const history = await store.listObservations(INSTANCE_ID);
+          const current = await store.getCurrentObservation(INSTANCE_ID);
+          assert.equal(commitAttempts, 1, `${wire.name}: exactly one committed mutation`);
+          assert.equal(history.length, 1, `${wire.name}: exactly the automatic observation`);
+          assert.ok(current, `${wire.name}: current observation present`);
+          assert.equal(current!.observationId, history[0]!.observationId, `${wire.name}: current is the committed observation`);
+          assert.equal(current!.probe.at, 91_000, `${wire.name}: truthful Worker time survives commit`);
+          assert.ok(!JSON.stringify(current).includes(privacyMarker), `${wire.name}: privacy sentinel never persisted`);
+
+          // The Human trigger uses the same canonical path after acceptance.
+          const post = await human();
+          const postText = await post.text();
+          assert.equal(post.status, 201, postText);
+          const posted = JSON.parse(postText) as { receipt: { observationId: string; probe: { at: number; source?: string; summary: string } } };
+          assert.equal(posted.receipt.probe.source, 'worker', `${wire.name}: a browser cannot forge provenance`);
+          assert.equal(posted.receipt.probe.at, 92_000, `${wire.name}: Human-trigger Worker time is truthful`);
+          const currentAfter = (await store.getCurrentObservation(INSTANCE_ID))!;
+          assert.equal(currentAfter.observationId, posted.receipt.observationId, `${wire.name}: Human receipt is current`);
+          assert.equal((await store.listObservations(INSTANCE_ID)).length, 2, `${wire.name}: one row per committed trigger`);
+
+          const body = (await (await get()).json()) as { receipt?: { observationId: string; probe: { at: number; summary: string } };
+            readiness: { probe?: { at: number; summary: string } }; probes: readonly { at: number }[] };
+          assert.equal(body.receipt?.observationId, posted.receipt.observationId, `${wire.name}: GET identifies the committed receipt`);
+          assert.equal(body.receipt?.probe.at, 92_000, `${wire.name}: GET receipt Worker time`);
+          assert.equal(body.readiness.probe?.at, 92_000, `${wire.name}: current readiness Worker time`);
+          assert.equal(body.probes.length, 2, `${wire.name}: durable history is inspectable`);
+          assert.ok(!JSON.stringify(body).includes(privacyMarker), `${wire.name}: privacy survives the query seam`);
+          assert.ok(!JSON.stringify(body).includes('/synthetic-private/'), `${wire.name}: host paths are redacted`);
+          const historical = await fetch(`${h.base}/api/environments/enrollments/${id}/receipts/${history[0]!.observationId}`,
+            { headers: { cookie: h.cookie } });
+          assert.equal(historical.status, 200, `${wire.name}: historical receipt stays retrievable`);
+          // Synthetic target-bound known-ready gate control: this proves the gate
+          // can admit established evidence, not that live account entitlement is provable.
+          assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, `${wire.name}: target-bound known-ready evidence admits`);
+        } else {
+          // The automatic trigger already consumed and refused this envelope. The
+          // Human trigger shares the same validator, so its deterministic HTTP
+          // settlement proves the same refusal reaches the request boundary too.
+          const post = await human();
+          const postText = await post.text();
+          assert.notEqual(post.status, 201, `${wire.name}: Human-trigger refusal is not a success`);
+          assert.ok(!postText.includes('"receipt"'), `${wire.name}: a refused Human trigger returns no receipt`);
+          const history = await store.listObservations(INSTANCE_ID);
+          const current = await store.getCurrentObservation(INSTANCE_ID);
+          assert.equal(commitAttempts, 0, `${wire.name}: neither trigger ever attempted a mutation`);
+          assert.equal(history.length, 0, `${wire.name}: an incompatible envelope never mutates observation history`);
+          assert.equal(current, undefined, `${wire.name}: an incompatible envelope establishes no current state`);
+          const response = await get();
+          assert.equal(response.status, 200, `${wire.name}: the neutral state stays inspectable`);
+          const body = (await response.json()) as { receipt?: unknown; readiness: { probe?: unknown; summary: { level: string } }; probes: readonly unknown[] };
+          assert.equal(body.receipt, undefined, `${wire.name}: no receipt in the neutral projection`);
+          assert.equal(body.readiness.probe, undefined, `${wire.name}: no fabricated current probe`);
+          assert.deepEqual(body.probes, [], `${wire.name}: no fabricated probe history`);
+          assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, `${wire.name}: ineligible`);
+          assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved', `${wire.name}: enrollment authority is preserved`);
+        }
+      } finally { await h.close(); }
+    }
+  });
+
+  test(`#128 ${backend}: a gateway protocol-mismatch refusal is an inspectable neutral state`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-gateway-skew-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.connect(id, join(directory, 'unapproved-key.pem'), {}, '99').catch(() => undefined);
+      const unproved = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(((await unproved.json()) as { connectionAttempt?: unknown }).connectionAttempt, undefined,
+        'a different Worker identity cannot publish a version-skew diagnostic');
+      const refusal = await h.connect(id, join(directory, 'worker-key.pem'), {}, '99').then(
+        () => undefined, (error: unknown) => error);
+      assert.ok(refusal instanceof Error, 'the mismatched Worker is refused before acceptance');
+      // The Worker host receives the explicit version-skew explanation on its own
+      // authenticated channel: the connector surfaces the core's `incompatible`
+      // refusal code rather than a generic transport error.
+      assert.equal((refusal as { code?: string }).code, 'incompatible',
+        'the refused Worker host gets an explicit incompatible explanation');
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined, 'no epoch is minted');
+      const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+      assert.equal(response.status, 200, 'the refusal stays inspectable over the query seam');
+      const body = (await response.json()) as { connectionAttempt?: { outcome: string; reason: string; at: number };
+        readiness: { compatibility: { state: string; detail?: string }; summary: { level: string }; probe?: unknown }; probes: readonly unknown[] };
+      // Pre-epoch refusal never becomes current readiness. The Human sees a
+      // separate core-owned attempt diagnostic, not echoed Worker claims.
+      assert.equal(body.readiness.compatibility.state, 'unknown');
+      assert.equal(body.readiness.compatibility.detail, undefined);
+      assert.equal(body.connectionAttempt?.outcome, 'incompatible');
+      assert.equal(body.connectionAttempt?.reason, 'the Worker protocol is incompatible with this Sprout build');
+      assert.ok(Number.isFinite(body.connectionAttempt?.at));
+      assert.equal(body.readiness.summary.level, 'red');
+      assert.equal(body.readiness.probe, undefined);
+      assert.deepEqual(body.probes, []);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved');
+      await h.connect(id, join(directory, 'worker-key.pem'));
+      const recovered = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(((await recovered.json()) as { connectionAttempt?: unknown }).connectionAttempt, undefined,
+        'a later accepted connection clears the old refusal diagnostic');
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: an empty-target bootstrap honours supported v2 and refuses an unsupported envelope`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'sprout-128-bootstrap-skew-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    // No configured target model selects the `worker/info` bootstrap trigger.
+    const cases = [
+      { name: 'v2', version: '2', commits: true },
+      { name: 'v4', version: '4', commits: false },
+    ] as const;
+    for (const wireCase of cases) {
+      const directory = join(root, wireCase.name);
+      mkdirSync(directory, { recursive: true });
+      const h = await readinessWorkflowHarness({ backend, directory });
+      try {
+        const id = (await h.runtime.enrollments.list())[0]!.id;
+        const store = h.runtime.stores.environmentReadiness;
+        let commitAttempts = 0;
+        const originalCommit = store.commitObservation.bind(store);
+        store.commitObservation = async (...args) => { commitAttempts += 1; return originalCommit(...args); };
+        await h.connect(id, join(directory, 'worker-key.pem'), {
+          readiness: () => ({ protocolVersion: wireCase.version, engines: [{ engine: 'scripted', installed: true,
+            readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+            probe: { at: 96_000, latencyMs: 3, protocolOk: true, enginesOk: true, source: 'worker',
+              version: '1', summary: 'bootstrap envelope' } }),
+        });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+        await h.runtime.observeWorkerReadiness(id);
+        if (wireCase.commits) {
+          await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'bootstrap commit');
+          const current = (await store.getCurrentObservation(INSTANCE_ID))!;
+          assert.equal(current.probe.at, 96_000, `${wireCase.name}: truthful Worker time survives bootstrap`);
+          assert.equal(commitAttempts, 1, `${wireCase.name}: exactly one committed bootstrap mutation`);
+        } else {
+          // Deterministic: the observation path is idempotent and already
+          // settled, so a second observe transitions nothing and proves the
+          // refused envelope never reaches a commit without a timer as evidence.
+          await h.runtime.observeWorkerReadiness(id);
+          assert.equal(commitAttempts, 0, `${wireCase.name}: the unsupported envelope never attempts a mutation`);
+          assert.equal((await store.getCurrentObservation(INSTANCE_ID)), undefined, `${wireCase.name}: no bootstrap observation commits`);
+        }
+        const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+        assert.equal(response.status, 200);
+        const body = (await response.json()) as { readiness: { probe?: { at: number } }; probes: readonly unknown[] };
+        if (wireCase.commits) {
+          assert.equal(body.readiness.probe?.at, 96_000, `${wireCase.name}: current bootstrap probe is inspectable`);
+          assert.equal(body.probes.length, 1, `${wireCase.name}: bootstrap history is inspectable`);
+        } else {
+          assert.equal(body.readiness.probe, undefined, `${wireCase.name}: no fabricated current probe`);
+          assert.deepEqual(body.probes, [], `${wireCase.name}: no fabricated history`);
+        }
+        assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, `${wireCase.name}: bootstrap cannot authorize an unmeasured target`);
+        assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved', `${wireCase.name}: authority is preserved`);
+      } finally { await h.close(); }
+    }
+  });
+
+  test(`#128 ${backend}: HTTP Agent edits fence held target evidence and preserve independent observations`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-edit-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'model-a' }] });
+    let release: (() => void) | undefined;
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.runtime.agentService.create({ id: 'scout', displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'model-a', effort: 'medium' }] });
+      const post = (path: string, body: object) => fetch(`${h.base}${path}`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      const edit = async (model: string, displayName: string) => {
+        const response = await post('/api/agents/scout/configuration', { displayName,
+          workOptions: [{ engine: 'codex', workModel: model, effort: 'medium' }] });
+        assert.equal(response.status, 200);
+      };
+      let started: (() => void) | undefined;
+      const first = new Promise<void>((resolve) => { started = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        if (requests.length === 1) { started?.(); await gate; }
+        const model = params.requirements?.modelsByEngine?.codex?.[0] ?? '';
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'synthetic target measurement' };
+        // Synthetic local-catalog gate control, not live entitlement evidence.
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe,
+          engines: [{ engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+            modelAvailability: 'available', models: [model], targetModels: [model], modelIdPresent: true,
+            ...(params.requirements?.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) }] }, probe };
+      } });
+      await first;
+      assert.deepEqual(requests[0]?.requiredModels, ['model-a']);
+      await edit('model-b', 'Scout');
+      release?.();
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(id)).length === 1, 'held old-target receipt');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      const old = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      assert.deepEqual(old.requirements?.modelsByEngine?.codex, ['model-a']);
+      const response = await post(`/api/environments/enrollments/${id}/probes`, {
+        requirements: { modelsByEngine: { codex: ['forged'] } }, connectionEpoch: 9000,
+        probe: { source: 'browser', summary: 'forged' }, engines: [{ engine: 'codex', readiness: 'ready' }],
+      });
+      assert.equal(response.status, 201);
+      assert.deepEqual(requests.at(-1)?.requiredModels, ['model-b']);
+      const receipt = (await response.json()) as { receipt: { observationId: string; probe: { source: string } } };
+      assert.equal(receipt.receipt.probe.source, 'worker');
+      const current = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      assert.equal(current.observationId, receipt.receipt.observationId);
+      assert.notEqual(current.observationId, old.observationId);
+      assert.equal((await h.runtime.stores.environmentReadiness.listObservations(INSTANCE_ID)).length, 2);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+      await edit('model-b', 'Renamed Scout');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, 'metadata edit preserves target evidence');
+      await edit('model-c', 'Renamed Scout');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'post-success target edit invalidates evidence');
+      assert.equal((await post(`/api/environments/enrollments/${id}/probes`, {})).status, 201);
+      assert.deepEqual(requests.at(-1)?.requiredModels, ['model-c']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+    } finally { release?.(); await h.close(); }
+  });
+
+  test(`#128 ${backend}: durable Agent edits bind each fresh authenticated probe to current targets`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-durable-targets-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'old-target' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const received: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        received.push(params);
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'target read' };
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+      } });
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+        method: 'POST', headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}',
+      });
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(received.at(-1)?.requiredModels, ['old-target']);
+      const created = await h.runtime.agentService.create({ id: 'scout', displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'new-target', effort: 'medium' }] });
+      assert.equal(created.id, 'scout');
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(received.at(-1)?.requiredModels, ['new-target']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false,
+        'no target-specific available evidence may be inferred from an empty probe');
+    } finally { await h.close(); }
+  });
+}
+
 /** Compose one accepted enrollment + Worker for the #124 acceptance scenarios. */
+test('#128 sqlite: HTTP Agent target edit survives reopen and scopes the next authenticated request', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-128-reopen-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const agents = [{ ...agent('scout'), engine: 'codex', model: 'old-target' }];
+  const first = await readinessWorkflowHarness({ backend: 'sqlite', directory, agents });
+  const id = (await first.runtime.enrollments.list())[0]!.id;
+  const keyPath = join(directory, 'worker-key.pem');
+  let historicalId: string;
+  try {
+    await first.runtime.agentService.create({ id: 'scout', displayName: 'Scout',
+      workOptions: [{ engine: 'codex', workModel: 'old-target', effort: 'medium' }] });
+    await first.connect(id, keyPath, { readinessProbe: async (params) => {
+      const probe = { at: 71_000, latencyMs: 3, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '3', summary: 'old target' };
+      return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+        { engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+          modelAvailability: 'available', models: ['old-target'], targetModels: ['old-target'],
+          modelIdPresent: true, requirementRevision: params.requirements!.revisionsByEngine!.codex! },
+      ] }, probe };
+    } });
+    await waitFor(async () => (await first.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID)) !== undefined,
+      'old target observation');
+    historicalId = (await first.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!.observationId;
+    const edited = await fetch(`${first.base}/api/agents/scout/configuration`, { method: 'POST',
+      headers: { cookie: first.cookie, 'x-sprout-csrf': first.csrf, 'content-type': 'application/json' },
+      body: JSON.stringify({ displayName: 'Scout', workOptions: [
+        { engine: 'codex', workModel: 'new-target', effort: 'medium' },
+      ] }),
+    });
+    assert.equal(edited.status, 200);
+    await first.runtime.refreshEnvironmentCatalog();
+    assert.equal(first.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+  } finally { await first.close(); }
+
+  // Deliberately pass the stale configured seed: the durable Agent edit must win.
+  const second = await readinessWorkflowHarness({ backend: 'sqlite', directory, agents, reopen: true });
+  try {
+    const history = await fetch(`${second.base}/api/environments/enrollments/${id}/receipts/${historicalId!}`,
+      { headers: { cookie: second.cookie } });
+    assert.equal(history.status, 200);
+    assert.equal(second.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+    const received: WorkerReadinessProbeParams[] = [];
+    await second.connect(id, keyPath, { readinessProbe: async (params) => {
+      received.push(params);
+      const probe = { at: 82_000, latencyMs: 4, protocolOk: true, enginesOk: true,
+        source: 'worker' as const, version: '3', summary: 'new target' };
+      return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+        { engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+          modelAvailability: 'available', models: ['new-target'], targetModels: ['new-target'],
+          modelIdPresent: true, requirementRevision: params.requirements!.revisionsByEngine!.codex! },
+      ] }, probe };
+    } });
+    await waitFor(() => received.length > 0, 'post-reopen Worker request');
+    assert.deepEqual(received[0]?.requirements?.modelsByEngine?.codex, ['new-target']);
+    const response = await fetch(`${second.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+      headers: { cookie: second.cookie, 'x-sprout-csrf': second.csrf, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual(received.at(-1)?.requirements?.modelsByEngine?.codex, ['new-target']);
+    const { receipt } = (await response.json()) as { receipt: { observationId: string } };
+    assert.notEqual(receipt.observationId, historicalId!);
+    const current = (await second.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+    assert.equal(current.observationId, receipt.observationId);
+    assert.equal(current.probe.at, 82_000, 'Worker time survives the reopened commit');
+    assert.equal(second.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+  } finally { await second.close(); }
+});
+
 async function readinessWorkflowHarness(options: {
   readonly backend: 'memory' | 'sqlite';
   readonly directory: string;
   readonly agents?: readonly AgentDefinition[];
+  /** The configured engine this build's use requires (defaults to `scripted`). */
+  readonly engineId?: string;
+  /** Reopen the same durable enrollment instead of creating a second one. */
+  readonly reopen?: boolean;
 }): Promise<{
   readonly runtime: SproutRuntime;
   readonly base: string;
@@ -2789,6 +3438,8 @@ async function readinessWorkflowHarness(options: {
       readonly readiness?: () => WorkerReadinessFacts;
       readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
     },
+    /** Dial protocol version, so an incompatible handshake can be composed. */
+    dialProtocolVersion?: string,
   ): Promise<WorkerEnrollmentConnection>;
   close(): Promise<void>;
 }> {
@@ -2804,6 +3455,7 @@ async function readinessWorkflowHarness(options: {
       databasePath: join(options.directory, 'sprout.db'),
       environmentSource: 'enrollment',
       operatorCredential: credential,
+      ...(options.engineId !== undefined ? { engineId: options.engineId } : {}),
       ...(options.agents !== undefined
         ? { runtimeConfiguration: { agents: [...options.agents] } }
         : {}),
@@ -2826,42 +3478,44 @@ async function readinessWorkflowHarness(options: {
   const workers: EnvironmentWorker[] = [];
   const connections: WorkerEnrollmentConnection[] = [];
 
-  const requested = await runtime.enrollments.requestEnrollment({
-    environmentInstanceId: INSTANCE_ID,
-    displayName: 'Workflow Host',
-    platform: 'macos',
-    capabilityRequests: [ADMISSION_CAPABILITY],
-    engineFacts: [],
-  });
-  const enrollmentId = requested.enrollment.id;
-  const keyPath = join(options.directory, 'worker-key.pem');
-  const host = loadOrCreateWorkerIdentity(keyPath);
-  await runtime.enrollments.claimEnrollment(enrollmentId, requested.claim?.secret ?? '');
-  const challenge = await runtime.enrollments.issueChallenge(enrollmentId);
-  await runtime.enrollments.connectWorker({
-    enrollmentId,
-    proof: {
-      challengeId: challenge.id,
-      publicKey: workerPublicKey(host.privateKey),
-      signature: signWorkerChallenge(host.privateKey, challenge),
-    },
-    connection: { state: 'online' },
-    compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
-    engines: [],
-  });
-  await runtime.enrollments.approve(enrollmentId, {
-    capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
-  });
+  if (!options.reopen) {
+    const requested = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID,
+      displayName: 'Workflow Host',
+      platform: 'macos',
+      capabilityRequests: [ADMISSION_CAPABILITY],
+      engineFacts: [],
+    });
+    const enrollmentId = requested.enrollment.id;
+    const keyPath = join(options.directory, 'worker-key.pem');
+    const host = loadOrCreateWorkerIdentity(keyPath);
+    await runtime.enrollments.claimEnrollment(enrollmentId, requested.claim?.secret ?? '');
+    const challenge = await runtime.enrollments.issueChallenge(enrollmentId);
+    await runtime.enrollments.connectWorker({
+      enrollmentId,
+      proof: {
+        challengeId: challenge.id,
+        publicKey: workerPublicKey(host.privateKey),
+        signature: signWorkerChallenge(host.privateKey, challenge),
+      },
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
+      engines: [],
+    });
+    await runtime.enrollments.approve(enrollmentId, {
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+    });
+  }
 
   return {
     runtime,
     base,
     cookie,
     csrf: csrfToken,
-    async connect(id, key, worker = {}) {
+    async connect(id, key, worker = {}, dialProtocolVersion = WORKER_PROTOCOL_VERSION) {
       const connection = await connectWorkerEnrollment({
         target: { enrollmentId: id, host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath: key },
-        protocolVersion: WORKER_PROTOCOL_VERSION,
+        protocolVersion: dialProtocolVersion,
         engineFacts: [{ engine: 'codex', installed: true, authenticated: true, models: [] }],
       });
       connections.push(connection);
@@ -2908,7 +3562,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               protocolVersion: WORKER_PROTOCOL_VERSION,
               engines: [
                 { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read' },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, authMode: 'chatgpt', probedAt: 2, probeExitCode: 0, source: 'codex-account-read', targetModels: params.requirements?.modelsByEngine?.codex ?? [], ...(params.requirements?.revision !== undefined ? { requirementRevision: params.requirements.revision } : {}) },
               ],
               probe,
             },
@@ -2919,10 +3573,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await waitFor(() => received !== undefined, 'the target probe to reach the Worker');
       assert.deepEqual(received?.requiredModels, ['gpt-6-astra'], 'targets are core-owned');
       assert.match(received?.attemptId ?? '', /^obs-/);
-      await waitFor(
-        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
-        'target-probe eligibility',
-      );
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(enrollmentId)).length > 0, 'target-probe receipt');
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'unknown entitlement is not admissible');
       const readiness = await h.runtime.enrollments.readiness(enrollmentId);
       assert.equal(readiness.readiness.probe?.latencyMs, 8);
       const codex = readiness.readiness.engines.find((engine) => engine.engine === 'codex');
@@ -2948,10 +3600,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           probe: { at: Date.now(), latencyMs: 4, protocolOk: true, enginesOk: true, source: 'worker', version: '1.0.0', summary: 'bootstrap probe' },
         }),
       });
-      await waitFor(
-        () => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
-        'bootstrap eligibility',
-      );
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(enrollmentId)).length > 0, 'bootstrap receipt');
       const probes = await h.runtime.enrollments.listProbes(enrollmentId);
       assert.ok(probes.length >= 1, 'the bootstrap observation is durable');
       assert.equal(probes.at(-1)?.source, 'worker');
@@ -2975,7 +3624,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
     try {
       const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
       await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
-        readinessProbe: async () => {
+        readinessProbe: async (params) => {
           const probe = {
             at: Date.now(), latencyMs: 9, protocolOk: true, enginesOk: true,
             source: 'worker' as const, version: '0.154.0', summary: 'requested probe',
@@ -2985,7 +3634,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               protocolVersion: WORKER_PROTOCOL_VERSION,
               engines: [
                 { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' as const, targetModels: params.requirements?.modelsByEngine?.codex ?? [], modelIdPresent: true, ...(params.requirements?.revisionsByEngine?.codex !== undefined ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) },
               ],
               probe,
             },
@@ -3669,7 +4318,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
       const authority = h.runtime.workerGateway.authorizeObservation(INSTANCE_ID);
       assert.ok(authority);
-      const result = { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe }, probe };
+      const result = { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe };
       const store = h.runtime.stores.environmentReadiness;
       const before = await store.getCurrentObservation(INSTANCE_ID);
       const history = await store.listObservations(INSTANCE_ID);

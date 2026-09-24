@@ -51,6 +51,8 @@ export interface EngineReadinessFact {
   readonly authMode?: string;
   readonly authType?: string;
   readonly modelIdPresent?: boolean;
+  readonly targetModels?: readonly string[];
+  readonly requirementRevision?: string;
   readonly probedAt?: number;
   readonly probeExitCode?: number;
   readonly source?: string;
@@ -79,8 +81,44 @@ export interface ProbeResultFact extends ReadinessProbeFact {
 /** Requirement scope representation for readiness observations (#126). */
 export interface ReadinessRequirementScope {
   readonly revision?: string;
+  readonly revisionsByEngine?: Readonly<Record<string, string>>;
   readonly requiredEngines?: readonly string[];
   readonly requiredModels?: readonly string[];
+  readonly modelsByEngine?: Readonly<Record<string, readonly string[]>>;
+}
+
+/** Stable only for changes to engine/model applicability, not agent metadata. */
+export function readinessRequirements(options: readonly { readonly engine: string; readonly workModel: string; readonly id?: string; readonly configurationVersion?: number }[], revisionInputs: readonly { readonly id: string; readonly configurationVersion?: number }[] = []): ReadinessRequirementScope {
+  const mapping: Record<string, string[]> = {};
+  for (const option of options) {
+    if (!option.engine) continue;
+    const models = mapping[option.engine] ?? (mapping[option.engine] = []);
+    if (option.workModel && !models.includes(option.workModel)) models.push(option.workModel);
+  }
+  const engines = Object.keys(mapping).sort();
+  const modelsByEngine = Object.fromEntries(engines.map((engine) => [engine, mapping[engine]!.sort()]));
+  // The revision is a compact label; exact snapshot equality is checked at the gate.
+  const hashSnapshot = (snapshot: string) => {
+    let hash = 2166136261;
+    for (let i = 0; i < snapshot.length; i++) hash = Math.imul(hash ^ snapshot.charCodeAt(i), 16777619);
+    return `r${(hash >>> 0).toString(16)}`;
+  };
+  const revisionsByEngine = Object.fromEntries(engines.map((engine) => [engine, hashSnapshot(JSON.stringify([
+    modelsByEngine[engine],
+    revisionInputs.filter((input) => options.some((option) => option.engine === engine && option.id === input.id))
+      .map((input) => [input.id, input.configurationVersion]).sort(),
+    ...(revisionInputs.length && options.every((option) => option.id === undefined) ? [revisionInputs] : []),
+  ]))]));
+  const revision = hashSnapshot(JSON.stringify(revisionsByEngine));
+  return { revision, revisionsByEngine, requiredEngines: engines, requiredModels: [...new Set(Object.values(modelsByEngine).flat())].sort(), modelsByEngine };
+}
+
+export function targetEvidenceSatisfiesRequirements(engine: EngineReadinessFact, scope: ReadinessRequirementScope | undefined): boolean {
+  if (!scope?.revision) return false;
+  const targets = scope.modelsByEngine?.[engine.engine];
+  if (!targets || engine.requirementRevision !== (scope.revisionsByEngine?.[engine.engine] ?? scope.revision) || !engine.targetModels) return false;
+  return targets.every((target) => engine.targetModels!.includes(target)) &&
+    (targets.length === 0 || engine.modelIdPresent === true);
 }
 
 /**
@@ -232,6 +270,8 @@ export function observedFactsFromWorkerReadiness(input: {
     readonly authMode?: string;
     readonly authType?: string;
     readonly modelIdPresent?: boolean;
+    readonly targetModels?: readonly string[];
+    readonly requirementRevision?: string;
     readonly probedAt?: number;
     readonly probeExitCode?: number;
     readonly source?: string;
@@ -270,6 +310,8 @@ export function observedFactsFromWorkerReadiness(input: {
         ...(authMode !== undefined ? { authMode } : {}),
         ...(authType !== undefined ? { authType } : {}),
         ...(engine.modelIdPresent !== undefined ? { modelIdPresent: engine.modelIdPresent } : {}),
+        ...(engine.targetModels !== undefined ? { targetModels: [...engine.targetModels] } : {}),
+        ...(engine.requirementRevision !== undefined ? { requirementRevision: engine.requirementRevision } : {}),
         ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
         ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
         ...(source !== undefined ? { source } : {}),

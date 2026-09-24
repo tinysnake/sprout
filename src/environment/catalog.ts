@@ -42,6 +42,7 @@ import type {
   ProtocolVersionRange,
   WorkSafetyState,
 } from './readiness.ts';
+import { targetEvidenceSatisfiesRequirements, type ReadinessRequirementScope } from './readiness.ts';
 
 /**
  * The capability a run must be permitted to acquire for automatic admission.
@@ -95,6 +96,7 @@ export interface EnvironmentCatalogInput {
   readonly currentEpoch: number | undefined;
   readonly probe?: ReadinessProbeFact;
   readonly requiredEngines: readonly string[];
+  readonly requirements?: ReadinessRequirementScope;
   readonly supportedProtocol: ProtocolVersionRange;
   readonly now: number;
   /**
@@ -176,7 +178,7 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     ...(input.workSafety === 'reconciling'
       ? { recoveryRecords: [{ environmentInstanceId: enrollment.environmentInstanceId, phase: 'reconciling' as const }] }
       : {}),
-    requiredEngines: input.requiredEngines,
+    requiredEngines: input.requirements?.requiredEngines ?? input.requiredEngines,
     ...(input.probe !== undefined ? { probe: input.probe } : {}),
     supportedProtocol: input.supportedProtocol,
     now: input.now,
@@ -203,7 +205,13 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
       (engine) =>
         engine.installed &&
         engine.readiness === 'ready' &&
-        engine.models.state === 'available',
+        (input.requirements === undefined
+          ? engine.models.state === 'available'
+          : targetEvidenceSatisfiesRequirements(engine, input.requirements) &&
+            JSON.stringify(authoritativeObserved?.requirements?.modelsByEngine?.[engine.engine]) === JSON.stringify(input.requirements.modelsByEngine?.[engine.engine]) &&
+            (authoritativeObserved?.requirements?.revisionsByEngine?.[engine.engine] ?? authoritativeObserved?.requirements?.revision) ===
+              (input.requirements.revisionsByEngine?.[engine.engine] ?? input.requirements.revision) &&
+            engine.models.state === 'available'),
     );
   const eligible =
     enrollment.status === 'approved' &&
