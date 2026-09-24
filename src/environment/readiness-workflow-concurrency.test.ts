@@ -46,10 +46,12 @@ for (const failure of [false, true]) {
         projected = true;
       },
     });
-    const leader = workflow.observeEnrollment('enroll');
+    const acceptance = { enrollment: { id: 'enroll', environmentInstanceId: 'env' },
+      epoch: { connectionId: 'conn', epoch: 1 }, requiredModels: [] };
+    const leader = workflow.observeAccepted(acceptance);
     await entered;
     let waiterSettled = false;
-    const waiter = workflow.observeEnrollment('enroll').then(
+    const waiter = workflow.observeAccepted(acceptance).then(
       () => { waiterSettled = true; },
       (error: unknown) => { waiterSettled = true; throw error; },
     );

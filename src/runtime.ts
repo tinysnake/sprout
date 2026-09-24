@@ -155,6 +155,21 @@ export interface RuntimeStores {
   close(): void;
 }
 
+/** Application-visible stores cannot reserve or commit Worker observations. */
+export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness'> & {
+  readonly environmentReadiness: Pick<EnvironmentReadinessStore,
+    'getReadiness' | 'getCurrentObservation' | 'listObservations' | 'listProbes' | 'getReceipt' | 'getObservation' | 'getAttempt'>;
+};
+
+/** Enrollment lifecycle and read commands, never the observation writer/issuer. */
+export type EnrollmentLifecycle = Pick<EnvironmentEnrollmentService,
+  'list' | 'get' | 'requestEnrollment' | 'claimEnrollment' | 'issueChallenge' |
+  'connectWorker' | 'approve' | 'revoke' | 'reset' | 'setCapabilityPermission' |
+  'getObservation' | 'getReceipt' | 'listProbes' | 'readiness'>;
+
+/** Inspection of accepted Workers, not their observation authority issuer. */
+export type WorkerGatewayView = Pick<WorkerGateway, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
+
 /**
  * The environment execution port the runtime crosses for one instance.
  *
@@ -243,9 +258,9 @@ export interface SproutRuntime {
   readonly definition: EnvironmentDefinition | undefined;
   /** The configured M1 carrier instance, when composed; `undefined` under enrollment. */
   readonly instance: EnvironmentInstance | undefined;
-  readonly stores: RuntimeStores;
+  readonly stores: RuntimeStoreViews;
   /** The Environment enrollment and readiness capability (#87). */
-  readonly enrollments: EnvironmentEnrollmentService;
+  readonly enrollments: EnrollmentLifecycle;
   /** The Environment reconciliation and recovery capability (#88). */
   readonly recovery: EnvironmentRecoveryService;
   /** The portable Agent identity capability (#90). */
@@ -264,7 +279,7 @@ export interface SproutRuntime {
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
    */
-  readonly workerGateway: WorkerGateway;
+  readonly workerGateway: WorkerGatewayView;
   /**
    * The runtime environment port over accepted enrollment-backed connections
    * (E1) and the accepted-connection registry the dynamic catalog projects from
@@ -286,15 +301,6 @@ export interface SproutRuntime {
    * Idempotent, so a clean restart changes nothing.
    */
   reconcile(): Promise<SproutReconciliation>;
-  /**
-   * Record the live Worker's reported readiness onto one approved enrollment (#87).
-   *
-   * The facts come from the Worker's own `worker/info` declaration; this maps
-   * them onto the durable observed facts without inventing an installation,
-   * login, or model state the Worker did not state. When no Worker is connected
-   * the observation is skipped: absence of a Worker is not evidence of unreadiness.
-   */
-  observeWorkerReadiness(enrollmentId: string): Promise<void>;
   /**
    * The operator-visible startup report, using the last `reconcile()` result.
    *
@@ -331,6 +337,12 @@ export interface SproutRuntimeOptions {
    * collaborators that need no filesystem.
    */
   readonly stores?: RuntimeStores;
+  /** Explicit composition injection for adapter tests; never part of SproutRuntime. */
+  readonly onTestComposition?: (composition: {
+    stores: RuntimeStores;
+    enrollments: EnvironmentEnrollmentService;
+    workerGateway: WorkerGateway;
+  }) => void;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
@@ -1266,7 +1278,39 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     /** The last reconciliation result, so `startupReport` reports what ran. */
     let lastReconciliation: SproutReconciliation | undefined;
 
+    options.onTestComposition?.({ stores, enrollments, workerGateway });
     const activeStores = stores;
+    const { environmentReadiness: readinessWriter, ...otherStores } = activeStores;
+    const applicationStores: RuntimeStoreViews = { ...otherStores, environmentReadiness: {
+      getReadiness: (...args) => readinessWriter.getReadiness(...args),
+      getCurrentObservation: (...args) => readinessWriter.getCurrentObservation(...args),
+      listObservations: (...args) => readinessWriter.listObservations(...args),
+      listProbes: (...args) => readinessWriter.listProbes(...args),
+      getReceipt: (...args) => readinessWriter.getReceipt(...args),
+      getObservation: (...args) => readinessWriter.getObservation(...args),
+      getAttempt: (...args) => readinessWriter.getAttempt(...args),
+    } };
+    const enrollmentLifecycle: EnrollmentLifecycle = {
+      list: (...args) => enrollments.list(...args),
+      get: (...args) => enrollments.get(...args),
+      requestEnrollment: (...args) => enrollments.requestEnrollment(...args),
+      claimEnrollment: (...args) => enrollments.claimEnrollment(...args),
+      issueChallenge: (...args) => enrollments.issueChallenge(...args),
+      connectWorker: (...args) => enrollments.connectWorker(...args),
+      approve: (...args) => enrollments.approve(...args),
+      revoke: (...args) => enrollments.revoke(...args),
+      reset: (...args) => enrollments.reset(...args),
+      setCapabilityPermission: (...args) => enrollments.setCapabilityPermission(...args),
+      getObservation: (...args) => enrollments.getObservation(...args),
+      getReceipt: (...args) => enrollments.getReceipt(...args),
+      listProbes: (...args) => enrollments.listProbes(...args),
+      readiness: (...args) => enrollments.readiness(...args),
+    };
+    const gatewayView: WorkerGatewayView = {
+      liveFor: (instanceId) => workerGateway.liveFor(instanceId),
+      currentConnectionEpoch: (enrollmentId) => workerGateway.currentConnectionEpoch(enrollmentId),
+      isCurrentConnection: (...args) => workerGateway.isCurrentConnection(...args),
+    };
 
     return {
       api,
@@ -1279,13 +1323,13 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       environmentCatalog,
       definition: configuredCarrierPresent ? configuredDefinition : undefined,
       instance: configuredCarrierPresent ? configuredInstance : undefined,
-      stores: activeStores,
-      enrollments,
+      stores: applicationStores,
+      enrollments: enrollmentLifecycle,
       recovery,
       agentService,
       projectService,
       projectAccess: projectAccessService,
-      workerGateway,
+      workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
       engines,
@@ -1310,16 +1354,6 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         };
         lastReconciliation = result;
         return result;
-      },
-
-      /**
-       * Transitional public entry point: observe the live Worker's readiness onto
-       * one approved enrollment. It delegates entirely to the one readiness
-       * workflow; remaining consumers are inventoried for the final cutover
-       * (#124).
-       */
-      async observeWorkerReadiness(enrollmentId: string): Promise<void> {
-        await readinessWorkflow.observeEnrollment(enrollmentId);
       },
 
       startupReport(boundPort: number): string {
