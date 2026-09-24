@@ -3156,6 +3156,11 @@ for (const backend of ['memory', 'sqlite'] as const) {
       agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
     try {
       const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.connect(id, join(directory, 'unapproved-key.pem'), {}, '99').catch(() => undefined);
+      const unproved = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(((await unproved.json()) as { connectionAttempt?: unknown }).connectionAttempt, undefined,
+        'a different Worker identity cannot publish a version-skew diagnostic');
       const refusal = await h.connect(id, join(directory, 'worker-key.pem'), {}, '99').then(
         () => undefined, (error: unknown) => error);
       assert.ok(refusal instanceof Error, 'the mismatched Worker is refused before acceptance');
@@ -3167,21 +3172,25 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined, 'no epoch is minted');
       const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
       assert.equal(response.status, 200, 'the refusal stays inspectable over the query seam');
-      const body = (await response.json()) as { readiness: { compatibility: { state: string; detail?: string }; summary: { level: string }; probe?: unknown }; probes: readonly unknown[] };
-      // Deliberate limit: a pre-epoch refusal carries no observation authority, so
-      // the *core-side public* projection is honestly `unknown`/red and ineligible
-      // rather than echoing the refused Worker's own claimed version. The explicit
-      // incompatible explanation is only available to the refused Worker host (the
-      // connector code asserted above) and to Worker-layer diagnostics, not through
-      // the Human HTTP readiness projection. This is by design (#125 authority),
-      // not a missing inspectability feature.
+      const body = (await response.json()) as { connectionAttempt?: { outcome: string; reason: string; at: number };
+        readiness: { compatibility: { state: string; detail?: string }; summary: { level: string }; probe?: unknown }; probes: readonly unknown[] };
+      // Pre-epoch refusal never becomes current readiness. The Human sees a
+      // separate core-owned attempt diagnostic, not echoed Worker claims.
       assert.equal(body.readiness.compatibility.state, 'unknown');
       assert.equal(body.readiness.compatibility.detail, undefined);
+      assert.equal(body.connectionAttempt?.outcome, 'incompatible');
+      assert.equal(body.connectionAttempt?.reason, 'the Worker protocol is incompatible with this Sprout build');
+      assert.ok(Number.isFinite(body.connectionAttempt?.at));
       assert.equal(body.readiness.summary.level, 'red');
       assert.equal(body.readiness.probe, undefined);
       assert.deepEqual(body.probes, []);
       assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
       assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved');
+      await h.connect(id, join(directory, 'worker-key.pem'));
+      const recovered = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+        { headers: { cookie: h.cookie } });
+      assert.equal(((await recovered.json()) as { connectionAttempt?: unknown }).connectionAttempt, undefined,
+        'a later accepted connection clears the old refusal diagnostic');
     } finally { await h.close(); }
   });
 

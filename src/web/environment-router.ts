@@ -322,6 +322,11 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             probes: assembled.probes
               .map(toProbeResultView)
               .filter((probe) => probe !== undefined),
+            ...(assembled.connectionAttempt !== undefined ? { connectionAttempt: {
+              outcome: assembled.connectionAttempt.outcome,
+              reason: assembled.connectionAttempt.reason,
+              at: assembled.connectionAttempt.at,
+            } } : {}),
             ...(receiptView !== undefined ? { receipt: receiptView } : {}),
           });
         } catch (error) {

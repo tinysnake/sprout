@@ -376,6 +376,7 @@ export class WorkerGateway {
         enrollmentId,
         proof: prove.proof,
         connection: { state: 'reconnecting' },
+        gatewayProtocolNegotiation: 'incompatible',
         compatibility: {
           ...compatibility,
           ...(protocolVersion !== undefined ? { workerProtocolVersion: protocolVersion } : {}),
@@ -392,6 +393,7 @@ export class WorkerGateway {
     const outcome = await this.#enrollments.connectWorker({
       enrollmentId,
       proof: prove.proof,
+      gatewayProtocolNegotiation: 'compatible',
       connection: { state: 'online' },
       compatibility: {
         // The Worker's own declared version decides compatibility, so a protocol

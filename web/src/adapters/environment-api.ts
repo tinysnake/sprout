@@ -203,7 +203,8 @@ export interface EnvironmentEnrollmentBrowserAdapter {
   revokeEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
-  readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[] }>;
+  readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[];
+    readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number } }>;
   /** Ask the authenticated Worker to execute a probe; the browser supplies no facts. */
   requestProbe(id: string): Promise<ProbeResultView>;
   /**
@@ -263,6 +264,7 @@ export interface EnvironmentFactsView {
   readonly enrollment: EnrollmentView;
   readonly readiness: EnvironmentReadinessView;
   readonly probes: readonly ProbeResultView[];
+  readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number };
   readonly recovery: readonly EnvironmentRecoveryView[];
   readonly forceReleases: readonly ForceReleaseView[];
 }
@@ -402,7 +404,8 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         transport.request<{ readonly enrollment: EnrollmentView }>(
           `/api/environments/enrollments/${encoded}`,
         ),
-        transport.request<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[] }>(
+        transport.request<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[];
+          readonly connectionAttempt?: EnvironmentFactsView['connectionAttempt'] }>(
           `/api/environments/enrollments/${encoded}/readiness`,
         ),
         transport.request<{ readonly recovery: readonly EnvironmentRecoveryView[]; readonly forceReleases: readonly ForceReleaseView[] }>(
@@ -413,6 +416,7 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         enrollment: enrollment.enrollment,
         readiness: readiness.readiness,
         probes: readiness.probes,
+        ...(readiness.connectionAttempt !== undefined ? { connectionAttempt: readiness.connectionAttempt } : {}),
         recovery: recovery.recovery,
         forceReleases: recovery.forceReleases,
       };
