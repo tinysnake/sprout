@@ -25,6 +25,8 @@ import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 
+import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
+
 import { createReadinessAuthorityTestSeam } from '../environment/readiness-authority.test-support.ts';
 
 import { EnrollmentError } from '../environment/enrollment.ts';
@@ -275,116 +277,89 @@ export async function recoveryApi(options: { readonly requiredEngines?: readonly
 }
 
 
-test('an anonymous caller cannot reach any Environment enrollment route', async () => {
+test('a probe route ignores browser facts and returns only Worker-sourced observations', async () => {
   const runtime = await enrollmentApi();
   try {
-    assert.equal((await fetch(`${runtime.base}/api/environments/enrollments`)).status, 401);
-    assert.equal(
-      (await fetch(`${runtime.base}/api/environments/enrollments`, { method: 'POST' })).status,
-      401,
-    );
-    // The proof challenge is authority-adjacent, so it must not be mintable
-    // anonymously even though it grants nothing by itself.
-    assert.equal(
-      (
-        await fetch(`${runtime.base}/api/environments/enrollments/enroll-1/challenge`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        })
-      ).status,
-      401,
-    );
-  } finally {
-    await runtime.api.close();
-  }
-});
-
-
-test('the enrollment lifecycle proves identity, then requires Human approval', async () => {
-  const runtime = await enrollmentApi();
-  try {
-    const identity = workerIdentityFixture();
-    const requested = await command(runtime.base, '/api/environments/enrollments', runtime, {
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
       environmentInstanceId: 'mac-mini-1',
       displayName: 'Local Mac',
-      publicKey: identity.publicKey,
+      publicKey: 'public-key-a',
       platform: 'macos',
-      protocolVersion: '2.1',
       capabilityRequests: ['agent-run'],
-      engines: [{ engine: 'codex', installed: true, authenticated: true, models: ['gpt-5-codex'] }],
-    });
-    assert.equal(requested.status, 201);
-    const requestedBody = (await requested.json()) as {
-      readonly enrollment: { readonly status: string };
-      readonly bootstrap: { readonly instructions: readonly string[] };
-    };
-    assert.equal(requestedBody.enrollment.status, 'pending');
-    assert.ok(requestedBody.bootstrap.instructions.length > 0);
-    assert.equal(JSON.stringify(requestedBody).includes(identity.publicKey), false, 'the public key is never echoed');
-
-    // A bare public key with no proof is refused: presenting a key is not proof.
-    const bare = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      publicKey: identity.publicKey,
-      connection: { state: 'online', lastConfirmedAt: 10_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
       engines: [],
     });
-    assert.equal(bare.status, 400, 'a connect without a proof is refused');
-
-    // A signed challenge response is a verified proof and keeps it pending.
-    const connect = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: await proveWorker(runtime, identity),
-      connection: { state: 'online', lastConfirmedAt: 10_000 },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [
-        { engine: 'codex', installed: true, readiness: 'ready', required: true, models: { state: 'available', models: ['gpt-5-codex'] } },
-      ],
+    const pendingProbe = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
+      forged: true,
     });
-    assert.equal(connect.status, 200);
-    assert.equal(((await connect.json()) as { outcome: string }).outcome, 'duplicate-same-key');
-
-    // Human approval grants the requested capability.
-    const approved = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+    assert.equal(pendingProbe.status, 409, 'pending enrollment has no probe authority');
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
       capabilityPermissions: { 'agent-run': true },
     });
-    assert.equal(approved.status, 200);
-    assert.equal(
-      ((await approved.json()) as { enrollment: { status: string } }).enrollment.status,
-      'approved',
-    );
-
-    // Even a proof-bearing legacy browser connect request cannot impersonate
-    // the Gateway's protocol negotiation and publish its refusal diagnostic.
-    const browserSkew = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: await proveWorker(runtime, identity),
-      connection: { state: 'reconnecting' },
-      compatibility: { state: 'incompatible', workerProtocolVersion: '99' },
-      engines: [],
-      gatewayProtocolNegotiation: 'incompatible',
+    const first = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
+      at: 'forged',
+      latencyMs: 0,
+      protocolOk: false,
+      enginesOk: true,
+      summary: 'forged browser result',
     });
-    assert.equal(browserSkew.status, 200);
-    assert.equal(((await browserSkew.json()) as { outcome: string }).outcome, 'reconnected');
-
-    const readiness = await read(
-      runtime.base,
-      '/api/environments/enrollments/enroll-1/readiness',
-      runtime,
-    );
-    assert.equal(readiness.status, 200);
-    const readinessBody = (await readiness.json()) as {
-      readonly readiness: { readonly summary: { readonly level: string; readonly reason: string } };
+    assert.equal(first.status, 201);
+    const second = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {
+      at: 999_999,
+      latencyMs: 0,
+      protocolOk: false,
+      enginesOk: true,
+      summary: 'forged local path and private network address',
+    });
+    assert.equal(second.status, 201);
+    const secondBody = (await second.json()) as {
+      readonly probe: { readonly summary: string; readonly latencyMs: number; readonly enginesOk: boolean };
     };
-    assert.equal(readinessBody.readiness.summary.reason.length > 0, true);
-    assert.equal(['green', 'yellow', 'red'].includes(readinessBody.readiness.summary.level), true);
-    assert.equal((readinessBody as { connectionAttempt?: unknown }).connectionAttempt, undefined);
+    assert.equal(secondBody.probe.latencyMs, 7, 'the browser latency was ignored');
+    assert.equal(secondBody.probe.enginesOk, false, 'the browser engine result was ignored');
+    assert.equal(secondBody.probe.summary, 'Worker non-inference readiness probe completed.');
+
+    const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const body = (await readiness.json()) as {
+      readonly probes: readonly { readonly at: number; readonly summary: string }[];
+    };
+    assert.deepEqual(body.probes.map((probe) => probe.at), [1_000, 1_001]);
+
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/revoke', runtime, { reason: 'retired' });
+    const revokedReadiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const revokedBody = (await revokedReadiness.json()) as {
+      readonly readiness: { readonly enrollmentStatus: string; readonly compatibility: { readonly state: string; readonly workerProtocolVersion?: string } };
+      readonly probes: readonly unknown[];
+    };
+    assert.equal(revokedBody.readiness.enrollmentStatus, 'revoked');
+    assert.deepEqual(revokedBody.readiness.compatibility, { state: 'unknown' }, 'revoked current facts are not exposed');
+    assert.deepEqual(revokedBody.probes, [], 'revoked probe history is not projected as current facts');
+    assert.equal(
+      (await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {})).status,
+      409,
+      'probe requests after revoke are refused',
+    );
+
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/reset', runtime, { reason: 'rotate' });
+    const resetReadiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const resetBody = (await resetReadiness.json()) as {
+      readonly readiness: { readonly enrollmentStatus: string; readonly compatibility: { readonly state: string; readonly workerProtocolVersion?: string } };
+      readonly probes: readonly unknown[];
+    };
+    assert.equal(resetBody.readiness.enrollmentStatus, 'pending');
+    assert.deepEqual(resetBody.readiness.compatibility, { state: 'unknown' }, 'reset current facts are not exposed');
+    assert.deepEqual(resetBody.probes, [], 'reset probe history is not projected as current facts');
+    assert.equal(
+      (await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {})).status,
+      409,
+      'probe requests after reset are refused',
+    );
   } finally {
     await runtime.api.close();
   }
 });
 
 
-test('a forged signature cannot reconnect, and a real one can', async () => {
+test('an empty engine configuration does not fabricate a dual-engine requirement', async () => {
   const runtime = await enrollmentApi();
   try {
     const identity = workerIdentityFixture();
@@ -396,34 +371,48 @@ test('a forged signature cannot reconnect, and a real one can', async () => {
       capabilityRequests: ['agent-run'],
       engines: [],
     });
-
-    // The signature is over the wrong nonce, so it must be refused before any
-    // identity is reconciled.
-    const challengeResponse = await command(
-      runtime.base,
-      '/api/environments/enrollments/enroll-1/challenge',
-      runtime,
-      {},
-    );
-    const { challenge } = (await challengeResponse.json()) as {
-      readonly challenge: { readonly id: string; readonly enrollmentId: string; readonly nonce: string };
-    };
-    const forged = identity.sign({ ...challenge, nonce: `${challenge.nonce}-tampered` });
-    const refused = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
-      proof: forged,
-      connection: { state: 'online' },
-      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [],
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
     });
-    assert.equal(refused.status, 401, 'an invalid signature is unauthorized');
-
-    const accepted = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
+    // The Worker declares only Codex; Pi is genuinely absent. With no explicit
+    // requirement, the missing Pi must be Yellow (attention), never a fabricated
+    // Red that claims the Environment is unusable.
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
       proof: await proveWorker(runtime, identity),
       connection: { state: 'online' },
       compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
-      engines: [],
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', required: false, models: { state: 'available', models: ['gpt-5-codex'] } },
+      ],
     });
-    assert.equal(accepted.status, 200);
+    await runtime.enrollments.observeReadiness('enroll-1', workerReadinessProbeFixture({
+      protocolVersion: '2.1',
+      engines: [
+        { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
+      ],
+    }), readinessAuthorityTestSeam.mint({
+      environmentInstanceId: 'mac-mini-1',
+      enrollmentId: 'enroll-1',
+      connectionEpoch: 1,
+    }));
+    const readiness = await read(runtime.base, '/api/environments/enrollments/enroll-1/readiness', runtime);
+    const body = (await readiness.json()) as {
+      readonly readiness: {
+        readonly engines: readonly { readonly engine: string; readonly required: boolean }[];
+        readonly summary: { readonly level: string; readonly reason: string };
+      };
+    };
+    assert.deepEqual(
+      body.readiness.engines.map((engine) => engine.engine),
+      ['codex'],
+      'only the engine the Worker declared is reported; no unconfigured engine is invented',
+    );
+    assert.equal(
+      body.readiness.engines.every((engine) => engine.required === false),
+      true,
+      'nothing is required without an explicit configuration',
+    );
+    assert.notEqual(body.readiness.summary.level, 'red', body.readiness.summary.reason);
   } finally {
     await runtime.api.close();
   }

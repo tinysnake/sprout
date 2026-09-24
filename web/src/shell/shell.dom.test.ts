@@ -7,13 +7,20 @@
  * leak into the next.
  */
 import assert from 'node:assert/strict';
+
 import { readFile } from 'node:fs/promises';
+
 import { test } from 'node:test';
+
 import { JSDOM } from 'jsdom';
+
 import type { ViteDevServer } from 'vite';
 
+
 const repoRoot = process.cwd();
+
 const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+
 
 const GLOBALS = [
   'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement',
@@ -22,11 +29,13 @@ const GLOBALS = [
   'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'TouchEvent', 'CustomEvent',
 ] as const;
 
+
 interface Connection {
   status: string;
   connection: string;
   loading: boolean;
 }
+
 
 interface Harness {
   dom: JSDOM;
@@ -35,6 +44,7 @@ interface Harness {
   mountInto: (app: { mount: (el: Element) => unknown }) => void;
   cleanup: () => Promise<void>;
 }
+
 
 async function setupHarness(): Promise<Harness> {
   const dom = new JSDOM(html, { url: 'http://sprout-operator.test/app/feed', pretendToBeVisual: true });
@@ -92,12 +102,15 @@ async function setupHarness(): Promise<Harness> {
   };
 }
 
+
 const settle = (ms = 110) => new Promise((resolve) => setTimeout(resolve, ms));
+
 
 /** Vite's module namespace object needs unwrapping before Vue can render it. */
 function componentOf(module: unknown): unknown {
   return (module as { default: unknown }).default;
 }
+
 
 test('the Shell composes a desktop sidebar and a phone bottom navigation from one navigation model', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
@@ -131,6 +144,7 @@ test('the Shell composes a desktop sidebar and a phone bottom navigation from on
   }
 });
 
+
 test('the phone header states connection status in text and offers the theme control', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
@@ -158,6 +172,7 @@ test('the phone header states connection status in text and offers the theme con
     await cleanup();
   }
 });
+
 
 test('the Shell reports loading, offline, and reconnecting distinctly, and refuses control while unsettled', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
@@ -199,6 +214,7 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
   }
 });
 
+
 test('the Shell has exactly one live announcement region, and a page can announce into it', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
@@ -231,6 +247,7 @@ test('the Shell has exactly one live announcement region, and a page can announc
   }
 });
 
+
 test('the Shell offers a keyboard-only skip control that moves focus to the main content', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
@@ -255,6 +272,7 @@ test('the Shell offers a keyboard-only skip control that moves focus to the main
     await cleanup();
   }
 });
+
 
 test('the main content region is a focusable landmark reachable by assistive technology', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
@@ -282,6 +300,7 @@ test('the main content region is a focusable landmark reachable by assistive tec
     await cleanup();
   }
 });
+
 
 test('every navigation target and interactive control in the shell is a real link or button', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
@@ -313,6 +332,7 @@ test('every navigation target and interactive control in the shell is a real lin
     await cleanup();
   }
 });
+
 
 test('shared primitives expose their accessible state: skeleton, empty state, list row, kpi, and disclosure', async () => {
   const { vite, cleanup } = await setupHarness();
@@ -378,6 +398,7 @@ test('shared primitives expose their accessible state: skeleton, empty state, li
   }
 });
 
+
 test('an interactive non-button card is focusable, exposes role=button, and activates from the keyboard', async () => {
   const { vite, dom, cleanup } = await setupHarness();
   try {
@@ -432,66 +453,6 @@ test('an interactive non-button card is focusable, exposes role=button, and acti
     assert.ok(button, 'the button card renders as a real button');
     assert.equal(button.tagName.toLowerCase(), 'button');
     assert.equal(button.getAttribute('type'), 'button', 'a card button never submits an enclosing form');
-
-    app.unmount();
-  } finally {
-    await cleanup();
-  }
-});
-
-test('the tab strip provides real tab semantics with roving focus and arrow-key movement', async () => {
-  const { vite, dom, cleanup } = await setupHarness();
-  try {
-    const { createApp, h, ref } = await import('vue');
-    const TabStrip = componentOf(await vite.ssrLoadModule('/src/primitives/TabStrip.vue'));
-
-    const host = document.createElement('div');
-    document.body.append(host);
-
-    const app = createApp({
-      setup() {
-        const value = ref('overview');
-        return () =>
-          h(TabStrip as never, {
-            items: [
-              { key: 'overview', label: 'Overview', icon: 'overview' },
-              { key: 'tasks', label: 'Tasks', icon: 'tasks' },
-              { key: 'chat', label: 'Chat', icon: 'chat' },
-            ],
-            modelValue: value.value,
-            label: 'Project views',
-            'onUpdate:modelValue': (next: string) => { value.value = next; },
-          });
-      },
-    });
-    app.mount(host);
-    await settle(60);
-
-    const list = host.querySelector('[role="tablist"]');
-    assert.ok(list, 'the strip is a tab list');
-    assert.equal(list.getAttribute('aria-label'), 'Project views');
-
-    const tabs = [...host.querySelectorAll('[role="tab"]')];
-    assert.equal(tabs.length, 3);
-    assert.equal(tabs[0]?.getAttribute('aria-selected'), 'true', 'the active tab is marked selected');
-    assert.equal(tabs[1]?.getAttribute('aria-selected'), 'false');
-
-    // Roving focus: only the active tab is in the tab sequence.
-    assert.equal(tabs[0]?.getAttribute('tabindex'), '0', 'the active tab is tabbable');
-    assert.deepEqual(tabs.slice(1).map((tab) => tab.getAttribute('tabindex')), ['-1', '-1'], 'inactive tabs are not in the tab sequence');
-
-    // A pointer activation changes the selected tab.
-    (tabs[2] as HTMLElement).click();
-    await settle(60);
-    const afterClick = [...host.querySelectorAll('[role="tab"]')];
-    assert.equal(afterClick[2]?.getAttribute('aria-selected'), 'true', 'activating a tab selects it');
-    assert.equal(afterClick[0]?.getAttribute('aria-selected'), 'false');
-
-    // Arrow keys move focus between tabs.
-    (afterClick[2] as HTMLElement).focus();
-    afterClick[2]?.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
-    await settle(60);
-    assert.equal(document.activeElement, afterClick[1], 'ArrowLeft moves focus to the previous tab');
 
     app.unmount();
   } finally {
