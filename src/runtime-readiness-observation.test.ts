@@ -170,6 +170,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
         body: '{}',
       });
       assert.notEqual(response.status, 201);
+      await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(enrollmentId),
+        (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'unavailable');
       const readiness = await h.runtime.enrollments.readiness(enrollmentId);
       assert.equal(readiness.readiness.probe, undefined, 'no committed probe from a contradictory result');
       assert.deepEqual(await h.runtime.enrollments.listProbes(enrollmentId), []);

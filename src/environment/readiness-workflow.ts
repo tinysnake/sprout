@@ -273,8 +273,15 @@ export class EnvironmentReadinessWorkflow {
     const requirements = this.#hasRequirementResolver ? await this.#resolveRequirements() : { requiredModels: live?.requiredModels ?? [] };
     const ticket = await this.#enrollments.issueReadinessAttempt(enrollment.id, authority, false, requirements.requiredModels ?? [], requirements);
     if (!ticket) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
-    const rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
-      this.#hasRequirementResolver ? ticket.requirements : undefined);
+    let rawResult: WorkerReadinessProbeResult | undefined;
+    try {
+      rawResult = await this.#environment.probeReadiness?.(enrollment.environmentInstanceId, ticket.observationId,
+        this.#hasRequirementResolver ? ticket.requirements : undefined);
+    } catch {
+      // The channel may have closed or the Worker may have refused the RPC.
+      // Transport diagnostics never become an internal observation disposition.
+      throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
+    }
     if (rawResult === undefined) throw new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
     const result = validateWorkerReadinessProbeResult(rawResult);
     if (result === undefined) {
