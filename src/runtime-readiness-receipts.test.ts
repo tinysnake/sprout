@@ -42,11 +42,18 @@ for (const backend of ['memory', 'sqlite'] as const) {
         assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
         assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
       }
-      const receipt = await h.runtime.enrollments.recordReadinessObservation(
-        enrollmentId, result, authority, { requirements: { revision: 'r1', requiredModels: ['safe-model'] } },
-      );
+      const ticket = await h.runtime.enrollments.issueReadinessAttempt(enrollmentId, authority, false, [], { requiredModels: [] });
+      assert.ok(ticket);
+      const wrong = { ...ticket, sequence: ticket.sequence + 1 };
+      assert.equal(await h.runtime.enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: wrong }), undefined);
+      const substituted = { ...ticket, requirements: { revision: 'r1', requiredModels: ['safe-model'] } };
+      assert.equal(await h.runtime.enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: substituted }), undefined);
+      assert.deepEqual(await store.getCurrentObservation(INSTANCE_ID), before);
+      assert.deepEqual(await store.listObservations(INSTANCE_ID), history);
+      assert.deepEqual(await store.listProbes(INSTANCE_ID), probes);
+      const receipt = await h.runtime.enrollments.recordReadinessObservation(enrollmentId, result, authority, { attempt: ticket });
       assert.ok(receipt);
-      assert.deepEqual(receipt.requirements, { revision: 'r1', requiredModels: ['safe-model'] });
+      assert.deepEqual(receipt.requirements, { requiredModels: [] });
     } finally {
       await h.close();
     }
