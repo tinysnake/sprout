@@ -91,6 +91,7 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
     options.input.on('end', () => this.#failAll('transport closed'));
     options.input.on('close', () => this.#failAll('transport closed'));
     options.input.on('error', () => this.#failAll('transport closed'));
+    options.input.resume?.();
   }
 
   request<T>(method: string, params?: unknown): Promise<T> {

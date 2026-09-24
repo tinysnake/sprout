@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { JsonRpcTransport } from '../engine/jsonrpc.ts';
+import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import { EnrollmentWorkerPort } from './enrollment-port.ts';
 import type { WorkerGateway, WorkerGatewayAcceptance } from './gateway.ts';
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
@@ -45,4 +46,67 @@ test('enrollment-port identification failures never log transport error text', a
     new RegExp(WORKER_DIAGNOSTICS.connectionUnavailable, 'i'),
   );
   await port.close();
+});
+
+test('connectWorkerEnrollment preserves downstream stream data arriving alongside worker/listening', async () => {
+  const { WebSocketServer, createWebSocketStream } = await import('ws');
+  const { connectWorkerEnrollment } = await import('./enrollment-connector.ts');
+  const { WORKER_PROTOCOL_VERSION } = await import('./protocol.ts');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+
+  const wss = new WebSocketServer({ port: 0 });
+  const port = (wss.address() as { port: number }).port;
+
+  wss.on('connection', (ws) => {
+    const stream = createWebSocketStream(ws);
+    let buffer = '';
+    stream.on('data', (chunk) => {
+      buffer += chunk.toString();
+      if (buffer.includes('worker/hello')) {
+        buffer = '';
+        stream.write(JSON.stringify({
+          type: 'worker/accepted',
+          enrollmentId: 'enroll-pipelined',
+          environmentInstanceId: 'inst-pipelined',
+          epoch: 1,
+          connectionId: 'conn-1',
+        }) + '\n');
+      } else if (buffer.includes('worker/ready')) {
+        buffer = '';
+        // Server writes worker/listening AND downstream JSON-RPC line together in one segment/stream write
+        stream.write(
+          JSON.stringify({ type: 'worker/listening', epoch: 1 }) + '\n' +
+          JSON.stringify({ jsonrpc: '2.0', method: 'handoff/check', params: { ok: true } }) + '\n'
+        );
+      }
+    });
+  });
+
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-test-pipelined-'));
+  const keyPath = join(dir, 'key.pem');
+  try {
+    const connection = await connectWorkerEnrollment({
+      target: { enrollmentId: 'enroll-pipelined', host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath: keyPath },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [],
+    });
+
+    const transport = new LineJsonRpcTransport({ input: connection.stream, output: connection.stream });
+    const receivedRpc = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 300);
+      transport.onNotification((notice) => {
+        clearTimeout(timer);
+        resolve(notice.method === 'handoff/check');
+      });
+    });
+
+    connection.close();
+    wss.close();
+    assert.equal(receivedRpc, true, 'the downstream JSON-RPC notification must not be swallowed by the handshake reader');
+  } finally {
+    wss.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -276,3 +276,115 @@ test('adapter, context, and readiness lookups never dial or start a production W
     await h.close();
   }
 });
+
+/** A raw WS handshake whose readiness barrier the test drives frame by frame. */
+async function openRawWorker(
+  h: Harness,
+  keyPath: string,
+  claimSecret: string,
+  protocolVersion: unknown = WORKER_PROTOCOL_VERSION,
+) {
+  const { WebSocket, createWebSocketStream } = await import('ws');
+  const identity = loadOrCreateWorkerIdentity(keyPath);
+  const publicKey = workerPublicKey(identity.privateKey);
+  const socket = new WebSocket(`ws://${h.base}/api/worker/connect`);
+  const stream = await new Promise<import('node:stream').Duplex>((resolve, reject) => {
+    socket.on('open', () => resolve(createWebSocketStream(socket) as unknown as import('node:stream').Duplex));
+    socket.on('error', reject);
+  });
+  let buffer = '';
+  const frames: { type: string; [key: string]: unknown }[] = [];
+  const waiters: ((frame: { type: string; [key: string]: unknown }) => void)[] = [];
+  stream.on('data', (chunk: Buffer | string) => {
+    buffer += chunk.toString();
+    let newline = buffer.indexOf('\n');
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line !== '') {
+        const frame = JSON.parse(line) as { type: string; [key: string]: unknown };
+        const waiter = waiters.shift();
+        if (waiter !== undefined) waiter(frame);
+        else frames.push(frame);
+      }
+      newline = buffer.indexOf('\n');
+    }
+  });
+  const next = (): Promise<{ type: string; [key: string]: unknown }> => {
+    const queued = frames.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    return new Promise((resolve) => waiters.push(resolve));
+  };
+  const write = (frame: Record<string, unknown>) => stream.write(`${JSON.stringify(frame)}\n`);
+  write({ type: 'worker/hello', enrollmentId: 'enroll-1', ...(claimSecret !== '' ? { claimSecret } : {}) });
+  for (;;) {
+    const frame = await next();
+    if (frame.type === 'worker/challenged') {
+      const challenge = frame.challenge as { id: string; enrollmentId: string; nonce: string };
+      write({
+        type: 'worker/prove',
+        proof: {
+          challengeId: challenge.id,
+          publicKey,
+          signature: signWorkerChallenge(identity.privateKey, challenge),
+        },
+        platform: 'macos',
+        protocolVersion,
+        engineFacts: [],
+      });
+      continue;
+    }
+    return { socket, stream, frame, next, write, close: () => socket.close() };
+  }
+}
+test('gateway handoff preserves a pipelined JSON-RPC notification across a partial line', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    let received!: (method: string) => void;
+    const notification = new Promise<string>((resolve) => { received = resolve; });
+    const remove = h.gateway.onAccept((acceptance) => {
+      if (acceptance.accepted) acceptance.transport.onNotification((message) => received(message.method));
+    });
+    const raw = await openRawWorker(h, key.path, '');
+    assert.equal(raw.frame.type, 'worker/accepted');
+    const rpc = JSON.stringify({ jsonrpc: '2.0', method: 'handoff/check', params: null }) + '\n';
+    raw.stream.write(JSON.stringify({ type: 'worker/ready' }) + '\n' + rpc.slice(0, 17));
+    assert.equal((await raw.next()).type, 'worker/listening');
+    raw.stream.write(rpc.slice(17));
+    assert.equal(await Promise.race([notification, new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 500))]), 'handoff/check');
+    remove();
+    raw.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('gateway handoff preserves a pipelined JSON-RPC notification across a partial line', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    let received!: (method: string) => void;
+    const notification = new Promise<string>((resolve) => { received = resolve; });
+    const remove = h.gateway.onAccept((acceptance) => {
+      if (acceptance.accepted) acceptance.transport.onNotification((message) => received(message.method));
+    });
+    const raw = await openRawWorker(h, key.path, '');
+    assert.equal(raw.frame.type, 'worker/accepted');
+    const rpc = JSON.stringify({ jsonrpc: '2.0', method: 'handoff/check', params: null }) + '\n';
+    raw.stream.write(JSON.stringify({ type: 'worker/ready' }) + '\n' + rpc.slice(0, 17));
+    assert.equal((await raw.next()).type, 'worker/listening');
+    raw.stream.write(rpc.slice(17));
+    assert.equal(await Promise.race([notification, new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 500))]), 'handoff/check');
+    remove();
+    raw.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});

@@ -269,16 +269,23 @@ class CoreFrameReader {
   #queue: WorkerGatewayServerFrame[] = [];
   #waiters: ((frame: WorkerGatewayServerFrame | undefined) => void)[] = [];
   #ended = false;
+  #disposed = false;
   #onData: (chunk: Buffer | string) => void;
+  #onEnd: () => void;
+  #onClose: () => void;
+  #onError: () => void;
   readonly #stream: WorkerDuplex;
 
   constructor(stream: WorkerDuplex) {
     this.#stream = stream;
     this.#onData = (chunk) => this.#receive(chunk.toString());
+    this.#onEnd = () => this.#finish();
+    this.#onClose = () => this.#finish();
+    this.#onError = () => this.#finish();
     stream.on('data', this.#onData);
-    stream.on('end', () => this.#finish());
-    stream.on('close', () => this.#finish());
-    stream.on('error', () => this.#finish());
+    stream.on('end', this.#onEnd);
+    stream.on('close', this.#onClose);
+    stream.on('error', this.#onError);
   }
 
   next(): Promise<WorkerGatewayServerFrame | undefined> {
@@ -291,8 +298,27 @@ class CoreFrameReader {
   dispose(): void {
     // The stream now carries JSON-RPC; stop consuming and detach so the Worker
     // server owns every subsequent line.
+    if (this.#disposed) return;
+    this.#disposed = true;
+    const finished = this.#ended;
     this.#ended = true;
     this.#stream.removeListener('data', this.#onData);
+    this.#stream.removeListener('end', this.#onEnd);
+    this.#stream.removeListener('close', this.#onClose);
+    this.#stream.removeListener('error', this.#onError);
+    if (finished) return; // EOF/error still needs listener cleanup, not a handoff.
+    this.#stream.pause();
+    const remainder = this.#buffer;
+    this.#buffer = '';
+    this.#queue = [];
+    if (remainder.length > 0) {
+      this.#stream.unshift(remainder);
+    }
+    this.#stream.once('newListener', (event) => {
+      if (event === 'data') {
+        process.nextTick(() => this.#stream.resume());
+      }
+    });
   }
 
   #receive(chunk: string): void {
@@ -303,7 +329,13 @@ class CoreFrameReader {
       const line = this.#buffer.slice(0, newline);
       this.#buffer = this.#buffer.slice(newline + 1);
       const frame = decodeCoreFrame(line);
-      if (frame !== undefined) this.#deliver(frame);
+      if (frame !== undefined) {
+        this.#deliver(frame);
+        if (frame.type === 'worker/listening' || frame.type === 'worker/refused' || frame.type === 'worker/pending') {
+          this.dispose();
+          return;
+        }
+      }
       newline = this.#buffer.indexOf('\n');
     }
   }

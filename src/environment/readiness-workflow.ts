@@ -118,7 +118,7 @@ export class EnvironmentReadinessWorkflow {
   readonly #resolveRequirements: () => ReadinessRequirementScope | Promise<ReadinessRequirementScope>;
   readonly #hasRequirementResolver: boolean;
   readonly #scheduleRetry: (run: () => void, delayMs: number) => void;
-  readonly #collectingBootstrap = new Set<string>();
+  readonly #collectingBootstrap = new Map<string, Promise<void>>();
   readonly #acceptanceReservations = new Map<string, Promise<ReadinessAttempt | false>>();
 
   constructor(options: EnvironmentReadinessWorkflowOptions) {
@@ -178,25 +178,43 @@ export class EnvironmentReadinessWorkflow {
     const ticket = issued ?? await (this.#acceptanceReservations.get(epoch.connectionId) ??
       this.#enrollments.issueReadinessAttempt(enrollment.id, authority, true, requirements.requiredModels ?? [], requirements));
     if (!ticket) return;
+    const inFlight = this.#collectingBootstrap.get(ticket.observationId);
+    if (inFlight !== undefined) {
+      await inFlight;
+      return;
+    }
+    // Share the actual leader outcome from receipt inspection through persistence
+    // AND catalog projection. Waiters see failures; a scheduled not-ready retry
+    // remains best-effort and is not part of this settlement window.
+    const leader = this.#settleBootstrap(acceptance, attempt, ticket, authority, mode, requirements);
+    this.#collectingBootstrap.set(ticket.observationId, leader);
+    try {
+      await leader;
+    } finally {
+      this.#collectingBootstrap.delete(ticket.observationId);
+    }
+  }
+
+  async #settleBootstrap(
+    acceptance: ReadinessAcceptance, attempt: number, ticket: ReadinessAttempt,
+    authority: ReadinessObservationAuthority, mode: CollectionMode, requirements: ReadinessRequirementScope,
+  ): Promise<void> {
+    const { enrollment } = acceptance;
     // A bootstrap is one adoption per acceptance, even across Runtime restart.
     // A reread is inspection, not another measurement.
     if (await this.#enrollments.getReceipt(enrollment.id, ticket.observationId)) return;
     const current = (await this.#enrollments.readiness(enrollment.id)).currentObservation;
     if (current !== undefined && current.sequence > ticket.sequence) return;
-    if (this.#collectingBootstrap.has(ticket.observationId)) return;
-    this.#collectingBootstrap.add(ticket.observationId);
     let outcome: CollectionOutcome;
     try {
       outcome = await this.#collect(enrollment.environmentInstanceId, mode, ticket.observationId, ticket.requirements ?? requirements);
     } catch {
-      this.#collectingBootstrap.delete(ticket.observationId);
       // A channel that cannot identify itself is already offline; the close
       // listener re-projects. A just-accepted Worker may also still be starting
       // its JSON-RPC server, so retry against this epoch only.
       this.#retry(acceptance, attempt, ticket);
       return;
     }
-    this.#collectingBootstrap.delete(ticket.observationId);
     if (outcome.kind === 'not-ready') {
       this.#retry(acceptance, attempt, ticket);
       return;
