@@ -2939,6 +2939,184 @@ for (const backend of ['memory', 'sqlite'] as const) {
     } finally { await h.close(); }
   });
 
+  /**
+   * #128 F2: one compact shared wire/inspection matrix.
+   *
+   * The same scenario table runs the automatic target trigger and the Human
+   * trigger for supported-v2, current-v3, incompatible-v4, and contradictory
+   * envelopes. The existing bootstrap/Human test above covers the empty-target
+   * `worker/info` trigger for v2; this adds the positive automatic/Human path and
+   * the no-write neutral path without duplicating a full Cartesian suite.
+   */
+  test(`#128 ${backend}: composed wire matrix keeps receipts, neutral refusal, and privacy`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'sprout-128-matrix-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const privacyMarker = 'SPROUT_SYNTHETIC_MATRIX_SENTINEL_7f3a9c1e5d2b4806a1c9e7f3b5d2084c';
+    const hostileSummary = `probe at /synthetic-private/${privacyMarker}/worker.sock`;
+    const wireCases = [
+      { name: 'supported-v2', version: '2', contradictory: false, commits: true },
+      { name: 'current-v3', version: '3', contradictory: false, commits: true },
+      { name: 'incompatible-v4', version: '4', contradictory: false, commits: false },
+      { name: 'contradictory-v2', version: '2', contradictory: true, commits: false },
+    ] as const;
+
+    for (const wire of wireCases) {
+      const directory = join(root, wire.name);
+      mkdirSync(directory, { recursive: true });
+      const h = await readinessWorkflowHarness({ backend, directory,
+        agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
+      try {
+        const id = (await h.runtime.enrollments.list())[0]!.id;
+        const store = h.runtime.stores.environmentReadiness;
+        let calls = 0;
+        await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+          calls += 1;
+          const probe = { at: 90_000 + calls * 1_000, latencyMs: 7, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '0.154.0', summary: hostileSummary };
+          const revision = params.requirements?.revisionsByEngine?.codex;
+          const targets = params.requirements?.modelsByEngine?.codex ?? [];
+          const engines = [{ engine: 'codex', installed: true, authenticated: true, readiness: 'ready' as const,
+            modelAvailability: 'available' as const, models: [...targets], targetModels: [...targets],
+            modelIdPresent: targets.length > 0, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' as const,
+            ...(revision !== undefined ? { requirementRevision: revision } : {}) }];
+          return { readiness: { protocolVersion: wire.version, engines,
+            probe: wire.contradictory ? { ...probe, summary: 'contradictory copy' } : probe }, probe };
+        } });
+        // The automatic target trigger fires on acceptance.
+        await waitFor(() => calls > 0, `${wire.name} automatic target probe`);
+        if (wire.commits) {
+          await waitFor(async () => (await store.listObservations(INSTANCE_ID)).length === 1, `${wire.name} commit`);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        await h.runtime.refreshEnvironmentCatalog();
+        const history = await store.listObservations(INSTANCE_ID);
+        const current = await store.getCurrentObservation(INSTANCE_ID);
+        const get = async () => fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
+          { headers: { cookie: h.cookie } });
+        if (wire.commits) {
+          assert.equal(history.length, 1, `${wire.name}: exactly the automatic observation`);
+          assert.ok(current, `${wire.name}: current observation present`);
+          assert.equal(current!.observationId, history[0]!.observationId, `${wire.name}: current is the committed observation`);
+          assert.equal(current!.probe.at, 91_000, `${wire.name}: truthful Worker time survives commit`);
+          assert.ok(!JSON.stringify(current).includes(privacyMarker), `${wire.name}: privacy sentinel never persisted`);
+
+          // The Human trigger uses the same canonical path after acceptance.
+          const post = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+            headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+            body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
+              probe: { source: 'browser', summary: 'forged' } }) });
+          const postText = await post.text();
+          assert.equal(post.status, 201, postText);
+          const posted = JSON.parse(postText) as { receipt: { observationId: string; probe: { at: number; source?: string; summary: string } } };
+          assert.equal(posted.receipt.probe.source, 'worker', `${wire.name}: a browser cannot forge provenance`);
+          assert.equal(posted.receipt.probe.at, 92_000, `${wire.name}: Human-trigger Worker time is truthful`);
+          const currentAfter = (await store.getCurrentObservation(INSTANCE_ID))!;
+          assert.equal(currentAfter.observationId, posted.receipt.observationId, `${wire.name}: Human receipt is current`);
+          assert.equal((await store.listObservations(INSTANCE_ID)).length, 2, `${wire.name}: one row per committed trigger`);
+
+          const body = (await (await get()).json()) as { receipt?: { observationId: string; probe: { at: number; summary: string } };
+            readiness: { probe?: { at: number; summary: string } }; probes: readonly { at: number }[] };
+          assert.equal(body.receipt?.observationId, posted.receipt.observationId, `${wire.name}: GET identifies the committed receipt`);
+          assert.equal(body.receipt?.probe.at, 92_000, `${wire.name}: GET receipt Worker time`);
+          assert.equal(body.readiness.probe?.at, 92_000, `${wire.name}: current readiness Worker time`);
+          assert.equal(body.probes.length, 2, `${wire.name}: durable history is inspectable`);
+          assert.ok(!JSON.stringify(body).includes(privacyMarker), `${wire.name}: privacy survives the query seam`);
+          assert.ok(!JSON.stringify(body).includes('/synthetic-private/'), `${wire.name}: host paths are redacted`);
+          const historical = await fetch(`${h.base}/api/environments/enrollments/${id}/receipts/${history[0]!.observationId}`,
+            { headers: { cookie: h.cookie } });
+          assert.equal(historical.status, 200, `${wire.name}: historical receipt stays retrievable`);
+          // Synthetic target-bound known-ready gate control: this proves the gate
+          // can admit established evidence, not that live account entitlement is provable.
+          assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, `${wire.name}: target-bound known-ready evidence admits`);
+        } else {
+          assert.equal(history.length, 0, `${wire.name}: an incompatible envelope never mutates observation history`);
+          assert.equal(current, undefined, `${wire.name}: an incompatible envelope establishes no current state`);
+          const response = await get();
+          assert.equal(response.status, 200, `${wire.name}: the neutral state stays inspectable`);
+          const body = (await response.json()) as { readiness: { probe?: unknown; summary: { level: string } }; probes: readonly unknown[] };
+          assert.equal(body.readiness.probe, undefined, `${wire.name}: no fabricated current probe`);
+          assert.deepEqual(body.probes, [], `${wire.name}: no fabricated probe history`);
+          assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, `${wire.name}: ineligible`);
+          assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved', `${wire.name}: enrollment authority is preserved`);
+        }
+      } finally { await h.close(); }
+    }
+  });
+
+  test(`#128 ${backend}: a gateway protocol-mismatch refusal is an inspectable neutral state`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-gateway-skew-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'matrix-target' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const refusal = await h.connect(id, join(directory, 'worker-key.pem'), {}, '99').then(
+        () => undefined, (error: unknown) => error);
+      assert.ok(refusal instanceof Error, 'the mismatched Worker is refused before acceptance');
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined, 'no epoch is minted');
+      const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+      assert.equal(response.status, 200, 'the refusal stays inspectable over the query seam');
+      const body = (await response.json()) as { readiness: { compatibility: { state: string; detail?: string }; summary: { level: string }; probe?: unknown }; probes: readonly unknown[] };
+      // A pre-epoch refusal carries no observation authority, so compatibility is
+      // honestly `unknown` rather than the refused Worker's own claim; the
+      // instance remains an approved, red, ineligible catalog entry.
+      assert.equal(body.readiness.compatibility.state, 'unknown');
+      assert.equal(body.readiness.summary.level, 'red');
+      assert.equal(body.readiness.probe, undefined);
+      assert.deepEqual(body.probes, []);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved');
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: an empty-target bootstrap honours supported v2 and refuses an unsupported envelope`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'sprout-128-bootstrap-skew-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    // No configured target model selects the `worker/info` bootstrap trigger.
+    const cases = [
+      { name: 'v2', version: '2', commits: true },
+      { name: 'v4', version: '4', commits: false },
+    ] as const;
+    for (const wireCase of cases) {
+      const directory = join(root, wireCase.name);
+      mkdirSync(directory, { recursive: true });
+      const h = await readinessWorkflowHarness({ backend, directory });
+      try {
+        const id = (await h.runtime.enrollments.list())[0]!.id;
+        const store = h.runtime.stores.environmentReadiness;
+        await h.connect(id, join(directory, 'worker-key.pem'), {
+          readiness: () => ({ protocolVersion: wireCase.version, engines: [{ engine: 'scripted', installed: true,
+            readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
+            probe: { at: 96_000, latencyMs: 3, protocolOk: true, enginesOk: true, source: 'worker',
+              version: '1', summary: 'bootstrap envelope' } }),
+        });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+        await h.runtime.observeWorkerReadiness(id);
+        if (wireCase.commits) {
+          await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'bootstrap commit');
+          const current = (await store.getCurrentObservation(INSTANCE_ID))!;
+          assert.equal(current.probe.at, 96_000, `${wireCase.name}: truthful Worker time survives bootstrap`);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          assert.equal((await store.getCurrentObservation(INSTANCE_ID)), undefined, `${wireCase.name}: no bootstrap observation commits`);
+        }
+        const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+        assert.equal(response.status, 200);
+        const body = (await response.json()) as { readiness: { probe?: { at: number } }; probes: readonly unknown[] };
+        if (wireCase.commits) {
+          assert.equal(body.readiness.probe?.at, 96_000, `${wireCase.name}: current bootstrap probe is inspectable`);
+          assert.equal(body.probes.length, 1, `${wireCase.name}: bootstrap history is inspectable`);
+        } else {
+          assert.equal(body.readiness.probe, undefined, `${wireCase.name}: no fabricated current probe`);
+          assert.deepEqual(body.probes, [], `${wireCase.name}: no fabricated history`);
+        }
+        assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, `${wireCase.name}: bootstrap cannot authorize an unmeasured target`);
+        assert.equal((await h.runtime.enrollments.get(id))?.status, 'approved', `${wireCase.name}: authority is preserved`);
+      } finally { await h.close(); }
+    }
+  });
+
   test(`#128 ${backend}: HTTP Agent edits fence held target evidence and preserve independent observations`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-128-edit-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -3126,6 +3304,8 @@ async function readinessWorkflowHarness(options: {
       readonly readiness?: () => WorkerReadinessFacts;
       readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
     },
+    /** Dial protocol version, so an incompatible handshake can be composed. */
+    dialProtocolVersion?: string,
   ): Promise<WorkerEnrollmentConnection>;
   close(): Promise<void>;
 }> {
@@ -3197,10 +3377,10 @@ async function readinessWorkflowHarness(options: {
     base,
     cookie,
     csrf: csrfToken,
-    async connect(id, key, worker = {}) {
+    async connect(id, key, worker = {}, dialProtocolVersion = WORKER_PROTOCOL_VERSION) {
       const connection = await connectWorkerEnrollment({
         target: { enrollmentId: id, host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath: key },
-        protocolVersion: WORKER_PROTOCOL_VERSION,
+        protocolVersion: dialProtocolVersion,
         engineFacts: [{ engine: 'codex', installed: true, authenticated: true, models: [] }],
       });
       connections.push(connection);
