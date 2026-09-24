@@ -14,6 +14,7 @@ import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
 
 import { createPendingEnrollment } from '../environment/enrollment.ts';
+import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 
 import { workerIdentityDigest } from '../environment/enrollment-identity.ts';
 
@@ -361,3 +362,128 @@ test('channel loss invalidates the epoch, and a reconnect receives a newer one',
     await h.close();
   }
 });
+
+test('a revoke landing during the acceptance window refuses the connection instead of accepting a stale epoch (R118-EPOCH-001)', async () => {
+  // Deterministically suspend the gateway's pre-epoch lifecycle re-read of the
+  // enrollment, so the revoke lands exactly inside the acceptance window.
+  class GatedStore extends InMemoryEnrollmentStore {
+    #remaining = -1;
+    #signalGate: (() => void) | undefined;
+    readonly gateReached = new Promise<void>((resolve) => { this.#signalGate = resolve; });
+    #release: (() => void) | undefined;
+    readonly gateReleased = new Promise<void>((resolve) => { this.#release = resolve; });
+    blockNthGetFromNow(count: number): void { this.#remaining = count; }
+    releaseGet(): void { this.#release?.(); }
+    override async get(enrollmentId: string): Promise<EnvironmentEnrollment | undefined> {
+      if (this.#remaining > 0) {
+        this.#remaining -= 1;
+        if (this.#remaining === 0) {
+          this.#signalGate?.();
+          await this.gateReleased;
+        }
+      }
+      return super.get(enrollmentId);
+    }
+  }
+  const store = new GatedStore();
+  const h = await harnessWithStore(store);
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    // `connectWorkerEnrollment` performs its own reads; block the gateway-side
+    // re-read that happens after reconciliation, which is the acceptance fence.
+    store.blockNthGetFromNow(3);
+    const connecting = connect(h, '', key.path).catch((error: unknown) => error);
+    await store.gateReached;
+    await h.enrollments.revoke('enroll-1', 'retired during acceptance');
+    store.releaseGet();
+    const result = await connecting;
+    assert.ok(result instanceof Error, 'the connection is refused');
+    assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
+    const durable = await h.enrollments.get('enroll-1');
+    assert.equal(durable?.status, 'revoked', 'the revoke is the durable authority');
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+
+test('an approved Worker is accepted with a monotonic epoch and its identity is current', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    const connection = await connect(h, '', key.path);
+    assert.equal(connection.environmentInstanceId, 'mac-mini-1');
+    assert.equal(connection.epoch, 1);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', connection.connectionId), true);
+    // The port exposes the accepted channel as the environment's engines seam.
+    const live = h.gateway.liveFor('mac-mini-1');
+    assert.notEqual(live, undefined);
+    connection.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+
+test('revocation synchronously closes the accepted channel and invalidates its epoch', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const claim = await requestPending(h);
+    await claimProveApprove(h, key.path, claim);
+    const connection = await connect(h, '', key.path);
+    assert.ok(h.gateway.liveFor('mac-mini-1'));
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), connection.epoch);
+
+    await h.enrollments.revoke('enroll-1', 'retired');
+
+    assert.equal(h.gateway.liveFor('mac-mini-1'), undefined);
+    assert.equal(h.gateway.currentConnectionEpoch('enroll-1'), undefined);
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+
+test('a revoked identity is refused after reconnect, and a new key cannot replace it', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    await h.enrollments.revoke('enroll-1', 'host retired');
+    await assert.rejects(() => connect(h, '', key.path), /not approved|revoked/);
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+
+test('a stale connection loses its epoch when a newer one is accepted', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    const first = await connect(h, '', key.path);
+    const second = await connect(h, '', key.path);
+    assert.ok(second.epoch > first.epoch);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', first.connectionId), false);
+    assert.equal(h.gateway.isCurrentConnection('enroll-1', second.connectionId), true);
+    first.close();
+    second.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+

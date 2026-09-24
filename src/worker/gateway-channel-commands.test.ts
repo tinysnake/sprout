@@ -22,6 +22,7 @@ import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } 
 import { EnvironmentWorker } from './server.ts';
 
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
+import { WorkerClient } from './client.ts';
 
 import { createRunApi } from '../web/api.ts';
 
@@ -388,3 +389,50 @@ test('gateway handoff preserves a pipelined JSON-RPC notification across a parti
     await h.close();
   }
 });
+
+test('a Worker claims, proves, and awaits Human approval before acceptance', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await assert.rejects(() => connect(h, secret, key.path), /awaiting Human approval/);
+    const afterAttempt = await h.enrollments.get('enroll-1');
+    assert.equal(afterAttempt?.status, 'pending');
+    assert.notEqual(afterAttempt?.worker.identityDigest, '');
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+
+test('the neutral Worker JSON-RPC and worker/info cross the accepted bidirectional channel', async () => {
+  const h = await harness();
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    // The Worker dials out and is accepted; its own neutral JSON-RPC server runs
+    // over the same accepted channel the core authenticated.
+    const connection = await connect(h, '', key.path);
+    const worker = new EnvironmentWorker({
+      environmentInstanceId: 'mac-mini-1',
+      engines: new Map(),
+      input: connection.stream,
+      output: connection.stream,
+    });
+    const gatewayTransport = h.gateway.liveFor('mac-mini-1')?.transport;
+    assert.notEqual(gatewayTransport, undefined);
+    const connected = await WorkerClient.connect(gatewayTransport!);
+    assert.equal(connected.info.environmentInstanceId, 'mac-mini-1');
+    // The additive `worker/info` readiness contract crosses the same channel.
+    assert.equal(connected.info.readiness?.protocolVersion, WORKER_PROTOCOL_VERSION);
+    assert.equal(connection.epoch, h.gateway.currentConnectionEpoch('enroll-1'));
+    await worker.shutdown();
+    connection.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+

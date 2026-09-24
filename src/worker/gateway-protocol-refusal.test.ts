@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 
-import assert from 'node:assert/strict';import { mkdtempSync, rmSync } from 'node:fs';
+import assert from 'node:assert/strict';import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 
 import { tmpdir } from 'node:os';
 
@@ -411,3 +411,54 @@ test('channel loss invalidates the cached enrollment port facts and commands', a
     await h.close();
   }
 });
+
+test('reusing a Worker identity requires exact owner-only mode and valid key content', () => {
+  const key = tmpKey();
+  try {
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /valid Ed25519 private key/);
+    writeFileSync(key.path, 'not a private key', { mode: 0o600 });
+    chmodSync(key.path, 0o644);
+    assert.throws(() => loadOrCreateWorkerIdentity(key.path), /invalid permissions/);
+  } finally {
+    key.cleanup();
+  }
+});
+
+
+test('an unauthenticated request cannot reach the machine boundary', async () => {
+  const h = await harness();
+  try {
+    const response = await fetch(`http://${h.base}/api/worker/enrollments/enroll-1/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claimSecret: 'not-the-secret' }),
+    });
+    assert.equal(response.status, 404, 'an unknown enrollment is a machine 404');
+  } finally {
+    await h.close();
+  }
+});
+
+
+test('the machine claim route consumes the secret, and replay is refused', async () => {
+  const h = await harness();
+  try {
+    const secret = await requestPending(h);
+    const first = await fetch(`http://${h.base}/api/worker/enrollments/enroll-1/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claimSecret: secret }),
+    });
+    assert.equal(first.status, 200);
+    const replay = await fetch(`http://${h.base}/api/worker/enrollments/enroll-1/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claimSecret: secret }),
+    });
+    assert.equal(replay.status, 409, 'a replayed claim is refused');
+  } finally {
+    await h.close();
+  }
+});
+
