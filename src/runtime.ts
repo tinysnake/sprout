@@ -471,6 +471,18 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // Agent document's unrelated revision.
       return readinessRequirements(options);
     };
+    const currentOptionsByAgent = async () => {
+      const durable = (await agentService.list()).filter((agent) => agent.status !== 'archived');
+      const identities = new Set(durable.map((agent) => agent.id));
+      const byAgent: Record<string, { engine: string; workModel: string }[]> = {};
+      for (const agent of agents.list().filter((a) => !identities.has(a.id))) {
+        byAgent[agent.id] = effectiveWorkOptions(agent).map((opt) => ({ engine: opt.engine, workModel: opt.workModel }));
+      }
+      for (const agent of durable) {
+        byAgent[agent.id] = currentOptions(agent).map((opt) => ({ engine: opt.engine, workModel: opt.workModel }));
+      }
+      return byAgent;
+    };
     // The bridge between the M2 Project authority and the M1 collaboration
     // machinery (#92, F1): authority Projects are projected into the registry
     // the wake contract and orchestrator read, so one Project identity routes
@@ -773,13 +785,9 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // instance admits the Agent's first option unchanged.
       engineFacts: async (requestedInstanceId) => {
         const readiness = await durableStores.environmentReadiness.getReadiness(requestedInstanceId);
-        return (readiness?.engines ?? []).map((engine) => ({
-          engine: engine.engine,
-          installed: engine.installed,
-          readiness: engine.readiness,
-          models: engine.models,
-        }));
+        return readiness?.engines ?? [];
       },
+      requirements: currentRequirements,
       strictAdmission: environmentSource === 'enrollment',
       // The durable access record a run is admitted under (#93): the binding
       // facts are captured once, persisted with the run, and used for the
@@ -969,6 +977,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
           currentEpoch: currentWorkerConnectionEpoch(enrollment.id),
           requiredEngines: [engineId],
           requirements: await currentRequirements(),
+          optionsByAgent: await currentOptionsByAgent(),
           supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
           now,
         });
@@ -1115,22 +1124,49 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
      * dials a Worker: it reads the durable observed facts for an instance the
      * catalog already admitted, and reports nothing when none is eligible.
      */
-    const firstEligibleReadiness = async (): Promise<{
+    const resolveCompatibilityTarget = async (
+      requestedInstanceId?: string,
+    ): Promise<{
       readonly instanceId: string | undefined;
       readonly readiness: Awaited<
         ReturnType<RuntimeStores['environmentReadiness']['getReadiness']>
       >;
     }> => {
+      if (requestedInstanceId !== undefined) {
+        return {
+          instanceId: requestedInstanceId,
+          readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(requestedInstanceId),
+        };
+      }
       const eligible = environmentCatalog
         .entries()
         .filter((entry) => entry.eligible)
         .sort((a, b) => a.instanceId.localeCompare(b.instanceId));
-      const first = eligible[0];
-      if (first === undefined) return { instanceId: undefined, readiness: undefined };
-      return {
-        instanceId: first.instanceId,
-        readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(first.instanceId),
-      };
+      if (eligible[0] !== undefined) {
+        return {
+          instanceId: eligible[0].instanceId,
+          readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(eligible[0].instanceId),
+        };
+      }
+      const approved = environmentCatalog
+        .entries()
+        .filter((entry) => entry.enrollment.status === 'approved')
+        .sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+      if (approved[0] !== undefined) {
+        return {
+          instanceId: approved[0].instanceId,
+          readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(approved[0].instanceId),
+        };
+      }
+      const anyEntry = [...environmentCatalog.entries()]
+        .sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+      if (anyEntry[0] !== undefined) {
+        return {
+          instanceId: anyEntry[0].instanceId,
+          readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(anyEntry[0].instanceId),
+        };
+      }
+      return { instanceId: undefined, readiness: undefined };
     };
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
@@ -1173,18 +1209,18 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
         createAgentRouter({
           agents: agentService,
           onMutation: scheduleCatalogRefresh,
-          compatibility: async (agent: Agent) => {
-            // The compatibility projection is per-eligible-instance under the
-            // dynamic catalog (E2). It reports the first eligible enrolled
-            // instance's observed engines, or an honest unavailable result when
-            // no instance is currently eligible. The injected configured carrier
-            // keeps its single-instance projection.
+          compatibility: async (agent: Agent, requestedInstanceId?: string) => {
+            // The compatibility projection reports the first eligible enrolled
+            // instance's observed engines, falling back to enrolled instances
+            // with observed facts when none is yet eligible (#129 AC1, AC2).
+            const reqs = await currentRequirements();
             const target = configuredCarrierPresent
               ? { instanceId: configuredInstance.id, readiness: await openedStoresForCatalog.environmentReadiness.getReadiness(configuredInstance.id) }
-              : await firstEligibleReadiness();
+              : await resolveCompatibilityTarget(requestedInstanceId);
             const projection = projectAgentCompatibility({
               workOptions: currentOptions(agent),
               availableEngines: target.readiness?.engines ?? [],
+              requirements: reqs,
             });
             return {
               agentId: agent.id,
@@ -1193,6 +1229,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
               ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
               ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
               options: projection.options,
+              explanation: projection.explanation,
             };
           },
           runAttribution: async (runId: string) => {

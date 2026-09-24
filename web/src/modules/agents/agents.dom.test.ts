@@ -209,6 +209,11 @@ test('the detail panel follows the prototype content order and status language',
     assert.match(detail!.textContent ?? '', /Priority 1 \(Primary\)/);
     assert.match(detail!.textContent ?? '', /Pre-Acceptance Fallback & No-Silent-Replay Guarantee/);
     assert.match(detail!.textContent ?? '', /Environment Compatibility & Admission Evaluation/);
+    assert.match(
+      detail!.textContent ?? '',
+      /Compatibility reflects engine and model readiness only, not permission to execute/,
+      'compatibility disclaimer is present in the DOM',
+    );
     assert.match(detail!.textContent ?? '', /Configuration Version Changelog/);
     assert.match(detail!.textContent ?? '', /Historical Run Attribution & Provenance/);
     assert.ok(detail!.querySelector('.agent-operations-toolbar'), 'the operations toolbar renders');

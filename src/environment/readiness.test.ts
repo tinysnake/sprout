@@ -2,11 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  evaluateEngineOption,
   observedFactsFromWorkerReadiness,
   protocolCompatibility,
   protocolMajor,
+  readinessRequirements,
   summarizeEnvironmentReadiness,
   workSafetyFromLeases,
+  type EngineReadinessFact,
   type EnvironmentReadiness,
 } from './readiness.ts';
 import { assembleEnvironmentReadiness } from './readiness-service.ts';
@@ -274,4 +277,139 @@ test('only explicitly required engines block work: an unrequired unavailable eng
   assert.equal(requiresPi.readiness.engines.find((engine) => engine.engine === 'pi')?.required, true);
   assert.equal(requiresPi.summary.level, 'red');
   assert.match(requiresPi.summary.reason, /pi/i);
+});
+
+test('#129: evaluateEngineOption interprets committed evidence consistently across states', () => {
+  // 1. Unobserved engine fact
+  const unobserved = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, undefined);
+  assert.equal(unobserved.state, 'unknown');
+  assert.match(unobserved.reason, /has not been observed/);
+
+  // 2. Missing engine fact
+  const missingFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: false,
+    readiness: 'missing',
+    required: true,
+    models: { state: 'none', models: [] },
+  };
+  const missing = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, missingFact);
+  assert.equal(missing.state, 'missing');
+  assert.match(missing.reason, /not installed/);
+
+  // 3. Login-required engine fact
+  const loginFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'login-required',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const login = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, loginFact);
+  assert.equal(login.state, 'login-required');
+  assert.match(login.reason, /requires a login/);
+
+  // 4. Unknown engine readiness
+  const unknownEngineFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'unknown',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const unknownEngine = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownEngineFact);
+  assert.equal(unknownEngine.state, 'unknown');
+  assert.match(unknownEngine.reason, /readiness is unknown/);
+
+  // 5. Empty workModel on ready engine
+  const readyFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+  };
+  const emptyModel = evaluateEngineOption({ engine: 'codex', workModel: '' }, readyFact);
+  assert.equal(emptyModel.state, 'available');
+  assert.match(emptyModel.reason, /is ready/);
+
+  // 6. Model availability 'none'
+  const noModelsFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'none', models: [] },
+  };
+  const noModels = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, noModelsFact);
+  assert.equal(noModels.state, 'model-unavailable');
+  assert.match(noModels.reason, /reports no available work models/);
+
+  // 7. Model availability 'unknown' (AC1, AC2)
+  const unknownModelFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const unknownModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownModelFact);
+  assert.equal(unknownModel.state, 'unknown');
+  assert.match(unknownModel.reason, /availability is unknown for "codex"/);
+
+  // 8. Model not in available models list
+  const otherModelFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-4'] },
+  };
+  const otherModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, otherModelFact);
+  assert.equal(otherModel.state, 'model-unavailable');
+  assert.match(otherModel.reason, /is not available for "codex"/);
+
+  // 9. Local catalog modelIdPresent === false
+  const notInCatalogFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: false,
+  };
+  const notInCatalog = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, notInCatalogFact);
+  assert.equal(notInCatalog.state, 'model-unavailable');
+
+  // 10. Requirement revision mismatch
+  const scope = readinessRequirements([{ engine: 'codex', workModel: 'gpt-5' }]);
+  const mismatchedRevisionFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: true,
+    requirementRevision: 'r-stale',
+  };
+  const staleRevision = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, mismatchedRevisionFact, scope);
+  assert.equal(staleRevision.state, 'unknown');
+  assert.match(staleRevision.reason, /readiness is not established for the current requirement revision/);
+
+  // 11. Matching target evidence with available model
+  const matchingFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: true,
+    requirementRevision: scope.revisionsByEngine!.codex!,
+  };
+  const availableOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, matchingFact, scope);
+  assert.equal(availableOption.state, 'available');
+  assert.match(availableOption.reason, /ready with the option's work model/);
 });

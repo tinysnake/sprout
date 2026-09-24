@@ -40,7 +40,7 @@ import { currentOptions, effectiveWorkOptions } from './agent/model.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
-import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
+import { ADMISSION_CAPABILITY, admissionRefusal } from './environment/catalog.ts';
 import { readinessRequirements, targetEvidenceSatisfiesRequirements } from './environment/readiness.ts';
 import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
@@ -3346,6 +3346,842 @@ for (const backend of ['memory', 'sqlite'] as const) {
         'no target-specific available evidence may be inferred from an empty probe');
     } finally { await h.close(); }
   });
+
+  test(`#129 ${backend}: ready, unknown, missing, login-required, and model-unavailable observations align compatibility explanations with admission (Scenario 14)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-129-scenario14-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      engineId: 'codex',
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'target-model' }],
+    });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.runtime.agentService.create({
+        id: 'scout',
+        displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'target-model', effort: 'medium' }],
+      });
+
+      const authorityProject = await h.runtime.projectService.create({
+        displayName: 'Scenario 14 Project',
+        goal: 'Verify compatibility and admission parity.',
+        agentMemberships: [{ agentId: 'scout' }],
+      });
+
+      let currentMode: 'ready' | 'unknown' | 'missing' | 'login-required' | 'model-unavailable' | 'unrequired-pi-degraded' = 'ready';
+      let probeCounter = 0;
+
+      const successEvents = [{ type: 'message' as const, text: 'done', final: true }];
+      const successAdapter = new ScriptedEngineAdapter({
+        turns: [{ events: successEvents, result: { status: 'completed' as const, text: 'done' } }],
+      });
+      Object.assign(successAdapter, { id: 'codex' });
+
+      await h.connect(
+        id,
+        join(directory, 'worker-key.pem'),
+        {
+          engines: new Map([['codex', successAdapter]]),
+          readinessProbe: async (params) => {
+            probeCounter += 1;
+            const probe = {
+              at: 80_000 + probeCounter,
+              latencyMs: 1,
+              protocolOk: true,
+              enginesOk: true,
+              source: 'worker' as const,
+              version: '3',
+              summary: `scenario-14 probe ${currentMode}`,
+            };
+            const revision = params.requirements?.revisionsByEngine?.codex ?? params.requirements?.revision;
+
+            if (currentMode === 'ready') {
+              // Synthetic known-ready positive control (gate verification, not live entitlement proof)
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: true,
+                      authenticated: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'available' as const,
+                      models: ['target-model'],
+                      targetModels: ['target-model'],
+                      modelIdPresent: true,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      source: 'codex-account-read',
+                      ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+
+            if (currentMode === 'unknown') {
+              // Required model availability unknown (strict unknown fact)
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: true,
+                      authenticated: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'unknown' as const,
+                      models: [],
+                      targetModels: ['target-model'],
+                      modelIdPresent: true,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      source: 'codex-account-read',
+                      ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+
+            if (currentMode === 'missing') {
+              // Engine uninstalled / missing
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: false,
+                      readiness: 'missing' as const,
+                      modelAvailability: 'none' as const,
+                      models: [],
+                      probedAt: 1,
+                      probeExitCode: 1,
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+
+            if (currentMode === 'login-required') {
+              // Engine requires login
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: true,
+                      authenticated: false,
+                      readiness: 'login-required' as const,
+                      modelAvailability: 'none' as const,
+                      models: [],
+                      probedAt: 1,
+                      probeExitCode: 1,
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+
+            if (currentMode === 'model-unavailable') {
+              // Model is not available for engine
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: true,
+                      authenticated: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'available' as const,
+                      models: ['other-model'],
+                      targetModels: ['target-model'],
+                      modelIdPresent: false,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+
+            // unrequired-pi-degraded mode: Codex is ready (positive control), Pi is degraded (missing)
+            return {
+              readiness: {
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                probe,
+                engines: [
+                  {
+                    engine: 'codex',
+                    installed: true,
+                    authenticated: true,
+                    readiness: 'ready' as const,
+                    modelAvailability: 'available' as const,
+                    models: ['target-model'],
+                    targetModels: ['target-model'],
+                    modelIdPresent: true,
+                    probedAt: 1,
+                    probeExitCode: 0,
+                    source: 'codex-account-read',
+                    ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                  },
+                  {
+                    engine: 'pi',
+                    installed: false,
+                    readiness: 'missing' as const,
+                    modelAvailability: 'none' as const,
+                    models: [],
+                  },
+                ],
+              },
+              probe,
+            };
+          },
+        },
+      );
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      await h.runtime.projectAccess.grant({
+        projectId: authorityProject.id,
+        environmentInstanceId: INSTANCE_ID,
+        selection: { kind: 'default' },
+      });
+
+      const triggerProbe = async () => {
+        const post = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+          method: 'POST',
+          headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+          body: '{}',
+        });
+        const text = await post.text();
+        assert.equal(post.status, 201, text);
+      };
+
+      const getCompatibility = async () => {
+        const response = await fetch(`${h.base}/api/agents/scout/compatibility`, {
+          headers: { cookie: h.cookie },
+        });
+        assert.equal(response.status, 200);
+        return (await response.json()) as {
+          available: boolean;
+          unavailableReason?: string;
+          explanation?: string;
+          options: readonly { option: unknown; state: string; reason: string }[];
+        };
+      };
+
+      // 1. Ready state: synthetic known-ready positive control
+      currentMode = 'ready';
+      await triggerProbe();
+      let compat = await getCompatibility();
+      assert.equal(compat.available, true);
+      assert.equal(compat.options[0]?.state, 'available');
+      assert.match(compat.options[0]?.reason ?? '', /ready with the option's work model/);
+      assert.match(compat.explanation ?? '', /Compatibility reflects engine and model readiness only/);
+      let admission = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(admission.ok, true);
+
+      let submitReady = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      let settledReady = await h.runtime.orchestrator.waitFor(submitReady.id);
+      assert.equal(settledReady.status, 'completed', `ready failed: ${settledReady.failure}`);
+      assert.equal(settledReady.workOption?.workModel, 'target-model');
+
+      // 2. Unknown model state: required unknown model
+      currentMode = 'unknown';
+      await triggerProbe();
+      compat = await getCompatibility();
+      assert.equal(compat.available, false, 'a required unknown model never appears available in compatibility');
+      assert.equal(compat.options[0]?.state, 'unknown');
+      assert.match(compat.options[0]?.reason ?? '', /availability is unknown for "codex"/);
+      assert.equal(compat.unavailableReason, compat.options[0]?.reason);
+
+      admission = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(admission.ok, false);
+      assert.equal(admission.reason, compat.options[0]?.reason, 'compatibility and admission explanations agree for unknown model');
+
+      let submitResult = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      let settled = await h.runtime.orchestrator.waitFor(submitResult.id);
+      assert.equal(settled.status, 'failed');
+      assert.match(settled.failure ?? '', /no available environment for capability: agent-run/);
+
+      // 3. Missing state: engine not installed
+      currentMode = 'missing';
+      await triggerProbe();
+      compat = await getCompatibility();
+      assert.equal(compat.available, false);
+      assert.equal(compat.options[0]?.state, 'missing');
+      assert.match(compat.options[0]?.reason ?? '', /is not installed/);
+      assert.equal(compat.unavailableReason, compat.options[0]?.reason);
+
+      admission = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(admission.ok, false);
+      assert.equal(admission.reason, compat.options[0]?.reason, 'compatibility and admission explanations agree for missing engine');
+
+      submitResult = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(submitResult.id);
+      assert.equal(settled.status, 'failed');
+      assert.match(settled.failure ?? '', /no available environment for capability: agent-run/);
+
+      // 4. Login-required state: engine requires login
+      currentMode = 'login-required';
+      await triggerProbe();
+      compat = await getCompatibility();
+      assert.equal(compat.available, false);
+      assert.equal(compat.options[0]?.state, 'login-required');
+      assert.match(compat.options[0]?.reason ?? '', /requires a login/);
+      assert.equal(compat.unavailableReason, compat.options[0]?.reason);
+
+      admission = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(admission.ok, false);
+      assert.equal(admission.reason, compat.options[0]?.reason, 'compatibility and admission explanations agree for login-required');
+
+      submitResult = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(submitResult.id);
+      assert.equal(settled.status, 'failed');
+      assert.match(settled.failure ?? '', /no available environment for capability: agent-run/);
+
+      // 5. Model-unavailable state: model not supported
+      currentMode = 'model-unavailable';
+      await triggerProbe();
+      compat = await getCompatibility();
+      assert.equal(compat.available, false);
+      assert.equal(compat.options[0]?.state, 'model-unavailable');
+      assert.match(compat.options[0]?.reason ?? '', /is not available for "codex"/);
+      assert.equal(compat.unavailableReason, compat.options[0]?.reason);
+
+      admission = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(admission.ok, false);
+      assert.equal(admission.reason, compat.options[0]?.reason, 'compatibility and admission explanations agree for model-unavailable');
+
+      submitResult = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(submitResult.id);
+      assert.equal(settled.status, 'failed');
+      assert.match(settled.failure ?? '', /no available environment for capability: agent-run/);
+
+      // 6. Independent facts & non-required degradation (AC 3)
+      currentMode = 'unrequired-pi-degraded';
+      await triggerProbe();
+
+      const getReadiness = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, {
+        headers: { cookie: h.cookie },
+      });
+      assert.equal(getReadiness.status, 200);
+      const readBody = (await getReadiness.json()) as {
+        readiness: {
+          connection: { state: string };
+          compatibility: { state: string };
+          workSafety: { state: string };
+          capabilities: readonly { name: string; permission: string }[];
+          summary: { level: string; reason: string };
+          engines: readonly {
+            engine: string;
+            installed: boolean;
+            readiness: string;
+            authenticated?: boolean;
+            modelIdPresent?: boolean;
+            targetModels?: readonly string[];
+          }[];
+        };
+      };
+
+      // Assert independent facts are preserved
+      assert.equal(readBody.readiness.connection.state, 'online', 'connectivity is independent fact');
+      assert.equal(readBody.readiness.compatibility.state, 'compatible', 'protocol is independent fact');
+      assert.equal(readBody.readiness.workSafety.state, 'clear', 'work-safety is independent fact');
+      assert.equal(readBody.readiness.capabilities.find((c) => c.name === 'agent-run')?.permission, 'allowed');
+      const codexFact = readBody.readiness.engines.find((e) => e.engine === 'codex')!;
+      const piFact = readBody.readiness.engines.find((e) => e.engine === 'pi')!;
+      assert.equal(codexFact.installed, true, 'executable presence is independent fact');
+      assert.equal(piFact.installed, false);
+      assert.equal(codexFact.authenticated, true, 'authentication is independent fact');
+      assert.equal(codexFact.modelIdPresent, true, 'local catalog is independent fact');
+
+      // Environment health is Yellow due to unrequired Pi degradation
+      assert.equal(readBody.readiness.summary.level, 'yellow');
+      assert.match(readBody.readiness.summary.reason, /pi/i);
+
+      // But required Codex option remains eligible, available, and admits to completion!
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, 'non-required degradation does not block catalog eligibility');
+      compat = await getCompatibility();
+      assert.equal(compat.available, true, 'non-required degradation does not block compatibility of required option');
+      assert.equal(compat.options[0]?.state, 'available');
+
+      submitResult = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(submitResult.id);
+      assert.equal(settled.status, 'completed', 'required compatible option runs to completion despite non-required degradation');
+      assert.equal(settled.workOption?.engine, 'codex');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#129 ${backend}: synthetic known-ready positive control admits while required unknown refuses, and compatible options remain blockable (Scenario 15)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-129-scenario15-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      engineId: 'codex',
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'target-model' }],
+    });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.runtime.agentService.create({
+        id: 'scout',
+        displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'target-model', effort: 'medium' }],
+      });
+
+      const authorityProject = await h.runtime.projectService.create({
+        displayName: 'Scenario 15 Project',
+        goal: 'Verify synthetic control vs unknown and authority/lease blocks.',
+        agentMemberships: [{ agentId: 'scout' }],
+      });
+
+      let mode: 'unknown' | 'synthetic-ready' = 'unknown';
+      let probeCounter = 0;
+      const successEvents = [{ type: 'message' as const, text: 'success-done', final: true }];
+      const adapter = new ScriptedEngineAdapter({
+        turns: [{ events: successEvents, result: { status: 'completed' as const, text: 'success-done' } }],
+      });
+      Object.assign(adapter, { id: 'codex' });
+
+      await h.connect(
+        id,
+        join(directory, 'worker-key.pem'),
+        {
+          engines: new Map([['codex', adapter]]),
+          readinessProbe: async (params) => {
+            probeCounter += 1;
+            const probe = {
+              at: 90_000 + probeCounter,
+              latencyMs: 1,
+              protocolOk: true,
+              enginesOk: true,
+              source: 'worker' as const,
+              version: '3',
+              summary: 'scenario-15 probe',
+            };
+            const revision = params.requirements?.revisionsByEngine?.codex ?? params.requirements?.revision;
+            if (mode === 'unknown') {
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'codex',
+                      installed: true,
+                      authenticated: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'unknown' as const,
+                      models: [],
+                      targetModels: ['target-model'],
+                      modelIdPresent: true,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      source: 'codex-account-read',
+                      ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                    },
+                  ],
+                },
+                probe,
+              };
+            }
+            // Synthetic target-bound known-ready gate control: this proves the gate
+            // can admit established evidence, not that live account entitlement is provable (#123 §6, #129 AC5).
+            return {
+              readiness: {
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                probe,
+                engines: [
+                  {
+                    engine: 'codex',
+                    installed: true,
+                    authenticated: true,
+                    readiness: 'ready' as const,
+                    modelAvailability: 'available' as const,
+                    models: ['target-model'],
+                    targetModels: ['target-model'],
+                    modelIdPresent: true,
+                    probedAt: 1,
+                    probeExitCode: 0,
+                    source: 'codex-account-read',
+                    ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                  },
+                ],
+              },
+              probe,
+            };
+          },
+        },
+      );
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      await h.runtime.projectAccess.grant({
+        projectId: authorityProject.id,
+        environmentInstanceId: INSTANCE_ID,
+        selection: { kind: 'default' },
+      });
+
+      const triggerProbe = async () => {
+        const post = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+          method: 'POST',
+          headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+          body: '{}',
+        });
+        assert.equal(post.status, 201);
+      };
+
+      // 1. Strict required-unknown refusal:
+      mode = 'unknown';
+      await triggerProbe();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+
+      const optionAdm = await h.runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+      assert.equal(optionAdm.ok, false);
+      assert.match(optionAdm.reason ?? '', /availability is unknown for "codex"/);
+
+      let run = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      let settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'failed');
+      assert.match(settled.failure ?? '', /no available environment for capability: agent-run/);
+
+      // 2. Synthetic known-ready positive control admits through the same composed Runtime/WorkerGateway channel:
+      mode = 'synthetic-ready';
+      await triggerProbe();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+      run = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'completed', `synthetic known-ready control admits: ${settled.failure ?? 'none'}`);
+      assert.equal(settled.workOption?.workModel, 'target-model');
+
+      // 3. Independent blocking of compatible option by lifecycle, current authority, permissions, leases (AC 4):
+      // 3a. Work safety / active lease conflict block
+      const held = h.runtime.pool.acquireLease({
+        instanceId: INSTANCE_ID,
+        capability: 'agent-run',
+        holderId: 'competing-task',
+        ttlMs: 60_000,
+      });
+      assert.equal(held.ok, true);
+      run = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'failed');
+      h.runtime.pool.releaseLease(held.lease.id);
+
+      // 3b. Capability permission block
+      await h.runtime.enrollments.setCapabilityPermission(id, ADMISSION_CAPABILITY, false);
+      await h.runtime.refreshEnvironmentCatalog();
+      let entry = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.equal(entry.eligible, false);
+      let refusal = admissionRefusal(entry);
+      assert.equal(refusal.ok, false);
+      run = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'failed');
+
+      // 3c. Current authority / disconnect block
+      const accepted = h.runtime.workerGateway.liveFor(INSTANCE_ID);
+      if (accepted !== undefined) accepted.close();
+      assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
+
+      // 3d. Lifecycle revocation block
+      await h.runtime.enrollments.revoke(id, 'revoked by test');
+      await h.runtime.refreshEnvironmentCatalog();
+      entry = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.equal(entry.eligible, false);
+      refusal = admissionRefusal(entry);
+      assert.equal(refusal.ok, false);
+      if (!refusal.ok) assert.equal(refusal.reason, 'revoked');
+      run = await h.runtime.orchestrator.submit({ agentId: 'scout', prompt: 'hi', projectId: authorityProject.id });
+      settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'failed');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test(`#129 ${backend}: ordered pre-acceptance selection and post-acceptance failure non-replay (Scenario 16)`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-129-scenario16-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({
+      backend,
+      directory,
+      engineId: 'scripted',
+      agents: [
+        {
+          ...agent('ordered-agent'),
+          engine: 'scripted',
+          model: 'model-two',
+          workOptions: [
+            { id: 'opt-1', engine: 'codex', workModel: 'model-one', effort: 'high' },
+            { id: 'opt-2', engine: 'scripted', workModel: 'model-two', effort: 'medium' },
+          ],
+        },
+      ],
+    });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.runtime.agentService.create({
+        id: 'ordered-agent',
+        displayName: 'Ordered Agent',
+        workOptions: [
+          { id: 'opt-1', engine: 'codex', workModel: 'model-one', effort: 'high' },
+          { id: 'opt-2', engine: 'scripted', workModel: 'model-two', effort: 'medium' },
+        ],
+      });
+
+      const authorityProject = await h.runtime.projectService.create({
+        displayName: 'Scenario 16 Project',
+        goal: 'Verify pre-acceptance ordered walk and post-acceptance non-replay.',
+        agentMemberships: [{ agentId: 'ordered-agent' }],
+      });
+
+      const scriptedSuccessEvents = [{ type: 'message' as const, text: 'scripted-turn-done', final: true }];
+      const scriptedAdapter = new ScriptedEngineAdapter({
+        turns: [{ events: scriptedSuccessEvents, result: { status: 'completed' as const, text: 'scripted-turn-done' } }],
+      });
+
+      let probeCounter = 0;
+      let codexInstalled = false;
+
+      await h.connect(
+        id,
+        join(directory, 'worker-key.pem'),
+        {
+          engines: new Map([['scripted', scriptedAdapter]]),
+          readinessProbe: async (params) => {
+            probeCounter += 1;
+            const probe = {
+              at: 95_000 + probeCounter,
+              latencyMs: 1,
+              protocolOk: true,
+              enginesOk: true,
+              source: 'worker' as const,
+              version: '3',
+              summary: 'scenario-16 probe',
+            };
+            const revision = params.requirements?.revisionsByEngine?.scripted ?? params.requirements?.revision;
+            return {
+              readiness: {
+                protocolVersion: WORKER_PROTOCOL_VERSION,
+                probe,
+                engines: [
+                  {
+                    engine: 'codex',
+                    installed: codexInstalled,
+                    readiness: codexInstalled ? ('ready' as const) : ('missing' as const),
+                    modelAvailability: codexInstalled ? ('available' as const) : ('none' as const),
+                    models: codexInstalled ? ['model-one'] : [],
+                    targetModels: codexInstalled ? ['model-one'] : [],
+                    modelIdPresent: codexInstalled,
+                  },
+                  {
+                    engine: 'scripted',
+                    installed: true,
+                    readiness: 'ready' as const,
+                    modelAvailability: 'available' as const,
+                    models: ['model-two'],
+                    targetModels: ['model-two'],
+                    modelIdPresent: true,
+                    probedAt: 1,
+                    probeExitCode: 0,
+                    ...(revision !== undefined ? { requirementRevision: revision } : {}),
+                  },
+                ],
+              },
+              probe,
+            };
+          },
+        },
+      );
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      await h.runtime.projectAccess.grant({
+        projectId: authorityProject.id,
+        environmentInstanceId: INSTANCE_ID,
+        selection: { kind: 'default' },
+      });
+
+      const triggerProbe = async () => {
+        const post = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+          method: 'POST',
+          headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+          body: '{}',
+        });
+        assert.equal(post.status, 201);
+      };
+
+      // 1. Pre-acceptance ordered walk:
+      // Option 1 (Codex) is missing; Option 2 (Scripted) is ready and available.
+      codexInstalled = false;
+      await triggerProbe();
+
+      const compatResponse = await fetch(`${h.base}/api/agents/ordered-agent/compatibility`, {
+        headers: { cookie: h.cookie },
+      });
+      const compat = (await compatResponse.json()) as {
+        available: boolean;
+        firstAvailable?: { engine: string; workModel: string };
+        options: readonly { state: string }[];
+      };
+      assert.equal(compat.available, true);
+      assert.equal(compat.options[0]?.state, 'missing', 'option 1 is missing');
+      assert.equal(compat.options[1]?.state, 'available', 'option 2 is available');
+      assert.equal(compat.firstAvailable?.engine, 'scripted', 'first available option is scripted');
+
+      // Submit run: admission walks in order, skips missing option 1, and admits option 2 before engine acceptance.
+      let run = await h.runtime.orchestrator.submit({ agentId: 'ordered-agent', prompt: 'hi', projectId: authorityProject.id });
+      let settled = await h.runtime.orchestrator.waitFor(run.id);
+      assert.equal(settled.status, 'completed', `run failed: ${settled.failure}`);
+      assert.equal(settled.workOption?.engine, 'scripted');
+      assert.equal(settled.workOption?.workModel, 'model-two');
+      assert.equal(scriptedAdapter.requests.length, 1);
+
+      // 2. Post-acceptance failure non-replay:
+      const fallbackEvents = [{ type: 'message' as const, text: 'fallback-executed', final: true }];
+      const fallbackAdapter = new ScriptedEngineAdapter({
+        turns: [{ events: fallbackEvents, result: { status: 'completed' as const, text: 'fallback-executed' } }],
+      });
+      Object.assign(fallbackAdapter, { id: 'scripted-fallback' });
+      const failingAdapter = new ScriptedEngineAdapter({
+        turns: [{ events: [], result: { status: 'failed' as const, message: 'engine crashed during execution' } }],
+      });
+      Object.assign(failingAdapter, { id: 'scripted-failing' });
+
+      const subDir = join(directory, 'sub-scenario16');
+      mkdirSync(subDir, { recursive: true });
+      const h2 = await readinessWorkflowHarness({
+        backend,
+        directory: subDir,
+        engineId: 'scripted-failing',
+        agents: [
+          {
+            ...agent('fail-agent'),
+            engine: 'scripted-failing',
+            workOptions: [
+              { id: 'opt-f1', engine: 'scripted-failing', workModel: 'model-fail', effort: 'medium' },
+              { id: 'opt-f2', engine: 'scripted-fallback', workModel: 'model-fallback', effort: 'low' },
+            ],
+          },
+        ],
+      });
+      try {
+        const id2 = (await h2.runtime.enrollments.list())[0]!.id;
+        await h2.runtime.agentService.create({
+          id: 'fail-agent',
+          displayName: 'Fail Agent',
+          workOptions: [
+            { id: 'opt-f1', engine: 'scripted-failing', workModel: 'model-fail', effort: 'medium' },
+            { id: 'opt-f2', engine: 'scripted-fallback', workModel: 'model-fallback', effort: 'low' },
+          ],
+        });
+        const proj2 = await h2.runtime.projectService.create({
+          displayName: 'Fail Project',
+          goal: 'Verify post-acceptance no replay.',
+          agentMemberships: [{ agentId: 'fail-agent' }],
+        });
+
+        await h2.connect(
+          id2,
+          join(subDir, 'worker-key.pem'),
+          {
+            engines: new Map([
+              ['scripted-failing', failingAdapter],
+              ['scripted-fallback', fallbackAdapter],
+            ]),
+            readinessProbe: async (params) => {
+              const probe = {
+                at: 99_000,
+                latencyMs: 1,
+                protocolOk: true,
+                enginesOk: true,
+                source: 'worker' as const,
+                version: '3',
+                summary: 'post-acceptance probe',
+              };
+              const revFailing = params.requirements?.revisionsByEngine?.['scripted-failing'] ?? params.requirements?.revision;
+              const revFallback = params.requirements?.revisionsByEngine?.['scripted-fallback'] ?? params.requirements?.revision;
+              return {
+                readiness: {
+                  protocolVersion: WORKER_PROTOCOL_VERSION,
+                  probe,
+                  engines: [
+                    {
+                      engine: 'scripted-failing',
+                      installed: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'available' as const,
+                      models: ['model-fail'],
+                      targetModels: ['model-fail'],
+                      modelIdPresent: true,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      ...(revFailing !== undefined ? { requirementRevision: revFailing } : {}),
+                    },
+                    {
+                      engine: 'scripted-fallback',
+                      installed: true,
+                      readiness: 'ready' as const,
+                      modelAvailability: 'available' as const,
+                      models: ['model-fallback'],
+                      targetModels: ['model-fallback'],
+                      modelIdPresent: true,
+                      probedAt: 1,
+                      probeExitCode: 0,
+                      ...(revFallback !== undefined ? { requirementRevision: revFallback } : {}),
+                    },
+                  ],
+                },
+                probe,
+              };
+            },
+          },
+        );
+        await waitFor(() => h2.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel h2');
+        await h2.runtime.projectAccess.grant({
+          projectId: proj2.id,
+          environmentInstanceId: INSTANCE_ID,
+          selection: { kind: 'default' },
+        });
+
+        const postProbe2 = await fetch(`${h2.base}/api/environments/enrollments/${id2}/probes`, {
+          method: 'POST',
+          headers: { cookie: h2.cookie, 'x-sprout-csrf': h2.csrf, 'content-type': 'application/json' },
+          body: '{}',
+        });
+        assert.equal(postProbe2.status, 201);
+
+        const failRun = await h2.runtime.orchestrator.submit({ agentId: 'fail-agent', prompt: 'hi', projectId: proj2.id });
+        const failSettled = await h2.runtime.orchestrator.waitFor(failRun.id);
+        assert.equal(failSettled.status, 'failed');
+        assert.match(failSettled.failure ?? '', /the engine turn failed|engine crashed during execution/);
+        assert.equal(failSettled.workOption?.engine, 'scripted-failing', 'run stayed on its admitted option');
+
+        assert.equal(failingAdapter.requests.length, 1, 'the primary engine was accepted and attempted');
+        assert.equal(fallbackAdapter.requests.length, 0, 'the fallback engine was NEVER started or replayed after acceptance');
+      } finally {
+        await h2.close();
+      }
+    } finally {
+      await h.close();
+    }
+  });
 }
 
 /** Compose one accepted enrollment + Worker for the #124 acceptance scenarios. */
@@ -3437,6 +4273,7 @@ async function readinessWorkflowHarness(options: {
     worker?: {
       readonly readiness?: () => WorkerReadinessFacts;
       readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
+      readonly engines?: ReadonlyMap<string, EngineAdapter>;
     },
     /** Dial protocol version, so an incompatible handshake can be composed. */
     dialProtocolVersion?: string,
@@ -3450,12 +4287,13 @@ async function readinessWorkflowHarness(options: {
   const { WORKER_PROTOCOL_VERSION } = await import('./worker/protocol.ts');
   const { signWorkerChallenge } = await import('./environment/worker-proof.ts');
   const credential = randomBytes(16).toString('base64url');
+  const configuredEngineId = options.engineId ?? options.agents?.[0]?.engine;
   const runtime = await createRuntime({
     configuration: hostConfiguration({
       databasePath: join(options.directory, 'sprout.db'),
       environmentSource: 'enrollment',
       operatorCredential: credential,
-      ...(options.engineId !== undefined ? { engineId: options.engineId } : {}),
+      ...(configuredEngineId !== undefined ? { engineId: configuredEngineId } : {}),
       ...(options.agents !== undefined
         ? { runtimeConfiguration: { agents: [...options.agents] } }
         : {}),
@@ -3522,7 +4360,8 @@ async function readinessWorkflowHarness(options: {
       const declaration = worker.readiness;
       workers.push(new EnvironmentWorker({
         environmentInstanceId: INSTANCE_ID,
-        engines: new Map(),
+        workspaceRoot: join(options.directory, 'worker-workspace'),
+        engines: worker.engines ?? new Map(),
         input: connection.stream,
         output: connection.stream,
         ...(declaration !== undefined ? { readiness: declaration } : {}),

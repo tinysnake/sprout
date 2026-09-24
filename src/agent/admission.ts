@@ -1,4 +1,9 @@
 import type { AgentWorkOption } from './model.ts';
+import {
+  evaluateEngineOption,
+  type EngineReadinessFact,
+  type ReadinessRequirementScope,
+} from '../environment/readiness.ts';
 
 /**
  * Run admission's ordered work-option selection (#90, ADR-0008).
@@ -21,21 +26,70 @@ export interface AgentWorkOptionEngineFact {
   readonly installed: boolean;
   readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown';
   readonly models: { readonly state: 'available' | 'none' | 'unknown'; readonly models: readonly string[] };
+  readonly version?: string;
+  readonly authenticated?: boolean;
+  readonly authMode?: string;
+  readonly authType?: string;
+  readonly modelIdPresent?: boolean;
+  readonly targetModels?: readonly string[];
+  readonly requirementRevision?: string;
+  readonly probedAt?: number;
+  readonly probeExitCode?: number;
+  readonly source?: string;
 }
 
 /**
  * Whether an engine's observed facts admit this option.
  *
+ * Consumes the shared engine/model evaluation (#123 §6, #129 AC1).
  * `unknown` is not admissible: an unverified readiness must never be treated as
  * a confirmation, exactly as the readiness summary refuses to colour it green.
  */
-function optionAdmissible(option: AgentWorkOption, facts: AgentWorkOptionEngineFact | undefined): boolean {
-  if (facts === undefined) return false;
-  if (!facts.installed || facts.readiness === 'missing' || facts.readiness === 'login-required') return false;
-  if (facts.readiness !== 'ready') return false;
-  if (option.workModel === '') return true;
-  if (facts.models.state === 'available') return facts.models.models.includes(option.workModel);
-  return false;
+export function optionAdmissible(
+  option: AgentWorkOption,
+  facts: (EngineReadinessFact | AgentWorkOptionEngineFact) | undefined,
+  requirements?: ReadinessRequirementScope,
+): boolean {
+  return (
+    evaluateEngineOption(option, facts as EngineReadinessFact | undefined, requirements).state ===
+    'available'
+  );
+}
+
+export interface AdmissibleOptionDecision {
+  readonly ok: boolean;
+  readonly option?: AgentWorkOption;
+  readonly reason?: string;
+}
+
+/**
+ * Evaluate configured work options in order and return the admission decision
+ * with the decisive explanation (#129 AC1, AC2, AC6).
+ */
+export function evaluateAdmissibleWorkOption(
+  options: readonly AgentWorkOption[],
+  availableEngines: readonly (EngineReadinessFact | AgentWorkOptionEngineFact)[],
+  requirements?: ReadinessRequirementScope,
+): AdmissibleOptionDecision {
+  const engines = new Map(availableEngines.map((fact) => [fact.engine, fact]));
+  let firstRefusalReason: string | undefined;
+  for (const option of options) {
+    const evaluation = evaluateEngineOption(
+      option,
+      engines.get(option.engine) as EngineReadinessFact | undefined,
+      requirements,
+    );
+    if (evaluation.state === 'available') {
+      return { ok: true, option };
+    }
+    if (firstRefusalReason === undefined) {
+      firstRefusalReason = evaluation.reason;
+    }
+  }
+  return {
+    ok: false,
+    reason: firstRefusalReason ?? 'no work option is compatible with observed environment facts',
+  };
 }
 
 /**
@@ -49,8 +103,8 @@ function optionAdmissible(option: AgentWorkOption, facts: AgentWorkOptionEngineF
  */
 export function selectAdmissibleWorkOption(
   options: readonly AgentWorkOption[],
-  availableEngines: readonly AgentWorkOptionEngineFact[],
+  availableEngines: readonly (EngineReadinessFact | AgentWorkOptionEngineFact)[],
+  requirements?: ReadinessRequirementScope,
 ): AgentWorkOption | undefined {
-  const engines = new Map(availableEngines.map((fact) => [fact.engine, fact]));
-  return options.find((option) => optionAdmissible(option, engines.get(option.engine)));
+  return evaluateAdmissibleWorkOption(options, availableEngines, requirements).option;
 }

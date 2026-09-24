@@ -1,4 +1,10 @@
 import type { AgentWorkOption } from './model.ts';
+import {
+  evaluateEngineOption,
+  type EngineOptionEvaluationState,
+  type EngineReadinessFact,
+  type ReadinessRequirementScope,
+} from '../environment/readiness.ts';
 
 /**
  * Agent work-option compatibility, derived from current Environment facts (#90, ADR-0008).
@@ -31,19 +37,19 @@ export interface OptionEngineFact {
   readonly installed: boolean;
   readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown';
   readonly models: { readonly state: 'available' | 'none' | 'unknown'; readonly models: readonly string[] };
+  readonly version?: string;
+  readonly authenticated?: boolean;
+  readonly authMode?: string;
+  readonly authType?: string;
+  readonly modelIdPresent?: boolean;
+  readonly targetModels?: readonly string[];
+  readonly requirementRevision?: string;
+  readonly probedAt?: number;
+  readonly probeExitCode?: number;
+  readonly source?: string;
 }
 
-export type OptionAvailabilityState =
-  /** The engine is installed, ready, and reports the option's work model. */
-  | 'available'
-  /** The engine exists but needs a login on the Environment host. */
-  | 'login-required'
-  /** The engine executable was not located on this Environment. */
-  | 'missing'
-  /** No observation covers this engine or its models yet. */
-  | 'unknown'
-  /** The engine is observed but does not report the option's work model. */
-  | 'model-unavailable';
+export type OptionAvailabilityState = EngineOptionEvaluationState;
 
 export interface OptionCompatibility {
   readonly option: AgentWorkOption;
@@ -61,6 +67,8 @@ export interface AgentCompatibilityProjection {
   readonly firstAvailable?: AgentWorkOption;
   /** The decisive reason the Agent is unavailable, when it is. */
   readonly unavailableReason?: string;
+  /** Explicit statement that compatibility is not an authorization token to execute. */
+  readonly explanation?: string;
 }
 
 /**
@@ -72,59 +80,21 @@ export interface AgentCompatibilityProjection {
  */
 export function projectAgentCompatibility(input: {
   readonly workOptions: readonly AgentWorkOption[];
-  readonly availableEngines: readonly OptionEngineFact[];
+  readonly availableEngines: readonly (EngineReadinessFact | OptionEngineFact)[];
+  readonly requirements?: ReadinessRequirementScope;
 }): AgentCompatibilityProjection {
   const engines = new Map(input.availableEngines.map((engine) => [engine.engine, engine]));
   const options = input.workOptions.map((option): OptionCompatibility => {
     const observed = engines.get(option.engine);
-    if (observed === undefined) {
-      return {
-        option,
-        state: 'unknown',
-        reason: `Engine "${option.engine}" has not been observed on this Environment.`,
-      };
-    }
-    if (observed.readiness === 'login-required') {
-      return {
-        option,
-        state: 'login-required',
-        reason: `Engine "${option.engine}" requires a login on this Environment.`,
-      };
-    }
-    if (!observed.installed || observed.readiness === 'missing') {
-      return {
-        option,
-        state: 'missing',
-        reason: `Engine "${option.engine}" is not installed on this Environment.`,
-      };
-    }
-    if (observed.readiness !== 'ready') {
-      return {
-        option,
-        state: 'unknown',
-        reason: `Engine "${option.engine}" readiness is unknown on this Environment.`,
-      };
-    }
-    if (option.workModel !== '' && observed.models.state === 'available') {
-      if (!observed.models.models.includes(option.workModel)) {
-        return {
-          option,
-          state: 'model-unavailable',
-          reason: `Work model "${option.workModel}" is not available for "${option.engine}" on this Environment.`,
-        };
-      }
-    }
-    if (option.workModel !== '' && observed.models.state === 'none') {
-      return {
-        option,
-        state: 'model-unavailable',
-        reason: `Engine "${option.engine}" reports no available work models on this Environment.`,
-      };
-    }
+    const evaluation = evaluateEngineOption(
+      option,
+      observed as EngineReadinessFact | undefined,
+      input.requirements,
+    );
     return {
       option,
-      state: 'available',
-      reason: `Engine "${option.engine}" is ready with the option's work model.`,
+      state: evaluation.state,
+      reason: evaluation.reason,
     };
   });
 
@@ -136,5 +106,7 @@ export function projectAgentCompatibility(input: {
     ...(firstAvailable === undefined
       ? { unavailableReason: options[0]?.reason ?? 'No work option can run on this Environment.' }
       : {}),
+    explanation:
+      'Compatibility reflects engine and model readiness only, not permission to execute. Runs remain independently gated by enrollment authority, capability permissions, leases, and work safety.',
   };
 }

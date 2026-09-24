@@ -1,6 +1,11 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import { effectiveWorkOptions, type AgentWorkOption } from '../agent/model.ts';
-import { selectAdmissibleWorkOption, type AgentWorkOptionEngineFact } from '../agent/admission.ts';
+import {
+  evaluateAdmissibleWorkOption,
+  type AgentWorkOptionEngineFact,
+  type AdmissibleOptionDecision,
+} from '../agent/admission.ts';
+import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
@@ -106,6 +111,10 @@ export interface RunOrchestratorOptions {
   /** Enforce unknown-as-blocking for a production Worker graph. */
   readonly strictAdmission?: boolean;
   /**
+   * The current core-owned engine/model requirement resolver (#128, #129).
+   */
+  readonly requirements?: () => Promise<ReadinessRequirementScope | undefined>;
+  /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
    *
@@ -209,6 +218,7 @@ export class RunOrchestrator {
         environmentInstanceId: string,
       ) => Promise<RunWorkspaceBinding | undefined>)
     | undefined;
+  readonly #requirements: (() => Promise<ReadinessRequirementScope | undefined>) | undefined;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -235,6 +245,7 @@ export class RunOrchestrator {
     // graphs that intentionally preserve pre-readiness behavior.
     this.#strictAdmission = options.strictAdmission ?? options.engineFacts !== undefined;
     this.#workspaceBinding = options.workspaceBinding;
+    this.#requirements = options.requirements;
   }
 
   /**
@@ -518,29 +529,57 @@ export class RunOrchestrator {
     environmentInstanceId: string,
   ): Promise<
     | { readonly ok: true; readonly option: AgentWorkOption; readonly configurationVersion: number }
-    | { readonly ok: false; readonly message: string }
+    | { readonly ok: false; readonly message: string; readonly reason?: string }
   > {
     const options = effectiveWorkOptions(agent);
     const observed = this.#engineFacts
       ? await this.#engineFacts(environmentInstanceId)
       : undefined;
+    const reqs = this.#requirements ? await this.#requirements() : undefined;
     // Once the Environment fact seam is wired, absence is unknown—not an
     // invitation to guess. This is the strict #114/#118 admission boundary:
     // every required engine/model fact must be established before the first
     // option is accepted. The only legacy escape hatch is an explicitly
     // non-strict graph (or an orchestrator constructed without `engineFacts`).
-    const admitted = observed === undefined || (observed.length === 0 && !this.#strictAdmission)
-      ? options[0]
-      : selectAdmissibleWorkOption(options, observed);
-    if (admitted === undefined) {
+    const firstOption = options[0];
+    const decision: AdmissibleOptionDecision =
+      observed === undefined || (observed.length === 0 && !this.#strictAdmission)
+        ? firstOption !== undefined
+          ? { ok: true, option: firstOption }
+          : { ok: false, reason: 'no configured work option' }
+        : evaluateAdmissibleWorkOption(options, observed, reqs);
+    if (!decision.ok || decision.option === undefined) {
+      const reasonDetail = decision.reason ? ` (${decision.reason})` : '';
       return {
         ok: false,
         message:
           `no compatible work option for agent ${agent.id} on environment instance ${environmentInstanceId}: ` +
-          options.map((option) => option.engine).join(', '),
+          options.map((option) => option.engine).join(', ') +
+          reasonDetail,
+        ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
       };
     }
-    return { ok: true, option: admitted, configurationVersion: agent.configurationVersion ?? 1 };
+    return { ok: true, option: decision.option, configurationVersion: agent.configurationVersion ?? 1 };
+  }
+
+  /**
+   * Evaluate whether an Agent's ordered work options are admissible on an
+   * environment instance without submitting a run (#129).
+   */
+  async evaluateOptionAdmission(
+    agentId: string,
+    environmentInstanceId: string,
+  ): Promise<AdmissibleOptionDecision> {
+    const agent = this.#agents.get(agentId);
+    if (agent === undefined) {
+      return { ok: false, reason: `unknown agent ${agentId}` };
+    }
+    const options = effectiveWorkOptions(agent);
+    const observed = this.#engineFacts
+      ? await this.#engineFacts(environmentInstanceId)
+      : undefined;
+    const reqs = this.#requirements ? await this.#requirements() : undefined;
+    return evaluateAdmissibleWorkOption(options, observed ?? [], reqs);
   }
 
   /** The current observable state of a run. */

@@ -12,6 +12,7 @@ import {
   type LeaseSafetyFact,
   type ProtocolVersionRange,
   type ReadinessReceipt,
+  type ReadinessRequirementScope,
   type WorkSafetyState,
 } from './readiness.ts';
 import { workSafetyFromRecovery, type EnvironmentRecoveryPhase } from './recovery.ts';
@@ -68,6 +69,7 @@ export interface AssembleReadinessInput {
     readonly phase: EnvironmentRecoveryPhase;
   }[];
   readonly requiredEngines: readonly string[];
+  readonly requirements?: ReadinessRequirementScope | undefined;
   readonly probe?: EnvironmentReadiness['probe'];
   readonly receipt?: ReadinessReceipt | undefined;
   readonly supportedProtocol: ProtocolVersionRange;
@@ -143,6 +145,7 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
     ...(input.observed?.observationId !== undefined ? { observationId: input.observed.observationId } : {}),
     ...(input.receipt !== undefined ? { receipt: input.receipt } : {}),
     workSafety: { state: workSafetyState },
+    ...(input.requirements !== undefined ? { requirements: input.requirements } : {}),
   };
 
   return {
