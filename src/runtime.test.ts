@@ -2889,6 +2889,68 @@ for (const backend of ['memory', 'sqlite'] as const) {
     } finally { await h.close(); }
   });
 
+  test(`#128 ${backend}: an unrequired degraded engine stays inspectable and does not reject the required Codex option`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-unrequired-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    // Only Codex is a configured work option, so Pi is measured but unrequired.
+    const h = await readinessWorkflowHarness({ backend, directory, engineId: 'codex',
+      agents: [{ ...agent('codex-agent'), engine: 'codex', model: 'codex-model' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        const probe = { at: 97_000, latencyMs: 2, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '0.154.0', summary: 'required Codex plus unrequired Pi' };
+        const codexTargets = params.requirements?.modelsByEngine?.codex ?? [];
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+          { engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+            modelAvailability: 'available', models: [...codexTargets], targetModels: [...codexTargets],
+            modelIdPresent: codexTargets.length > 0, probedAt: 5, probeExitCode: 0, source: 'codex-account-read',
+            ...(params.requirements?.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) },
+          // A degraded, unrequired engine: installed but its login is unverified,
+          // so its readiness is honestly `unknown` and no model is claimed.
+          { engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown',
+            models: [], targetModels: [], modelIdPresent: false },
+        ] }, probe };
+      } });
+      await waitFor(() => requests.length > 0, 'scoped target request');
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ requiredModels: ['forged'], probe: { source: 'browser' } }) });
+      const response = await post();
+      const responseText = await response.text();
+      assert.equal(response.status, 201, responseText);
+      // The core never asks the Worker for an unrequired engine target, and never
+      // asks it to enumerate Pi models (no Pi model-list operation).
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine, { codex: ['codex-model'] },
+        'only the required Codex engine carries a target');
+
+      // HTTP inspection keeps the independent Pi degradation visible.
+      const get = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
+      assert.equal(get.status, 200);
+      const body = (await get.json()) as {
+        readiness: { summary: { level: string; reason: string }; engines: readonly {
+          engine: string; required: boolean; readiness: string; modelIdPresent?: boolean }[] } };
+      const codex = body.readiness.engines.find((engine) => engine.engine === 'codex')!;
+      const pi = body.readiness.engines.find((engine) => engine.engine === 'pi')!;
+      assert.equal(codex.required, true, 'Codex is the required engine');
+      assert.equal(codex.readiness, 'ready');
+      assert.equal(pi.required, false, 'Pi is measured but unrequired');
+      assert.equal(pi.readiness, 'unknown', 'Pi degradation stays an independent inspectable fact');
+      assert.equal(pi.modelIdPresent, false, 'the Worker measured no Pi target presence; no entitlement is inferred');
+      // A non-required degradation may be Yellow without blocking the option.
+      assert.equal(body.readiness.summary.level, 'yellow', body.readiness.summary.reason);
+
+      // The required Codex option admits despite the unrequired Pi degradation.
+      const entry = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.equal(entry.eligible, true, 'the required Codex option remains eligible');
+      // Synthetic target-bound known-ready gate control only, not live entitlement.
+      assert.equal(entry.readiness.readiness.engines.find((engine) => engine.engine === 'pi')?.required, false);
+    } finally { await h.close(); }
+  });
+
   test(`#128 ${backend}: authenticated v2/v3 probes and incompatible wire keep one receipt history`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-128-wire-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -3351,6 +3413,8 @@ async function readinessWorkflowHarness(options: {
   readonly backend: 'memory' | 'sqlite';
   readonly directory: string;
   readonly agents?: readonly AgentDefinition[];
+  /** The configured engine this build's use requires (defaults to `scripted`). */
+  readonly engineId?: string;
   /** Reopen the same durable enrollment instead of creating a second one. */
   readonly reopen?: boolean;
 }): Promise<{
@@ -3382,6 +3446,7 @@ async function readinessWorkflowHarness(options: {
       databasePath: join(options.directory, 'sprout.db'),
       environmentSource: 'enrollment',
       operatorCredential: credential,
+      ...(options.engineId !== undefined ? { engineId: options.engineId } : {}),
       ...(options.agents !== undefined
         ? { runtimeConfiguration: { agents: [...options.agents] } }
         : {}),
