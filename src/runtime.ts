@@ -342,13 +342,6 @@ export interface SproutRuntimeOptions {
    * collaborators that need no filesystem.
    */
   readonly stores?: RuntimeStores;
-  /** Explicit composition injection for adapter tests; never part of SproutRuntime. */
-  readonly onTestComposition?: (composition: {
-    stores: RuntimeStores;
-    enrollments: EnvironmentEnrollmentService;
-    workerGateway: WorkerGateway;
-    readinessWorkflow: EnvironmentReadinessWorkflow;
-  }) => void;
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
@@ -356,6 +349,24 @@ export interface SproutRuntimeOptions {
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
+}
+
+/** Explicit private composition injection, used only by adapter tests. */
+export type SproutTestComposition = {
+    stores: RuntimeStores;
+    enrollments: EnvironmentEnrollmentService;
+    workerGateway: WorkerGateway;
+    readinessWorkflow: EnvironmentReadinessWorkflow;
+};
+
+export function createSproutRuntime(options: SproutRuntimeOptions): Promise<SproutRuntime> {
+  return composeSproutRuntime(options);
+}
+
+/** An explicit adapter-test seam; not an option on the production constructor. */
+export function createSproutRuntimeForTest(options: SproutRuntimeOptions,
+  capture: (composition: SproutTestComposition) => void): Promise<SproutRuntime> {
+  return composeSproutRuntime(options, capture);
 }
 
 /**
@@ -367,7 +378,8 @@ export interface SproutRuntimeOptions {
  * and Web layers. Engine validation deliberately precedes store creation so a
  * misconfigured engine is still refused before a database is touched.
  */
-export async function createSproutRuntime(options: SproutRuntimeOptions): Promise<SproutRuntime> {
+async function composeSproutRuntime(options: SproutRuntimeOptions,
+  capture?: (composition: SproutTestComposition) => void): Promise<SproutRuntime> {
   const { configuration, projectRoot } = options;
   const {
     databasePath,
@@ -1284,7 +1296,7 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
     /** The last reconciliation result, so `startupReport` reports what ran. */
     let lastReconciliation: SproutReconciliation | undefined;
 
-    options.onTestComposition?.({ stores, enrollments, workerGateway, readinessWorkflow });
+    capture?.({ stores, enrollments, workerGateway, readinessWorkflow });
     const activeStores = stores;
     const { environmentReadiness: readinessWriter, ...otherStores } = activeStores;
     const applicationStores: RuntimeStoreViews = { ...otherStores, environmentReadiness: {

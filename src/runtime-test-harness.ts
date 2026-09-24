@@ -44,6 +44,8 @@ import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
 import {
   createSproutRuntime,
+  createSproutRuntimeForTest,
+  type SproutTestComposition,
   type RuntimeEnvironment,
   type RuntimeStores,
   type SproutRuntime,
@@ -55,7 +57,7 @@ export const runtimeWorkerResources = new WeakMap<
   Array<{ readonly worker: EnvironmentWorker; readonly connection: WorkerEnrollmentConnection }>
 >();
 
-type TestComposition = Parameters<NonNullable<Parameters<typeof createSproutRuntime>[0]['onTestComposition']>>[0];
+type TestComposition = SproutTestComposition;
 const compositions = new WeakMap<SproutRuntime, TestComposition>();
 
 /** Explicit private adapter injection, unavailable from the application-facing Runtime. */
@@ -67,9 +69,7 @@ export function testComposition(runtime: SproutRuntime): TestComposition {
 
 export async function createRuntime(options: Parameters<typeof createSproutRuntime>[0]) {
   let composition: TestComposition | undefined;
-  const runtime = await createSproutRuntime({ ...options,
-    onTestComposition: (value) => { composition = value; options.onTestComposition?.(value); },
-  });
+  const runtime = await createSproutRuntimeForTest(options, (value) => { composition = value; });
   assert.ok(composition);
   compositions.set(runtime, composition);
   const productionClose = runtime.close.bind(runtime);
