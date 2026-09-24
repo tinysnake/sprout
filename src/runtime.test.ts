@@ -36,11 +36,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 
 import type { AgentDefinition } from './agent/registry.ts';
+import { currentOptions, effectiveWorkOptions } from './agent/model.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
-import { readinessRequirements } from './environment/readiness.ts';
+import { readinessRequirements, targetEvidenceSatisfiesRequirements } from './environment/readiness.ts';
 import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
@@ -2807,6 +2808,31 @@ for (const backend of ['memory', 'sqlite'] as const) {
         workOptions: [{ engine: 'pi', workModel: 'pi-new', effort: 'medium' }] });
       assert.equal(edit.status, 200);
       await h.runtime.refreshEnvironmentCatalog();
+
+      // Before any fresh probe: resolve current core-owned requirements the same
+      // way the runtime does (durable Agents over the configured seed), then prove
+      // the committed pre-edit Codex evidence is still applicable to the
+      // *current* Codex scope while the Pi revision has moved. This is a composed
+      // read projection, not a raw current-readiness seed.
+      const durableAgents = (await h.runtime.agentService.list()).filter((agent) => agent.status !== 'archived');
+      const durableIds = new Set(durableAgents.map((agent) => agent.id));
+      const currentScope = readinessRequirements([
+        ...h.runtime.agents.list().filter((a) => !durableIds.has(a.id))
+          .flatMap((a) => effectiveWorkOptions(a).map((option) => ({ ...option, id: a.id }))),
+        ...durableAgents.flatMap((a) => currentOptions(a).map((option) => ({ ...option, id: a.id }))),
+      ]);
+      assert.deepEqual(currentScope.modelsByEngine, { codex: ['codex-model'], pi: ['pi-new'] },
+        'the post-edit core-held scope is current');
+      assert.equal(codex.requirementRevision, currentScope.revisionsByEngine?.codex,
+        'pre-edit Codex evidence still matches the current Codex scope revision');
+      assert.ok(targetEvidenceSatisfiesRequirements({ ...codex, required: true }, currentScope),
+        'pre-edit Codex target evidence remains applicable before a fresh probe');
+      assert.notEqual(old.requirements?.revisionsByEngine?.pi, currentScope.revisionsByEngine?.pi,
+        'only the changed Pi revision moved');
+      const catalogBeforeProbe = h.runtime.environmentCatalog.entry(INSTANCE_ID)!;
+      assert.ok(catalogBeforeProbe.observed?.engines?.some((engine) => engine.engine === 'codex'),
+        'the composed catalog projection still carries the pre-edit Codex evidence');
+
       const result = await post(`/api/environments/enrollments/${id}/probes`, {});
       assert.equal(result.status, 201);
       const fresh = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
@@ -2968,7 +2994,13 @@ for (const backend of ['memory', 'sqlite'] as const) {
       try {
         const id = (await h.runtime.enrollments.list())[0]!.id;
         const store = h.runtime.stores.environmentReadiness;
+        // Count every mutation attempt so a refused envelope is proven to reach
+        // no commit at all, rather than inferred from a fixed sleep.
+        let commitAttempts = 0;
+        const originalCommit = store.commitObservation.bind(store);
+        store.commitObservation = async (...args) => { commitAttempts += 1; return originalCommit(...args); };
         let calls = 0;
+        let settledCalls = 0;
         await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
           calls += 1;
           const probe = { at: 90_000 + calls * 1_000, latencyMs: 7, protocolOk: true, enginesOk: true,
@@ -2979,22 +3011,25 @@ for (const backend of ['memory', 'sqlite'] as const) {
             modelAvailability: 'available' as const, models: [...targets], targetModels: [...targets],
             modelIdPresent: targets.length > 0, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' as const,
             ...(revision !== undefined ? { requirementRevision: revision } : {}) }];
+          settledCalls += 1;
           return { readiness: { protocolVersion: wire.version, engines,
             probe: wire.contradictory ? { ...probe, summary: 'contradictory copy' } : probe }, probe };
         } });
-        // The automatic target trigger fires on acceptance.
-        await waitFor(() => calls > 0, `${wire.name} automatic target probe`);
-        if (wire.commits) {
-          await waitFor(async () => (await store.listObservations(INSTANCE_ID)).length === 1, `${wire.name} commit`);
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        await h.runtime.refreshEnvironmentCatalog();
-        const history = await store.listObservations(INSTANCE_ID);
-        const current = await store.getCurrentObservation(INSTANCE_ID);
+        const human = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+          headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+          body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
+            probe: { source: 'browser', summary: 'forged' } }) });
         const get = async () => fetch(`${h.base}/api/environments/enrollments/${id}/readiness`,
           { headers: { cookie: h.cookie } });
+        // The automatic target trigger fires on acceptance.
+        await waitFor(() => calls > 0, `${wire.name} automatic target probe`);
+        await waitFor(() => settledCalls >= 1, `${wire.name} automatic Worker response`);
         if (wire.commits) {
+          await waitFor(async () => (await store.listObservations(INSTANCE_ID)).length === 1, `${wire.name} commit`);
+          await h.runtime.refreshEnvironmentCatalog();
+          const history = await store.listObservations(INSTANCE_ID);
+          const current = await store.getCurrentObservation(INSTANCE_ID);
+          assert.equal(commitAttempts, 1, `${wire.name}: exactly one committed mutation`);
           assert.equal(history.length, 1, `${wire.name}: exactly the automatic observation`);
           assert.ok(current, `${wire.name}: current observation present`);
           assert.equal(current!.observationId, history[0]!.observationId, `${wire.name}: current is the committed observation`);
@@ -3002,10 +3037,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
           assert.ok(!JSON.stringify(current).includes(privacyMarker), `${wire.name}: privacy sentinel never persisted`);
 
           // The Human trigger uses the same canonical path after acceptance.
-          const post = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
-            headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
-            body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
-              probe: { source: 'browser', summary: 'forged' } }) });
+          const post = await human();
           const postText = await post.text();
           assert.equal(post.status, 201, postText);
           const posted = JSON.parse(postText) as { receipt: { observationId: string; probe: { at: number; source?: string; summary: string } } };
@@ -3030,11 +3062,22 @@ for (const backend of ['memory', 'sqlite'] as const) {
           // can admit established evidence, not that live account entitlement is provable.
           assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, `${wire.name}: target-bound known-ready evidence admits`);
         } else {
+          // The automatic trigger already consumed and refused this envelope. The
+          // Human trigger shares the same validator, so its deterministic HTTP
+          // settlement proves the same refusal reaches the request boundary too.
+          const post = await human();
+          const postText = await post.text();
+          assert.notEqual(post.status, 201, `${wire.name}: Human-trigger refusal is not a success`);
+          assert.ok(!postText.includes('"receipt"'), `${wire.name}: a refused Human trigger returns no receipt`);
+          const history = await store.listObservations(INSTANCE_ID);
+          const current = await store.getCurrentObservation(INSTANCE_ID);
+          assert.equal(commitAttempts, 0, `${wire.name}: neither trigger ever attempted a mutation`);
           assert.equal(history.length, 0, `${wire.name}: an incompatible envelope never mutates observation history`);
           assert.equal(current, undefined, `${wire.name}: an incompatible envelope establishes no current state`);
           const response = await get();
           assert.equal(response.status, 200, `${wire.name}: the neutral state stays inspectable`);
-          const body = (await response.json()) as { readiness: { probe?: unknown; summary: { level: string } }; probes: readonly unknown[] };
+          const body = (await response.json()) as { receipt?: unknown; readiness: { probe?: unknown; summary: { level: string } }; probes: readonly unknown[] };
+          assert.equal(body.receipt, undefined, `${wire.name}: no receipt in the neutral projection`);
           assert.equal(body.readiness.probe, undefined, `${wire.name}: no fabricated current probe`);
           assert.deepEqual(body.probes, [], `${wire.name}: no fabricated probe history`);
           assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, `${wire.name}: ineligible`);
@@ -3054,14 +3097,24 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const refusal = await h.connect(id, join(directory, 'worker-key.pem'), {}, '99').then(
         () => undefined, (error: unknown) => error);
       assert.ok(refusal instanceof Error, 'the mismatched Worker is refused before acceptance');
+      // The Worker host receives the explicit version-skew explanation on its own
+      // authenticated channel: the connector surfaces the core's `incompatible`
+      // refusal code rather than a generic transport error.
+      assert.equal((refusal as { code?: string }).code, 'incompatible',
+        'the refused Worker host gets an explicit incompatible explanation');
       assert.equal(h.runtime.workerGateway.liveFor(INSTANCE_ID), undefined, 'no epoch is minted');
       const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
       assert.equal(response.status, 200, 'the refusal stays inspectable over the query seam');
       const body = (await response.json()) as { readiness: { compatibility: { state: string; detail?: string }; summary: { level: string }; probe?: unknown }; probes: readonly unknown[] };
-      // A pre-epoch refusal carries no observation authority, so compatibility is
-      // honestly `unknown` rather than the refused Worker's own claim; the
-      // instance remains an approved, red, ineligible catalog entry.
+      // Deliberate limit: a pre-epoch refusal carries no observation authority, so
+      // the *core-side public* projection is honestly `unknown`/red and ineligible
+      // rather than echoing the refused Worker's own claimed version. The explicit
+      // incompatible explanation is only available to the refused Worker host (the
+      // connector code asserted above) and to Worker-layer diagnostics, not through
+      // the Human HTTP readiness projection. This is by design (#125 authority),
+      // not a missing inspectability feature.
       assert.equal(body.readiness.compatibility.state, 'unknown');
+      assert.equal(body.readiness.compatibility.detail, undefined);
       assert.equal(body.readiness.summary.level, 'red');
       assert.equal(body.readiness.probe, undefined);
       assert.deepEqual(body.probes, []);
@@ -3085,6 +3138,9 @@ for (const backend of ['memory', 'sqlite'] as const) {
       try {
         const id = (await h.runtime.enrollments.list())[0]!.id;
         const store = h.runtime.stores.environmentReadiness;
+        let commitAttempts = 0;
+        const originalCommit = store.commitObservation.bind(store);
+        store.commitObservation = async (...args) => { commitAttempts += 1; return originalCommit(...args); };
         await h.connect(id, join(directory, 'worker-key.pem'), {
           readiness: () => ({ protocolVersion: wireCase.version, engines: [{ engine: 'scripted', installed: true,
             readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
@@ -3097,8 +3153,13 @@ for (const backend of ['memory', 'sqlite'] as const) {
           await waitFor(async () => (await store.getCurrentObservation(INSTANCE_ID)) !== undefined, 'bootstrap commit');
           const current = (await store.getCurrentObservation(INSTANCE_ID))!;
           assert.equal(current.probe.at, 96_000, `${wireCase.name}: truthful Worker time survives bootstrap`);
+          assert.equal(commitAttempts, 1, `${wireCase.name}: exactly one committed bootstrap mutation`);
         } else {
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          // Deterministic: the observation path is idempotent and already
+          // settled, so a second observe transitions nothing and proves the
+          // refused envelope never reaches a commit without a timer as evidence.
+          await h.runtime.observeWorkerReadiness(id);
+          assert.equal(commitAttempts, 0, `${wireCase.name}: the unsupported envelope never attempts a mutation`);
           assert.equal((await store.getCurrentObservation(INSTANCE_ID)), undefined, `${wireCase.name}: no bootstrap observation commits`);
         }
         const response = await fetch(`${h.base}/api/environments/enrollments/${id}/readiness`, { headers: { cookie: h.cookie } });
