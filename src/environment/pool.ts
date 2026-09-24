@@ -71,6 +71,22 @@ export interface LeaseStore {
   list(): Promise<readonly EnvironmentLease[]> | readonly EnvironmentLease[];
 }
 
+/**
+ * The Task-held lease statements a Task's atomic begin/end boundary needs.
+ *
+ * A Task lifecycle commits its Task row and its Task-held lease in one shared
+ * transaction. The environment domain owns the lease SQL, so the Task store
+ * opens the boundary through the shared `TransactionCoordinator` and runs only
+ * the lease-specific statements through this port; neither statement begins or
+ * ends a transaction of its own, so the shared boundary stays exact.
+ */
+export interface TaskLeaseBinding {
+  /** Refuse a live lease on the instance, then insert the Task-held lease. */
+  insertTaskHeldLease(lease: EnvironmentLease): void;
+  /** Refuse a lease that is not this Task's, then mark it released. */
+  markTaskLeaseReleased(leaseId: string, taskId: string): void;
+}
+
 export class InMemoryLeaseStore implements LeaseStore {
   readonly #leases = new Map<string, EnvironmentLease>();
 
@@ -95,6 +111,16 @@ export interface EnvironmentPoolOptions {
   readonly clock?: Clock;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly idFactory?: () => string;
+  /**
+   * The instances currently eligible to admit new work (E2, #116).
+   *
+   * When supplied, `requiresLease` and therefore environment resolution treat
+   * every other instance as unusable, so an ineligible catalog entry remains an
+   * inspectable instance without admitting Project/run work. When omitted, every
+   * present instance is eligible, which preserves the static M1 behaviour for
+   * tests and callers that never opted into the dynamic catalog.
+   */
+  readonly eligibleInstanceIds?: readonly string[];
 }
 
 export class EnvironmentPool {
@@ -104,6 +130,11 @@ export class EnvironmentPool {
   readonly #store: LeaseStore | undefined;
   readonly #clock: Clock;
   readonly #idFactory: () => string;
+  /**
+   * The dynamic eligibility gate (E2). `undefined` means every present instance
+   * is eligible; a set means exactly those instances are.
+   */
+  #eligibleInstanceIds: ReadonlySet<string> | undefined;
 
   constructor(options: EnvironmentPoolOptions) {
     for (const definition of options.definitions) {
@@ -112,6 +143,8 @@ export class EnvironmentPool {
     for (const instance of options.instances) {
       this.#instances.set(instance.id, instance);
     }
+    this.#eligibleInstanceIds =
+      options.eligibleInstanceIds === undefined ? undefined : new Set(options.eligibleInstanceIds);
     this.#clock = options.clock ?? systemClock;
     // A lease is persisted, so a per-process counter would collide with a
     // released historical lease after Sprout restarts.  The default is durable
@@ -146,6 +179,36 @@ export class EnvironmentPool {
       }
     }
     return this.leases();
+  }
+
+  /**
+   * Replace the dynamic membership of this pool without touching lease state.
+   *
+   * Enrolled Environment instances are the dynamic execution catalog (E2,
+   * ADR-0012), so the pool must observe catalog additions and state changes
+   * while every existing active, recovering, expired, and released lease — and
+   * every run or Task that historically named an instance — stays untouched and
+   * readable. Only the instance/definition projection and the eligibility gate
+   * are replaced; the lease map is never rebuilt or filtered by membership, so
+   * a historical instance reference remains resolvable after the instance stops
+   * being eligible.
+   */
+  synchronize(input: {
+    readonly definitions: readonly EnvironmentDefinition[];
+    readonly instances: readonly EnvironmentInstance[];
+    readonly eligibleInstanceIds?: readonly string[];
+  }): void {
+    for (const definition of input.definitions) this.#definitions.set(definition.id, definition);
+    for (const instance of input.instances) this.#instances.set(instance.id, instance);
+    this.#eligibleInstanceIds =
+      input.eligibleInstanceIds === undefined
+        ? undefined
+        : new Set(input.eligibleInstanceIds);
+  }
+
+  /** Whether an instance is currently eligible to admit new work. */
+  isEligible(instanceId: string): boolean {
+    return this.#eligibleInstanceIds === undefined || this.#eligibleInstanceIds.has(instanceId);
   }
 
   /**
@@ -315,6 +378,11 @@ export class EnvironmentPool {
   }
 
   #lookup(instanceId: string, capability: string) {
+    // An ineligible instance is retained as an inspectable catalog entry, but it
+    // cannot serve a capability for new work (E2). Returning `undefined` is the
+    // same "cannot be used" signal the resolution seam already understands, so
+    // lease acquisition and run resolution fail closed without a new branch.
+    if (!this.isEligible(instanceId)) return undefined;
     const instance = this.#instances.get(instanceId);
     if (!instance) return undefined;
     const definition = this.#definitions.get(instance.definitionId);

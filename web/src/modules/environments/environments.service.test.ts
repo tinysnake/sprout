@@ -101,6 +101,9 @@ test('EnvironmentService: unbindWorkspace removes bound workspace safely', async
 
 test('EnvironmentService: reconcileEvidence synchronizes evidence and updates recovery state', async () => {
   const service = new FixtureEnvironmentService();
+  // The fixture simulates a wired Worker evidence port so tests can drive the
+  // full reconcile → decide flow; the production bridge declares the opposite.
+  assert.equal(service.supportsEvidenceReconciliation, true);
   const before = await service.getEnvironment('env-reconciling');
   assert.ok(before);
   assert.equal(before.workSafety, 'reconciling');

@@ -99,11 +99,14 @@ function parseWorkspaces(raw: unknown): readonly ProjectWorkspace[] {
   const workspaces = raw.map((entry) => {
     if (!isRecord(entry)) throw new Error('SPROUT_RUNTIME_CONFIG workspace must be an object');
     const environmentInstanceId = required(entry, 'environmentInstanceId', 'workspace');
-    const path = required(entry, 'path', 'workspace');
-    if (!isSafeRelativePath(path)) {
+    const pathValue = entry['path'];
+    // A configured entry with no path keeps the Worker-managed default while
+    // still marking the instance as granted; a path must stay below the root.
+    if (pathValue === undefined) return { environmentInstanceId };
+    if (typeof pathValue !== 'string' || !isSafeRelativePath(pathValue)) {
       throw new Error('SPROUT_RUNTIME_CONFIG workspace.path must be a relative path below the Worker root');
     }
-    return { environmentInstanceId, path };
+    return { environmentInstanceId, path: pathValue };
   });
   if (new Set(workspaces.map((workspace) => workspace.environmentInstanceId)).size !== workspaces.length) {
     throw new Error('SPROUT_RUNTIME_CONFIG project workspaces must have unique environmentInstanceIds');

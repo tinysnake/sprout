@@ -1,20 +1,29 @@
 <script setup lang="ts">
+/**
+ * Operator connection state, shown identically on phone and desktop.
+ *
+ * It reads the one shell connection presentation, so the label, the status
+ * colour, and the meaning for control actions cannot disagree between surfaces.
+ * Change announcements go through the single shared live region, so this pill is
+ * status text rather than another live region.
+ */
 import { computed } from 'vue';
-import { useAppStore } from '../stores/app.js';
+import { useShellConnection } from './use-shell-connection.js';
 import StatusDot from '../primitives/StatusDot.vue';
 
-const appStore = useAppStore();
-const isOnline = computed(() => appStore.operatorOnline);
+withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
+
+const connection = useShellConnection();
+const presentation = computed(() => connection.presentation.value);
 </script>
 
 <template>
   <div
     class="operator-pill flex items-center gap-2 px-2.5 py-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] text-[11px] text-[var(--text-secondary)] select-none"
-    :title="isOnline ? 'Operator Connection Online' : 'Operator Disconnected'"
-    role="status"
-    aria-label="Operator Connection Status"
+    :title="presentation.announce"
+    :aria-label="`Operator connection: ${presentation.label}`"
   >
-    <StatusDot :status="isOnline ? 'green' : 'red'" size="sm" />
-    <span class="font-medium font-mono">{{ isOnline ? 'Operator Online' : 'Offline' }}</span>
+    <StatusDot :status="presentation.status" size="sm" />
+    <span class="font-medium font-mono truncate">{{ presentation.label }}</span>
   </div>
 </template>

@@ -17,6 +17,8 @@ import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, Stre
 export const WORKER_METHODS = {
   /** Identify the worker and the engines it can host. */
   info: 'worker/info',
+  /** Execute the Worker-owned, non-inference readiness probe. */
+  readinessProbe: 'worker/readiness-probe',
   /** Create an engine session for one run. */
   startSession: 'session/start',
   /** Begin one turn on an existing session. */
@@ -29,6 +31,8 @@ export const WORKER_METHODS = {
   prepareTaskContext: 'context/prepare',
   /** Verify and recycle one owned Task context. */
   recycleTaskContext: 'context/recycle',
+  /** Validate or prepare one Project workspace selection (#93). */
+  validateWorkspace: 'workspace/validate',
 } as const;
 
 export const WORKER_NOTIFICATIONS = {
@@ -37,6 +41,90 @@ export const WORKER_NOTIFICATIONS = {
   /** A turn's terminal result. Always sent after that turn's events. */
   settled: 'turn/settled',
 } as const;
+
+/**
+ * The Worker protocol version this build speaks.
+ *
+ * Reported on `worker/info` so the core can derive compatibility without
+ * guessing. It is a Sprout protocol fact, not an engine fact (ADR-0003).
+ */
+export const WORKER_PROTOCOL_VERSION = '3';
+
+/**
+ * One engine's neutral readiness fact, as the Environment Worker sees it.
+ *
+ * These are the sanitized, portable facts ADR-0009 and the enrollment research
+ * require: installation, authentication readiness, and available models. No
+ * token, cookie, auth file, account identifier, or raw stderr has a field here.
+ */
+export interface WorkerEngineReadinessFact {
+  readonly engine: string;
+  /** The executable version observed on the Worker host. */
+  readonly version?: string;
+  /** Whether the engine's executable was located on this Environment host. */
+  readonly installed: boolean;
+  readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown';
+  readonly modelAvailability: 'available' | 'none' | 'unknown';
+  readonly models: readonly string[];
+  /** Independent, privacy-reduced probe facts. */
+  readonly authenticated?: boolean;
+  readonly authMode?: string;
+  readonly authType?: string;
+  readonly modelIdPresent?: boolean;
+  readonly targetModels?: readonly string[];
+  readonly requirementRevision?: string;
+  readonly probedAt?: number;
+  readonly probeExitCode?: number;
+  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'unknown';
+}
+
+/** One Worker-measured non-inference readiness probe record. */
+export interface WorkerProbeFact {
+  readonly at: number;
+  readonly latencyMs: number;
+  readonly protocolOk: boolean;
+  readonly enginesOk: boolean;
+  readonly source: 'worker';
+  readonly version: string;
+  readonly summary: string;
+}
+
+/**
+ * The Worker's neutral readiness projection.
+ *
+ * Additive to `worker/info`; the method and its required fields are unchanged.
+ * A Worker that does not implement this simply omits it, and the core records
+ * `unknown` rather than inventing a value.
+ */
+export interface WorkerReadinessFacts {
+  readonly protocolVersion: string;
+  readonly engines: readonly WorkerEngineReadinessFact[];
+  /** Observation time is supplied by the Worker, never by the browser. */
+  readonly observedAt?: number;
+  /** The startup or most-recent explicit Worker probe which produced these facts. */
+  readonly probe?: WorkerProbeFact;
+}
+
+export interface WorkerReadinessProbeParams {
+  /** Opaque core-issued attempt; never a Worker clock or browser input. */
+  readonly attemptId?: string;
+  /** Deliberately empty today; the browser cannot submit readiness facts. */
+  readonly requiredModels?: readonly string[];
+  readonly requirements?: import('../environment/readiness.ts').ReadinessRequirementScope;
+}
+
+export interface WorkerObservationEnvelope {
+  readonly protocolVersion: '3';
+  readonly observedAt?: number;
+  readonly engines: readonly WorkerEngineReadinessFact[];
+  readonly probe: WorkerProbeFact;
+}
+
+export interface WorkerReadinessProbeResult {
+  readonly attemptId?: string;
+  readonly readiness: WorkerReadinessFacts;
+  readonly probe: WorkerProbeFact;
+}
 
 /**
  * JSON-RPC error codes private to the worker protocol.
@@ -71,6 +159,8 @@ export interface WorkerInfo {
   /** The environment instance this worker serves. */
   readonly environmentInstanceId: string;
   readonly engines: readonly WorkerEngineDescription[];
+  /** Neutral protocol and engine readiness, when this Worker can report it. */
+  readonly readiness?: WorkerReadinessFacts;
 }
 
 export interface StartSessionParams {
@@ -83,7 +173,13 @@ export interface StartSessionParams {
   /** The engine-neutral reasoning effort this session should use, when configured. */
   readonly effort?: string;
   readonly projectWorkspaceId?: string;
-  /** Worker-root-relative registered repository location, when the Project has one. */
+  /** How the Worker must interpret the portable workspace identity. */
+  readonly projectWorkspaceKind?: 'default' | 'relative';
+  /**
+   * Worker-root-relative registered repository location, when the Project has
+   * one. Must be relative: an absolute location is refused at this boundary,
+   * never resolved (#93, ADR-0009).
+   */
   readonly projectWorkspacePath?: string;
   readonly instructions?: string;
   /**
@@ -128,6 +224,32 @@ export interface RecycleTaskContextParams {
   readonly taskId: string;
   readonly environmentInstanceId: string;
   readonly environmentLeaseId: string;
+}
+
+/**
+ * One Project workspace selection the core asks the Worker to validate.
+ *
+ * The selection is portable: the Worker-managed default, or a relative location
+ * beneath the Worker's configured workspace root. The absolute location never
+ * crosses this boundary in either direction.
+ */
+export interface ValidateWorkspaceParams {
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly kind: 'default' | 'relative';
+  /** Worker-root-relative location; present only for a `relative` selection. */
+  readonly path?: string;
+}
+
+/**
+ * The portable workspace facts the Worker returns after validating or preparing
+ * a selection. `workspaceId` is an opaque, host-derived identity, never a path.
+ */
+export interface ValidateWorkspaceResult {
+  readonly workspaceId: string;
+  readonly kind: 'default' | 'relative';
+  /** Worker-root-relative location, when the selection named one. */
+  readonly path?: string;
 }
 
 export interface StartSessionResult {

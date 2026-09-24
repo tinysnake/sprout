@@ -1,4 +1,11 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
+import { effectiveWorkOptions, type AgentWorkOption } from '../agent/model.ts';
+import {
+  evaluateAdmissibleWorkOption,
+  type AgentWorkOptionEngineFact,
+  type AdmissibleOptionDecision,
+} from '../agent/admission.ts';
+import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
@@ -7,9 +14,10 @@ import { assembleProjectContract, renderProjectContract } from '../project/contr
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
+import { sanitizeWorkspacePath } from '../project/access.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
-import type { AgentRun, AgentRunStatus, RunObserver } from './model.ts';
-import type { RunStore } from './store.ts';
+import type { AgentRun, AgentRunStatus, RunObserver, RunWorkspaceBinding } from './model.ts';
+import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 
@@ -41,6 +49,8 @@ export interface RunOrchestratorOptions {
     | ReadonlyMap<string, EngineAdapter>
     | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
+  /** Current Agent configuration authority; when supplied it also owns lifecycle refusal. */
+  readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
   /**
    * Where an agent's project memberships come from. Optional so existing callers
    * and tests that never resolve an environment need not supply one; a run by an
@@ -88,6 +98,37 @@ export interface RunOrchestratorOptions {
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
+  /**
+   * The observed engine facts (#87) for one environment instance, when this
+   * build wires Environment readiness.
+   *
+   * Supplied by the runtime from the enrollment/readiness store. Optional so
+   * existing callers and the preserved M1 graphs — which never derived
+   * compatibility from facts — stay unchanged; absent means admission takes
+   * the Agent's first option as before, without fabricating an observation.
+   */
+  readonly engineFacts?: (
+    environmentInstanceId: string,
+  ) => Promise<readonly AgentWorkOptionEngineFact[]>;
+  /** Enforce unknown-as-blocking for a production Worker graph. */
+  readonly strictAdmission?: boolean;
+  /**
+   * The current core-owned engine/model requirement resolver (#128, #129).
+   */
+  readonly requirements?: () => Promise<ReadinessRequirementScope | undefined>;
+  /**
+   * The durable Project workspace binding for one (Project, Environment), when
+   * the build wires Project access (#93, ADR-0008).
+   *
+   * Read once at admission and recorded on the run, so a later workspace change
+   * or restart cannot rewrite which binding historical work used. Absent means
+   * the build has no access records and workspace facts come only from the
+   * registry projection, as before.
+   */
+  readonly workspaceBinding?: (
+    projectId: string,
+    environmentInstanceId: string,
+  ) => Promise<RunWorkspaceBinding | undefined>;
 }
 
 export interface SubmitRunRequest {
@@ -156,6 +197,7 @@ type SessionAttempt =
 export class RunOrchestrator {
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
+  readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly #projects: ProjectRegistry | undefined;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
@@ -168,6 +210,18 @@ export class RunOrchestrator {
   readonly #onTaskRunSettled: TaskRunObserver | undefined;
   readonly #leaseTtlMs: number;
   readonly #clock: { now(): number };
+  readonly #engineFacts:
+    | ((environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>)
+    | undefined;
+  readonly #strictAdmission: boolean;
+  /** Reads the durable binding a run is admitted under (#93); optional. */
+  readonly #workspaceBinding:
+    | ((
+        projectId: string,
+        environmentInstanceId: string,
+      ) => Promise<RunWorkspaceBinding | undefined>)
+    | undefined;
+  readonly #requirements: (() => Promise<ReadinessRequirementScope | undefined>) | undefined;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -178,6 +232,7 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#engines = options.engines;
     this.#agents = options.agents;
+    this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
     this.#projects = options.projects;
     this.#pool = options.pool;
     this.#store = options.store;
@@ -188,6 +243,13 @@ export class RunOrchestrator {
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
+    this.#engineFacts = options.engineFacts;
+    // Wiring the fact provider opts into strict unknown-as-blocking admission;
+    // an explicit false remains available only for legacy non-production
+    // graphs that intentionally preserve pre-readiness behavior.
+    this.#strictAdmission = options.strictAdmission ?? options.engineFacts !== undefined;
+    this.#workspaceBinding = options.workspaceBinding;
+    this.#requirements = options.requirements;
   }
 
   /**
@@ -209,7 +271,7 @@ export class RunOrchestrator {
       createdAt: this.#clock.now(),
     };
 
-    const agent = this.#agents.get(request.agentId);
+    const agent = await this.#resolveAgent(request.agentId);
     if (!agent) {
       await this.settleTaskRun(
         await this.#finish(run, 'failed', {
@@ -312,10 +374,45 @@ export class RunOrchestrator {
       return { id: taskRun.id };
     }
 
+    // Run admission picks the first work option that is compatible with the
+    // resolved Environment's current facts (ADR-0008). The choice happens
+    // entirely *before* an engine accepts the work, and it is recorded on the
+    // durable run so the engine, work model, effort, and configuration version
+    // the run actually used remain historically attributable. Once an engine
+    // accepts the run, this choice is never revisited: a later failure is
+    // reported as-is and never replayed through a lower-priority option.
+    const admittedOption = await this.#admitWorkOption(agent, resolution.instanceId);
+    if (!admittedOption.ok) {
+      await this.settleTaskRun(
+        await this.#finish(taskRun, 'failed', {
+          status: 'failed',
+          message: admittedOption.message,
+        }),
+      );
+      return { id: taskRun.id };
+    }
+
+    // Capture the durable workspace binding facts once, before any engine
+    // accepts the work (ADR-0008): after a later workspace change or a restart,
+    // the run's history still names the binding it actually used. The binding
+    // is a historical fact like the work option and is never re-derived below.
+    const rawWorkspaceBinding =
+      resolution.projectId !== undefined && this.#workspaceBinding !== undefined
+        ? await this.#workspaceBinding(resolution.projectId, resolution.instanceId)
+        : undefined;
+    // A binding port may be reading legacy durable data. Never let an unsafe
+    // location become run history or a Worker request: discard malformed facts
+    // before this run is persisted, then use only the independently validated
+    // legacy projection fallback below.
+    const workspaceBinding = sanitizeRunWorkspaceBinding(rawWorkspaceBinding);
+
     const recorded: AgentRun = {
       ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
+      workOption: admittedOption.option,
+      configurationVersion: admittedOption.configurationVersion,
+      ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
       ...(request.environmentLeaseId !== undefined ? { leaseId: request.environmentLeaseId } : {}),
     };
     this.#runs.set(recorded.id, recorded);
@@ -343,17 +440,42 @@ export class RunOrchestrator {
       }
     }
 
+    // The run's own durable binding is the authoritative workspace fact: it was
+    // captured from the access record at admission and never re-read, so a
+    // workspace change or restart after admission cannot change what this run
+    // presents to the Worker. The registry projection is only the fallback for
+    // callers with no access records, and its location passes the same
+    // relative-path validator the domain records with, so a corrupt projection
+    // cannot cross the internal boundary as an absolute host path (ADR-0009).
     const resolvedProject = this.#projects?.get(resolution.projectId);
     const registeredWorkspace = resolvedProject === undefined
       ? undefined
       : workspaceFor(resolvedProject, resolution.instanceId);
+    const binding = recorded.workspaceBinding;
+    const registeredPath = registeredWorkspace?.path;
+    const safeRequestedPath = sanitizeWorkspacePath(request.projectWorkspacePath);
+    const safeProjectionPath =
+      binding === undefined && registeredPath !== undefined
+        ? sanitizeWorkspacePath(registeredPath)
+        : undefined;
     const workspace = {
-      ...(request.projectWorkspaceId !== undefined
-        ? { projectWorkspaceId: request.projectWorkspaceId }
-        : registeredWorkspace !== undefined ? { projectWorkspaceId: resolution.projectId } : {}),
-      ...(request.projectWorkspacePath !== undefined
-        ? { projectWorkspacePath: request.projectWorkspacePath }
-        : registeredWorkspace !== undefined ? { projectWorkspacePath: registeredWorkspace.path } : {}),
+      ...(binding?.workspaceId !== undefined
+        ? { projectWorkspaceId: binding.workspaceId }
+        : request.projectWorkspaceId !== undefined
+          ? { projectWorkspaceId: request.projectWorkspaceId }
+          : registeredWorkspace !== undefined
+            ? { projectWorkspaceId: resolution.projectId }
+            : {}),
+      ...(binding?.workspaceId !== undefined
+        ? { projectWorkspaceKind: binding.kind }
+        : {}),
+      ...(binding?.path !== undefined
+        ? { projectWorkspacePath: binding.path }
+        : binding?.workspaceId === undefined && safeRequestedPath !== undefined
+          ? { projectWorkspacePath: safeRequestedPath }
+          : safeProjectionPath !== undefined
+            ? { projectWorkspacePath: safeProjectionPath }
+            : {}),
       ...(request.taskBootstrapInstructions !== undefined ? { taskBootstrapInstructions: request.taskBootstrapInstructions } : {}),
     };
     const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));
@@ -387,6 +509,83 @@ export class RunOrchestrator {
       : `no available environment for capability: ${agent.capability}`;
   }
 
+  /**
+   * Pick the Agent's first work option compatible with one Environment's
+   * current facts, before any engine accepts the work (ADR-0008).
+   *
+   * Compatibility is derived from the Environment's observed engine facts
+   * (#87), never from a stored state or a probe of a live process. An option
+   * the Environment cannot yet observe is not admissible here — `unknown` is
+   * honest, and admitting onto an unverified engine would fabricate readiness.
+   * An Agent whose every option is incompatible therefore fails admission with
+   * an explicit reason; the Agent itself stays valid and visibly unavailable
+   * through the compatibility projection.
+   *
+   * When the engine facts for the instance are genuinely absent (a build with
+   * no enrollment/readiness wiring, or the single-instance M1 graphs), the
+   * projection receives no facts and every option reports `unknown`; this
+   * orchestrator then admits the first option unchanged, preserving the
+   * behaviour of callers that never opted into Environment facts. A build that
+   * supplies facts gets the full ordered evaluation.
+   */
+  async #admitWorkOption(
+    agent: AgentDefinition,
+    environmentInstanceId: string,
+  ): Promise<
+    | { readonly ok: true; readonly option: AgentWorkOption; readonly configurationVersion: number }
+    | { readonly ok: false; readonly message: string; readonly reason?: string }
+  > {
+    const options = effectiveWorkOptions(agent);
+    const observed = this.#engineFacts
+      ? await this.#engineFacts(environmentInstanceId)
+      : undefined;
+    const reqs = this.#requirements ? await this.#requirements() : undefined;
+    // Once the Environment fact seam is wired, absence is unknown—not an
+    // invitation to guess. This is the strict #114/#118 admission boundary:
+    // every required engine/model fact must be established before the first
+    // option is accepted. The only legacy escape hatch is an explicitly
+    // non-strict graph (or an orchestrator constructed without `engineFacts`).
+    const firstOption = options[0];
+    const decision: AdmissibleOptionDecision =
+      observed === undefined || (observed.length === 0 && !this.#strictAdmission)
+        ? firstOption !== undefined
+          ? { ok: true, option: firstOption }
+          : { ok: false, reason: 'no configured work option' }
+        : evaluateAdmissibleWorkOption(options, observed, reqs);
+    if (!decision.ok || decision.option === undefined) {
+      const reasonDetail = decision.reason ? ` (${decision.reason})` : '';
+      return {
+        ok: false,
+        message:
+          `no compatible work option for agent ${agent.id} on environment instance ${environmentInstanceId}: ` +
+          options.map((option) => option.engine).join(', ') +
+          reasonDetail,
+        ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+      };
+    }
+    return { ok: true, option: decision.option, configurationVersion: agent.configurationVersion ?? 1 };
+  }
+
+  /**
+   * Evaluate whether an Agent's ordered work options are admissible on an
+   * environment instance without submitting a run (#129).
+   */
+  async evaluateOptionAdmission(
+    agentId: string,
+    environmentInstanceId: string,
+  ): Promise<AdmissibleOptionDecision> {
+    const agent = await this.#resolveAgent(agentId);
+    if (agent === undefined) {
+      return { ok: false, reason: `unknown agent ${agentId}` };
+    }
+    const options = effectiveWorkOptions(agent);
+    const observed = this.#engineFacts
+      ? await this.#engineFacts(environmentInstanceId)
+      : undefined;
+    const reqs = this.#requirements ? await this.#requirements() : undefined;
+    return evaluateAdmissibleWorkOption(options, observed ?? [], reqs);
+  }
+
   /** The current observable state of a run. */
   get(runId: string): AgentRun | undefined {
     return this.#runs.get(runId);
@@ -408,6 +607,11 @@ export class RunOrchestrator {
       if (!this.#runs.has(stored.id)) this.#runs.set(stored.id, stored);
     }
     return [...this.#runs.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** Latest durable run snapshots in their store-assigned forward replay order. */
+  async replaySnapshots(): Promise<readonly RunReplaySnapshot[]> {
+    return this.#store.replaySnapshots();
   }
 
   /**
@@ -524,8 +728,13 @@ export class RunOrchestrator {
   async #execute(
     initial: AgentRun,
     agent: AgentDefinition,
-    workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
+    workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspaceKind?: 'default' | 'relative'; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
+    // The run executes under the option it was admitted with (#90): the
+    // engine, work model, and effort recorded before any engine accepted the
+    // work. This is deliberately not re-derived here — re-deriving could move
+    // the run to another option after acceptance, which ADR-0008 forbids.
+    const option = initial.workOption ?? effectiveWorkOptions(agent)[0]!;
     // Adapters are resolved *for the instance this run resolved and will lease*,
     // never from a global pool: a run that leases container-1 must execute on
     // container-1's worker, or the run record would name a machine it never used.
@@ -543,11 +752,11 @@ export class RunOrchestrator {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    const adapter = engines.get(agent.engine);
+    const adapter = engines.get(option.engine);
     if (!adapter) {
       return this.#finish(initial, 'failed', {
         status: 'failed',
-        message: `no engine adapter registered for: ${agent.engine}`,
+        message: `no engine adapter registered for: ${option.engine}`,
       });
     }
     const nestedTaskLease = initial.taskId !== undefined && initial.leaseId !== undefined;
@@ -589,13 +798,24 @@ export class RunOrchestrator {
       // fact-form hand-off. Both are deterministic functions of persisted facts.
       // Keep all setup inside the lease guard so a rejected assembly is persisted
       // as a terminal failure and cannot leave the acquired lease active.
+      // A bound Project workspace is the run's continuation slot. The workspace
+      // identity here must include the Worker-root-relative location: ADR-0004
+      // scopes a native session to its working directory, and ADR-0008 requires a
+      // workspace change to start a new native session slot rather than continue
+      // the session that belonged to the old directory. A Worker-managed default
+      // carries no location, so the Project identity alone is its slot.
       const workingDirectory = workspace.projectWorkspaceId === undefined
         ? resolveWorkingDirectory(this.#pool, initial.environmentInstanceId, agent)
-        : `project-workspace:${workspace.projectWorkspaceId}`;
+        : workspace.projectWorkspacePath === undefined
+          ? `project-workspace:${workspace.projectWorkspaceId}`
+          : `project-workspace:${workspace.projectWorkspaceId}:${workspace.projectWorkspacePath}`;
       const assembled = await this.#assembleInput(initial, agent, running.id);
-      prepared = await this.#advance(running, {
-        ...(assembled.handOff !== undefined ? { handOff: assembled.handOff } : {}),
-      });
+      // Do not persist and notify an unchanged observable run state. Replay
+      // cursors use durable write positions as forward boundaries, so a no-op
+      // state must not move an already-issued boundary past another run.
+      if (assembled.handOff !== undefined) {
+        prepared = await this.#advance(running, { handOff: assembled.handOff });
+      }
 
       // The continuation slot is `(agent, engine, environment instance, working
       // directory)`. All four must match for a stored key to be reusable: the key
@@ -605,7 +825,7 @@ export class RunOrchestrator {
       // fallback is an explicit failed run, not a rejected promise that leaks a lease.
       const identity: SessionKeyIdentity = {
         agentId: agent.id,
-        engine: agent.engine,
+        engine: option.engine,
         environmentInstanceId: initial.environmentInstanceId,
         workingDirectory,
       };
@@ -614,12 +834,14 @@ export class RunOrchestrator {
       let attempt = await this.#runSession(
         adapter,
         agent,
+        option,
         assembled.prompt,
         prepared,
         stored?.key,
         appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
         workingDirectory,
         workspace.projectWorkspaceId,
+        workspace.projectWorkspaceKind,
         workspace.projectWorkspacePath,
       );
 
@@ -638,12 +860,14 @@ export class RunOrchestrator {
         attempt = await this.#runSession(
           adapter,
           agent,
+          option,
           assembled.prompt,
           prepared,
           undefined,
           appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
           workingDirectory,
           workspace.projectWorkspaceId,
+          workspace.projectWorkspaceKind,
           workspace.projectWorkspacePath,
         );
       }
@@ -690,12 +914,14 @@ export class RunOrchestrator {
   async #runSession(
     adapter: EngineAdapter,
     agent: AgentDefinition,
+    option: AgentWorkOption,
     prompt: string,
     running: AgentRun,
     resumeKey: string | undefined,
     instructions: string | undefined,
     workingDirectory: string,
     projectWorkspaceId: string | undefined,
+    projectWorkspaceKind: 'default' | 'relative' | undefined,
     projectWorkspacePath: string | undefined,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
@@ -703,13 +929,14 @@ export class RunOrchestrator {
       session = await adapter.startSession({
         agentId: agent.id,
         workingDirectory,
-        ...(agent.model !== undefined ? { model: agent.model } : {}),
-        ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
+        ...(option.workModel !== '' ? { model: option.workModel } : {}),
+        ...(option.effort !== '' ? { effort: option.effort } : {}),
         // The assembled project contract is re-sent on every run, because it is
         // the standing agreement the agent works under and must not depend on a
         // prior session having carried it (O5).
         ...(instructions !== undefined ? { instructions } : {}),
         ...(projectWorkspaceId !== undefined ? { projectWorkspaceId } : {}),
+        ...(projectWorkspaceKind !== undefined ? { projectWorkspaceKind } : {}),
         ...(projectWorkspacePath !== undefined ? { projectWorkspacePath } : {}),
         ...(resumeKey !== undefined ? { resumeSessionKey: resumeKey } : {}),
       });
@@ -866,8 +1093,8 @@ export class RunOrchestrator {
   async #advance(run: AgentRun, patch: Partial<AgentRun>): Promise<AgentRun> {
     const next: AgentRun = { ...run, ...patch };
     this.#runs.set(next.id, next);
-    await this.#store.save(next);
-    for (const observer of this.#observers) observer(next);
+    const replaySequence = await this.#store.save(next);
+    for (const observer of this.#observers) observer(next, replaySequence);
     return next;
   }
 }
@@ -899,4 +1126,34 @@ function appendBootstrap(instructions: string | undefined, bootstrap: string | u
   return instructions === undefined || instructions === ''
     ? bootstrap
     : `${instructions}\n\n${bootstrap}`;
+}
+
+/**
+ * Normalize a binding received from an authority-facing port before it becomes
+ * an AgentRun fact or a Worker request. Durable records can predate the path
+ * invariant, so an unsafe relative location invalidates the whole binding
+ * rather than being silently reinterpreted as a Worker default.
+ */
+function sanitizeRunWorkspaceBinding(
+  binding: RunWorkspaceBinding | undefined,
+): RunWorkspaceBinding | undefined {
+  if (binding === undefined) return undefined;
+  if (binding.kind === 'relative') {
+    const path = sanitizeWorkspacePath(binding.path);
+    if (path === undefined) return undefined;
+    return {
+      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
+      kind: 'relative',
+      path,
+    };
+  }
+  if (binding.kind === 'default' && binding.path === undefined) {
+    return {
+      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
+      kind: 'default',
+    };
+  }
+  return undefined;
 }

@@ -5,6 +5,7 @@ import Button from '../../../primitives/Button.vue';
 
 defineProps<{
   env: EnvironmentInstance;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -36,6 +37,7 @@ const emit = defineEmits<{
             variant="primary"
             size="xs"
             class="approve-enroll-btn text-[10px] h-6 px-2"
+            :disabled="disabled"
             @click="emit('approve', env.id)"
           >
             Approve
@@ -67,6 +69,9 @@ const emit = defineEmits<{
             {{ env.protocolCompatibility.toUpperCase() }}
           </Badge>
         </div>
+        <p v-if="env.connectionAttempt?.outcome === 'incompatible'" class="text-xs text-[var(--text-muted)]">
+          Last refused connection: {{ env.connectionAttempt.reason }}. No current Worker evidence.
+        </p>
       </div>
 
       <!-- 4. Work Safety & Lease -->
@@ -83,6 +88,10 @@ const emit = defineEmits<{
           </Badge>
         </div>
       </div>
+    </div>
+
+    <div class="text-[10px] text-[var(--text-muted)] mt-1">
+      Health colour is an operational summary, not an authorization token to execute runs.
     </div>
   </div>
 </template>

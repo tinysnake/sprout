@@ -348,6 +348,13 @@ export function createInitialFixtures(): EnvironmentInstance[] {
 export class FixtureEnvironmentService implements EnvironmentService {
   private instances: EnvironmentInstance[];
 
+  /**
+   * The fixture simulates a wired Worker evidence port, so its tests can drive
+   * the full reconcile → decide flow deterministically. Production declares the
+   * opposite; see `ProductionEnvironmentService.supportsEvidenceReconciliation`.
+   */
+  readonly supportsEvidenceReconciliation = true;
+
   constructor(initialData?: EnvironmentInstance[]) {
     this.instances = initialData ?? createInitialFixtures();
   }
@@ -402,6 +409,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
     if (env.leaseRecovery) {
+      env.leaseRecovery.evidenceSynchronized = true;
       env.leaseRecovery.reconciledEvidence = {
         retainedEventsCount: 4,
         engineStoppedProof: true,

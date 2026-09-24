@@ -2,7 +2,6 @@ import type { Readable, Writable } from 'node:stream';
 
 import type {
   AgentRunEvent,
-  ContractDelivery,
   EngineAdapter,
   EngineSession,
   EngineTurnResult,
@@ -13,6 +12,7 @@ import {
   WORKER_ERROR_CODES,
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
+  WORKER_PROTOCOL_VERSION,
   type CloseParams,
   type InterruptParams,
   type InterruptResult,
@@ -23,9 +23,20 @@ import {
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
   type TaskContextMaterialization,
+  type ValidateWorkspaceParams,
+  type ValidateWorkspaceResult,
   type WorkerInfo,
+  type WorkerReadinessFacts,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import {
+  contractDeliveryDiagnostic,
+  sanitizeEngineTurnResult,
+  WORKER_DIAGNOSTICS,
+  type WorkerDiagnostic,
+} from './diagnostics.ts';
 
 /**
  * The worker: the part of Sprout that runs *inside* an environment.
@@ -47,16 +58,46 @@ export interface EnvironmentWorkerOptions {
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   readonly input: Readable;
   readonly output: Writable;
-  readonly onLog?: (line: string) => void;
+  readonly onLog?: (line: WorkerDiagnostic) => void;
   /** Root owned by this Worker for persistent Project workspaces. */
   readonly workspaceRoot?: string;
+  /**
+   * Neutral readiness facts this Worker reports on `worker/info`, when known.
+   *
+   * It is a provider rather than a value because readiness is Environment-local
+   * and may change after the Worker starts (an engine login can expire). A Worker
+   * that cannot determine a fact reports `unknown` rather than inventing one.
+   */
+  readonly readiness?: () => WorkerReadinessFacts;
+  /** Executes on this host; it never accepts facts from the caller. */
+  readonly readinessProbe?: (
+    params: WorkerReadinessProbeParams,
+  ) => Promise<WorkerReadinessProbeResult>;
 }
-
 interface LiveSession {
   readonly engine: string;
   readonly session: EngineSession;
   readonly events: EventSink;
   turnId: string | undefined;
+}
+/**
+ * The honest fallback when a Worker has no readiness source: it knows which
+ * engines it hosts, but not their installation or login, so it says `unknown`
+ * rather than claiming readiness it did not verify.
+ */
+function defaultReadiness(engines: ReadonlyMap<string, EngineAdapter>): WorkerReadinessFacts {
+  return {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engines: [...engines.keys()].map((engine) => ({
+      engine,
+      // An adapter whose CLI the Worker located is installed by definition; its
+      // login and models remain unverified, so they are honestly `unknown`.
+      installed: true,
+      readiness: 'unknown',
+      modelAvailability: 'unknown',
+      models: [],
+    })),
+  };
 }
 
 /** Where a session's run events go. Swappable so the worker is testable. */
@@ -72,6 +113,7 @@ export class EnvironmentWorker {
   readonly #workspace: WorkerWorkspace | undefined;
   #counter = 0;
   #closed = false;
+  #readiness: WorkerReadinessFacts | undefined;
 
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
@@ -103,6 +145,9 @@ export class EnvironmentWorker {
         case WORKER_METHODS.info:
           this.#transport.respond(id, this.#info());
           return;
+        case WORKER_METHODS.readinessProbe:
+          this.#transport.respond(id, await this.#probeReadiness(params as WorkerReadinessProbeParams));
+          return;
         case WORKER_METHODS.startSession:
           this.#transport.respond(id, await this.#startSession(params as StartSessionParams));
           return;
@@ -121,8 +166,11 @@ export class EnvironmentWorker {
         case WORKER_METHODS.recycleTaskContext:
           this.#transport.respond(id, await this.#recycleTaskContext(params as RecycleTaskContextParams));
           return;
+        case WORKER_METHODS.validateWorkspace:
+          this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
+          return;
         default:
-          this.#transport.respondError(id, -32_601, `unknown worker method: ${method}`);
+          this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);
       }
     } catch (error) {
       // An engine's rejected resume is a classifyable failure, not a generic
@@ -130,13 +178,15 @@ export class EnvironmentWorker {
       // "the engine refused this key" from "this worker failed". Everything else
       // is reported as an ordinary worker error and is never retried.
       if (error instanceof EngineResumeRefusedError) {
-        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, error.message);
+        this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, WORKER_DIAGNOSTICS.resumeRefused);
         return;
       }
       this.#transport.respondError(
         id,
         -32_603,
-        error instanceof Error ? error.message : String(error),
+        method === WORKER_METHODS.startSession
+          ? WORKER_DIAGNOSTICS.sessionStartFailed
+          : WORKER_DIAGNOSTICS.requestFailed,
       );
     }
   }
@@ -151,7 +201,45 @@ export class EnvironmentWorker {
         supportsInterrupt: engine.capabilities.supportsInterrupt,
         standingInstructions: engine.capabilities.standingInstructions,
       })),
+      ...(this.#readiness !== undefined
+        ? { readiness: this.#readiness }
+        : this.#options.readiness !== undefined
+        ? { readiness: this.#options.readiness() }
+        : { readiness: defaultReadiness(this.#options.engines) }),
     };
+  }
+
+  async #probeReadiness(params: WorkerReadinessProbeParams): Promise<WorkerReadinessProbeResult> {
+    // Parameters are deliberately narrow. In particular, no browser-supplied
+    // status, latency, protocol result, credential, prompt, or model turn can
+    // enter this method. The only optional value is a list of model ids the
+    // core may ask the host to compare locally; the current strict contract
+    // still records account entitlement as unknown.
+    const requiredModels = params !== null && typeof params === 'object' && Array.isArray(params?.requiredModels)
+      ? params.requiredModels.filter((model): model is string => typeof model === 'string')
+      : [];
+    const result = await this.#options.readinessProbe?.({ requiredModels,
+      ...(params?.requirements !== undefined ? { requirements: params.requirements } : {}),
+      ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) });
+    if (result === undefined) {
+      throw new Error('Worker has no non-inference readiness probe');
+    }
+    this.#readiness = result.readiness;
+    if (result.readiness.protocolVersion === '3') {
+      // Legacy-shaped test adapters may still return two probe copies. Never
+      // discard a contradiction while translating to the single v3 wire fact.
+      if (JSON.stringify(result.readiness.probe) !== JSON.stringify(result.probe)) {
+        throw new Error('inconsistent Worker probe metadata');
+      }
+      // Preserve the identity of a deliberately redelivered attempt. Replacing
+      // it with the request's new identity would append instead of replaying
+      // the original receipt after flattening the v3 wire envelope.
+      const attemptId = result.attemptId ?? params?.attemptId;
+      return { protocolVersion: '3', observedAt: result.readiness.observedAt,
+        engines: result.readiness.engines, probe: result.probe,
+        ...(attemptId !== undefined ? { attemptId } : {}) } as unknown as WorkerReadinessProbeResult;
+    }
+    return params?.attemptId === undefined ? result : { ...result, attemptId: result.attemptId ?? params.attemptId };
   }
 
   async #startSession(params: StartSessionParams): Promise<StartSessionResult> {
@@ -167,6 +255,7 @@ export class EnvironmentWorker {
         : await this.#requireWorkspace().projectWorkingDirectory(
           params.projectWorkspaceId,
           params.projectWorkspacePath,
+          params.projectWorkspaceKind,
         ),
       ...(params.model !== undefined ? { model: params.model } : {}),
       ...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -184,8 +273,7 @@ export class EnvironmentWorker {
     // or "not delivered" (C21-002).
     const delivery = session.contractDelivery;
     if (delivery !== undefined) {
-      const line = describeDelivery(params.agentId, params.workingDirectory, delivery);
-      this.#options.onLog?.(line);
+      this.#options.onLog?.(contractDeliveryDiagnostic(delivery));
     }
     this.#sessions.set(sessionId, {
       engine: params.engine,
@@ -223,6 +311,10 @@ export class EnvironmentWorker {
     return this.#requireWorkspace().recycle(params);
   }
 
+  #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
+    return this.#requireWorkspace().validateWorkspace(params);
+  }
+
   #requireWorkspace(): WorkerWorkspace {
     if (!this.#workspace) throw new Error('worker has no configured workspace root');
     return this.#workspace;
@@ -252,11 +344,15 @@ export class EnvironmentWorker {
         } catch {
           // The completion below carries the real terminal result.
         }
-        live.events.settled(turnId, await turn.completion, live.session.engineSessionKey);
-      } catch (error) {
+        live.events.settled(
+          turnId,
+          sanitizeEngineTurnResult(await turn.completion),
+          live.session.engineSessionKey,
+        );
+      } catch {
         live.events.settled(turnId, {
           status: 'failed',
-          message: error instanceof Error ? error.message : String(error),
+          message: WORKER_DIAGNOSTICS.turnFailed,
         });
       } finally {
         if (live.turnId === turnId) live.turnId = undefined;
@@ -297,60 +393,5 @@ export class EnvironmentWorker {
       this.#sessions.delete(sessionId);
       await live.session.close().catch(() => undefined);
     }
-  }
-}
-
-/**
- * The line to log for a contract delivery.
- *
- * **Every mechanism a run can report is logged.** A delivery outcome is not
- * internal bookkeeping: it is how an operator confirms that the project contract
- * did or did not reach the engine, and the two "obvious" successes are exactly
- * the ones whose absence would be hardest to distinguish from a run that was
- * never given a contract at all (C21-002). Reporting is deliberately uniform —
- * one line per delivered contract, naming the mechanism and where it went — so
- * there is no outcome that is observable only by its silence.
- */
-function describeDelivery(
-  agentId: string,
-  workingDirectory: string,
-  delivery: ContractDelivery,
-): string {
-  const where =
-    delivery.path !== undefined
-      ? ` (${delivery.path})`
-      : ` (${workingDirectory})`;
-  switch (delivery.mechanism) {
-    case 'agents.md':
-      return (
-        `project contract for agent ${agentId} was delivered to the engine's own ` +
-        `AGENTS.md${where}`
-      );
-    case 'sprout-contract-file':
-      return (
-        `project contract for agent ${agentId} was delivered to Sprout's own ` +
-        `file${where}, registered with the engine's instruction list because the ` +
-        `engine does not discover that name`
-      );
-    case 'engine-hook':
-      return (
-        `project contract for agent ${agentId} was delivered through the engine's ` +
-        `config hook${where}`
-      );
-    case 'skipped-user-owned':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `a user-owned file in ${workingDirectory} was left intact`
-      );
-    case 'skipped-unreadable':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `an existing file in ${workingDirectory} could not be read and was left intact`
-      );
-    case 'unavailable':
-      return (
-        `project contract for agent ${agentId} was not delivered: ` +
-        `${delivery.reason ?? `no writable location in ${workingDirectory}`}`
-      );
   }
 }

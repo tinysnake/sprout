@@ -26,7 +26,7 @@ import { EnvironmentPool } from '../src/environment/pool.ts';
 import { ProjectRegistry } from '../src/project/registry.ts';
 import type { Project } from '../src/project/model.ts';
 import { RunOrchestrator } from '../src/run/orchestrator.ts';
-import { SqliteStore } from '../src/run/sqlite-store.ts';
+import { SqliteStore } from '../src/store/db.ts';
 import { EndpointCarrier } from '../src/worker/carrier.ts';
 import { CollaborationCoordinator } from '../src/collaboration/coordinator.ts';
 

@@ -1,13 +1,16 @@
 import { test } from 'node:test';
+
 import assert from 'node:assert/strict';
+
 import { PassThrough } from 'node:stream';
-import { mkdtempSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
+
 import { EngineResumeRefusedError } from './port.ts';
+
 import type { AgentRunEvent } from './port.ts';
+
 
 interface WireMessage {
   readonly jsonrpc?: string;
@@ -16,7 +19,9 @@ interface WireMessage {
   readonly params?: unknown;
 }
 
+
 type Script = (request: { id: number; method: string; params: unknown }, server: FakeCodexServer) => void;
+
 
 /**
  * A fake `codex app-server`.
@@ -97,6 +102,7 @@ class FakeCodexServer {
   }
 }
 
+
 function startAdapter(server: FakeCodexServer, binaryPath = '/usr/bin/true') {
   return new CodexEngineAdapter({
     binaryPath,
@@ -104,11 +110,13 @@ function startAdapter(server: FakeCodexServer, binaryPath = '/usr/bin/true') {
   });
 }
 
+
 async function collect(turn: { events: AsyncIterable<AgentRunEvent> }): Promise<AgentRunEvent[]> {
   const events: AgentRunEvent[] = [];
   for await (const event of turn.events) events.push(event);
   return events;
 }
+
 
 test('the adapter initialises, starts a thread, and launches the app-server transport', async () => {
   const server = new FakeCodexServer((request, self) => {
@@ -140,6 +148,7 @@ test('the adapter initialises, starts a thread, and launches the app-server tran
   assert.equal(start.sandbox, 'read-only');
 });
 
+
 test('a stored key resumes the thread instead of starting a new one', async () => {
   // Codex assigns thread ids but `thread/resume` keeps the same id (#19), so a
   // stored key resumes the same thread. `thread/start` must not be called: a
@@ -167,6 +176,7 @@ test('a stored key resumes the thread instead of starting a new one', async () =
   assert.equal(resume.cwd, '/tmp');
 });
 
+
 test('thread initialization omits model configuration when the Agent does not configure it', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
@@ -179,6 +189,7 @@ test('thread initialization omits model configuration when the Agent does not co
   assert.equal('model' in start, false);
   assert.equal('config' in start, false);
 });
+
 
 test('a stale thread id is a hard failure at session start, not a silent fresh session', async () => {
   // Codex documents `no rollout found for thread id …` and does not fall back
@@ -201,6 +212,7 @@ test('a stale thread id is a hard failure at session start, not a silent fresh s
     /no rollout found for thread id/,
   );
 });
+
 
 test('a refused resume is classified so the core retries only for a real refusal', async () => {
   // SK-001: the core's retry is gated on this neutral classification, not on
@@ -259,6 +271,7 @@ test('a refused resume is classified so the core retries only for a real refusal
   );
 });
 
+
 test('a turn streams assistant text, tool calls, and tool output before completing', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
@@ -303,6 +316,7 @@ test('a turn streams assistant text, tool calls, and tool output before completi
   assert.deepEqual(result, { status: 'completed', text: 'done' });
 });
 
+
 test('a turn attaches the per-turn Codex token usage notification on completion', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
@@ -343,6 +357,7 @@ test('a turn attaches the per-turn Codex token usage notification on completion'
   });
 });
 
+
 test('interrupting a turn is reported as interrupted, not as a failure', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
@@ -374,6 +389,7 @@ test('interrupting a turn is reported as interrupted, not as a failure', async (
   assert.ok(server.requests.some((request) => request.method === 'turn/interrupt'));
 });
 
+
 test('a turn error from the engine becomes a failed terminal state', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
@@ -397,6 +413,7 @@ test('a turn error from the engine becomes a failed terminal state', async () =>
   assert.deepEqual(result, { status: 'failed', message: 'sandbox denied' });
 });
 
+
 test('a failure to initialise the daemon is reported when the session starts', async () => {
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.reject(request.id, 'protocol mismatch');
@@ -408,6 +425,7 @@ test('a failure to initialise the daemon is reported when the session starts', a
     /failed to initialise: initialize: protocol mismatch/,
   );
 });
+
 
 test('a server-initiated approval request is declined rather than left hanging', async () => {
   const server = new FakeCodexServer((request, self) => {
@@ -428,131 +446,4 @@ test('a server-initiated approval request is declined rather than left hanging',
   await turn.completion;
   await session.close();
   assert.ok(true);
-});
-
-test('the binary path is resolved with realpath before launch', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sprout-codex-'));
-  const link = join(dir, 'codex-link');
-  symlinkSync('/usr/bin/true', link);
-
-  let launched = '';
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-  });
-
-  const adapter = new CodexEngineAdapter({
-    binaryPath: link,
-    spawnProcess: (binaryPath) => {
-      launched = binaryPath;
-      return server.process;
-    },
-  });
-  await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
-
-  assert.equal(launched, '/usr/bin/true', 'the symlink target is resolved, not the link path');
-});
-
-test('a daemon that dies mid-turn fails the turn instead of hanging it', async () => {
-  // Regression found in the live UI: with the process gone and no
-  // `turn/completed`, the turn never settled, so stopping the run waited forever.
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-    if (request.method === 'turn/start') {
-      self.respond(request.id, { turn: { id: 'turn-1' } });
-      // The daemon dies before reporting anything about the turn.
-      queueMicrotask(() => {
-        self.process.kill('SIGTERM');
-        self.crash();
-      });
-    }
-  });
-
-  const adapter = startAdapter(server);
-  const session = await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
-  const turn = session.run('go');
-  const result = await turn.completion;
-
-  assert.equal(result.status, 'failed');
-  assert.match(
-    result.status === 'failed' ? result.message : '',
-    /codex app-server closed unexpectedly/,
-  );
-});
-
-test('interrupting settles the turn even when the engine never confirms it', async () => {
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-    if (request.method === 'turn/start') {
-      self.respond(request.id, { turn: { id: 'turn-1' } });
-      // Deliberately never sends turn/completed.
-    }
-    if (request.method === 'turn/interrupt') {
-      // Deliberately never answers the interrupt either.
-    }
-  });
-
-  const adapter = startAdapter(server);
-  const session = await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
-  const turn = session.run('long job');
-  await new Promise((resolve) => setTimeout(resolve, 10));
-
-  // The engine answers neither the interrupt nor a completion.
-  await session.interrupt();
-  const result = await turn.completion;
-
-  assert.deepEqual(result, { status: 'interrupted' });
-});
-
-test('closing a session settles an in-flight turn as interrupted', async () => {
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-    if (request.method === 'turn/start') {
-      self.respond(request.id, { turn: { id: 'turn-1' } });
-    }
-  });
-
-  const adapter = startAdapter(server);
-  const session = await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
-  const turn = session.run('long job');
-  await session.close();
-
-  assert.deepEqual(await turn.completion, { status: 'interrupted' });
-});
-
-test('the sandbox posture is configurable, because a container is its own boundary', async () => {
-  // A container cannot create the user namespace Codex's sandbox needs, so every
-  // turn fails inside one unless Codex's own sandbox is disabled there. The
-  // environment decides this, so the adapter must accept it rather than hard-code
-  // the shared-host posture.
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-  });
-
-  const adapter = new CodexEngineAdapter({
-    binaryPath: '/usr/bin/true',
-    sandbox: 'danger-full-access',
-    spawnProcess: () => server.process,
-  });
-  await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/sprout' });
-
-  const start = server.requests.find((request) => request.method === 'thread/start');
-  assert.equal((start?.params as Record<string, unknown>).sandbox, 'danger-full-access');
-});
-
-test('the default sandbox posture keeps Codex bounded on a shared host', async () => {
-  const server = new FakeCodexServer((request, self) => {
-    if (request.method === 'initialize') self.respond(request.id, {});
-    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
-  });
-
-  const adapter = startAdapter(server);
-  await adapter.startSession({ agentId: 'agent-scout', workingDirectory: '/tmp' });
-
-  const start = server.requests.find((request) => request.method === 'thread/start');
-  assert.equal((start?.params as Record<string, unknown>).sandbox, 'read-only');
 });

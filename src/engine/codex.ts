@@ -217,11 +217,9 @@ function spawnCodex(
   if (!child.stdin || !child.stdout || !child.stderr) {
     throw new Error('codex app-server did not expose stdio');
   }
-  // Engine diagnostics are how a failure is explained; forward them rather than
-  // letting them fill a pipe buffer nobody reads.
-  child.stderr.on('data', (chunk: Buffer) => {
-    process.stderr.write(`[codex] ${chunk.toString()}`);
-  });
+  // Drain engine stderr so the child cannot block, but never forward provider,
+  // account, host-path, or network text into Worker diagnostics (ADR-0009).
+  child.stderr.on('data', () => undefined);
   return {
     stdin: child.stdin,
     stdout: child.stdout,

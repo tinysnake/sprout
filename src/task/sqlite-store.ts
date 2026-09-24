@@ -8,7 +8,9 @@ import type {
   TaskWithRuns,
 } from './model.ts';
 import type { TaskFilter, TaskStore } from './store.ts';
-import type { EnvironmentLease } from '../environment/pool.ts';
+import type { EnvironmentLease, TaskLeaseBinding } from '../environment/pool.ts';
+import { createTransactionCoordinator, type TransactionCoordinator } from '../store/transaction.ts';
+import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
  * SQLite-backed Task storage (ticket #28, ADR-0002).
@@ -25,19 +27,37 @@ import type { EnvironmentLease } from '../environment/pool.ts';
  * check first. The link's `sequence` is assigned from the current maximum for the
  * Task, inside the same transaction as the insert, so concurrent advancements
  * cannot both claim the same position.
+ *
+ * This adapter owns only `tasks` and `task_run_links` SQL. The Task-held lease
+ * rows a begin/end boundary writes belong to the environment domain, so those
+ * boundaries run the environment adapter's `TaskLeaseBinding` statements inside
+ * one shared transaction (`src/store/transaction.ts`) rather than issuing
+ * `environment_leases` SQL here.
  */
 
 export class SqliteTaskStore implements TaskStore {
   readonly #db: DatabaseSync;
   readonly #ownsDb: boolean;
+  readonly #leases: TaskLeaseBinding | undefined;
+  readonly #transactions: TransactionCoordinator;
 
-  constructor(options: { filename: string } | { db: DatabaseSync }) {
+  constructor(options: { filename: string; leases?: TaskLeaseBinding } | { db: DatabaseSync; leases?: TaskLeaseBinding; transactions?: TransactionCoordinator }) {
     if ('db' in options) {
       this.#db = options.db;
       this.#ownsDb = false;
+      this.#leases = options.leases;
+      this.#transactions = options.transactions ?? createTransactionCoordinator(options.db);
     } else {
       this.#db = new DatabaseSync(options.filename);
       this.#ownsDb = true;
+      this.#leases = options.leases;
+      this.#transactions = createTransactionCoordinator(this.#db);
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
     }
     this.#init();
   }
@@ -167,40 +187,26 @@ export class SqliteTaskStore implements TaskStore {
   }
 
   async saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void> {
-    this.#db.exec('BEGIN IMMEDIATE');
-    try {
-      const conflict = this.#db.prepare(
-        `SELECT id FROM environment_leases
-          WHERE instance_id = ? AND state IN ('active', 'recovering') LIMIT 1`,
-      ).get(lease.instanceId);
-      if (conflict) throw new Error(`environment ${lease.instanceId} is unavailable`);
-      this.#saveLease(lease);
+    const leases = this.#requireLeases();
+    this.#transactions.immediate(() => {
+      leases.insertTaskHeldLease(lease);
       this.#saveTask(task);
-      this.#db.exec('COMMIT');
-    } catch (error) {
-      this.#db.exec('ROLLBACK');
-      throw error;
-    }
+    });
   }
 
   async saveTerminalWithLease(task: Task, leaseId: string): Promise<void> {
-    this.#db.exec('BEGIN IMMEDIATE');
-    try {
-      // An already-released lease is an idempotent retry after a crash.  A
-      // different or missing lease is never silently treated as Task cleanup.
-      const lease = this.#db.prepare(
-        `SELECT holder_kind, task_id FROM environment_leases WHERE id = ?`,
-      ).get(leaseId) as { holder_kind: string | null; task_id: string | null } | undefined;
-      if (!lease || lease.holder_kind !== 'task' || lease.task_id !== task.id) {
-        throw new Error(`task ${task.id} lease could not be released after cleanup`);
-      }
-      this.#db.prepare(`UPDATE environment_leases SET state = 'released' WHERE id = ?`).run(leaseId);
+    const leases = this.#requireLeases();
+    this.#transactions.immediate(() => {
+      leases.markTaskLeaseReleased(leaseId, task.id);
       this.#saveTask(task);
-      this.#db.exec('COMMIT');
-    } catch (error) {
-      this.#db.exec('ROLLBACK');
-      throw error;
+    });
+  }
+
+  #requireLeases(): TaskLeaseBinding {
+    if (!this.#leases) {
+      throw new Error('SqliteTaskStore has no Environment lease adapter; mount it on the shared handle with the environment domain');
     }
+    return this.#leases;
   }
 
   #taskValues(task: Task): (string | number | null)[] {
@@ -218,15 +224,6 @@ export class SqliteTaskStore implements TaskStore {
       `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
        environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
     ).run(...this.#taskValues(task), task.id);
-  }
-
-  #saveLease(lease: EnvironmentLease): void {
-    this.#db.prepare(
-      `INSERT INTO environment_leases
-       (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(lease.id, lease.instanceId, lease.capability, lease.holderId, 'task', lease.runId ?? null,
-      lease.taskId ?? null, lease.acquiredAt, lease.expiresAt, lease.state);
   }
 
   async linkRun(input: {

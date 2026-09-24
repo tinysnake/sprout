@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
-import { WorkerClient, WorkerContextClient } from './client.ts';
+import { WorkerClient, WorkerContextClient, WorkerReadinessClient } from './client.ts';
 import type { WorkerConnection } from './carrier.ts';
 
 const execFileAsync = promisify(execFile);
@@ -136,6 +136,7 @@ export class SshTunnelCarrier {
         info: connected.info,
         adapters: connected.adapters,
         contexts: new WorkerContextClient(transport),
+        readiness: new WorkerReadinessClient(transport),
         get alive() {
           return alive;
         },

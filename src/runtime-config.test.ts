@@ -76,3 +76,18 @@ test('runtime configuration refuses unsafe or ungranted Project workspace regist
     project: { ...base.project, workspaces: [{ environmentInstanceId: 'other-macos', path: 'game' }] },
   })), /not available/);
 });
+
+test('a workspace registration with no path keeps the Worker-managed default', () => {
+  const configured = parseRuntimeConfiguration(JSON.stringify({
+    agents: [{ id: 'planner', name: 'Planner', engine: 'codex', capability: 'agent-run' }],
+    project: {
+      id: 'game', goal: 'Validate', rules: [], availableEnvironmentInstanceIds: ['local-macos'],
+      memberships: [{ agentId: 'planner', responsibilities: [], collaborationInstructions: 'Report facts.' }],
+      // A pathless entry grants the instance while leaving the location to the
+      // Worker, so no host path ever enters the portable configuration.
+      workspaces: [{ environmentInstanceId: 'local-macos' }],
+    },
+  }));
+  assert.deepEqual(configured.project?.workspaces, [{ environmentInstanceId: 'local-macos' }]);
+  assert.equal('path' in (configured.project?.workspaces?.[0] ?? {}), false);
+});

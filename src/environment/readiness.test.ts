@@ -1,0 +1,415 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  evaluateEngineOption,
+  observedFactsFromWorkerReadiness,
+  protocolCompatibility,
+  protocolMajor,
+  readinessRequirements,
+  summarizeEnvironmentReadiness,
+  workSafetyFromLeases,
+  type EngineReadinessFact,
+  type EnvironmentReadiness,
+} from './readiness.ts';
+import { assembleEnvironmentReadiness } from './readiness-service.ts';
+import { createPendingEnrollment, approveEnrollment, type CreatePendingEnrollmentInput } from './enrollment.ts';
+import { workerIdentityDigest } from './enrollment-identity.ts';
+
+function ready(overrides: Partial<EnvironmentReadiness> = {}): EnvironmentReadiness {
+  return {
+    enrollmentStatus: 'approved',
+    connection: { state: 'online', lastConfirmedAt: 1_000 },
+    compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+    capabilities: [{ name: 'agent-run', permission: 'allowed', required: true }],
+    engines: [
+      {
+        engine: 'codex',
+        installed: true,
+        readiness: 'ready',
+        required: true,
+        models: { state: 'available', models: ['gpt-5-codex'] },
+      },
+    ],
+    probe: { at: 1_000, latencyMs: 12, protocolOk: true, enginesOk: true, summary: 'ok' },
+    workSafety: { state: 'clear' },
+    ...overrides,
+  };
+}
+
+test('a fully ready Environment is Green with a decisive textual reason', () => {
+  const summary = summarizeEnvironmentReadiness(ready(), { now: 1_100 });
+  assert.equal(summary.level, 'green');
+  assert.ok(summary.reason.length > 0);
+});
+
+test('the summary always carries the decisive reason and never replaces the facts', () => {
+  const facts = ready({ connection: { state: 'offline' } });
+  const summary = summarizeEnvironmentReadiness(facts, { now: 1_100 });
+  assert.equal(summary.level, 'red');
+  assert.match(summary.reason, /offline/i);
+  // The facts are unchanged: the summary is a projection, not a mutation.
+  assert.equal(facts.connection.state, 'offline');
+  assert.equal(facts.enrollmentStatus, 'approved');
+});
+
+test('revocation, incompatibility, denial, missing engine, and recovery are Red', () => {
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ enrollmentStatus: 'revoked' }), { now: 1_100 }).level,
+    'red',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(
+      ready({ compatibility: { state: 'incompatible', detail: 'too old' } }),
+      { now: 1_100 },
+    ).level,
+    'red',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(
+      ready({ capabilities: [{ name: 'agent-run', permission: 'denied', required: true }] }),
+      { now: 1_100 },
+    ).level,
+    'red',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(
+      ready({
+        engines: [
+          {
+            engine: 'codex',
+            installed: false,
+            readiness: 'missing',
+            required: true,
+            models: { state: 'none', models: [] },
+          },
+        ],
+      }),
+      { now: 1_100 },
+    ).level,
+    'red',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ workSafety: { state: 'recovery' } }), { now: 1_100 }).level,
+    'red',
+  );
+});
+
+test('pending enrollment, first connection, reconnect, unknown compatibility, login-required, and stale probe are Yellow', () => {
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ enrollmentStatus: 'pending' }), { now: 1_100 }).level,
+    'yellow',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ connection: { state: 'never-connected' } }), { now: 1_100 })
+      .level,
+    'yellow',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ connection: { state: 'reconnecting' } }), { now: 1_100 })
+      .level,
+    'yellow',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(ready({ compatibility: { state: 'unknown' } }), { now: 1_100 }).level,
+    'yellow',
+  );
+  assert.equal(
+    summarizeEnvironmentReadiness(
+      ready({
+        engines: [
+          {
+            engine: 'codex',
+            installed: true,
+            readiness: 'login-required',
+            required: true,
+            models: { state: 'unknown', models: [] },
+          },
+        ],
+      }),
+      { now: 1_100 },
+    ).level,
+    'yellow',
+  );
+  const stale = summarizeEnvironmentReadiness(
+    ready({ probe: { at: 1_000, latencyMs: 12, protocolOk: true, enginesOk: true, summary: 'old' } }),
+    { now: 1_000 + 600_000 },
+  );
+  assert.equal(stale.level, 'yellow');
+  assert.match(stale.reason, /stale/i);
+});
+
+test('a Red decisive fact is preferred over a merely pending one', () => {
+  const summary = summarizeEnvironmentReadiness(
+    ready({ enrollmentStatus: 'pending', workSafety: { state: 'recovery' } }),
+    { now: 1_100 },
+  );
+  assert.equal(summary.level, 'red');
+  assert.match(summary.reason, /recovery/i);
+});
+
+test('protocol compatibility is derived from the reported major version, not guessed', () => {
+  const supported = { minMajor: 2, maxMajor: 2 };
+  assert.equal(protocolCompatibility('2.1', supported).state, 'compatible');
+  assert.equal(protocolCompatibility('v2.0', supported).state, 'compatible');
+  assert.equal(protocolCompatibility('1.8', supported).state, 'incompatible');
+  assert.equal(protocolCompatibility('3.0', supported).state, 'incompatible');
+  assert.equal(protocolCompatibility(undefined, supported).state, 'unknown');
+  assert.equal(protocolMajor('v2.1'), 2);
+  assert.equal(protocolMajor('nonsense'), undefined);
+});
+
+test('malformed protocol evidence is incompatible without entering readiness diagnostics', () => {
+  const privacyMarker = 'SPROUT_SYNTHETIC_READINESS_SENTINEL_3f97bb53d5ac42c89dc598d04cc88f52';
+  const privatePath = `/synthetic-private/${privacyMarker}/worker.sock`;
+  const networkEndpoint = `${privacyMarker.toLowerCase()}.invalid:61947`;
+  const hostileProtocol = `1;marker=${privacyMarker};path=${privatePath};endpoint=${networkEndpoint}`;
+  const supported = { minMajor: 2, maxMajor: 2 };
+  assert.deepEqual(protocolCompatibility(hostileProtocol, supported), {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+
+  const observed = observedFactsFromWorkerReadiness({
+    protocolVersion: hostileProtocol,
+    engines: [],
+    at: 5_000,
+    supported,
+  });
+  assert.deepEqual(observed.compatibility, {
+    state: 'incompatible',
+    detail: 'the Worker protocol is incompatible with this Sprout build',
+  });
+  const exposed = JSON.stringify(observed);
+  for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
+    assert.equal(exposed.includes(sentinel), false, `protocol evidence entered readiness: ${sentinel}`);
+  }
+});
+
+test('work safety is projected from the lease registry without collapsing other facts', () => {
+  assert.equal(
+    workSafetyFromLeases([{ instanceId: 'env-1', state: 'active' }], 'env-1'),
+    'held',
+  );
+  assert.equal(
+    workSafetyFromLeases([{ instanceId: 'env-1', state: 'recovering' }], 'env-1'),
+    'recovery',
+  );
+  assert.equal(workSafetyFromLeases([], 'env-1'), 'clear');
+  assert.equal(
+    workSafetyFromLeases([{ instanceId: 'env-2', state: 'active' }], 'env-1'),
+    'clear',
+    'another environment lease does not affect this one',
+  );
+});
+
+test('a Worker readiness declaration maps to independent observed facts without assuming unverified values', () => {
+  const observed = observedFactsFromWorkerReadiness({
+    protocolVersion: '2',
+    engines: [
+      { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
+      { engine: 'pi', installed: true, readiness: 'weird-value', modelAvailability: 'whatever', models: [] },
+    ],
+    at: 5_000,
+    supported: { minMajor: 2, maxMajor: 2 },
+  });
+  assert.equal(observed.connection.state, 'online');
+  assert.equal(observed.compatibility.state, 'compatible');
+  assert.equal(observed.compatibility.workerProtocolVersion, '2');
+  assert.equal(observed.engines[0]?.readiness, 'ready');
+  assert.equal(observed.engines[0]?.models.state, 'available');
+  // An unrecognized value becomes `unknown` rather than being trusted.
+  assert.equal(observed.engines[1]?.readiness, 'unknown');
+  assert.equal(observed.engines[1]?.models.state, 'unknown');
+});
+
+function enrollmentWith(platform: string, capabilityRequests: readonly string[]) {
+  const input: CreatePendingEnrollmentInput = {
+    id: 'enroll-1',
+    environmentInstanceId: 'env-1',
+    displayName: 'Env',
+    identityDigest: workerIdentityDigest('public-key-a'),
+    platform,
+    capabilityRequests,
+    engineFacts: [],
+    at: 1_000,
+  };
+  return approveEnrollment(createPendingEnrollment(input), {
+    capabilityPermissions: Object.fromEntries(capabilityRequests.map((capability) => [capability, true])),
+    at: 2_000,
+  });
+}
+
+test('only explicitly required engines block work: an unrequired unavailable engine is Yellow', () => {
+  const enrollment = enrollmentWith('macos', ['agent-run']);
+  const observed = {
+    connection: { state: 'online' as const, lastConfirmedAt: 3_000 },
+    compatibility: { state: 'compatible' as const, workerProtocolVersion: '2' },
+    engines: [
+      { engine: 'codex', installed: true, readiness: 'ready' as const, required: false, models: { state: 'available' as const, models: ['gpt-5-codex'] } },
+    ],
+  };
+
+  // Empty configuration: Pi is genuinely absent but nobody requires it, so the
+  // Environment is Yellow (attention), never a fabricated Red dual-engine block.
+  const noRequirements = assembleEnvironmentReadiness({
+    enrollment,
+    observed,
+    leases: [],
+    requiredEngines: [],
+    probe: { at: 3_000, latencyMs: 1, protocolOk: true, enginesOk: true, summary: 'ok' },
+    supportedProtocol: { minMajor: 2, maxMajor: 2 },
+    now: 3_100,
+  });
+  assert.equal(noRequirements.readiness.engines.every((engine) => engine.required === false), true);
+  assert.notEqual(noRequirements.summary.level, 'red', noRequirements.summary.reason);
+
+  // An explicit requirement makes the absence a Red block.
+  const requiresPi = assembleEnvironmentReadiness({
+    enrollment,
+    observed,
+    leases: [],
+    requiredEngines: ['pi'],
+    probe: { at: 3_000, latencyMs: 1, protocolOk: true, enginesOk: true, summary: 'ok' },
+    supportedProtocol: { minMajor: 2, maxMajor: 2 },
+    now: 3_100,
+  });
+  assert.equal(requiresPi.readiness.engines.find((engine) => engine.engine === 'pi')?.required, true);
+  assert.equal(requiresPi.summary.level, 'red');
+  assert.match(requiresPi.summary.reason, /pi/i);
+});
+
+test('#129: evaluateEngineOption interprets committed evidence consistently across states', () => {
+  // 1. Unobserved engine fact
+  const unobserved = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, undefined);
+  assert.equal(unobserved.state, 'unknown');
+  assert.match(unobserved.reason, /has not been observed/);
+
+  // 2. Missing engine fact
+  const missingFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: false,
+    readiness: 'missing',
+    required: true,
+    models: { state: 'none', models: [] },
+  };
+  const missing = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, missingFact);
+  assert.equal(missing.state, 'missing');
+  assert.match(missing.reason, /not installed/);
+
+  // 3. Login-required engine fact
+  const loginFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'login-required',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const login = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, loginFact);
+  assert.equal(login.state, 'login-required');
+  assert.match(login.reason, /requires a login/);
+
+  // 4. Unknown engine readiness
+  const unknownEngineFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'unknown',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const unknownEngine = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownEngineFact);
+  assert.equal(unknownEngine.state, 'unknown');
+  assert.match(unknownEngine.reason, /readiness is unknown/);
+
+  // 5. Empty workModel on ready engine
+  const readyFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+  };
+  const emptyModel = evaluateEngineOption({ engine: 'codex', workModel: '' }, readyFact);
+  assert.equal(emptyModel.state, 'available');
+  assert.match(emptyModel.reason, /is ready/);
+
+  // 6. Model availability 'none'
+  const noModelsFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'none', models: [] },
+  };
+  const noModels = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, noModelsFact);
+  assert.equal(noModels.state, 'model-unavailable');
+  assert.match(noModels.reason, /reports no available work models/);
+
+  // 7. Model availability 'unknown' (AC1, AC2)
+  const unknownModelFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'unknown', models: [] },
+  };
+  const unknownModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownModelFact);
+  assert.equal(unknownModel.state, 'unknown');
+  assert.match(unknownModel.reason, /availability is unknown for "codex"/);
+
+  // 8. Model not in available models list
+  const otherModelFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-4'] },
+  };
+  const otherModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, otherModelFact);
+  assert.equal(otherModel.state, 'model-unavailable');
+  assert.match(otherModel.reason, /is not available for "codex"/);
+
+  // 9. Local catalog modelIdPresent === false
+  const notInCatalogFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: false,
+  };
+  const notInCatalog = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, notInCatalogFact);
+  assert.equal(notInCatalog.state, 'model-unavailable');
+
+  // 10. Requirement revision mismatch
+  const scope = readinessRequirements([{ engine: 'codex', workModel: 'gpt-5' }]);
+  const mismatchedRevisionFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: true,
+    requirementRevision: 'r-stale',
+  };
+  const staleRevision = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, mismatchedRevisionFact, scope);
+  assert.equal(staleRevision.state, 'unknown');
+  assert.match(staleRevision.reason, /readiness is not established for the current requirement revision/);
+
+  // 11. Matching target evidence with available model
+  const matchingFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'available', models: ['gpt-5'] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: true,
+    requirementRevision: scope.revisionsByEngine!.codex!,
+  };
+  const availableOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, matchingFact, scope);
+  assert.equal(availableOption.state, 'available');
+  assert.match(availableOption.reason, /ready with the option's work model/);
+});
