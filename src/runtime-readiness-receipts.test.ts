@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { SproutRuntime } from './runtime.ts';
 import type { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
+import { ReadinessOutcomeError } from './environment/readiness-workflow.ts';
 
 /** Checked by tsc: normal application callers cannot issue, authorize or write evidence. */
 function applicationSurfaceCannotWrite(runtime: SproutRuntime, workflow: EnvironmentReadinessWorkflow): void {
@@ -60,6 +61,16 @@ for (const backend of ['memory', 'sqlite'] as const) {
       assert.ok(authority);
       const result = { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [], probe };
       const store = h.runtime.stores.environmentReadiness;
+      const injectedStore = testComposition(h.runtime).stores.environmentReadiness;
+      const originalCommit = injectedStore.commitObservation.bind(injectedStore);
+      injectedStore.commitObservation = async () => false;
+      try {
+        await assert.rejects(testComposition(h.runtime).readinessWorkflow.request(enrollmentId),
+          (error: unknown) => error instanceof ReadinessOutcomeError && error.disposition === 'superseded');
+      } finally {
+        injectedStore.commitObservation = originalCommit;
+      }
+      assert.deepEqual(await store.listObservations(INSTANCE_ID), [], 'uncommitted refusal has no history');
       const before = await store.getCurrentObservation(INSTANCE_ID);
       const history = await store.listObservations(INSTANCE_ID);
       const probes = await store.listProbes(INSTANCE_ID);
