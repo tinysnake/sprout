@@ -6,7 +6,7 @@ import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { AgentStore } from './agent/store.ts';
 import { AgentService } from './agent/service.ts';
 import type { Agent } from './agent/model.ts';
-import { currentOptions } from './agent/model.ts';
+import { currentConfiguration, currentOptions } from './agent/model.ts';
 import { projectAgentCompatibility } from './agent/compatibility.ts';
 import {
   CollaborationCoordinator,
@@ -778,6 +778,23 @@ export async function createSproutRuntime(options: SproutRuntimeOptions): Promis
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       agents,
+      resolveAgent: async (agentId) => {
+        const durable = await agentService.get(agentId);
+        if (durable === undefined) return agents.get(agentId);
+        if (durable.status !== 'active') return undefined;
+        const configuration = currentConfiguration(durable);
+        const seed = agents.get(agentId);
+        return {
+          id: durable.id,
+          name: durable.displayName,
+          engine: configuration.options[0]!.engine,
+          capability: seed?.capability ?? 'agent-run',
+          workOptions: configuration.options,
+          configurationVersion: configuration.version,
+          ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
+          ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
+        };
+      },
       // Observed engine facts (#87) per instance, so run admission can take the
       // Agent's first compatible work option before any engine accepts the
       // work (#90, ADR-0008). The facts are the readiness store's durable

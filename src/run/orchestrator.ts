@@ -49,6 +49,8 @@ export interface RunOrchestratorOptions {
     | ReadonlyMap<string, EngineAdapter>
     | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
   readonly agents: AgentRegistry;
+  /** Current Agent configuration authority; when supplied it also owns lifecycle refusal. */
+  readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
   /**
    * Where an agent's project memberships come from. Optional so existing callers
    * and tests that never resolve an environment need not supply one; a run by an
@@ -195,6 +197,7 @@ type SessionAttempt =
 export class RunOrchestrator {
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
+  readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly #projects: ProjectRegistry | undefined;
   readonly #pool: EnvironmentPool;
   readonly #store: RunStore;
@@ -229,6 +232,7 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#engines = options.engines;
     this.#agents = options.agents;
+    this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
     this.#projects = options.projects;
     this.#pool = options.pool;
     this.#store = options.store;
@@ -267,7 +271,7 @@ export class RunOrchestrator {
       createdAt: this.#clock.now(),
     };
 
-    const agent = this.#agents.get(request.agentId);
+    const agent = await this.#resolveAgent(request.agentId);
     if (!agent) {
       await this.settleTaskRun(
         await this.#finish(run, 'failed', {
@@ -570,7 +574,7 @@ export class RunOrchestrator {
     agentId: string,
     environmentInstanceId: string,
   ): Promise<AdmissibleOptionDecision> {
-    const agent = this.#agents.get(agentId);
+    const agent = await this.#resolveAgent(agentId);
     if (agent === undefined) {
       return { ok: false, reason: `unknown agent ${agentId}` };
     }
