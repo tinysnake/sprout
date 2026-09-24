@@ -40,6 +40,8 @@ import { InMemoryCollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter, EngineSession, StartSessionRequest } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
+import { readinessRequirements } from './environment/readiness.ts';
+import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { createPendingEnrollment } from './environment/enrollment.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import { workerIdentityDigest } from './environment/enrollment-identity.ts';
@@ -1675,7 +1677,7 @@ test('production starts with zero Environments and admits an enrolled instance w
     // required; production admits it without a restart.
     await connectRuntimeWorker(runtime, enrollmentId, keyPath);
     const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('enrolled-host-1')?.eligible, true);
@@ -1691,6 +1693,27 @@ function scriptedReadinessProbe() {
     observedAt: Date.now(),
     engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
   });
+}
+
+/** Synthetic gate control only: not evidence of a live account entitlement. */
+const scriptedScope = readinessRequirements([{ engine: 'scripted', workModel: '' }]);
+function targetBoundScriptedProbe() {
+  const result = scriptedReadinessProbe();
+  return {
+    ...result,
+    readiness: { ...result.readiness, engines: result.readiness.engines.map((engine) => ({
+      ...engine, targetModels: [], modelIdPresent: true,
+      ...(scriptedScope.revisionsByEngine?.scripted !== undefined ? { requirementRevision: scriptedScope.revisionsByEngine.scripted } : {}),
+    })) },
+  };
+}
+function scriptedStartupReadiness() {
+  return { ...targetBoundScriptedProbe().readiness, protocolVersion: WORKER_PROTOCOL_VERSION,
+    probe: startupWorkerProbe() };
+}
+async function observeSyntheticReady(runtime: SproutRuntime, enrollmentId: string, authority: ReadinessObservationAuthority) {
+  return runtime.enrollments.recordReadinessObservation(enrollmentId, targetBoundScriptedProbe(), authority,
+    { requirements: scriptedScope });
 }
 
 for (const backend of ['memory', 'sqlite'] as const) {
@@ -1749,7 +1772,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
         return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION,
           engines: [{ engine: 'scripted', version: '1.0.0', installed: state === 'ready', readiness: state,
             modelAvailability: state === 'ready' ? 'available' as const : 'none' as const,
-            models: state === 'ready' ? ['scripted-model'] : [] }], probe }, probe };
+            models: state === 'ready' ? ['scripted-model'] : [], targetModels: [], modelIdPresent: state === 'ready',
+            ...(scriptedScope.revisionsByEngine?.scripted !== undefined ? { requirementRevision: scriptedScope.revisionsByEngine.scripted } : {}) }], probe }, probe };
       };
       await h.connect(id, join(directory, 'worker-key.pem'), {
         readiness: () => fact('ready', 100).readiness,
@@ -1862,7 +1886,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
         assert.equal((await store.listProbes(enrollment.environmentInstanceId))[0]?.source, 'worker');
 
         // The refusal is input validation, not a broken authority/admission path.
-        assert.equal(await runtime.enrollments.observeReadiness(enrollment.id, scriptedReadinessProbe(), authority), true);
+        assert.ok(await observeSyntheticReady(runtime, enrollment.id, authority));
         await runtime.refreshEnvironmentCatalog();
         assert.equal(runtime.environmentCatalog.entry(enrollment.environmentInstanceId)?.eligible, true);
         assert.equal((await store.listProbes(enrollment.environmentInstanceId)).length, 2);
@@ -1894,7 +1918,7 @@ async function enrollEligibleInstance(
   });
   await connectRuntimeWorker(runtime, enrollmentId, identityKeyPath);
   const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-  await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+  await observeSyntheticReady(runtime, enrollmentId,
     readinessAuthority(runtime, enrollmentId, epoch));
   await runtime.refreshEnvironmentCatalog();
   return enrollmentId;
@@ -1938,7 +1962,7 @@ test('E2: a durable enrollment alone does not admit work; a current epoch and re
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
 
     // Establishing the required readiness fact makes it eligible dynamically.
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, emptyEpoch));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2035,7 +2059,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     const replacement = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2077,7 +2101,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
 
     // A delayed old-epoch observation is refused as non-authoritative and
     // cannot make the new connection eligible or release/conflict-bypass lease.
-    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(), firstAuthority);
+    await observeSyntheticReady(runtime, enrollmentA, firstAuthority);
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     const blocked = runtime.pool.acquireLease({
@@ -2085,7 +2109,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     });
     assert.equal(blocked.ok, false);
 
-    await runtime.enrollments.observeReadiness(enrollmentA, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentA,
       readinessAuthority(runtime, enrollmentA, replacement));
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2141,10 +2165,10 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
 
     // Delayed old facts remain non-authoritative; only readiness produced by
     // the replacement epoch restores admission.
-    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(), firstAuthority);
+    await observeSyntheticReady(second, enrollmentId, firstAuthority);
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false);
-    await second.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(second, enrollmentId,
       readinessAuthority(second, enrollmentId, replacement));
     await second.refreshEnvironmentCatalog();
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, true);
@@ -2282,19 +2306,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       // The Worker declares its own neutral, non-inference readiness facts
       // (ADR-0013). A real probe implementation is E4 (#118); here the Worker
       // states what it verified so the catalog can reach eligibility.
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [
-          {
-            engine: 'scripted',
-            installed: true,
-            readiness: 'ready',
-            modelAvailability: 'available',
-            models: ['scripted-model'],
-          },
-        ],
-      }),
+      readiness: scriptedStartupReadiness,
     });
 
     // The acceptance observer records the delegated readiness; wait for the
@@ -2369,14 +2381,7 @@ test('E2: an authenticated inbound connection admits a run on the enrolled insta
       input: replacement.stream,
       output: replacement.stream,
       workspaceRoot,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{
-          engine: 'scripted', installed: true, readiness: 'ready',
-          modelAvailability: 'available', models: ['scripted-model'],
-        }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry('enrolled-host-1')?.eligible === true,
@@ -2445,11 +2450,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       engines: new Map(),
       input: firstConnection.stream,
       output: firstConnection.stream,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
@@ -2503,11 +2504,7 @@ test('E2: a legacy same-instance enrollment cannot inherit stale readiness throu
       engines: new Map(),
       input: secondConnection.stream,
       output: secondConnection.stream,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        probe: startupWorkerProbe(),
-        engines: [{ engine: 'scripted', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] }],
-      }),
+      readiness: scriptedStartupReadiness,
     });
     await waitFor(
       () => runtime.environmentCatalog.entry(instanceId)?.eligible === true,
@@ -2741,7 +2738,7 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
     });
     await connectRuntimeWorker(runtime, enrollmentId, keyPath);
     const epoch = runtime.workerGateway.currentConnectionEpoch(enrollmentId)!;
-    await runtime.enrollments.observeReadiness(enrollmentId, scriptedReadinessProbe(),
+    await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, epoch));
     await runtime.refreshEnvironmentCatalog();
     await waitFor(
@@ -2773,6 +2770,160 @@ test('E2: approval and revocation re-project eligibility without a restart', asy
  */
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#128 ${backend}: Pi-only and mixed targets stay engine-scoped and unsupported`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-pi-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'pi', model: 'pi-model' }] });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'Pi unsupported measurement' };
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe, engines: [
+          { engine: 'pi', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [],
+            targetModels: [], modelIdPresent: false,
+            ...(params.requirements?.revisionsByEngine?.pi !== undefined ? { requirementRevision: params.requirements.revisionsByEngine.pi } : {}) },
+          ...(params.requirements?.modelsByEngine?.codex?.length ? [{ engine: 'codex', installed: true,
+            readiness: 'ready' as const, modelAvailability: 'available' as const,
+            models: [...params.requirements.modelsByEngine.codex], targetModels: [...params.requirements.modelsByEngine.codex],
+            modelIdPresent: true, ...(params.requirements.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) }] : []),
+        ] }, probe };
+      } });
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.pi, ['pi-model']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      const add = await fetch(`${h.base}/api/agents`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'codex-agent', displayName: 'Codex Agent',
+          workOptions: [{ engine: 'codex', workModel: 'codex-model', effort: 'medium' }] }) });
+      assert.equal(add.status, 201);
+      assert.equal((await post()).status, 201);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.pi, ['pi-model']);
+      assert.deepEqual(requests.at(-1)?.requirements?.modelsByEngine?.codex, ['codex-model']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false,
+        'Codex local catalog cannot turn unsupported Pi measurement into eligibility');
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: authenticated v2/v3 probes and incompatible wire keep one receipt history`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-wire-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory });
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      let mode: 'v2' | 'v3' | 'duplicate' | 'incompatible' = 'v2';
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        const probe = { at: Date.now(), latencyMs: 3, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '1', summary: 'synthetic wire control' };
+        const engines = [{ engine: 'scripted', installed: true, readiness: 'ready' as const,
+          modelAvailability: 'available' as const, models: ['scripted-model'], targetModels: [], modelIdPresent: true,
+          ...(params.requirements?.revisionsByEngine?.scripted !== undefined
+            ? { requirementRevision: params.requirements.revisionsByEngine.scripted } : {}) }];
+        return { readiness: { protocolVersion: mode === 'v2' || mode === 'duplicate' ? '2' : mode === 'v3' ? '3' : '4',
+          engines, probe: mode === 'duplicate' ? { ...probe, summary: 'contradictory' } : probe }, probe };
+      } });
+      const store = h.runtime.stores.environmentReadiness;
+      await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'accepted channel');
+      const post = () => fetch(`${h.base}/api/environments/enrollments/${id}/probes`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify({ requiredModels: ['forged'], connectionEpoch: 999,
+          probe: { source: 'browser', summary: 'forged' } }) });
+      const before = (await store.listObservations(INSTANCE_ID)).length;
+      const old = await post();
+      assert.equal(old.status, 201);
+      const oldReceipt = (await old.json()) as { receipt: { observationId: string; probe: { source: string } } };
+      assert.equal(oldReceipt.receipt.probe.source, 'worker');
+      mode = 'v3';
+      const fresh = await post();
+      assert.equal(fresh.status, 201);
+      const freshReceipt = (await fresh.json()) as { receipt: { observationId: string } };
+      assert.notEqual(oldReceipt.receipt.observationId, freshReceipt.receipt.observationId);
+      assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.observationId, freshReceipt.receipt.observationId);
+      assert.equal((await store.listObservations(INSTANCE_ID)).length, before + 2);
+      for (const rejected of ['duplicate', 'incompatible'] as const) {
+        mode = rejected;
+        assert.notEqual((await post()).status, 201);
+        assert.equal((await store.getCurrentObservation(INSTANCE_ID))?.observationId, freshReceipt.receipt.observationId);
+        assert.equal((await store.listObservations(INSTANCE_ID)).length, before + 2);
+      }
+    } finally { await h.close(); }
+  });
+
+  test(`#128 ${backend}: HTTP Agent edits fence held target evidence and preserve independent observations`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-128-edit-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const h = await readinessWorkflowHarness({ backend, directory,
+      agents: [{ ...agent('scout'), engine: 'codex', model: 'model-a' }] });
+    let release: (() => void) | undefined;
+    try {
+      const id = (await h.runtime.enrollments.list())[0]!.id;
+      await h.runtime.agentService.create({ id: 'scout', displayName: 'Scout',
+        workOptions: [{ engine: 'codex', workModel: 'model-a', effort: 'medium' }] });
+      const post = (path: string, body: object) => fetch(`${h.base}${path}`, { method: 'POST',
+        headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      const edit = async (model: string, displayName: string) => {
+        const response = await post('/api/agents/scout/configuration', { displayName,
+          workOptions: [{ engine: 'codex', workModel: model, effort: 'medium' }] });
+        assert.equal(response.status, 200);
+      };
+      let started: (() => void) | undefined;
+      const first = new Promise<void>((resolve) => { started = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const requests: WorkerReadinessProbeParams[] = [];
+      await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async (params) => {
+        requests.push(params);
+        if (requests.length === 1) { started?.(); await gate; }
+        const model = params.requirements?.modelsByEngine?.codex?.[0] ?? '';
+        const probe = { at: Date.now(), latencyMs: 1, protocolOk: true, enginesOk: true,
+          source: 'worker' as const, version: '3', summary: 'synthetic target measurement' };
+        // Synthetic local-catalog gate control, not live entitlement evidence.
+        return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, probe,
+          engines: [{ engine: 'codex', installed: true, authenticated: true, readiness: 'ready',
+            modelAvailability: 'available', models: [model], targetModels: [model], modelIdPresent: true,
+            ...(params.requirements?.revisionsByEngine?.codex !== undefined
+              ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) }] }, probe };
+      } });
+      await first;
+      assert.deepEqual(requests[0]?.requiredModels, ['model-a']);
+      await edit('model-b', 'Scout');
+      release?.();
+      await waitFor(async () => (await h.runtime.enrollments.listProbes(id)).length === 1, 'held old-target receipt');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false);
+      const old = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      assert.deepEqual(old.requirements?.modelsByEngine?.codex, ['model-a']);
+      const response = await post(`/api/environments/enrollments/${id}/probes`, {
+        requirements: { modelsByEngine: { codex: ['forged'] } }, connectionEpoch: 9000,
+        probe: { source: 'browser', summary: 'forged' }, engines: [{ engine: 'codex', readiness: 'ready' }],
+      });
+      assert.equal(response.status, 201);
+      assert.deepEqual(requests.at(-1)?.requiredModels, ['model-b']);
+      const receipt = (await response.json()) as { receipt: { observationId: string; probe: { source: string } } };
+      assert.equal(receipt.receipt.probe.source, 'worker');
+      const current = (await h.runtime.stores.environmentReadiness.getCurrentObservation(INSTANCE_ID))!;
+      assert.equal(current.observationId, receipt.receipt.observationId);
+      assert.notEqual(current.observationId, old.observationId);
+      assert.equal((await h.runtime.stores.environmentReadiness.listObservations(INSTANCE_ID)).length, 2);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+      await edit('model-b', 'Renamed Scout');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true, 'metadata edit preserves target evidence');
+      await edit('model-c', 'Renamed Scout');
+      await h.runtime.refreshEnvironmentCatalog();
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, false, 'post-success target edit invalidates evidence');
+      assert.equal((await post(`/api/environments/enrollments/${id}/probes`, {})).status, 201);
+      assert.deepEqual(requests.at(-1)?.requiredModels, ['model-c']);
+      assert.equal(h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible, true);
+    } finally { release?.(); await h.close(); }
+  });
+
   test(`#128 ${backend}: durable Agent edits bind each fresh authenticated probe to current targets`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-durable-targets-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -3001,7 +3152,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
     try {
       const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
       await h.connect(enrollmentId, join(directory, 'worker-key.pem'), {
-        readinessProbe: async () => {
+        readinessProbe: async (params) => {
           const probe = {
             at: Date.now(), latencyMs: 9, protocolOk: true, enginesOk: true,
             source: 'worker' as const, version: '0.154.0', summary: 'requested probe',
@@ -3011,7 +3162,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
               protocolVersion: WORKER_PROTOCOL_VERSION,
               engines: [
                 { engine: 'scripted', version: '1.0.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['scripted-model'] },
-                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' },
+                { engine: 'codex', version: '0.154.0', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-6-astra'], authenticated: true, probedAt: 5, probeExitCode: 0, source: 'codex-account-read' as const, targetModels: params.requirements?.modelsByEngine?.codex ?? [], modelIdPresent: true, ...(params.requirements?.revisionsByEngine?.codex !== undefined ? { requirementRevision: params.requirements.revisionsByEngine.codex } : {}) },
               ],
               probe,
             },

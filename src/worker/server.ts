@@ -231,9 +231,13 @@ export class EnvironmentWorker {
       if (JSON.stringify(result.readiness.probe) !== JSON.stringify(result.probe)) {
         throw new Error('inconsistent Worker probe metadata');
       }
+      // Preserve the identity of a deliberately redelivered attempt. Replacing
+      // it with the request's new identity would append instead of replaying
+      // the original receipt after flattening the v3 wire envelope.
+      const attemptId = result.attemptId ?? params?.attemptId;
       return { protocolVersion: '3', observedAt: result.readiness.observedAt,
         engines: result.readiness.engines, probe: result.probe,
-        ...(params?.attemptId !== undefined ? { attemptId: params.attemptId } : {}) } as unknown as WorkerReadinessProbeResult;
+        ...(attemptId !== undefined ? { attemptId } : {}) } as unknown as WorkerReadinessProbeResult;
     }
     return params?.attemptId === undefined ? result : { ...result, attemptId: result.attemptId ?? params.attemptId };
   }
