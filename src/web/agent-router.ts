@@ -49,6 +49,7 @@ export interface AgentRouterOptions {
    */
   readonly compatibility?: (
     agent: Agent,
+    environmentInstanceId?: string,
   ) => Promise<unknown>;
 }
 
@@ -259,7 +260,8 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
         if (compatibility === undefined) {
           return json(context, 503, { error: 'compatibility facts are not configured' });
         }
-        return json(context, 200, await compatibility(agent));
+        const environmentInstanceId = context.searchParams.get('environmentInstanceId') ?? undefined;
+        return json(context, 200, await compatibility(agent, environmentInstanceId));
       }
 
       // GET /api/runs/:id/work-option — one run's durable admission facts (#90).

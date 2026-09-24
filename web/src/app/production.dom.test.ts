@@ -222,6 +222,11 @@ test('Production Web: mounts Shell and Manage / Environments, preserving structu
     // 4. Verify 6 Independent Health Dimensions
     assert.match(doc.body.textContent ?? '', /6 Independent Health Dimensions/);
     assert.match(doc.body.textContent ?? '', /1–4\. Core Operational Status & Safety Dimensions/);
+    assert.match(
+      doc.body.textContent ?? '',
+      /Health colour is an operational summary, not an authorization token to execute runs/,
+      'health colour authorization disclaimer is present in the DOM',
+    );
     assert.match(doc.body.textContent ?? '', /5\. Capability Permissions/);
     assert.match(doc.body.textContent ?? '', /6\. Engine Harness Readiness/);
 

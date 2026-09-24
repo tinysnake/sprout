@@ -41,8 +41,13 @@ import type {
   ReadinessProbeFact,
   ProtocolVersionRange,
   WorkSafetyState,
+  EngineReadinessFact,
 } from './readiness.ts';
-import { targetEvidenceSatisfiesRequirements, type ReadinessRequirementScope } from './readiness.ts';
+import {
+  evaluateEngineOption,
+  targetEvidenceSatisfiesRequirements,
+  type ReadinessRequirementScope,
+} from './readiness.ts';
 
 /**
  * The capability a run must be permitted to acquire for automatic admission.
@@ -97,6 +102,7 @@ export interface EnvironmentCatalogInput {
   readonly probe?: ReadinessProbeFact;
   readonly requiredEngines: readonly string[];
   readonly requirements?: ReadinessRequirementScope;
+  readonly optionsByAgent?: Readonly<Record<string, readonly { readonly engine: string; readonly workModel: string }[]>>;
   readonly supportedProtocol: ProtocolVersionRange;
   readonly now: number;
   /**
@@ -179,6 +185,7 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
       ? { recoveryRecords: [{ environmentInstanceId: enrollment.environmentInstanceId, phase: 'reconciling' as const }] }
       : {}),
     requiredEngines: input.requirements?.requiredEngines ?? input.requiredEngines,
+    ...(input.requirements !== undefined ? { requirements: input.requirements } : {}),
     ...(input.probe !== undefined ? { probe: input.probe } : {}),
     supportedProtocol: input.supportedProtocol,
     now: input.now,
@@ -199,20 +206,49 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
   // an available model. An unrequired engine stays an honestly non-blocking
   // fact. Strict probe-driven admission for the remaining dimensions arrives
   // with E4 (#118); E2 admits only what its independent facts establish.
-  const requiredReadinessEstablished = readiness.readiness.engines
-    .filter((engine) => engine.required)
-    .every(
-      (engine) =>
-        engine.installed &&
-        engine.readiness === 'ready' &&
-        (input.requirements === undefined
-          ? engine.models.state === 'available'
-          : targetEvidenceSatisfiesRequirements(engine, input.requirements) &&
-            JSON.stringify(authoritativeObserved?.requirements?.modelsByEngine?.[engine.engine]) === JSON.stringify(input.requirements.modelsByEngine?.[engine.engine]) &&
-            (authoritativeObserved?.requirements?.revisionsByEngine?.[engine.engine] ?? authoritativeObserved?.requirements?.revision) ===
-              (input.requirements.revisionsByEngine?.[engine.engine] ?? input.requirements.revision) &&
-            engine.models.state === 'available'),
+  const isEngineSatisfied = (engine: EngineReadinessFact): boolean => {
+    if (input.requirements === undefined) {
+      return (
+        evaluateEngineOption({ engine: engine.engine, workModel: '' }, engine).state === 'available' &&
+        engine.models.state === 'available'
+      );
+    }
+    const targets = input.requirements.modelsByEngine?.[engine.engine] ?? [];
+    const targetsSatisfied = targets.length === 0
+      ? evaluateEngineOption({ engine: engine.engine, workModel: '' }, engine, input.requirements).state === 'available'
+      : targets.every(
+          (target) =>
+            evaluateEngineOption({ engine: engine.engine, workModel: target }, engine, input.requirements).state === 'available',
+        );
+    return (
+      targetsSatisfied &&
+      targetEvidenceSatisfiesRequirements(engine, input.requirements) &&
+      JSON.stringify(authoritativeObserved?.requirements?.modelsByEngine?.[engine.engine]) ===
+        JSON.stringify(input.requirements.modelsByEngine?.[engine.engine]) &&
+      (authoritativeObserved?.requirements?.revisionsByEngine?.[engine.engine] ?? authoritativeObserved?.requirements?.revision) ===
+        (input.requirements.revisionsByEngine?.[engine.engine] ?? input.requirements.revision) &&
+      engine.models.state === 'available'
     );
+  };
+
+  const optionsByAgent = input.optionsByAgent;
+  const isEngineRequired = (engineName: string): boolean => {
+    if (!optionsByAgent) return true;
+    return Object.values(optionsByAgent).some((agentOptions) => {
+      const hasSatisfiedAlternative = agentOptions.some(
+        (opt) => opt.engine !== engineName && (() => {
+          const fact = readiness.readiness.engines.find((e) => e.engine === opt.engine);
+          return fact !== undefined && isEngineSatisfied(fact);
+        })(),
+      );
+      if (hasSatisfiedAlternative) return false;
+      return agentOptions.some((opt) => opt.engine === engineName);
+    });
+  };
+
+  const requiredReadinessEstablished = readiness.readiness.engines
+    .filter((engine) => engine.required && isEngineRequired(engine.engine))
+    .every((engine) => isEngineSatisfied(engine));
   const eligible =
     enrollment.status === 'approved' &&
     platform !== 'unknown' &&

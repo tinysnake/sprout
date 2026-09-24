@@ -121,6 +121,145 @@ export function targetEvidenceSatisfiesRequirements(engine: EngineReadinessFact,
     (targets.length === 0 || engine.modelIdPresent === true);
 }
 
+export type EngineOptionEvaluationState =
+  | 'available'
+  | 'login-required'
+  | 'missing'
+  | 'unknown'
+  | 'model-unavailable';
+
+export interface EngineOptionEvaluation {
+  readonly state: EngineOptionEvaluationState;
+  readonly reason: string;
+}
+
+/**
+ * Reusable engine and model evaluation (#123 §6, #129 AC1).
+ *
+ * Interprets applicable committed evidence for Agent work-option compatibility,
+ * Agent-run admission, catalog eligibility, and Environment health.
+ *
+ * An unknown model remains unknown and never appears available in compatibility
+ * while admission refuses it for that readiness reason.
+ */
+export function evaluateEngineOption(
+  option: { readonly engine: string; readonly workModel?: string },
+  fact: EngineReadinessFact | undefined,
+  requirementScope?: ReadinessRequirementScope,
+): EngineOptionEvaluation {
+  if (fact === undefined) {
+    return {
+      state: 'unknown',
+      reason: `Engine "${option.engine}" has not been observed on this Environment.`,
+    };
+  }
+  if (!fact.installed || fact.readiness === 'missing') {
+    return {
+      state: 'missing',
+      reason: `Engine "${option.engine}" is not installed on this Environment.`,
+    };
+  }
+  if (fact.readiness === 'login-required') {
+    return {
+      state: 'login-required',
+      reason: `Engine "${option.engine}" requires a login on this Environment.`,
+    };
+  }
+  if (fact.readiness !== 'ready') {
+    return {
+      state: 'unknown',
+      reason: `Engine "${option.engine}" readiness is unknown on this Environment.`,
+    };
+  }
+
+  const workModel = option.workModel ?? '';
+
+  if (workModel === '') {
+    if (requirementScope?.revision !== undefined) {
+      const expectedRevision =
+        requirementScope.revisionsByEngine?.[option.engine] ?? requirementScope.revision;
+      if (expectedRevision !== undefined && fact.requirementRevision !== expectedRevision) {
+        return {
+          state: 'unknown',
+          reason: `Engine "${option.engine}" readiness is not established for the current requirement revision.`,
+        };
+      }
+      if (!targetEvidenceSatisfiesRequirements(fact, requirementScope)) {
+        return {
+          state: 'unknown',
+          reason: `Target evidence does not satisfy current requirements for engine "${option.engine}".`,
+        };
+      }
+    }
+    return {
+      state: 'available',
+      reason: `Engine "${option.engine}" is ready.`,
+    };
+  }
+
+  if (fact.models.state === 'none') {
+    return {
+      state: 'model-unavailable',
+      reason: `Engine "${option.engine}" reports no available work models on this Environment.`,
+    };
+  }
+
+  if (fact.models.state === 'unknown') {
+    return {
+      state: 'unknown',
+      reason: `Work model "${workModel}" availability is unknown for "${option.engine}" on this Environment.`,
+    };
+  }
+
+  if (fact.models.models.length > 0 && !fact.models.models.includes(workModel)) {
+    return {
+      state: 'model-unavailable',
+      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+    };
+  }
+
+  if (fact.targetModels !== undefined && fact.targetModels.length > 0 && !fact.targetModels.includes(workModel)) {
+    return {
+      state: 'model-unavailable',
+      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+    };
+  }
+
+  if (fact.modelIdPresent === false) {
+    return {
+      state: 'model-unavailable',
+      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+    };
+  }
+
+  if (requirementScope !== undefined) {
+    const expectedRevision =
+      requirementScope.revisionsByEngine?.[option.engine] ?? requirementScope.revision;
+    if (expectedRevision !== undefined) {
+      if (fact.requirementRevision !== expectedRevision) {
+        return {
+          state: 'unknown',
+          reason: `Work model "${workModel}" readiness is not established for the current requirement revision.`,
+        };
+      }
+      if (
+        requirementScope.modelsByEngine?.[option.engine]?.includes(workModel) &&
+        !targetEvidenceSatisfiesRequirements(fact, requirementScope)
+      ) {
+        return {
+          state: 'unknown',
+          reason: `Target evidence does not satisfy current requirements for engine "${option.engine}".`,
+        };
+      }
+    }
+  }
+
+  return {
+    state: 'available',
+    reason: `Engine "${option.engine}" is ready with the option's work model.`,
+  };
+}
+
 /**
  * Committed observation receipt identifying the exact canonical durable
  * observation (#126).
@@ -167,6 +306,7 @@ export interface EnvironmentReadiness {
   readonly observationId?: string;
   readonly receipt?: ReadinessReceipt;
   readonly workSafety: WorkSafetyFact;
+  readonly requirements?: ReadinessRequirementScope;
 }
 
 export interface EnvironmentReadinessSummary {
@@ -399,10 +539,15 @@ export function summarizeEnvironmentReadiness(
     }
   }
   for (const engine of readiness.engines) {
-    if (engine.required && (engine.readiness === 'missing' || engine.readiness === 'unknown')) {
-      return red(`Required engine "${engine.engine}" is ${engine.readiness}.`);
+    const evaluation = evaluateEngineOption(
+      { engine: engine.engine, workModel: engine.targetModels?.[0] ?? '' },
+      engine,
+      readiness.requirements,
+    );
+    if (engine.required && (evaluation.state === 'missing' || engine.readiness === 'unknown')) {
+      return red(`Required engine "${engine.engine}" is ${evaluation.state === 'missing' ? 'missing' : engine.readiness}.`);
     }
-    if (engine.required && engine.models.state === 'none') {
+    if (engine.required && evaluation.state === 'model-unavailable') {
       return red(`Required engine "${engine.engine}" has no available work model.`);
     }
   }
@@ -422,10 +567,18 @@ export function summarizeEnvironmentReadiness(
     }
   }
   for (const engine of readiness.engines) {
-    if (engine.readiness === 'login-required') {
+    const evaluation = evaluateEngineOption(
+      { engine: engine.engine, workModel: engine.targetModels?.[0] ?? '' },
+      engine,
+      readiness.requirements,
+    );
+    if (evaluation.state === 'login-required') {
       return yellow(`Engine "${engine.engine}" requires a login on the Environment host.`);
     }
-    if (engine.readiness !== 'ready') {
+    if (evaluation.state !== 'available') {
+      if (engine.models.state === 'unknown' && engine.readiness === 'ready') {
+        return yellow(`Model availability for engine "${engine.engine}" is unknown.`);
+      }
       return yellow(`Engine "${engine.engine}" is ${engine.readiness}.`);
     }
     if (engine.models.state === 'unknown') {

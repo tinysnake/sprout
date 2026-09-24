@@ -15,7 +15,7 @@ import {
 import { AgentService } from './service.ts';
 import { InMemoryAgentStore } from './store.ts';
 import { projectAgentCompatibility } from './compatibility.ts';
-import { selectAdmissibleWorkOption } from './admission.ts';
+import { evaluateAdmissibleWorkOption, selectAdmissibleWorkOption } from './admission.ts';
 
 /**
  * The portable Agent identity contract (#90, ADR-0008): stable identity,
@@ -359,4 +359,21 @@ test('admission selects the first verified option and never a lower one silently
   );
   // An empty fact list verifies nothing.
   assert.equal(selectAdmissibleWorkOption(options, []), undefined);
+});
+
+test('#129: a required unknown model is unknown in compatibility and refused by admission with matching explanation', () => {
+  const options = [{ id: 'opt-1', engine: 'codex', workModel: 'gpt-5.2-codex', effort: 'medium' }];
+  const facts = [
+    { engine: 'codex', installed: true, readiness: 'ready' as const, models: { state: 'unknown' as const, models: [] } },
+  ];
+  const compat = projectAgentCompatibility({ workOptions: options, availableEngines: facts });
+  assert.equal(compat.available, false);
+  assert.equal(compat.options[0]!.state, 'unknown');
+  assert.match(compat.options[0]!.reason, /availability is unknown for "codex"/);
+  assert.equal(compat.unavailableReason, compat.options[0]!.reason);
+
+  const admission = evaluateAdmissibleWorkOption(options, facts);
+  assert.equal(admission.ok, false);
+  assert.equal(admission.reason, compat.options[0]!.reason, 'compatibility and admission reasons agree');
+  assert.equal(selectAdmissibleWorkOption(options, facts), undefined);
 });

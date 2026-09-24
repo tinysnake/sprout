@@ -135,7 +135,7 @@ function input(overrides: Partial<EnvironmentCatalogInput> & {
       ? overrides.observed
       : observed({ enrollmentId: selectedEnrollment.id }),
     workSafety: overrides.workSafety ?? ('clear' as WorkSafetyState),
-    requiredEngines: overrides.requiredEngines ?? ['codex'],
+    requiredEngines: overrides.requiredEngines ?? overrides.requirements?.requiredEngines ?? ['codex'],
     ...(overrides.requirements !== undefined ? { requirements: overrides.requirements } : {}),
     supportedProtocol: overrides.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL,
     now: overrides.now ?? NOW,

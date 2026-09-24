@@ -235,3 +235,25 @@ test('a failed turn is reported as-is and never replayed through a lower option'
   assert.equal(piAdapter.requests.length, 0, 'the fallback engine was never started after acceptance');
   assert.equal(adapters.get('pi')!.requests.length, 0);
 });
+
+test('#129: evaluateOptionAdmission reports the decisive readiness reason matching compatibility', async () => {
+  const unknownCodex: AgentWorkOptionEngineFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    models: { state: 'unknown', models: [] },
+  };
+  const { orchestrator } = build({
+    agent: orderedAgent,
+    engineFacts: async () => [unknownCodex],
+    strictAdmission: true,
+  });
+  const decision = await orchestrator.evaluateOptionAdmission('agent-scout', 'mac-mini-1');
+  assert.equal(decision.ok, false);
+  assert.match(decision.reason ?? '', /availability is unknown for "codex"/);
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hi' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /availability is unknown for "codex"/);
+});

@@ -173,12 +173,16 @@ const agentRuns = computed(() =>
     <!-- Section 4: Environment Compatibility (foldable, backend projection) -->
     <Foldable
       class="foldable-env-compat"
+      :default-open="true"
       title="Environment Compatibility & Admission Evaluation"
       :subtext="agent.compatibility?.environmentAvailable ? 'A compatible option is available' : 'No compatible option verified'"
     >
       <div class="flex flex-col gap-2">
         <p class="text-[11px] text-[var(--text-muted)] m-0">
           Evaluated at read time from the Environment's current observed engine facts. Host credentials and local paths remain isolated.
+        </p>
+        <p class="text-[10px] text-[var(--text-muted)] m-0 border-l-2 border-[var(--border-subtle)] pl-2">
+          Compatibility reflects engine and model readiness only, not permission to execute. Runs remain independently gated by enrollment authority, capability permissions, leases, and work safety.
         </p>
         <div
           v-for="option in agent.workOptions"

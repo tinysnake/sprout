@@ -58,11 +58,12 @@ export interface AgentOptionCompatibilityView {
 
 export interface AgentCompatibilityView {
   readonly agentId: string;
-  readonly environmentInstanceId: string;
+  readonly environmentInstanceId?: string;
   readonly available: boolean;
   readonly firstAvailable?: AgentWorkOptionView;
   readonly unavailableReason?: string;
   readonly options: readonly AgentOptionCompatibilityView[];
+  readonly explanation?: string;
 }
 
 /** One run's durable admission facts (#90). */
@@ -102,7 +103,7 @@ export interface AgentBrowserAdapter {
   archiveAgent(id: string): Promise<AgentView>;
   restoreAgent(id: string): Promise<AgentView>;
   /** The current Environment-facts compatibility projection for one Agent. */
-  compatibility(id: string): Promise<AgentCompatibilityView>;
+  compatibility(id: string, environmentInstanceId?: string): Promise<AgentCompatibilityView>;
   /** One run's durable engine/work-model/effort/config-version attribution. */
   runWorkOption(runId: string): Promise<RunWorkOptionAttributionRecord>;
 }
@@ -160,9 +161,10 @@ export function createAgentBrowserAdapter(transport: BrowserTransport): AgentBro
       );
       return response.agent;
     },
-    async compatibility(id) {
+    async compatibility(id, environmentInstanceId) {
+      const suffix = environmentInstanceId === undefined ? '' : `?environmentInstanceId=${encodeURIComponent(environmentInstanceId)}`;
       return transport.request<AgentCompatibilityView>(
-        `/api/agents/${encodeURIComponent(id)}/compatibility`,
+        `/api/agents/${encodeURIComponent(id)}/compatibility${suffix}`,
       );
     },
     async runWorkOption(runId) {

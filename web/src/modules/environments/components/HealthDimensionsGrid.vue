@@ -89,5 +89,9 @@ const emit = defineEmits<{
         </div>
       </div>
     </div>
+
+    <div class="text-[10px] text-[var(--text-muted)] mt-1">
+      Health colour is an operational summary, not an authorization token to execute runs.
+    </div>
   </div>
 </template>
