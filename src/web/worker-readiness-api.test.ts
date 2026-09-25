@@ -273,6 +273,21 @@ test('a pending enrollment has no probe authority over the real gateway (R118-AP
 });
 
 
+test('probe POST against an approved enrollment with no live Worker connection returns 409 unavailable (R118-API-002)', async (t) => {
+  const h = await harness();
+  const key = tmpKey();
+  t.after(async () => { key.cleanup(); await h.close(); });
+  await enrollAndApprove(h, key.path);
+
+  const response = await post(h, '/api/environments/enrollments/enroll-1/probes');
+  assert.equal(response.status, 409);
+  const body = (await response.json()) as { error: string; code?: string; disposition?: string };
+  assert.equal(body.error, 'the Environment Worker is offline');
+  assert.equal(body.disposition, 'unavailable');
+  assert.equal(body.code, 'unavailable');
+});
+
+
 test('a real accepted Worker probe crosses the gateway epoch and GET returns coherent facts (R118-API-002)', async (t) => {
   const h = await harness();
   const key = tmpKey();
