@@ -359,8 +359,8 @@ test('a Worker-declared provider or account identity is dropped at the readiness
 });
 
 test('semver floor comparison helpers parse standard versions and evaluate floor accurately (#136)', () => {
-  assert.deepEqual(parseSemver('0.154.0'), [0, 154, 0]);
-  assert.deepEqual(parseSemver('  0.86.1\n'), [0, 86, 1]);
+  assert.deepEqual(parseSemver('0.154.0'), { core: [0n, 154n, 0n] });
+  assert.deepEqual(parseSemver('  0.86.1\n'), { core: [0n, 86n, 1n] });
   assert.equal(parseSemver('not-a-version'), undefined);
   assert.equal(parseSemver('1.2'), undefined);
 
@@ -379,6 +379,95 @@ test('semver floor comparison helpers parse standard versions and evaluate floor
   assert.equal(isAtLeastVersion('0.86.0', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
   assert.equal(isAtLeastVersion('0.85.1', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
   assert.equal(isAtLeastVersion('bad', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
+});
+
+test('prerelease versions on higher cores reach the verified probes, but floor-core prereleases do not (#136)', async () => {
+  for (const [configuration, floor, above] of [
+    [configurations[0]!, '0.154.0', '0.154.1-rc.1+build.2'],
+    [configurations[1]!, '0.86.1', '0.86.2-rc.1+build.2'],
+  ] as const) {
+    for (const [version, supported] of [[`${floor}-rc.1`, false], [above, true]] as const) {
+      const calls: string[] = [];
+      const result = await probeEnvironmentReadiness([configuration], {
+        commandRunner: {
+          async run(_binary, args) {
+            calls.push(args.join(' '));
+            return args[0] === '--version'
+              ? { stdout: `${configuration.engine === 'codex' ? 'codex-cli' : 'pi'} ${version}`, exitCode: 0 }
+              : { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+          },
+          async accountRead() {
+            calls.push('account/read');
+            return { stdout: JSON.stringify({ account: { type: 'apiKey' }, requiresOpenaiAuth: true }), exitCode: 0 };
+          },
+          async bundledModels() {
+            calls.push('debug models --bundled');
+            return { stdout: JSON.stringify({ models: [{ slug: 'synthetic-model' }] }), exitCode: 0 };
+          },
+        },
+      });
+      assert.equal(result.readiness.engines[0]?.readiness, supported ? 'ready' : 'unknown', version);
+      assert.equal(result.readiness.engines[0]?.version, version);
+      assert.deepEqual(calls, supported
+        ? configuration.engine === 'codex' ? ['--version', 'account/read', 'debug models --bundled'] : ['--version', 'auth check --json --no-refresh --provider openai-codex']
+        : ['--version']);
+      if (!supported) {
+        const evaluation = evaluateEngineOption({ engine: configuration.engine }, {
+          engine: configuration.engine, version, installed: true, readiness: 'unknown', required: true,
+          models: { state: 'unknown', models: [] },
+        });
+        assert.equal(evaluation.reason, `Engine "${configuration.engine}" readiness is unknown on this Environment.`);
+      }
+    }
+  }
+});
+
+test('SemVer prerelease identifiers and build metadata follow precedence, while malformed versions fail closed (#136)', () => {
+  const ordered = [
+    '1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta',
+    '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11',
+    '1.0.0-rc.1', '1.0.0',
+  ];
+  for (let i = 1; i < ordered.length; i++) {
+    assert.equal(isAtLeastVersion(ordered[i]!, ordered[i - 1]!), true);
+    assert.equal(isAtLeastVersion(ordered[i - 1]!, ordered[i]!), false);
+  }
+  assert.equal(isAtLeastVersion('1.0.0-1', '1.0.0-alpha'), false);
+  assert.equal(isAtLeastVersion('1.0.0+build.1', '1.0.0+build.2'), true);
+  assert.equal(isAtLeastVersion('1.0.0-alpha+build.2', '1.0.0-alpha+build.1'), true);
+  assert.equal(isAtLeastVersion('9007199254740993.0.0', '9007199254740992.0.0'), true);
+  for (const malformed of ['1.2', '01.2.3', '1.2.3-01', '1.2.3-', '1.2.3+bad..id', '1.2.3-rc!']) {
+    assert.equal(isAtLeastVersion(malformed, '0.0.0'), false, malformed);
+  }
+});
+
+test('malformed version output stays unknown with a neutral reason and never invokes auth (#136)', async () => {
+  for (const configuration of configurations) {
+    for (const version of ['0.154', '0.154.1-01', '0.154.1+bad..id']) {
+      const calls: string[] = [];
+      const result = await probeEnvironmentReadiness([configuration], {
+        commandRunner: {
+          async run(_binary, args) {
+            calls.push(args.join(' '));
+            return { stdout: `${configuration.engine === 'codex' ? 'codex-cli' : 'pi'} ${version}`, exitCode: 0 };
+          },
+          async accountRead() {
+            calls.push('account/read');
+            return { stdout: '{}', exitCode: 0 };
+          },
+        },
+      });
+      const fact = result.readiness.engines[0]!;
+      assert.deepEqual(calls, ['--version'], `${configuration.engine}: ${version}`);
+      assert.equal(fact.readiness, 'unknown');
+      assert.equal(fact.version, undefined);
+      const evaluation = evaluateEngineOption({ engine: configuration.engine }, {
+        engine: configuration.engine, installed: true, readiness: fact.readiness, required: true,
+        models: { state: 'unknown', models: [] },
+      });
+      assert.equal(evaluation.reason, `Engine "${configuration.engine}" readiness is unknown on this Environment.`);
+    }
+  }
 });
 
 test('engine versions at or above minimum supported floors execute verified non-inference probe contracts (#136)', async () => {

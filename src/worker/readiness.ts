@@ -133,25 +133,47 @@ export const SUPPORTED_READINESS_VERSION_FLOORS = {
 
 export const SUPPORTED_READINESS_VERSIONS = SUPPORTED_READINESS_VERSION_FLOORS;
 
-/**
- * Parse a standard 3-component semantic version number into numeric components.
- */
-export function parseSemver(version: string): readonly [number, number, number] | undefined {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
-  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
+type ParsedSemver = {
+  readonly core: readonly [bigint, bigint, bigint];
+  readonly prerelease?: readonly (bigint | string)[];
+};
 
 /**
- * Check whether `actual` version meets or exceeds `floor` version.
+ * Strict SemVer 2.0 precedence for the readiness floor: three numeric core
+ * components, optional prerelease identifiers, and optional build metadata.
+ * Prereleases are below their stable core; numeric prerelease identifiers sort
+ * numerically and before alphanumeric ones, then by list length. Build metadata
+ * has no precedence. Invalid/missing components fail closed (never probe auth).
  */
+export function parseSemver(version: string): ParsedSemver | undefined {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version.trim());
+  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined;
+  const identifiers = match[4]?.split('.');
+  if (identifiers?.some((id) => /^\d+$/.test(id) && id.length > 1 && id.startsWith('0'))) return undefined;
+  return {
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    ...(identifiers !== undefined ? { prerelease: identifiers.map((id) => /^\d+$/.test(id) ? BigInt(id) : id) } : {}),
+  };
+}
+
+/** Check whether `actual` meets or exceeds `floor` by SemVer precedence. */
 export function isAtLeastVersion(actual: string, floor: string): boolean {
   const a = parseSemver(actual);
   const b = parseSemver(floor);
   if (!a || !b) return false;
-  if (a[0] !== b[0]) return a[0] > b[0];
-  if (a[1] !== b[1]) return a[1] > b[1];
-  return a[2] >= b[2];
+  for (let i = 0; i < 3; i++) {
+    if (a.core[i]! !== b.core[i]!) return a.core[i]! > b.core[i]!;
+  }
+  if (a.prerelease === undefined) return true;
+  if (b.prerelease === undefined) return false;
+  for (let i = 0; i < Math.min(a.prerelease.length, b.prerelease.length); i++) {
+    const left = a.prerelease[i]!;
+    const right = b.prerelease[i]!;
+    if (left === right) continue;
+    if (typeof left !== typeof right) return typeof left === 'string';
+    return left > right;
+  }
+  return a.prerelease.length >= b.prerelease.length;
 }
 
 /**
@@ -171,9 +193,10 @@ function pinnedVersionFromOutput(engine: 'codex' | 'pi', output: string): string
   // command is not evidence that this executable implements the pinned schema.
   const text = output.trim();
   const match = engine === 'codex'
-    ? /^codex-cli\s+v?(\d+\.\d+\.\d+)$/.exec(text)
-    : /^(?:pi\s+)?v?(\d+\.\d+\.\d+)$/.exec(text);
-  return match?.[1];
+    ? /^codex-cli\s+v?(\S+)$/.exec(text)
+    : /^(?:pi\s+)?v?(\S+)$/.exec(text);
+  const version = match?.[1];
+  return version !== undefined && parseSemver(version) !== undefined ? version : undefined;
 }
 
 function safePiAuthType(value: unknown): 'oauth' | 'api_key' | undefined {
