@@ -41,7 +41,7 @@ const emit = defineEmits<{
   (e: 'registerReplacement'): void;
 }>();
 
-const now = useReactiveClock();
+const now = useReactiveClock(() => props.env.claim?.expiresAt);
 
 const isExpired = computed(() => {
   if (!props.env.claim) return false;

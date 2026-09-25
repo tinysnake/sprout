@@ -1040,7 +1040,7 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
   }
 });
 
-test('Ticket #141 (reactive expiry): pending cancel controls recompute reactively when claim expiresAt passes without prop changes', async () => {
+test('Ticket #141 (reactive expiry): pending cancel controls recompute reactively precisely when claim expiresAt passes without coarse interval lag', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
     const { createApp, h } = await import('vue');
@@ -1052,7 +1052,8 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
     )) as { default: any };
 
     const now = Date.now();
-    // Claim expires in 300ms
+    // Claim expires precisely 70ms in the future
+    const expiresAt = now + 70;
     const expiringEnv = {
       id: 'env-expiring-clock-test',
       displayName: 'Expiring Host',
@@ -1071,7 +1072,7 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
       probeHistory: [],
       boundWorkspaces: [],
       identityDigest: '',
-      claim: { issuedAt: now - 5000, expiresAt: now + 300 },
+      claim: { issuedAt: now - 5000, expiresAt },
       decisions: [],
     };
 
@@ -1089,18 +1090,20 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
     });
     appCard.mount(containerCard);
 
-    await new Promise((r) => setTimeout(r, 60));
-
-    // Initially unexpired: both detail and list show the cancel button
+    // Initial check (well before the 70ms expiry):
+    await new Promise((r) => setTimeout(r, 15));
+    assert.ok(Date.now() < expiresAt, 'test assertion runs before claim expiry');
     assert.ok(containerDetail.querySelector('.cancel-enroll-btn'), 'detail shows cancel button before expiry');
     assert.ok(containerCard.querySelector('.cancel-enroll-btn'), 'card shows cancel button before expiry');
 
-    // Wait for the reactive clock to advance past claim.expiresAt (interval is 1000ms, claim expired at 300ms)
-    await new Promise((r) => setTimeout(r, 1200));
+    // Wait past the 70ms expiry (~80ms additional, total elapsed ~95ms).
+    // Notice this is far below any 1000ms coarse interval:
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(Date.now() >= expiresAt, 'test assertion runs immediately after claim expiry');
 
-    // Without any prop changes, the reactive clock invalidated the computed gating:
-    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail hides cancel button reactively once claim expires');
-    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'card hides cancel button reactively once claim expires');
+    // The precise expiry timer fired at expiresAt and invalidated the computed gating immediately:
+    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail hides cancel button precisely at expiry');
+    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'card hides cancel button precisely at expiry');
 
     appDetail.unmount();
     containerDetail.remove();
