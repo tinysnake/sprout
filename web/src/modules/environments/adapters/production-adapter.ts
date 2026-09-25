@@ -256,6 +256,10 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
 export class ProductionEnvironmentService implements EnvironmentService {
   readonly #adapter: EnvironmentEnrollmentBrowserAdapter;
 
+  getBootstrapCommand(enrollmentId: string): string {
+    return buildBootstrapCommand(enrollmentId);
+  }
+
   /**
    * Production never reconciles evidence on the operator's behalf.
    *
@@ -340,7 +344,7 @@ export class ProductionEnvironmentService implements EnvironmentService {
       ...(result.claim !== undefined
         ? { claimSecret: result.claim.secret, claimExpiresAt: result.claim.expiresAt }
         : {}),
-      bootstrapCommand: buildBootstrapCommand(result.enrollment.id),
+      bootstrapCommand: this.getBootstrapCommand(result.enrollment.id),
     };
   }
 

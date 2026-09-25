@@ -135,6 +135,8 @@ const engineFactsList = computed(() => {
       authenticated: details?.authStatus === 'authenticated' || details?.authenticated === true,
       models: details?.models ?? [],
       version: details?.version,
+      source: details?.source,
+      observedAt: details?.observedAt,
     };
   });
 });
@@ -161,6 +163,13 @@ async function loadExisting(id: string) {
   try {
     const env = await service.getEnvironment(id);
     if (env) {
+      // The one-use secret is intentionally not persisted. Only the public command is reproducible.
+      claimSecret.value = undefined;
+      claimExpiresAt.value = env.claim?.expiresAt;
+      bootstrapCommand.value = env.enrollmentStatus === 'pending' && !env.identityDigest
+        ? service.getBootstrapCommand(env.id) : '';
+      commandCopied.value = false;
+      secretCopied.value = false;
       activeEnv.value = env;
       updatePermissionsFromEnv(env);
       if (env.enrollmentStatus === 'approved') {
@@ -180,7 +189,7 @@ function updatePermissionsFromEnv(env: EnvironmentInstance) {
   const perms: Record<string, boolean> = {};
   const caps = env.requestedCapabilities ?? Object.keys(env.capabilityPermissions);
   for (const cap of caps) {
-    perms[cap] = env.capabilityPermissions[cap] ?? true;
+    perms[cap] = env.capabilityPermissions[cap] ?? false;
   }
   selectedPermissions.value = perms;
 }
@@ -548,7 +557,7 @@ onUnmounted(() => {
               id="btn-copy-command"
               variant="secondary"
               size="sm"
-              class="absolute right-2 top-2 text-[11px] min-h-[36px]"
+              class="absolute right-2 top-2 text-[11px] min-h-[44px]"
               aria-label="Copy bootstrap command"
               @click="handleCopyCommand"
             >
@@ -605,7 +614,7 @@ onUnmounted(() => {
               v-if="!isApproved && !isCancelled && !isRevoked"
               variant="ghost"
               size="sm"
-              class="text-[11px] h-7 p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              class="text-[11px] min-h-[44px] p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
               @click="handleRegenerateSecret"
             >
               <Icon name="refresh" :size="12" />
@@ -681,6 +690,9 @@ onUnmounted(() => {
               </div>
               <div v-if="item.models.length > 0" class="text-[10px] text-[var(--text-secondary)] truncate">
                 Models: {{ item.models.join(', ') }}
+              </div>
+              <div class="text-[10px] text-[var(--text-secondary)]">
+                Source: {{ item.source ?? 'Not reported' }} · Observed: {{ item.observedAt !== undefined ? new Date(item.observedAt).toLocaleString() : 'Not reported' }} · Version: {{ item.version ?? 'Not reported' }}
               </div>
             </div>
           </div>

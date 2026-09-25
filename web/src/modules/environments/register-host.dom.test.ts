@@ -140,7 +140,6 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
           capabilityPermissions: {
             processExecution: false,
             fileReadWrite: false,
-            networkAccess: false,
           },
           requestedCapabilities: ['processExecution', 'fileReadWrite', 'networkAccess'],
           engineReadiness: {
@@ -148,7 +147,7 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
             pi: 'ready',
           },
           engineDetails: {
-            codex: { version: '0.154.0', installed: true, authStatus: 'authenticated', models: ['gpt-5-codex'] },
+            codex: { version: '0.154.0', installed: true, authStatus: 'authenticated', models: ['gpt-5-codex'], source: 'codex-account-read', observedAt: 1_700_000_000_123 },
             pi: { version: '1.4.0', installed: true, authStatus: 'authenticated', models: ['claude-3-7-sonnet'] },
           },
           probeHistory: [],
@@ -326,6 +325,9 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     assert.match(doc.body.textContent ?? '', /pi/i);
     assert.match(doc.body.textContent ?? '', /gpt-5-codex/);
     assert.match(doc.body.textContent ?? '', /claude-3-7-sonnet/);
+    assert.match(doc.body.textContent ?? '', /Source: codex-account-read/);
+    assert.match(doc.body.textContent ?? '', /Observed: .*2023/);
+    assert.match(doc.body.textContent ?? '', /Version: 0\.154\.0/);
 
     // Check capability checkboxes: Human explicitly checks processExecution
     const execCheckbox = doc.getElementById('perm-processExecution') as HTMLButtonElement | null;
@@ -380,6 +382,68 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
   }
 });
 
+test('RegisterHostDialog: resumed pending enrollment restores public command and rotates secret without persisting it', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, h, ref, nextTick } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+    const { buildBootstrapCommand } = (await vite.ssrLoadModule(
+      '/src/modules/environments/adapters/production-adapter.ts',
+    )) as { buildBootstrapCommand: (id: string) => string };
+    const now = Date.now();
+    const env: any = {
+      id: 'enroll-resumed', enrollmentStatus: 'pending', identityDigest: '',
+      capabilityPermissions: {}, requestedCapabilities: [],
+      claim: { issuedAt: now, expiresAt: now + 60_000 }, decisions: [],
+    };
+    let rotations = 0;
+    const service = {
+      getEnvironment: async () => env,
+      // Exercise the production endpoint builder used by the typed service, not a hard-coded test port.
+      getBootstrapCommand: buildBootstrapCommand,
+      regenerateClaimSecret: async () => {
+        rotations++;
+        return { claimSecret: 'fresh-only-in-memory', claimExpiresAt: now + 60_000 };
+      },
+    };
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+    const isOpen = ref(true);
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value, service, initialEnrollmentId: env.id,
+        'onUpdate:open': (value: boolean) => { isOpen.value = value; },
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 80));
+    const doc = dom.window.document;
+    const expected = buildBootstrapCommand(env.id);
+    assert.equal(doc.getElementById('bootstrap-command-text')?.textContent, expected);
+    assert.equal(doc.getElementById('claim-secret-value'), null, 'the old secret cannot be recovered');
+    clipboardContent = '';
+    (doc.getElementById('btn-copy-command') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(clipboardContent, expected);
+    const rotate = Array.from(doc.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Regenerate Secret');
+    assert.ok(rotate);
+    rotate.click();
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(rotations, 1);
+    assert.equal(doc.getElementById('claim-secret-value')?.textContent?.trim(), 'fresh-only-in-memory');
+    assert.equal(doc.getElementById('bootstrap-command-text')?.textContent, expected);
+    assert.equal(expected.includes('fresh-only-in-memory'), false);
+    isOpen.value = false;
+    await nextTick();
+    app.unmount();
+    container.remove();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('RegisterHostDialog: 8 distinct states have decisive text and actions', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
@@ -395,6 +459,7 @@ test('RegisterHostDialog: 8 distinct states have decisive text and actions', asy
       supportsEvidenceReconciliation: false,
       listEnvironments: async () => (testEnv ? [testEnv] : []),
       getEnvironment: async (id: string) => testEnv,
+      getBootstrapCommand: (id: string) => `sprout worker enroll sprout-operator.test:80 ${id}`,
       requestEnrollment: async () => ({} as any),
       regenerateClaimSecret: async () => ({
         claimSecret: 'fresh-secret',

@@ -346,6 +346,9 @@ export function createInitialFixtures(): EnvironmentInstance[] {
 }
 
 export class FixtureEnvironmentService implements EnvironmentService {
+  getBootstrapCommand(enrollmentId: string): string {
+    return `sprout worker enroll localhost:41030 ${enrollmentId}`;
+  }
   private instances: EnvironmentInstance[];
 
   /**
@@ -428,7 +431,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
       enrollment: JSON.parse(JSON.stringify(newEnv)),
       claimSecret: 'claim-secret-mock-12345',
       claimExpiresAt: expiresAt,
-      bootstrapCommand: `sprout worker enroll localhost:41030 ${id}`,
+      bootstrapCommand: this.getBootstrapCommand(id),
     };
   }
 

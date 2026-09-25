@@ -13,6 +13,8 @@ import type {
 export interface EnvironmentService {
   listEnvironments(): Promise<EnvironmentInstance[]>;
   getEnvironment(id: string): Promise<EnvironmentInstance | undefined>;
+  /** Recreate the public E3 command for a durable pending enrollment using the current endpoint. Never includes the one-use secret. */
+  getBootstrapCommand(enrollmentId: string): string;
   requestEnrollment(input: {
     environmentInstanceId: string;
     displayName: string;

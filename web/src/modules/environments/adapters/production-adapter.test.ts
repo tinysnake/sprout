@@ -352,6 +352,8 @@ test('requestEnrollment creates pending enrollment and separates secret from boo
   assert.equal(result.claimSecret, 'secret-claim-xyz');
   assert.equal(result.claimExpiresAt, 50000);
   assert.match(result.bootstrapCommand, /^sprout worker enroll \S+ enroll-1$/);
+  assert.equal(service.getBootstrapCommand(result.enrollment.id), result.bootstrapCommand,
+    'resumed enrollment uses the same command as creation');
   // Verify secret is NOT in command text
   assert.equal(result.bootstrapCommand.includes('secret-claim-xyz'), false);
 });
