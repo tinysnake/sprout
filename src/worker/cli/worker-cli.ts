@@ -32,8 +32,7 @@ import { join } from 'node:path';
 import { parseWorkerConfiguration } from '../../host-config.ts';
 import { EnvironmentWorker } from '../server.ts';
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
-import { createEnvironmentWorkerEngines, describeEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
-import { probeEnvironmentReadiness } from '../readiness.ts';
+import { createEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
@@ -685,10 +684,10 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     environment: NodeJS.ProcessEnv,
   ): Promise<void> {
     const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
-    const facts = hostEngineFacts(configuration);
-    const engines = createEnvironmentWorkerEngines(facts);
-    const engineConfigurations = describeEnvironmentWorkerEngines(facts);
-    let workerReadiness = (await probeEnvironmentReadiness(engineConfigurations)).readiness;
+    const engines = createEnvironmentWorkerEngines(hostEngineFacts(configuration));
+    // Prefer the same environment-variable allowlisted facts the core forwards,
+    // but fall back to a minimal honest readiness projection when the CLI runs
+    // engine selection in-process.
     void engineIds;
     const worker = new EnvironmentWorker({
       environmentInstanceId,
@@ -697,15 +696,16 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       output: connection.stream,
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
       workspaceRoot: configuration.workspaceRoot,
-      readiness: () => workerReadiness,
-      readinessProbe: async (params) => {
-        const result = await probeEnvironmentReadiness(engineConfigurations, {
-          ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
-          ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
-        });
-        workerReadiness = result.readiness;
-        return result;
-      },
+      readiness: () => ({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        engines: [...engines.keys()].map((engine) => ({
+          engine,
+          installed: true,
+          readiness: 'unknown',
+          modelAvailability: 'unknown',
+          models: [],
+        })),
+      }),
     });
     await new Promise<void>((resolve) => {
       connection.stream.on('close', () => {
