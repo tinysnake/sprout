@@ -40,12 +40,13 @@ test('an interrupted run always requires a Human decision, even with clean evide
   assert.equal(canAutoResolve({ hadActiveRun: true, holderKind: 'run', evidence: cleanEvidence }), false);
 });
 
-test('an idle restart with proven engine stop and recycled Task context may return to clear', () => {
+test('an idle restart with proven engine stop and owned prepared Task context may return to clear', () => {
+  const idleEvidence = { ...cleanEvidence, taskContextRecycled: false, taskContextPrepared: true };
   assert.equal(
-    phaseAfterEvidence({ hadActiveRun: false, holderKind: 'task', evidence: cleanEvidence }),
+    phaseAfterEvidence({ hadActiveRun: false, holderKind: 'task', evidence: idleEvidence }),
     'resolved',
   );
-  assert.equal(canAutoResolve({ hadActiveRun: false, holderKind: 'task', evidence: cleanEvidence }), true);
+  assert.equal(canAutoResolve({ hadActiveRun: false, holderKind: 'task', evidence: idleEvidence }), true);
 });
 
 test('an unproven engine stop or unrecycled Task context keeps the record in recovery', () => {

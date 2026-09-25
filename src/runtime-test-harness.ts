@@ -23,6 +23,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './worker/protocol.ts';
 import { EnvironmentWorker } from './worker/server.ts';
+import type { WorkerRecoveryJournal } from './worker/recovery-journal.ts';
 import {
   connectWorkerEnrollment,
   loadOrCreateWorkerIdentity,
@@ -445,6 +446,7 @@ export async function readinessWorkflowHarness(options: {
       readonly readiness?: () => WorkerReadinessFacts;
       readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
       readonly engines?: ReadonlyMap<string, EngineAdapter>;
+      readonly recoveryJournal?: WorkerRecoveryJournal;
     },
     /** Dial protocol version, so an incompatible handshake can be composed. */
     dialProtocolVersion?: string,
@@ -535,6 +537,7 @@ export async function readinessWorkflowHarness(options: {
         engines: worker.engines ?? new Map(),
         input: connection.stream,
         output: connection.stream,
+        ...(worker.recoveryJournal !== undefined ? { recoveryJournal: worker.recoveryJournal } : {}),
         ...(declaration !== undefined ? { readiness: declaration } : {}),
         ...(worker.readinessProbe !== undefined ? { readinessProbe: worker.readinessProbe } : {}),
       }));

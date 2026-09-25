@@ -72,6 +72,7 @@ const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
       <strong>Worker Evidence:</strong> Retained {{ recovery.reconciledEvidence.retainedEventsCount }} events.
       Engine stop {{ recovery.reconciledEvidence.engineStoppedProof ? 'proved' : 'unproved' }};
       terminal settlement {{ recovery.reconciledEvidence.turnSettlementObserved ? 'observed' : 'missing' }}.
+      <span v-if="recovery.reconciledEvidence.terminalStatus">Outcome: {{ recovery.reconciledEvidence.terminalStatus }}.</span>
       {{ evidenceReady ? 'Ready for Human decision.' : 'Ordinary recovery remains blocked.' }}
     </div>
 

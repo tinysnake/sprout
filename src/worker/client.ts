@@ -134,6 +134,7 @@ export class WorkerClient implements EngineAdapter {
         {
           engine: this.id,
           agentId: request.agentId,
+          ...(request.runId !== undefined ? { runId: request.runId } : {}),
           workingDirectory: request.workingDirectory,
           ...(request.model !== undefined ? { model: request.model } : {}),
           ...(request.effort !== undefined ? { effort: request.effort } : {}),

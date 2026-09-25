@@ -31,13 +31,17 @@ export const WORKER_METHODS = {
   prepareTaskContext: 'context/prepare',
   /** Verify and recycle one owned Task context. */
   recycleTaskContext: 'context/recycle',
+  inspectTaskContext: 'context/inspect',
   /** Validate or prepare one Project workspace selection (#93). */
   validateWorkspace: 'workspace/validate',
   recoverySnapshot: 'recovery/snapshot',
   recoveryAcknowledge: 'recovery/acknowledge',
+  recoveryAcknowledgeContext: 'recovery/ack-context',
 } as const;
 
 export const WORKER_NOTIFICATIONS = {
+  /** Wake core to pull the durable journal; contains no Worker-supplied facts. */
+  recoveryChanged: 'recovery/changed',
   /** One run event, in order, for a turn in flight. */
   event: 'turn/event',
   /** A turn's terminal result. Always sent after that turn's events. */
@@ -169,6 +173,7 @@ export interface StartSessionParams {
   /** Which engine the worker should host for this session. */
   readonly engine: string;
   readonly agentId: string;
+  readonly runId?: string;
   readonly workingDirectory: string;
   /** The engine-neutral model this session should use, when configured. */
   readonly model?: string;

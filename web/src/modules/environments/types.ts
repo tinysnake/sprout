@@ -48,6 +48,7 @@ export interface ReconciledEvidence {
   retainedEventsCount: number;
   engineStoppedProof: boolean;
   turnSettlementObserved?: boolean;
+  terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
   taskContextRecycled?: boolean;
 }
 

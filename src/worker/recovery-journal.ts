@@ -5,6 +5,7 @@ import { PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
 
 export interface JournalTurn {
   readonly sessionId: string;
+  readonly runId?: string;
   readonly turnId: string;
   readonly events: readonly { readonly sequence: number; readonly event: AgentRunEvent }[];
   readonly settlement?: EngineTurnResult;
@@ -24,9 +25,11 @@ const MAX_TURNS = 128;
 /** A corrupt, overlarge or inaccessible journal is an error, never an empty outbox. */
 export class WorkerRecoveryJournal {
   readonly #path: string;
+  readonly #inheritedUnfenced: boolean;
   #state: JournalSnapshot;
 
   constructor(path: string, epoch: number) {
+    if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error('invalid recovery journal epoch');
     this.#path = path;
     let previous: JournalSnapshot | undefined;
     try {
@@ -42,6 +45,7 @@ export class WorkerRecoveryJournal {
     }
     // A process death cannot prove its child was fenced. Do not clear this bit
     // merely because a new Worker established an authenticated connection.
+    this.#inheritedUnfenced = previous?.engineStopped === false;
     this.#state = { epoch, turns: previous?.turns ?? [], engineStopped: previous?.engineStopped ?? true,
       taskContexts: previous?.taskContexts ?? {} };
     this.#save(this.#state);
@@ -54,18 +58,41 @@ export class WorkerRecoveryJournal {
     if (Buffer.byteLength(bytes) > MAX_BYTES || state.turns.length > MAX_TURNS) {
       throw new Error('recovery journal capacity exceeded; refusing unrecorded work');
     }
+    // A superseded Worker may still be unwinding an engine or context action
+    // after its channel closes. Never allow it to replace a newer epoch's
+    // journal or launder its stale facts into a subsequent reconnect.
+    try {
+      const disk = JSON.parse(readFileSync(this.#path, 'utf8')) as JournalSnapshot;
+      if (!Number.isSafeInteger(disk.epoch) || disk.epoch > state.epoch) {
+        throw new Error('stale recovery journal epoch');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     writePrivateFile(this.#path, bytes);
     this.#state = state;
   }
 
   engineStarted(): void { this.#save({ ...this.#state, engineStopped: false }); }
-  engineStopped(): void { this.#save({ ...this.#state, engineStopped: true }); }
+  engineStopped(): void {
+    // Closing a NEW session cannot prove that an orphan from the killed
+    // predecessor stopped. Only an explicit future host-local fence may clear
+    // that inherited uncertainty; normal reconnect never invents one.
+    if (!this.#inheritedUnfenced) this.#save({ ...this.#state, engineStopped: true });
+  }
   context(taskId: string, state: 'prepared' | 'recycled'): void {
     this.#save({ ...this.#state, taskContexts: { ...this.#state.taskContexts, [taskId]: state } });
   }
-  begin(sessionId: string, turnId: string): void {
+  acknowledgeContext(epoch: number, taskId: string, state: 'prepared' | 'recycled'): void {
+    if (epoch !== this.#state.epoch) throw new Error('stale recovery epoch');
+    if (this.#state.taskContexts[taskId] !== state) throw new Error('invalid context acknowledgement');
+    const taskContexts = { ...this.#state.taskContexts };
+    delete taskContexts[taskId];
+    this.#save({ ...this.#state, taskContexts });
+  }
+  begin(sessionId: string, turnId: string, runId?: string): void {
     this.#save({ ...this.#state, turns: [...this.#state.turns,
-      { sessionId, turnId, events: [], acknowledged: 0, settlementAcknowledged: false }] });
+      { sessionId, turnId, ...(runId !== undefined ? { runId } : {}), events: [], acknowledged: 0, settlementAcknowledged: false }] });
   }
   event(turnId: string, event: AgentRunEvent): void {
     this.#update(turnId, (turn) => ({ ...turn, events: [...turn.events,

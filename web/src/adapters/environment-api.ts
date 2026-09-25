@@ -120,8 +120,10 @@ export interface EnvironmentRecoveryView {
   readonly evidence?: {
     readonly retainedEventCount: number;
     readonly turnSettlementObserved: boolean;
+    readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
     readonly engineSessionStopped: boolean;
     readonly taskContextRecycled: boolean;
+    readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
   readonly evidenceSynchronized: boolean;
@@ -155,8 +157,10 @@ export interface ForceReleaseView {
 export interface RetainedEvidenceView {
   readonly retainedEventCount: number;
   readonly turnSettlementObserved: boolean;
+  readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
   readonly engineSessionStopped: boolean;
   readonly taskContextRecycled: boolean;
+  readonly taskContextPrepared?: boolean;
 }
 
 export interface EnvironmentEnrollmentBrowserAdapter {

@@ -32,13 +32,42 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 16);
+  assert.equal(CURRENT_SCHEMA_VERSION, 17);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 16);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 17);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 16,
-    current: 16,
+    max: 17,
+    current: 17,
+  });
+});
+
+test('v17 recovery migration makes a safety copy and preserves v16 run rows without invented proof', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sprout.db');
+    const db = new DatabaseSync(path);
+    db.exec(`CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, prompt TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL, project_id TEXT, task_id TEXT,
+      status TEXT NOT NULL, events TEXT NOT NULL, lease_id TEXT,
+      failure TEXT, result TEXT, created_at INTEGER NOT NULL,
+      completed_at INTEGER, hand_off TEXT, token_usage TEXT,
+      replay_sequence INTEGER, work_option TEXT, configuration_version INTEGER,
+      workspace_binding TEXT
+    );
+    INSERT INTO agent_runs (id, agent_id, prompt, environment_instance_id, status, events, created_at)
+      VALUES ('legacy-run', 'agent', 'old prompt', 'instance', 'failed', '[]', 1);
+    PRAGMA user_version = 16;`);
+    db.close();
+    const store = new SqliteStore({ filename: path });
+    try {
+      assert.equal(store.schemaVersion, 17);
+      assert.equal(existsSync(defaultSafetyCopyPath(path)), true);
+      const run = await store.runs.get('legacy-run');
+      assert.equal(run?.recoverySettlement, undefined);
+      assert.equal(run?.recoveredEvents, undefined);
+      assert.ok(store.db.prepare("SELECT name FROM sqlite_master WHERE name = 'worker_recovery_receipts'").get());
+    } finally { store.close(); }
   });
 });
 
@@ -126,7 +155,7 @@ test('v12 migration seeds epoch high-water and instance enrollment authority bef
     legacy.close();
 
     const store = new SqliteStore({ filename: dbPath });
-    assert.equal(store.schemaVersion, 16);
+    assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
     const seeded = store.db.prepare(
       'SELECT high_water FROM worker_connection_epochs WHERE enrollment_id = ?',
     ).get('enrollment-a') as { readonly high_water: number } | undefined;

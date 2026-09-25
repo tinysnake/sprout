@@ -136,7 +136,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     assert.equal(lease.ok, true);
 
     // The accepted connection ends: the epoch is invalidated and the catalog is
-    // re-projected. The record and the active lease survive; the instance stops
+    // re-projected. The record and protected lease survive; the instance stops
     // admitting new work.
     testComposition(runtime).workerGateway.liveFor('host-a')!.close();
     await waitFor(() => runtime.workerGateway.liveFor('host-a') === undefined, 'disconnected Worker removal');
@@ -144,7 +144,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     assert.ok(runtime.environmentCatalog.entry('host-a') !== undefined, 'offline never deletes');
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     assert.equal(runtime.pool.requiresLease('host-a', ADMISSION_CAPABILITY), undefined);
-    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
+    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'recovering');
 
     // A newer epoch cannot reuse old readiness. It becomes eligible only after
     // fresh facts for that replacement epoch are stored; the lease is intact.
@@ -155,8 +155,9 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     await observeSyntheticReady(runtime, enrollmentId,
       readinessAuthority(runtime, enrollmentId, replacement));
     await runtime.refreshEnvironmentCatalog();
-    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
-    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false,
+      'fresh readiness alone does not resolve interrupted work');
+    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'recovering');
   } finally {
     await runtime.close();
   }
@@ -190,7 +191,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     assert.equal(runtime.environmentCatalog.entry('host-b')?.eligible, true);
-    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'active');
+    if (lease.ok) assert.equal(runtime.pool.getLease(lease.lease.id)?.state, 'recovering');
 
     // A delayed old-epoch observation is refused as non-authoritative and
     // cannot make the new connection eligible or release/conflict-bypass lease.
@@ -205,12 +206,13 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     await observeSyntheticReady(runtime, enrollmentA,
       readinessAuthority(runtime, enrollmentA, replacement));
     await runtime.refreshEnvironmentCatalog();
-    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, true);
+    assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false,
+      'fresh readiness cannot bypass a protected run lease with no recovery proof');
     const conflict = runtime.pool.acquireLease({
       instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scribe', runId: 'run-conflict', ttlMs: 60_000,
     });
     assert.equal(conflict.ok, false);
-    if (!conflict.ok) assert.equal(conflict.reason, 'conflict');
+    if (!conflict.ok) assert.equal(conflict.reason, 'unknown-capability', 'recovery bars admission before lease matching');
   } finally {
     await runtime.close();
   }

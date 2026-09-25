@@ -119,6 +119,8 @@ export interface TokenUsage {
 export interface StartSessionRequest {
   /** Sprout-owned agent identity. Never derived from the engine installation. */
   readonly agentId: string;
+  /** Core-owned run identity, for durable Worker delivery correlation only. */
+  readonly runId?: string;
   /** The working directory inside the environment the run executes in. */
   readonly workingDirectory: string;
   /** The engine-neutral model this session should use, when configured. */

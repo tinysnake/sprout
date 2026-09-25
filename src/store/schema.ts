@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 16;
+export const CURRENT_SCHEMA_VERSION = 17;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 16;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 17;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -780,6 +780,44 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         observation_id TEXT PRIMARY KEY, environment_instance_id TEXT NOT NULL,
         sequence INTEGER NOT NULL, bootstrap_key TEXT UNIQUE, document TEXT NOT NULL
       );`);
+    },
+  },
+  {
+    fromVersion: 16,
+    toVersion: 17,
+    name: 'worker_recovery_receipts_and_run_projection',
+    migrate: (db) => {
+      // ADR-0009: safety-copy and migrate nonempty v16 databases before any
+      // adapter may add recovery columns. Never synthesize proof for old runs.
+      const runs = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'").get();
+      if (runs !== undefined) {
+        const columns = db.prepare('PRAGMA table_info(agent_runs)').all() as unknown as readonly { name: string }[];
+        if (!columns.some((column) => column.name === 'recovery_settlement')) {
+          db.exec('ALTER TABLE agent_runs ADD COLUMN recovery_settlement TEXT');
+        }
+        if (!columns.some((column) => column.name === 'recovered_events')) {
+          db.exec('ALTER TABLE agent_runs ADD COLUMN recovered_events TEXT');
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_recovery_receipts (
+          enrollment_id TEXT NOT NULL, turn_id TEXT NOT NULL, run_id TEXT,
+          sequence INTEGER NOT NULL, settlement INTEGER NOT NULL,
+          event_count INTEGER NOT NULL, settlement_payload TEXT, settlement_status TEXT,
+          acknowledged INTEGER NOT NULL DEFAULT 0, settlement_acked INTEGER NOT NULL DEFAULT 0,
+          compacted INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (enrollment_id, turn_id)
+        );
+        CREATE TABLE IF NOT EXISTS worker_recovery_events (
+          enrollment_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL, payload TEXT NOT NULL,
+          PRIMARY KEY (enrollment_id, turn_id, sequence)
+        );
+        CREATE TABLE IF NOT EXISTS worker_recovery_contexts (
+          enrollment_id TEXT NOT NULL, task_id TEXT NOT NULL,
+          state TEXT NOT NULL, PRIMARY KEY (enrollment_id, task_id)
+        );
+      `);
     },
   },
 ];

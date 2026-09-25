@@ -111,23 +111,23 @@ function leaseRecoveryOf(recovery: readonly EnvironmentRecoveryView[]): LeaseRec
     // is for Force Release, never an enabled Resume/Discard/Release control.
     evidenceSynchronized: open.phase === 'recovery' && open.evidenceSynchronized &&
       open.evidence?.turnSettlementObserved === true && open.evidence.engineSessionStopped === true &&
-      (open.runId === undefined || open.evidence.retainedEventCount > 0),
+      (open.runId === undefined || open.evidence.terminalStatus !== undefined) &&
+      (open.holderKind !== 'task' || open.evidence.taskContextPrepared === true),
   };
-  if (open.runId !== undefined) {
-    return { ...composed, interruptedRunId: open.runId };
-  }
   if (open.evidence !== undefined) {
     return {
       ...composed,
+      ...(open.runId !== undefined ? { interruptedRunId: open.runId } : {}),
       reconciledEvidence: {
         retainedEventsCount: open.evidence.retainedEventCount,
         engineStoppedProof: open.evidence.engineSessionStopped,
         turnSettlementObserved: open.evidence.turnSettlementObserved,
+        ...(open.evidence.terminalStatus !== undefined ? { terminalStatus: open.evidence.terminalStatus } : {}),
         taskContextRecycled: open.evidence.taskContextRecycled,
       },
     };
   }
-  return composed;
+  return { ...composed, ...(open.runId !== undefined ? { interruptedRunId: open.runId } : {}) };
 }
 
 /** The audit record the page's ForcedReleaseAuditBox renders, when one exists. */
