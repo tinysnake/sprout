@@ -1,8 +1,10 @@
 import {
   normalizeEnrollment,
   approveEnrollment,
+  cancelEnrollment,
   createPendingEnrollment,
   reconcileWorkerConnection,
+  regenerateEnrollmentClaim,
   resetEnrollment,
   revokeEnrollment,
   setCapabilityPermission,
@@ -554,6 +556,51 @@ export class EnvironmentEnrollmentService {
     const reset = await this.#mutateWithCas(enrollmentId, (current) => resetEnrollment(current, at, reason));
     this.#announce(reset);
     return reset;
+  }
+
+  /**
+   * Cancel a pending enrollment (#120).
+   *
+   * Refuses if the enrollment is not pending. Moves status to revoked and
+   * fences any concurrent connection attempts.
+   */
+  async cancelEnrollment(enrollmentId: string, reason?: string): Promise<EnvironmentEnrollment> {
+    this.#loseAuthority(enrollmentId);
+    const at = this.#clock();
+    const cancelled = await this.#mutateWithCas(
+      enrollmentId,
+      (current) => cancelEnrollment(current, at, reason),
+    );
+    this.#announce(cancelled);
+    return normalizeEnrollment(cancelled);
+  }
+
+  /**
+   * Regenerate an unused or expired claim secret on a pending enrollment (#120).
+   *
+   * Refused if the enrollment is revoked, not pending, or if the claim was
+   * already consumed.
+   */
+  async regenerateClaimSecret(enrollmentId: string): Promise<{
+    readonly enrollment: EnvironmentEnrollment;
+    readonly claim: { readonly secret: string; readonly expiresAt: number };
+  }> {
+    const at = this.#clock();
+    const secret = this.#claimSecretFactory();
+    const claim: EnrollmentClaim = {
+      secretDigest: claimSecretDigest(secret),
+      issuedAt: at,
+      expiresAt: at + this.#claimTtlMs,
+    };
+    const updated = await this.#mutateWithCas(
+      enrollmentId,
+      (current) => regenerateEnrollmentClaim(current, claim, at),
+    );
+    this.#announce(updated);
+    return {
+      enrollment: normalizeEnrollment(updated),
+      claim: { secret, expiresAt: claim.expiresAt },
+    };
   }
 
   async setCapabilityPermission(

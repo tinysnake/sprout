@@ -276,6 +276,44 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
+      // POST /api/environments/enrollments/:id/claim-secret — regenerate claim secret (#120).
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'claim-secret'
+      ) {
+        try {
+          const result = await enrollments.regenerateClaimSecret(segments[3] ?? '');
+          return json(context, 200, {
+            enrollment: toEnrollmentView(result.enrollment),
+            claim: result.claim,
+          });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/enrollments/:id/cancel — cancel pending enrollment (#120).
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'cancel'
+      ) {
+        const body = await context.readBody();
+        try {
+          const cancelled = await enrollments.cancelEnrollment(segments[3] ?? '', stringField(body, 'reason'));
+          return json(context, 200, { enrollment: toEnrollmentView(cancelled) });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
       // POST /api/environments/enrollments/:id/permissions — capability permission.
       if (
         method === 'POST' &&

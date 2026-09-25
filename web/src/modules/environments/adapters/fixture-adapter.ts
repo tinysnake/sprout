@@ -368,13 +368,116 @@ export class FixtureEnvironmentService implements EnvironmentService {
     return found ? JSON.parse(JSON.stringify(found)) : undefined;
   }
 
-  async approveEnrollment(id: string): Promise<void> {
+  async requestEnrollment(input: {
+    environmentInstanceId: string;
+    displayName: string;
+    platform?: string;
+  }): Promise<{
+    enrollment: EnvironmentInstance;
+    claimSecret?: string;
+    claimExpiresAt?: number;
+    bootstrapCommand: string;
+  }> {
+    const id = `enroll-${Date.now().toString(36)}`;
+    const now = Date.now();
+    const expiresAt = now + 15 * 60 * 1000;
+    const newEnv: EnvironmentInstance = {
+      id,
+      displayName: input.displayName,
+      platform: (input.platform as any) ?? 'macos',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Pending worker enrollment · Waiting for host connection',
+      enrollmentStatus: 'pending',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'unknown',
+      workSafety: 'clear',
+      capabilityPermissions: {
+        fileReadWrite: false,
+        processExecution: false,
+        networkAccess: false,
+        guiAutomation: false,
+      },
+      engineReadiness: {
+        codex: 'unknown',
+        pi: 'unknown',
+        agy: 'unknown',
+        opencode: 'unknown',
+      },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: {
+        issuedAt: now,
+        expiresAt,
+      },
+      decisions: [
+        {
+          kind: 'requested',
+          actor: 'operator',
+          at: now,
+          reason: 'Pending enrollment created in Web; awaiting Worker proof and Human approval.',
+        },
+      ],
+      requestedCapabilities: ['fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'],
+    };
+    this.instances.push(newEnv);
+    return {
+      enrollment: JSON.parse(JSON.stringify(newEnv)),
+      claimSecret: 'claim-secret-mock-12345',
+      claimExpiresAt: expiresAt,
+      bootstrapCommand: `sprout worker enroll localhost:41030 ${id}`,
+    };
+  }
+
+  async regenerateClaimSecret(id: string): Promise<{
+    claimSecret: string;
+    claimExpiresAt: number;
+  }> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    const now = Date.now();
+    const expiresAt = now + 15 * 60 * 1000;
+    env.claim = {
+      issuedAt: now,
+      expiresAt,
+    };
+    return {
+      claimSecret: 'claim-secret-mock-regenerated-67890',
+      claimExpiresAt: expiresAt,
+    };
+  }
+
+  async cancelEnrollment(id: string, reason?: string): Promise<void> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    env.enrollmentStatus = 'revoked';
+    env.trafficLight = 'red';
+    env.trafficLightReason = reason ?? 'Pending enrollment cancelled by operator';
+    env.claim = undefined;
+    env.decisions = [
+      ...(env.decisions ?? []),
+      {
+        kind: 'cancelled',
+        actor: 'operator',
+        at: Date.now(),
+        reason: reason ?? 'Pending enrollment cancelled by operator',
+      },
+    ];
+  }
+
+  async approveEnrollment(id: string, permissions?: Record<string, boolean>): Promise<void> {
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
     env.enrollmentStatus = 'approved';
     env.connectionState = 'online';
     env.trafficLight = 'green';
     env.trafficLightReason = 'Approved by operator · All health checks passed';
+    if (permissions) {
+      env.capabilityPermissions = { ...env.capabilityPermissions, ...permissions };
+    }
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

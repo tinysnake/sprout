@@ -199,6 +199,19 @@ function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance
   return details;
 }
 
+function resolveSproutEndpoint(): string {
+  if (typeof window !== 'undefined' && window.location) {
+    const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+    return `${window.location.hostname}:${port}`;
+  }
+  return 'localhost:41030';
+}
+
+export function buildBootstrapCommand(enrollmentId: string): string {
+  const endpoint = resolveSproutEndpoint();
+  return `sprout worker enroll ${endpoint} ${enrollmentId}`;
+}
+
 /** Compose one page row from the production facts. */
 function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInstance {
   const { enrollment, readiness, probes, recovery, forceReleases, connectionAttempt } = facts;
@@ -233,6 +246,10 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     forcedReleaseRecord: auditOf(forceReleases),
     probeHistory: probesOf(probes),
     boundWorkspaces: [],
+    identityDigest: enrollment.identityDigest,
+    claim: enrollment.claim,
+    decisions: enrollment.decisions,
+    requestedCapabilities: readiness.capabilities.map((c) => c.name),
   };
 }
 
@@ -302,13 +319,59 @@ export class ProductionEnvironmentService implements EnvironmentService {
     }
   }
 
-  async approveEnrollment(id: string): Promise<void> {
+  async requestEnrollment(input: {
+    environmentInstanceId: string;
+    displayName: string;
+    platform?: string;
+  }): Promise<{
+    enrollment: EnvironmentInstance;
+    claimSecret?: string;
+    claimExpiresAt?: number;
+    bootstrapCommand: string;
+  }> {
+    const result = await this.#adapter.requestEnrollment({
+      environmentInstanceId: input.environmentInstanceId,
+      displayName: input.displayName,
+      platform: input.platform ?? 'macos',
+    });
+    const facts = await this.#adapter.environmentFacts(result.enrollment.id);
+    return {
+      enrollment: composeInstance(facts, Date.now()),
+      ...(result.claim !== undefined
+        ? { claimSecret: result.claim.secret, claimExpiresAt: result.claim.expiresAt }
+        : {}),
+      bootstrapCommand: buildBootstrapCommand(result.enrollment.id),
+    };
+  }
+
+  async regenerateClaimSecret(id: string): Promise<{
+    claimSecret: string;
+    claimExpiresAt: number;
+  }> {
+    const result = await this.#adapter.regenerateClaimSecret(id);
+    return {
+      claimSecret: result.claim.secret,
+      claimExpiresAt: result.claim.expiresAt,
+    };
+  }
+
+  async cancelEnrollment(id: string, reason?: string): Promise<void> {
+    await this.#adapter.cancelEnrollment(id, reason);
+  }
+
+  async approveEnrollment(id: string, permissions?: Record<string, boolean>): Promise<void> {
     const { enrollment } = await this.#adapter.environmentFacts(id);
-    const permissions: Record<string, boolean> = {};
-    for (const capability of Object.keys(enrollment.capabilityPermissions)) {
-      permissions[capability] = true;
+    const resolvedPermissions: Record<string, boolean> = {};
+    if (permissions !== undefined) {
+      for (const [key, val] of Object.entries(permissions)) {
+        resolvedPermissions[key] = val === true;
+      }
+    } else {
+      for (const capability of Object.keys(enrollment.capabilityPermissions)) {
+        resolvedPermissions[capability] = true;
+      }
     }
-    await this.#adapter.approveEnrollment(id, permissions);
+    await this.#adapter.approveEnrollment(id, resolvedPermissions);
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

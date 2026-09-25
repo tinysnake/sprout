@@ -116,6 +116,19 @@ export interface EnvironmentInstance {
   forcedReleaseRecord?: ForcedReleaseRecord | undefined;
   probeHistory: ProbeRecord[];
   boundWorkspaces: BoundWorkspace[];
+  identityDigest?: string | undefined;
+  claim?: {
+    readonly issuedAt: number;
+    readonly expiresAt: number;
+    readonly consumedAt?: number;
+  } | undefined;
+  decisions?: readonly {
+    readonly kind: string;
+    readonly actor: string;
+    readonly at: number;
+    readonly reason: string;
+  }[] | undefined;
+  requestedCapabilities?: readonly string[] | undefined;
 }
 
 export type EnvironmentFilter = 'all' | 'ready' | 'attention' | 'action-required' | 'archived';

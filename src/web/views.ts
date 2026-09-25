@@ -387,6 +387,14 @@ export interface EnrollmentView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
+  readonly claim?: EnrollmentClaimView;
+  readonly requiresFreshIdentity?: boolean;
+}
+
+export interface EnrollmentClaimView {
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly consumedAt?: number;
 }
 
 export interface EnrollmentDecisionView {
@@ -415,6 +423,16 @@ export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentV
     capabilityPermissions: safe.capabilityPermissions,
     createdAt: safe.createdAt,
     updatedAt: safe.updatedAt,
+    ...(safe.claim !== undefined
+      ? {
+          claim: {
+            issuedAt: safe.claim.issuedAt,
+            expiresAt: safe.claim.expiresAt,
+            ...(safe.claim.consumedAt !== undefined ? { consumedAt: safe.claim.consumedAt } : {}),
+          },
+        }
+      : {}),
+    ...(safe.requiresFreshIdentity ? { requiresFreshIdentity: true } : {}),
     decisions: safe.decisions.map((decision) => ({
       kind: decision.kind,
       actor: decision.actor,

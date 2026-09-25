@@ -428,3 +428,65 @@ test('a forged signature cannot reconnect, and a real one can', async () => {
     await runtime.api.close();
   }
 });
+
+test('POST /api/environments/enrollments/:id/claim-secret regenerates the one-use claim secret', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const res = await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engines: [],
+    });
+    assert.equal(res.status, 201);
+    const initialBody = (await res.json()) as { claim?: { secret: string; expiresAt: number } };
+    assert.ok(initialBody.claim?.secret);
+
+    const regenRes = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/claim-secret',
+      runtime,
+      {},
+    );
+    assert.equal(regenRes.status, 200);
+    const regenBody = (await regenRes.json()) as {
+      enrollment: { status: string; decisions: { kind: string }[] };
+      claim: { secret: string; expiresAt: number };
+    };
+    assert.ok(regenBody.claim?.secret);
+    assert.equal(regenBody.enrollment.status, 'pending');
+    assert.equal(regenBody.enrollment.decisions.at(-1)?.kind, 'secret-regenerated');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('POST /api/environments/enrollments/:id/cancel cancels a pending enrollment', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engines: [],
+    });
+
+    const cancelRes = await command(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/cancel',
+      runtime,
+      { reason: 'User closed registration dialog' },
+    );
+    assert.equal(cancelRes.status, 200);
+    const cancelBody = (await cancelRes.json()) as {
+      enrollment: { status: string; decisions: { kind: string; reason: string }[] };
+    };
+    assert.equal(cancelBody.enrollment.status, 'revoked');
+    assert.equal(cancelBody.enrollment.decisions.at(-1)?.kind, 'cancelled');
+    assert.match(cancelBody.enrollment.decisions.at(-1)?.reason ?? '', /User closed/);
+  } finally {
+    await runtime.api.close();
+  }
+});

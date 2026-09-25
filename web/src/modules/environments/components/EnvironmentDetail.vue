@@ -35,6 +35,7 @@ const emit = defineEmits<{
   (e: 'archive', id: string): void;
   (e: 'restore', id: string): void;
   (e: 'unenroll', id: string): void;
+  (e: 'resumeEnrollment', id: string): void;
 }>();
 </script>
 
@@ -140,6 +141,18 @@ const emit = defineEmits<{
 
     <!-- 5. Interactive Operations Toolbar -->
     <div class="env-operations-toolbar flex items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)] flex-wrap">
+      <Button
+        v-if="env.enrollmentStatus === 'pending'"
+        variant="secondary"
+        size="sm"
+        class="resume-enroll-btn text-xs"
+        :disabled="disabled"
+        @click="emit('resumeEnrollment', env.id)"
+      >
+        <Icon name="key" :size="13" />
+        <span>Enrollment Ceremony</span>
+      </Button>
+
       <Button
         v-if="env.enrollmentStatus === 'pending'"
         variant="primary"
