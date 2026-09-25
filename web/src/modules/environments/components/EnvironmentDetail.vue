@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { CapabilityKey, EnvironmentInstance } from '../types.js';
+import { useReactiveClock } from '../use-reactive-clock.js';
 import StateBanner from '../../../primitives/StateBanner.vue';
 import Button from '../../../primitives/Button.vue';
 import Icon from '../../../primitives/Icon.vue';
@@ -40,9 +41,11 @@ const emit = defineEmits<{
   (e: 'registerReplacement'): void;
 }>();
 
+const now = useReactiveClock();
+
 const isExpired = computed(() => {
   if (!props.env.claim) return false;
-  return Date.now() >= props.env.claim.expiresAt && props.env.claim.consumedAt === undefined && !props.env.identityDigest;
+  return now.value >= props.env.claim.expiresAt && props.env.claim.consumedAt === undefined && !props.env.identityDigest;
 });
 
 const isCancelled = computed(() => {

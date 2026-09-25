@@ -877,7 +877,7 @@ test('RegisterHostDialog: ceremony state resets completely across close and reop
   }
 });
 
-test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pending status across ceremony and detail contexts', async () => {
+test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pending status across ceremony, detail, and list contexts', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
     const { createApp, ref, h } = await import('vue');
@@ -886,6 +886,9 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
     )) as { default: any };
     const { default: EnvironmentDetail } = (await vite.ssrLoadModule(
       '/src/modules/environments/components/EnvironmentDetail.vue',
+    )) as { default: any };
+    const { default: EnvironmentMasterCard } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentMasterCard.vue',
     )) as { default: any };
 
     const now = Date.now();
@@ -991,6 +994,27 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
       return hasBtn;
     }
 
+    // Helper to check button presence in EnvironmentMasterCard
+    async function checkMasterCardCancelBtn(env: any): Promise<boolean> {
+      const container = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(container);
+
+      const app = createApp({
+        setup: () => () => h(EnvironmentMasterCard, {
+          env,
+          disabled: false,
+          canControl: true,
+        }),
+      });
+      app.mount(container);
+      await new Promise((r) => setTimeout(r, 60));
+
+      const hasBtn = dom.window.document.querySelector('.cancel-enroll-btn') !== null;
+      app.unmount();
+      container.remove();
+      return hasBtn;
+    }
+
     // 1. Ceremony context checks
     assert.equal(await checkCeremonyCancelBtn(pendingEnv), true, 'ceremony: pending shows cancel button');
     assert.equal(await checkCeremonyCancelBtn(approvedEnv), false, 'ceremony: approved hides cancel button');
@@ -1004,6 +1028,84 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
     assert.equal(await checkDetailCancelBtn(revokedEnv), false, 'detail: revoked hides cancel button');
     assert.equal(await checkDetailCancelBtn(expiredEnv), false, 'detail: expired hides cancel button');
     assert.equal(await checkDetailCancelBtn(archivedEnv), false, 'detail: archived hides cancel button');
+
+    // 3. Master-list context checks
+    assert.equal(await checkMasterCardCancelBtn(pendingEnv), true, 'master-list: pending shows cancel button');
+    assert.equal(await checkMasterCardCancelBtn(approvedEnv), false, 'master-list: approved hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(revokedEnv), false, 'master-list: revoked hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(expiredEnv), false, 'master-list: expired hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(archivedEnv), false, 'master-list: archived hides cancel button');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #141 (reactive expiry): pending cancel controls recompute reactively when claim expiresAt passes without prop changes', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, h } = await import('vue');
+    const { default: EnvironmentDetail } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentDetail.vue',
+    )) as { default: any };
+    const { default: EnvironmentMasterCard } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentMasterCard.vue',
+    )) as { default: any };
+
+    const now = Date.now();
+    // Claim expires in 300ms
+    const expiringEnv = {
+      id: 'env-expiring-clock-test',
+      displayName: 'Expiring Host',
+      platform: 'macos' as const,
+      enrollmentStatus: 'pending' as const,
+      trafficLight: 'yellow' as const,
+      trafficLightReason: 'Pending worker claim',
+      connectionState: 'online' as const,
+      connectionAgeSec: 5,
+      lastConfirmedTime: '5s ago',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible' as const,
+      workSafety: 'clear' as const,
+      capabilityPermissions: { processExecution: true },
+      engineReadiness: { codex: 'ready' as const },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: now - 5000, expiresAt: now + 300 },
+      decisions: [],
+    };
+
+    const containerDetail = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(containerDetail);
+    const appDetail = createApp({
+      setup: () => () => h(EnvironmentDetail, { env: expiringEnv, disabled: false }),
+    });
+    appDetail.mount(containerDetail);
+
+    const containerCard = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(containerCard);
+    const appCard = createApp({
+      setup: () => () => h(EnvironmentMasterCard, { env: expiringEnv, disabled: false, canControl: true }),
+    });
+    appCard.mount(containerCard);
+
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Initially unexpired: both detail and list show the cancel button
+    assert.ok(containerDetail.querySelector('.cancel-enroll-btn'), 'detail shows cancel button before expiry');
+    assert.ok(containerCard.querySelector('.cancel-enroll-btn'), 'card shows cancel button before expiry');
+
+    // Wait for the reactive clock to advance past claim.expiresAt (interval is 1000ms, claim expired at 300ms)
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Without any prop changes, the reactive clock invalidated the computed gating:
+    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail hides cancel button reactively once claim expires');
+    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'card hides cancel button reactively once claim expires');
+
+    appDetail.unmount();
+    containerDetail.remove();
+    appCard.unmount();
+    containerCard.remove();
   } finally {
     await cleanup();
   }

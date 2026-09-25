@@ -448,6 +448,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :can-control="controlAvailable"
               @select="handleSelectEnvironment"
               @probe="handleProbe"
+              @cancel-enrollment="handleCancelEnrollment"
             />
           </div>
 
@@ -511,6 +512,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :can-control="controlAvailable"
               @select="handleSelectEnvironment"
               @probe="handleProbe"
+              @cancel-enrollment="handleCancelEnrollment"
             />
           </div>
         </div>

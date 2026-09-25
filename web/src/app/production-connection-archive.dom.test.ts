@@ -310,8 +310,8 @@ test('Ticket #141: stale cancel in environment detail surfaces typed 409 refusal
     const doc = dom.window.document;
 
     // Verify Cancel Pending Enrollment button exists in detail toolbar
-    const cancelBtn = doc.querySelector('.cancel-enroll-btn') as HTMLButtonElement;
-    assert.ok(cancelBtn, 'Cancel Pending Enrollment button rendered for pending enrollment');
+    const cancelBtn = doc.querySelector('.env-detail-card .cancel-enroll-btn') as HTMLButtonElement;
+    assert.ok(cancelBtn, 'Cancel Pending Enrollment button rendered for pending enrollment in detail');
 
     // Click cancel button on stale record
     cancelBtn.click();
@@ -328,9 +328,85 @@ test('Ticket #141: stale cancel in environment detail surfaces typed 409 refusal
     assert.equal(noticeText.includes('409'), false, 'no raw 409 in operator-visible notice');
     assert.equal(/error/i.test(noticeText), false, 'no raw error string in notice');
 
-    // Verify row was refreshed from server and cancel button is gone
-    assert.equal(doc.querySelector('.cancel-enroll-btn'), null, 'Cancel Pending Enrollment button is gone after refresh');
+    // Verify row was refreshed from server and cancel button is gone from detail
+    assert.equal(doc.querySelector('.env-detail-card .cancel-enroll-btn'), null, 'Cancel Pending Enrollment button is gone from detail after refresh');
     assert.ok(doc.querySelector('.revoked-enrollment-panel'), 'revoked state panel is now displayed in detail');
+
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #141: stale cancel in master-list card surfaces typed 409 refusal and refreshes row', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const fixtureModule = (await vite.ssrLoadModule('/src/modules/environments/adapters/fixture-adapter.ts')) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+    const options = await deterministicAppOptions(vite);
+    const base = new fixtureModule.FixtureEnvironmentService();
+    const existing = (await base.listEnvironments())[0]!;
+    const now = Date.now();
+    const pendingEnv = {
+      ...existing,
+      id: 'env-pending-card-stale-test',
+      displayName: 'Pending Card Stale Host',
+      enrollmentStatus: 'pending' as const,
+      trafficLight: 'yellow' as const,
+      trafficLightReason: 'Pending worker claim',
+      claim: { issuedAt: now, expiresAt: now + 60000 },
+      decisions: [{ kind: 'requested', actor: 'operator', at: now, reason: 'Pending enrollment created' }],
+    };
+
+    let cancelAttempts = 0;
+    const service = Object.create(base) as fixtureModule.FixtureEnvironmentService;
+    let currentList = [...await base.listEnvironments(), pendingEnv];
+    service.listEnvironments = async () => currentList;
+    service.cancelEnrollment = async (id: string) => {
+      cancelAttempts += 1;
+      pendingEnv.enrollmentStatus = 'revoked';
+      pendingEnv.trafficLight = 'red';
+      pendingEnv.trafficLightReason = 'Enrollment identity revoked';
+      pendingEnv.decisions.push({ kind: 'revoked', actor: 'server', at: Date.now(), reason: 'Concurrent revocation' });
+      const err = new Error('Only a pending enrollment can be cancelled.');
+      (err as any).code = 'not-pending';
+      (err as any).status = 409;
+      throw err;
+    };
+
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    const { app, router } = createSproutApp({ ...options, environmentService: service });
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const doc = dom.window.document;
+
+    // Verify master card has Cancel Pending Enrollment button
+    const card = doc.querySelector('[data-env="env-pending-card-stale-test"]')?.parentElement;
+    assert.ok(card, 'pending card shell found in master list');
+    const cardCancelBtn = card.querySelector('.cancel-enroll-btn') as HTMLButtonElement;
+    assert.ok(cardCancelBtn, 'Cancel Pending Enrollment button rendered on master card');
+
+    // Click cancel on the master card
+    cardCancelBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(cancelAttempts, 1, 'cancelEnrollment was called from master card');
+
+    // Verify decisive refusal notice banner is visible
+    const noticeEl = doc.querySelector('.env-action-notice');
+    assert.ok(noticeEl, 'Action notice banner is visible');
+    const noticeText = noticeEl.textContent ?? '';
+    assert.match(noticeText, /not-pending/, 'notice surfaces the specific refusal code');
+    assert.match(noticeText, /Only a pending enrollment can be cancelled|no longer pending/i, 'notice surfaces operator-readable refusal');
+    assert.equal(noticeText.includes('409'), false, 'no raw 409 in operator-visible notice');
+    assert.equal(/error/i.test(noticeText), false, 'no raw error string in notice');
+
+    // Verify card is now excluded from active filter (since it became revoked) or cancel button is gone
+    const updatedCard = doc.querySelector('[data-env="env-pending-card-stale-test"]')?.parentElement;
+    assert.equal(updatedCard?.querySelector('.cancel-enroll-btn') ?? null, null, 'card cancel button is gone after refresh');
 
     app.unmount();
   } finally {
