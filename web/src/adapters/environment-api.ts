@@ -30,6 +30,14 @@ export interface EnrollmentView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
+  readonly claim?: EnrollmentClaimView;
+  readonly requiresFreshIdentity?: boolean;
+}
+
+export interface EnrollmentClaimView {
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly consumedAt?: number;
 }
 
 export interface EnvironmentReadinessView {
@@ -202,6 +210,11 @@ export interface EnvironmentEnrollmentBrowserAdapter {
   approveEnrollment(id: string, capabilityPermissions: Readonly<Record<string, boolean>>): Promise<EnrollmentView>;
   revokeEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
+  cancelEnrollment(id: string, reason?: string): Promise<EnrollmentView>;
+  regenerateClaimSecret(id: string): Promise<{
+    readonly enrollment: EnrollmentView;
+    readonly claim: { readonly secret: string; readonly expiresAt: number };
+  }>;
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
   readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[];
     readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number } }>;
@@ -323,6 +336,19 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand({ reason }),
       );
       return response.enrollment;
+    },
+    async cancelEnrollment(id, reason) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/cancel`,
+        jsonCommand(reason !== undefined ? { reason } : {}),
+      );
+      return response.enrollment;
+    },
+    async regenerateClaimSecret(id) {
+      return transport.request(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/claim-secret`,
+        jsonCommand({}),
+      );
     },
     async setCapabilityPermission(id, capability, allowed) {
       const response = await transport.request<{ readonly enrollment: EnrollmentView }>(

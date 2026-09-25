@@ -55,7 +55,7 @@ test('EnvironmentService: listEnvironments returns structured health facts and s
 
 test('EnvironmentService: approveEnrollment approves pending host and updates traffic light', async () => {
   const service = new FixtureEnvironmentService();
-  await service.approveEnrollment('env-pending');
+  await service.approveEnrollment('env-pending', {});
 
   const env = await service.getEnvironment('env-pending');
   assert.ok(env);

@@ -24,7 +24,6 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'approve', id: string): void;
   (e: 'probe', id: string): void;
   (e: 'togglePermission', cap: CapabilityKey): void;
   (e: 'unbindWorkspace', payload: { projectId: string; envId: string }): void;
@@ -35,6 +34,7 @@ const emit = defineEmits<{
   (e: 'archive', id: string): void;
   (e: 'restore', id: string): void;
   (e: 'unenroll', id: string): void;
+  (e: 'resumeEnrollment', id: string): void;
 }>();
 </script>
 
@@ -58,7 +58,7 @@ const emit = defineEmits<{
       </div>
 
       <!-- 1–4. Core Operational Status & Safety Dimensions -->
-      <HealthDimensionsGrid :env="env" :disabled="disabled" @approve="emit('approve', $event)" />
+      <HealthDimensionsGrid :env="env" />
 
       <!-- 5. Capability Permissions (Granular & Safety Guarded) -->
       <CapabilityPermissionsGrid
@@ -142,14 +142,14 @@ const emit = defineEmits<{
     <div class="env-operations-toolbar flex items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)] flex-wrap">
       <Button
         v-if="env.enrollmentStatus === 'pending'"
-        variant="primary"
+        variant="secondary"
         size="sm"
-        class="approve-enroll-btn text-xs"
+        class="resume-enroll-btn text-xs"
         :disabled="disabled"
-        @click="emit('approve', env.id)"
+        @click="emit('resumeEnrollment', env.id)"
       >
-        <Icon name="check" :size="13" />
-        <span>Approve Enrollment (Human Action)</span>
+        <Icon name="key" :size="13" />
+        <span>Enrollment Ceremony</span>
       </Button>
 
       <Button

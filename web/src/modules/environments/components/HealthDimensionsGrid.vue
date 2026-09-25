@@ -1,15 +1,9 @@
 <script setup lang="ts">
 import type { EnvironmentInstance } from '../types.js';
 import Badge from '../../../primitives/Badge.vue';
-import Button from '../../../primitives/Button.vue';
 
 defineProps<{
   env: EnvironmentInstance;
-  disabled?: boolean;
-}>();
-
-const emit = defineEmits<{
-  (e: 'approve', id: string): void;
 }>();
 </script>
 
@@ -32,16 +26,6 @@ const emit = defineEmits<{
           <Badge :variant="env.enrollmentStatus === 'approved' ? 'success' : env.enrollmentStatus === 'pending' ? 'warning' : 'danger'">
             {{ env.enrollmentStatus.toUpperCase() }}
           </Badge>
-          <Button
-            v-if="env.enrollmentStatus === 'pending'"
-            variant="primary"
-            size="xs"
-            class="approve-enroll-btn text-[10px] h-6 px-2"
-            :disabled="disabled"
-            @click="emit('approve', env.id)"
-          >
-            Approve
-          </Button>
         </div>
       </div>
 

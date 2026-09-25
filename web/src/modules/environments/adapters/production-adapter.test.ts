@@ -162,7 +162,7 @@ test('an unreachable readiness read degrades to its authority facts, never hides
   assert.equal(rows[0]!.enrollmentStatus, 'approved', 'the enrollment authority is preserved');
 });
 
-test('approve grants every declared permission through the wire command', async () => {
+test('approval without a Human permission decision is refused before reaching the wire', async () => {
   const facts = enrollmentFacts();
   const calls: string[] = [];
   const wire = adapter(facts, calls);
@@ -176,8 +176,8 @@ test('approve grants every declared permission through the wire command', async 
     return facts.enrollment;
   };
   const service = new ProductionEnvironmentService(wire);
-  await service.approveEnrollment('enroll-1');
-  assert.deepEqual(permissions[0], { 'agent-run': true, fileReadWrite: true });
+  await assert.rejects(service.approveEnrollment('enroll-1', undefined as unknown as Record<string, boolean>), /permission/i);
+  assert.deepEqual(permissions, []);
 });
 
 test('recovery decisions target the open record lease id from the wire facts', async () => {
@@ -320,4 +320,89 @@ test('M89-EVIDENCE-001: the production bridge never fabricates Worker-synchroniz
   const env = await service.getEnvironment('enroll-1');
   assert.equal(env?.workSafety, 'reconciling', 'the record stays reconciling');
   assert.equal(env?.leaseRecovery?.evidenceSynchronized, false, 'no evidence was fabricated');
+});
+
+test('requestEnrollment creates pending enrollment and separates secret from bootstrap command', async () => {
+  const facts = enrollmentFacts({
+    enrollment: {
+      ...enrollmentFacts().enrollment,
+      status: 'pending',
+      identityDigest: '',
+    },
+  });
+  const calls: string[] = [];
+  const wire = adapter(facts, calls);
+  wire.requestEnrollment = async (input) => {
+    calls.push(`requestEnrollment:${input.displayName}`);
+    return {
+      enrollment: facts.enrollment,
+      bootstrap: { instructions: ['Install sprout worker'] },
+      claim: { secret: 'secret-claim-xyz', expiresAt: 50000 },
+    };
+  };
+
+  const service = new ProductionEnvironmentService(wire);
+  const result = await service.requestEnrollment({
+    displayName: 'New Mac Mini',
+    environmentInstanceId: 'inst-mini',
+    platform: 'macos',
+  });
+
+  assert.equal(result.enrollment.id, 'enroll-1');
+  assert.equal(result.claimSecret, 'secret-claim-xyz');
+  assert.equal(result.claimExpiresAt, 50000);
+  assert.match(result.bootstrapCommand, /^sprout worker enroll \S+ enroll-1$/);
+  assert.equal(service.getBootstrapCommand(result.enrollment.id), result.bootstrapCommand,
+    'resumed enrollment uses the same command as creation');
+  // Verify secret is NOT in command text
+  assert.equal(result.bootstrapCommand.includes('secret-claim-xyz'), false);
+});
+
+test('regenerateClaimSecret and cancelEnrollment forward to the wire', async () => {
+  const facts = enrollmentFacts();
+  const calls: string[] = [];
+  const wire = adapter(facts, calls);
+  wire.regenerateClaimSecret = async (id) => {
+    calls.push(`regenerateClaimSecret:${id}`);
+    return {
+      enrollment: facts.enrollment,
+      claim: { secret: 'new-secret-123', expiresAt: 99000 },
+    };
+  };
+  wire.cancelEnrollment = async (id, reason) => {
+    calls.push(`cancelEnrollment:${id}:${reason}`);
+    return facts.enrollment;
+  };
+
+  const service = new ProductionEnvironmentService(wire);
+  const regen = await service.regenerateClaimSecret('enroll-1');
+  assert.equal(regen.claimSecret, 'new-secret-123');
+
+  await service.cancelEnrollment('enroll-1', 'operator cancelled');
+  assert.deepEqual(calls, [
+    'regenerateClaimSecret:enroll-1',
+    'cancelEnrollment:enroll-1:operator cancelled',
+  ]);
+});
+
+test('approveEnrollment sends only human-selected permissions', async () => {
+  const facts = enrollmentFacts();
+  let submittedPermissions: Record<string, boolean> = {};
+  const wire = adapter(facts);
+  wire.approveEnrollment = async (_id, perms) => {
+    submittedPermissions = { ...perms };
+    return facts.enrollment;
+  };
+
+  const service = new ProductionEnvironmentService(wire);
+  // Operator explicitly grants fileReadWrite: true, but denies agent-run: false
+  await service.approveEnrollment('enroll-1', {
+    fileReadWrite: true,
+    'agent-run': false,
+  });
+
+  assert.deepEqual(submittedPermissions, {
+    fileReadWrite: true,
+    'agent-run': false,
+  });
 });

@@ -72,6 +72,17 @@ const isLoading = ref(true);
 const isForceReleaseOpen = ref(false);
 const isGuideOpen = ref(false);
 const isRegisterOpen = ref(false);
+const registerEnrollmentId = ref<string | undefined>(undefined);
+
+function handleOpenRegister(id?: string) {
+  registerEnrollmentId.value = id;
+  isRegisterOpen.value = true;
+}
+
+async function handleEnrolled(enrollmentId: string) {
+  await loadData();
+  selectedId.value = enrollmentId;
+}
 
 async function loadData() {
   const service = activeService.value;
@@ -162,10 +173,6 @@ function handleSelectEnvironment(id: string) {
   selectedId.value = id;
   // Push route so phone drills down and the record is URL-addressable.
   router.push({ name: 'environment-detail', params: { id } });
-}
-
-async function handleApprove(id: string) {
-  await runControl((service) => service.approveEnrollment(id));
 }
 
 async function handleProbe(id: string) {
@@ -270,7 +277,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
             class="register-host-btn icon-only-btn"
             title="Register New Host"
             aria-label="Register New Host"
-            @click="isRegisterOpen = true"
+            @click="handleOpenRegister(undefined)"
           >
             <Icon name="plus" :size="14" />
           </Button>
@@ -378,7 +385,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
           title="No Environments Enrolled"
           description="No host environments are currently enrolled. Connect a worker or register a new host to begin dispatching agent tasks."
         >
-          <Button variant="primary" size="sm" class="mt-3" :disabled="controlsDisabled" @click="isRegisterOpen = true">
+          <Button variant="primary" size="sm" class="mt-3" :disabled="controlsDisabled" @click="handleOpenRegister(undefined)">
             <Icon name="plus" :size="13" />
             <span>Register New Host</span>
           </Button>
@@ -407,7 +414,6 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :env="selectedEnv"
               :disabled="controlsDisabled"
               :can-reconcile="canReconcileEvidence"
-              @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
               @unbind-workspace="handleUnbindWorkspace"
@@ -418,6 +424,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @archive="handleArchive"
               @restore="handleRestore"
               @unenroll="handleUnenroll"
+              @resume-enrollment="handleOpenRegister"
             />
             <div v-else class="p-8 text-center text-xs text-[var(--text-muted)]">
               No environment matches the active filter.
@@ -433,7 +440,6 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :env="selectedEnv"
               :disabled="controlsDisabled"
               :can-reconcile="canReconcileEvidence"
-              @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
               @unbind-workspace="handleUnbindWorkspace"
@@ -444,6 +450,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @archive="handleArchive"
               @restore="handleRestore"
               @unenroll="handleUnenroll"
+              @resume-enrollment="handleOpenRegister"
             />
           </div>
 
@@ -479,7 +486,10 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
 
     <RegisterHostDialog
       :open="isRegisterOpen"
+      :service="activeService"
+      :initial-enrollment-id="registerEnrollmentId"
       @update:open="isRegisterOpen = $event"
+      @enrolled="handleEnrolled"
     />
   </div>
 </template>
