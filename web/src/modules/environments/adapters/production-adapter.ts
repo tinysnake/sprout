@@ -363,17 +363,13 @@ export class ProductionEnvironmentService implements EnvironmentService {
     await this.#adapter.cancelEnrollment(id, reason);
   }
 
-  async approveEnrollment(id: string, permissions?: Record<string, boolean>): Promise<void> {
-    const { enrollment } = await this.#adapter.environmentFacts(id);
+  async approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void> {
+    if (permissions === undefined || permissions === null || typeof permissions !== 'object' || Array.isArray(permissions)) {
+      throw new Error('Human-selected capability permissions are required for approval');
+    }
     const resolvedPermissions: Record<string, boolean> = {};
-    if (permissions !== undefined) {
-      for (const [key, val] of Object.entries(permissions)) {
-        resolvedPermissions[key] = val === true;
-      }
-    } else {
-      for (const capability of Object.keys(enrollment.capabilityPermissions)) {
-        resolvedPermissions[capability] = true;
-      }
+    for (const [key, val] of Object.entries(permissions)) {
+      resolvedPermissions[key] = val === true;
     }
     await this.#adapter.approveEnrollment(id, resolvedPermissions);
   }

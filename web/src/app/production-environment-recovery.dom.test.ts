@@ -184,7 +184,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
   };
 }
 
-test('Production Web: approving pending enrollment updates status, connectivity, and traffic light', async () => {
+test('Production Web: pending enrollment offers only the review ceremony, not direct approval', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
@@ -209,15 +209,14 @@ test('Production Web: approving pending enrollment updates status, connectivity,
     // Verify initial pending status and yellow traffic light
     assert.match(doc.body.textContent ?? '', /Pending enrollment approval/);
 
-    // Find and click Approve Enrollment button
-    const approveBtn = doc.querySelector('.approve-enroll-btn') as HTMLButtonElement;
-    assert.ok(approveBtn, 'Approve enrollment button found');
-    approveBtn.click();
+    assert.equal(doc.querySelectorAll('.approve-enroll-btn').length, 0, 'no approval outside review on desktop or phone');
+    assert.equal(doc.querySelectorAll('.resume-enroll-btn').length, 2, 'desktop and phone retain the ceremony');
+    const ceremony = doc.querySelector('.resume-enroll-btn') as HTMLButtonElement;
+    assert.ok(ceremony, 'pending host keeps its ceremony entry point');
+    ceremony.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
-
-    // Verify status changed to Approved and traffic light turns green
-    assert.match(doc.body.textContent ?? '', /Green: Ready/);
-    assert.match(doc.body.textContent ?? '', /Approved by operator/);
+    assert.ok(doc.querySelector('.register-host-dialog'), 'ceremony opens to inspect and approve after review');
+    assert.match(doc.body.textContent ?? '', /Pending enrollment approval/);
 
     app.unmount();
   } finally {

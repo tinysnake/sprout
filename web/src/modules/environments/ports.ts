@@ -30,7 +30,7 @@ export interface EnvironmentService {
     claimExpiresAt: number;
   }>;
   cancelEnrollment(id: string, reason?: string): Promise<void>;
-  approveEnrollment(id: string, permissions?: Record<string, boolean>): Promise<void>;
+  approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void>;
   triggerProbe(id: string): Promise<ProbeRecord>;
   togglePermission(id: string, cap: CapabilityKey): Promise<void>;
   unbindWorkspace(projectId: string, envId: string): Promise<void>;

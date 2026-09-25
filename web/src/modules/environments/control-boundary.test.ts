@@ -60,7 +60,7 @@ for (const state of ['loading', 'reconnecting', 'stale', 'offline'] as const) {
     assert.equal(boundary.canControl(), false, `${state}: control reports unavailable`);
 
     await assert.rejects(
-      () => boundary.run((s) => s.approveEnrollment('env-1')),
+      () => boundary.run((s) => s.approveEnrollment('env-1', {})),
       (error: unknown) => {
         assert.ok(error instanceof EnvironmentControlRefused, 'a typed refusal is raised');
         assert.equal(error.kind, 'connection-unsettled');

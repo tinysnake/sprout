@@ -175,10 +175,6 @@ function handleSelectEnvironment(id: string) {
   router.push({ name: 'environment-detail', params: { id } });
 }
 
-async function handleApprove(id: string) {
-  await runControl((service) => service.approveEnrollment(id));
-}
-
 async function handleProbe(id: string) {
   await runControl((service) => service.triggerProbe(id));
 }
@@ -418,7 +414,6 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :env="selectedEnv"
               :disabled="controlsDisabled"
               :can-reconcile="canReconcileEvidence"
-              @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
               @unbind-workspace="handleUnbindWorkspace"
@@ -445,7 +440,6 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :env="selectedEnv"
               :disabled="controlsDisabled"
               :can-reconcile="canReconcileEvidence"
-              @approve="handleApprove"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
               @unbind-workspace="handleUnbindWorkspace"

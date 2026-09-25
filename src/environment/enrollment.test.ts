@@ -69,6 +69,12 @@ test('Human approval records the decision, grants permissions, and is durable in
   assert.deepEqual(approved.decisions.map((decision) => decision.kind), ['requested', 'approved']);
 });
 
+test('an omitted capability is denied even if a pending record carries a stale grant', () => {
+  const stale = { ...pending(), capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true } };
+  const approved = approveEnrollment(stale, { capabilityPermissions: { 'agent-run': true }, at: 2_000 });
+  assert.deepEqual(approved.capabilityPermissions, { 'agent-run': true, 'read-only-investigation': false });
+});
+
 test('only a pending enrollment can be approved', () => {
   const approved = approveEnrollment(pending(), { capabilityPermissions: {}, at: 2_000 });
   assert.throws(

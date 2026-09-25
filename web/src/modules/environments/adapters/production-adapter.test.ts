@@ -162,7 +162,7 @@ test('an unreachable readiness read degrades to its authority facts, never hides
   assert.equal(rows[0]!.enrollmentStatus, 'approved', 'the enrollment authority is preserved');
 });
 
-test('approve grants every declared permission through the wire command', async () => {
+test('approval without a Human permission decision is refused before reaching the wire', async () => {
   const facts = enrollmentFacts();
   const calls: string[] = [];
   const wire = adapter(facts, calls);
@@ -176,8 +176,8 @@ test('approve grants every declared permission through the wire command', async 
     return facts.enrollment;
   };
   const service = new ProductionEnvironmentService(wire);
-  await service.approveEnrollment('enroll-1');
-  assert.deepEqual(permissions[0], { 'agent-run': true, fileReadWrite: true });
+  await assert.rejects(service.approveEnrollment('enroll-1', undefined as unknown as Record<string, boolean>), /permission/i);
+  assert.deepEqual(permissions, []);
 });
 
 test('recovery decisions target the open record lease id from the wire facts', async () => {

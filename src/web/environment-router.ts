@@ -226,7 +226,8 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         segments[4] === 'approve'
       ) {
         const body = await context.readBody();
-        const permissions = booleanRecord(body['capabilityPermissions']);
+        const permissions = body['capabilityPermissions'] === undefined
+          ? 'invalid' : booleanRecord(body['capabilityPermissions']);
         if (permissions === 'invalid') {
           return json(context, 400, { error: 'capabilityPermissions must be a record of booleans' });
         }

@@ -344,6 +344,11 @@ test('the enrollment lifecycle proves identity, then requires Human approval', a
     assert.equal(connect.status, 200);
     assert.equal(((await connect.json()) as { outcome: string }).outcome, 'duplicate-same-key');
 
+    // A request without any Human permission decision cannot approve.
+    const missingDecision = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {});
+    assert.equal(missingDecision.status, 400);
+    assert.equal((await runtime.enrollments.get('enroll-1'))?.status, 'pending');
+
     // Human approval grants the requested capability.
     const approved = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
       capabilityPermissions: { 'agent-run': true },

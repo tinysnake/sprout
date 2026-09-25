@@ -435,7 +435,10 @@ export function approveEnrollment(
       'This enrollment has no proven Worker identity yet; the host must claim it and prove key possession before approval.',
     );
   }
-  const permissions: Record<string, boolean> = { ...enrollment.capabilityPermissions };
+  // Never inherit a grant from a pending record when the Human did not select it.
+  const permissions: Record<string, boolean> = Object.fromEntries(
+    Object.keys(enrollment.capabilityPermissions).map((capability) => [capability, false]),
+  );
   for (const [capability, allowed] of Object.entries(input.capabilityPermissions)) {
     if (capability in permissions) permissions[capability] = allowed === true;
   }

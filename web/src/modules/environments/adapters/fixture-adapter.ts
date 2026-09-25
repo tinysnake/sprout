@@ -471,16 +471,17 @@ export class FixtureEnvironmentService implements EnvironmentService {
     ];
   }
 
-  async approveEnrollment(id: string, permissions?: Record<string, boolean>): Promise<void> {
+  async approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void> {
+    if (permissions === undefined || permissions === null) throw new Error('Human-selected capability permissions are required for approval');
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
     env.enrollmentStatus = 'approved';
     env.connectionState = 'online';
     env.trafficLight = 'green';
     env.trafficLightReason = 'Approved by operator · All health checks passed';
-    if (permissions) {
-      env.capabilityPermissions = { ...env.capabilityPermissions, ...permissions };
-    }
+    env.capabilityPermissions = Object.fromEntries(
+      Object.keys(env.capabilityPermissions).map((capability) => [capability, permissions[capability] === true]),
+    );
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {
