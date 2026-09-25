@@ -1,7 +1,9 @@
 /** Host-local, at-least-once recovery outbox. Never stores prompts or credentials. */
-import { lstatSync, readFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { AgentRunEvent, EngineTurnResult } from '../engine/port.ts';
-import { PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
+import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
 
 export interface JournalTurn {
   readonly sessionId: string;
@@ -22,6 +24,54 @@ export interface JournalSnapshot {
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_TURNS = 128;
 
+/**
+ * A crash-released, cross-process exclusive lock around reading AND replacing
+ * the JSON journal. An atomic rename alone cannot protect a read-then-write
+ * epoch check. SQLite's BEGIN IMMEDIATE serializes competing Worker processes;
+ * its empty lock database holds no journal payload or identity data.
+ */
+function withJournalLock<T>(path: string, work: () => T): T {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  chmodSync(directory, PRIVATE_DIRECTORY_MODE);
+  const lockPath = `${path}.lock.sqlite`;
+  const lock = new DatabaseSync(lockPath);
+  try {
+    chmodSync(lockPath, PRIVATE_FILE_MODE);
+    lock.exec('PRAGMA busy_timeout = 10000');
+    lock.exec('CREATE TABLE IF NOT EXISTS journal_lock (id INTEGER PRIMARY KEY)');
+    lock.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      lock.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try { lock.exec('ROLLBACK'); } catch { /* retain the original failure */ }
+      throw error;
+    }
+  } finally {
+    lock.close();
+  }
+}
+
+function readJournal(path: string): JournalSnapshot | undefined {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE || stat.size > MAX_BYTES) {
+      throw new Error('invalid recovery journal');
+    }
+    const previous = JSON.parse(readFileSync(path, 'utf8')) as JournalSnapshot;
+    if (!Array.isArray(previous.turns) || !Number.isSafeInteger(previous.epoch) ||
+        typeof previous.engineStopped !== 'boolean' || !previous.taskContexts) {
+      throw new Error('invalid recovery journal');
+    }
+    return previous;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new Error('recovery journal cannot be opened');
+  }
+}
+
 /** A corrupt, overlarge or inaccessible journal is an error, never an empty outbox. */
 export class WorkerRecoveryJournal {
   readonly #path: string;
@@ -31,29 +81,29 @@ export class WorkerRecoveryJournal {
   constructor(path: string, epoch: number) {
     if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error('invalid recovery journal epoch');
     this.#path = path;
-    let previous: JournalSnapshot | undefined;
-    try {
-      const stat = lstatSync(path);
-      if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE || stat.size > MAX_BYTES) {
-        throw new Error('invalid recovery journal');
-      }
-      previous = JSON.parse(readFileSync(path, 'utf8')) as JournalSnapshot;
-      if (!Array.isArray(previous.turns) || typeof previous.epoch !== 'number' ||
-          typeof previous.engineStopped !== 'boolean' || !previous.taskContexts) throw new Error('invalid recovery journal');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('recovery journal cannot be opened');
-    }
+    const previous = withJournalLock(path, () => {
+      const prior = readJournal(path);
+      const state: JournalSnapshot = { epoch, turns: prior?.turns ?? [],
+        engineStopped: prior?.engineStopped ?? true, taskContexts: prior?.taskContexts ?? {} };
+      this.#writeLocked(state);
+      return prior;
+    });
     // A process death cannot prove its child was fenced. Do not clear this bit
     // merely because a new Worker established an authenticated connection.
     this.#inheritedUnfenced = previous?.engineStopped === false;
     this.#state = { epoch, turns: previous?.turns ?? [], engineStopped: previous?.engineStopped ?? true,
       taskContexts: previous?.taskContexts ?? {} };
-    this.#save(this.#state);
   }
 
   snapshot(): JournalSnapshot { return structuredClone(this.#state); }
 
   #save(state: JournalSnapshot): void {
+    withJournalLock(this.#path, () => this.#writeLocked(state));
+    this.#state = state;
+  }
+
+  /** Called only while holding the same exclusive lock as journal construction. */
+  #writeLocked(state: JournalSnapshot): void {
     const bytes = JSON.stringify(state);
     if (Buffer.byteLength(bytes) > MAX_BYTES || state.turns.length > MAX_TURNS) {
       throw new Error('recovery journal capacity exceeded; refusing unrecorded work');
@@ -61,16 +111,9 @@ export class WorkerRecoveryJournal {
     // A superseded Worker may still be unwinding an engine or context action
     // after its channel closes. Never allow it to replace a newer epoch's
     // journal or launder its stale facts into a subsequent reconnect.
-    try {
-      const disk = JSON.parse(readFileSync(this.#path, 'utf8')) as JournalSnapshot;
-      if (!Number.isSafeInteger(disk.epoch) || disk.epoch > state.epoch) {
-        throw new Error('stale recovery journal epoch');
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    const disk = readJournal(this.#path);
+    if (disk !== undefined && disk.epoch > state.epoch) throw new Error('stale recovery journal epoch');
     writePrivateFile(this.#path, bytes);
-    this.#state = state;
   }
 
   engineStarted(): void { this.#save({ ...this.#state, engineStopped: false }); }
