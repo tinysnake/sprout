@@ -40,12 +40,12 @@ test('protected API lists and revokes sessions without exposing bearer values', 
     const second = await signIn(protectedRuntime.base, protectedRuntime.credential);
     const list = await fetch(`${protectedRuntime.base}/api/auth/sessions`, { headers: { cookie: first.cookie } });
     assert.equal(list.status, 200);
-    const sessions = (await list.json()) as { sessions: { id: string; current: boolean }[] };
+    const sessions = (await list.json()) as { sessions: { id: string; current: boolean }[]; csrfToken: string };
     assert.equal(sessions.sessions.length, 2);
     assert.equal(JSON.stringify(sessions).includes('sprout_session'), false);
 
     const revoked = await fetch(`${protectedRuntime.base}/api/auth/sessions/revoke-others`, {
-      method: 'POST', headers: { cookie: first.cookie, 'x-sprout-csrf': first.csrf },
+      method: 'POST', headers: { cookie: first.cookie, 'x-sprout-csrf': sessions.csrfToken },
     });
     assert.equal(revoked.status, 200);
     assert.equal(((await revoked.json()) as { revoked: number }).revoked, 1);

@@ -46,6 +46,24 @@ test('a host-initialized identity creates independent hashed browser sessions', 
   assert.equal(await service.verifyRequestForgery(authenticated.session.id, privateInput()), false);
 });
 
+test('restored-session CSRF refresh is bound to the live session and replaces its prior proof', async () => {
+  const store = new InMemoryOperatorSessionStore();
+  const service = new OperatorSessionService({ store });
+  const credential = privateInput();
+  await service.initializeOrRecover(credential);
+  const signedIn = await service.signIn(credential);
+  assert.ok(signedIn);
+  const authentication = await service.authenticate(signedIn.bearerToken);
+  assert.equal(authentication.authenticated, true);
+  if (!authentication.authenticated) return;
+
+  const restoredToken = await service.refreshRequestForgeryToken(authentication.session.id);
+  assert.ok(restoredToken);
+  assert.equal(await service.verifyRequestForgery(authentication.session.id, restoredToken), true);
+  assert.equal(await service.verifyRequestForgery(authentication.session.id, signedIn.csrfToken), false);
+  assert.equal(await service.refreshRequestForgeryToken('not-this-session'), undefined);
+});
+
 test('session revocation, revoke-others, and host recovery remain durable across restart', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-auth-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

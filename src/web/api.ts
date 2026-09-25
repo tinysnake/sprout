@@ -218,7 +218,12 @@ export function createRunApi(options: RunApiOptions): RunApi {
     }
 
     if (auth && request.method === 'GET' && url.pathname === '/api/auth/sessions') {
-      sendJson(response, 200, { sessions: await auth.listSessions(browserSession!.id) });
+      const csrfToken = await auth.refreshRequestForgeryToken(browserSession!.id);
+      if (!csrfToken) {
+        sendJson(response, 401, { error: 'authentication required' });
+        return;
+      }
+      sendJson(response, 200, { sessions: await auth.listSessions(browserSession!.id), csrfToken });
       return;
     }
 

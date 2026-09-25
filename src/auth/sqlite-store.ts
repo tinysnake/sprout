@@ -143,6 +143,13 @@ export class SqliteOperatorSessionStore implements OperatorSessionStore {
     `).run(at, idleExpiresAt, id, at, at).changes) > 0;
   }
 
+  async replaceCsrfHash(id: string, csrfHash: string, at: number): Promise<boolean> {
+    return Number(this.#db.prepare(`
+      UPDATE browser_sessions SET csrf_hash = ?
+      WHERE id = ? AND revoked_at IS NULL AND absolute_expires_at > ? AND idle_expires_at > ?
+    `).run(csrfHash, id, at, at).changes) > 0;
+  }
+
   async revokeExpiredSessions(at: number): Promise<number> {
     return Number(this.#db.prepare(`
       UPDATE browser_sessions SET revoked_at = ?
