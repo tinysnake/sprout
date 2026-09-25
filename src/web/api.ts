@@ -973,25 +973,138 @@ function isTransportSecure(request: IncomingMessage): boolean {
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.cjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
+  '.wasm': 'application/wasm',
 };
 
-async function serveStatic(
+const ASSET_EXTENSIONS = new Set([
+  '.js', '.mjs', '.cjs',
+  '.css',
+  '.html', '.htm',
+  '.json',
+  '.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.avif',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.map',
+  '.wasm',
+  '.txt', '.xml',
+]);
+
+function contentTypeFor(filePath: string): string {
+  const dot = filePath.lastIndexOf('.');
+  if (dot < 0) return 'application/octet-stream';
+  const ext = filePath.slice(dot).toLowerCase();
+  return CONTENT_TYPES[ext] ?? 'application/octet-stream';
+}
+
+function hasAssetExtension(pathname: string): boolean {
+  const lastSlash = pathname.lastIndexOf('/');
+  const segment = lastSlash >= 0 ? pathname.slice(lastSlash + 1) : pathname;
+  const dot = segment.lastIndexOf('.');
+  if (dot <= 0 || dot === segment.length - 1) return false;
+  const ext = segment.slice(dot).toLowerCase();
+  return ASSET_EXTENSIONS.has(ext) || /^\.[a-z0-9]{1,8}$/i.test(ext);
+}
+
+function isAppPath(pathname: string): boolean {
+  return pathname === '/app' || pathname.startsWith('/app/');
+}
+
+function containsTraversal(path: string): boolean {
+  if (path.includes('..') || path.includes('\\')) return true;
+  try {
+    const decoded = decodeURIComponent(path);
+    if (decoded.includes('..') || decoded.includes('\\')) return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+async function safeRead(
+  readFile: (path: string) => Promise<Buffer | undefined>,
+  filePath: string,
+): Promise<Buffer | undefined> {
+  try {
+    return await readFile(filePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR' || code === 'ENOTDIR' || code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+export async function serveStatic(
   pathname: string,
   root: string,
   readFile: ((path: string) => Promise<Buffer | undefined>) | undefined,
 ): Promise<{ body: Buffer; contentType: string } | undefined> {
   if (!readFile) return undefined;
-  const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-  if (relative.includes('..')) return undefined;
-  const body = await readFile(joinPath(root, relative));
-  if (!body) return undefined;
-  const extension = relative.slice(relative.lastIndexOf('.'));
-  return { body, contentType: CONTENT_TYPES[extension] ?? 'application/octet-stream' };
+  if (containsTraversal(pathname)) return undefined;
+
+  const rawRelative = pathname.replace(/^\/+/, '');
+  if (containsTraversal(rawRelative)) return undefined;
+
+  // 1. Directory path with trailing slash (e.g. `/`, `/app/`, `/prototype/`): resolve to `${dir}index.html`.
+  if (pathname.endsWith('/')) {
+    const normalized = rawRelative.replace(/\/+$/, '');
+    const indexPath = normalized === '' ? 'index.html' : `${normalized}/index.html`;
+    const body = await safeRead(readFile, joinPath(root, indexPath));
+    if (body) {
+      return { body, contentType: contentTypeFor(indexPath) };
+    }
+    // If a directory index was not found, check if it is under the app mount for SPA fallback.
+    // E.g. `/app/manage/environments/` (with trailing slash).
+    if (isAppPath(pathname) && !hasAssetExtension(pathname)) {
+      const appIndexBody = await safeRead(readFile, joinPath(root, 'app/index.html'));
+      if (appIndexBody) {
+        return { body: appIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
+      }
+    }
+    return undefined;
+  }
+
+  // 2. Exact file path: try reading directly.
+  const body = await safeRead(readFile, joinPath(root, rawRelative));
+  if (body) {
+    return { body, contentType: contentTypeFor(rawRelative) };
+  }
+
+  // 3. Directory path without trailing slash (e.g. `/app`, `/prototype`): try `${relative}/index.html`.
+  const dirIndexBody = await safeRead(readFile, joinPath(root, `${rawRelative}/index.html`));
+  if (dirIndexBody) {
+    return { body: dirIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
+  }
+
+  // 4. SPA fallback: paths under the app mount without a matching file and without an asset extension
+  // resolve to the app index so history-mode routes work on refresh and direct entry.
+  // Missing asset extensions (.js/.css/etc.) stay 404 (return undefined).
+  if (isAppPath(pathname) && !hasAssetExtension(pathname)) {
+    const appIndexBody = await safeRead(readFile, joinPath(root, 'app/index.html'));
+    if (appIndexBody) {
+      return { body: appIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
+    }
+  }
+
+  return undefined;
 }
 
 function joinPath(root: string, relative: string): string {
-  return `${root.replace(/\/+$/, '')}/${relative}`;
+  const cleanRoot = root.replace(/\/+$/, '');
+  const cleanRel = relative.replace(/^\/+/, '');
+  return `${cleanRoot}/${cleanRel}`;
 }

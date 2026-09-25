@@ -1762,9 +1762,15 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
 /**
  * Read a static asset, treating a missing file as "not served here".
  */
-async function defaultReadFile(path: string): Promise<Buffer | undefined> {
+export async function defaultReadFile(path: string): Promise<Buffer | undefined> {
   if (!existsSync(path)) return undefined;
-  return readFile(path);
+  try {
+    return await readFile(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR' || code === 'ENOTDIR' || code === 'ENOENT') return undefined;
+    throw error;
+  }
 }
 
 /**

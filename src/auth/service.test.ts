@@ -61,6 +61,22 @@ test('restored-session CSRF refresh is bound to the live session and replaces it
   assert.ok(restoredToken);
   assert.equal(await service.verifyRequestForgery(authentication.session.id, restoredToken), true);
   assert.equal(await service.verifyRequestForgery(authentication.session.id, signedIn.csrfToken), false);
+
+  const secondSession = await service.signIn(credential);
+  assert.ok(secondSession);
+  const secondAuthentication = await service.authenticate(secondSession.bearerToken);
+  assert.equal(secondAuthentication.authenticated, true);
+  if (!secondAuthentication.authenticated) return;
+  assert.equal(
+    await service.verifyRequestForgery(secondAuthentication.session.id, restoredToken),
+    false,
+    'a refreshed token for session A cannot authorize session B',
+  );
+  assert.equal(
+    await service.verifyRequestForgery(secondAuthentication.session.id, secondSession.csrfToken),
+    true,
+    'session B accepts only its own CSRF proof',
+  );
   assert.equal(await service.refreshRequestForgeryToken('not-this-session'), undefined);
 });
 
