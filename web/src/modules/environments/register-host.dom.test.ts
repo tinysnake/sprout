@@ -651,3 +651,228 @@ test('Privacy Boundary: production enrollment route imports no fixture authority
   assert.equal(command.includes('secret'), false);
   assert.equal(command.includes('--private-transport'), false);
 });
+
+test('RegisterHostDialog: dialog width classes compose predictably on sm+ and mobile viewports', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+    const { default: Dialog } = (await vite.ssrLoadModule(
+      '/src/primitives/Dialog.vue',
+    )) as { default: any };
+
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+
+    // 1. Check RegisterHostDialog width classes
+    const isOpen = ref(true);
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value,
+        service: {
+          supportsEvidenceReconciliation: false,
+          listEnvironments: async () => [],
+          getEnvironment: async () => undefined,
+          getBootstrapCommand: () => '',
+          requestEnrollment: async () => ({} as any),
+          regenerateClaimSecret: async () => ({} as any),
+          cancelEnrollment: async () => {},
+          approveEnrollment: async () => {},
+          triggerProbe: async () => ({} as any),
+          togglePermission: async () => {},
+          unbindWorkspace: async () => {},
+          reconcileEvidence: async () => {},
+          resumeRecovery: async () => {},
+          discardRecovery: async () => {},
+          forceRelease: async () => {},
+          archiveEnvironment: async () => {},
+          restoreEnvironment: async () => {},
+          unenrollEnvironment: async () => {},
+        },
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 60));
+
+    const doc = dom.window.document;
+    const dialogEl = doc.querySelector('.register-host-dialog');
+    assert.ok(dialogEl, 'RegisterHostDialog element found');
+
+    const classList = Array.from(dialogEl.classList);
+    assert.ok(classList.includes('register-host-dialog'), 'includes ceremony marker');
+    assert.ok(classList.includes('sm:max-w-2xl'), 'includes sm:max-w-2xl for roomy layout on wide screens');
+    assert.equal(classList.includes('sm:max-w-[500px]'), false, 'hardcoded sm:max-w-[500px] does not override wide width');
+    assert.ok(classList.includes('w-[calc(100%-2rem)]'), 'responsive full width with margins down to narrow viewports');
+    assert.ok(classList.includes('sm:w-full'), 'full width constrained by sm:max-w-2xl on sm+');
+    assert.ok(classList.includes('p-4') && classList.includes('sm:p-6'), 'consistent padding rhythm (not p-0)');
+    assert.equal(classList.includes('p-0'), false, 'p-0 is removed so header/footer are not flush against edges');
+
+    app.unmount();
+    container.innerHTML = '';
+
+    // 2. Check Dialog primitive composition with unscoped max-w-2xl
+    const app2 = createApp({
+      setup: () => () => h(Dialog, {
+        open: true,
+        title: 'Custom Width Dialog',
+        class: 'max-w-2xl',
+      }),
+    });
+    app2.mount(container);
+    await new Promise((r) => setTimeout(r, 60));
+
+    const dialog2El = doc.querySelector('[role="dialog"]');
+    assert.ok(dialog2El, 'Dialog with max-w-2xl found');
+    const classList2 = Array.from(dialog2El.classList);
+    assert.ok(classList2.includes('max-w-2xl'), 'unscoped max-w-2xl applied');
+    assert.equal(classList2.includes('sm:max-w-[500px]'), false, 'sm:max-w-[500px] default yielded to caller max-w class');
+
+    app2.unmount();
+    container.remove();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('RegisterHostDialog: ceremony state resets completely across close and reopen', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+
+    let currentEnv: any = null;
+    const mockService = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: async () => (currentEnv ? [currentEnv] : []),
+      getEnvironment: async (id: string) => (currentEnv && currentEnv.id === id ? currentEnv : undefined),
+      requestEnrollment: async (input: any) => {
+        const now = Date.now();
+        currentEnv = {
+          id: 'enroll-reopen-test',
+          displayName: input.displayName,
+          platform: input.platform ?? 'macos',
+          trafficLight: 'yellow',
+          enrollmentStatus: 'pending',
+          capabilityPermissions: { processExecution: false },
+          requestedCapabilities: ['processExecution'],
+          engineReadiness: { codex: 'ready' },
+          identityDigest: '',
+          claim: { issuedAt: now, expiresAt: now + 60000 },
+          decisions: [],
+        };
+        return {
+          enrollment: currentEnv,
+          claimSecret: 'secret-to-be-cleared-12345',
+          claimExpiresAt: currentEnv.claim.expiresAt,
+          bootstrapCommand: `sprout worker enroll localhost:41030 ${currentEnv.id}`,
+        };
+      },
+      approveEnrollment: async (id: string) => {
+        currentEnv.enrollmentStatus = 'approved';
+        currentEnv.trafficLight = 'green';
+      },
+      regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async () => {},
+      triggerProbe: async () => ({} as any),
+      togglePermission: async () => {},
+      unbindWorkspace: async () => {},
+      reconcileEvidence: async () => {},
+      resumeRecovery: async () => {},
+      discardRecovery: async () => {},
+      forceRelease: async () => {},
+      archiveEnvironment: async () => {},
+      restoreEnvironment: async () => {},
+      unenrollEnvironment: async () => {},
+      getBootstrapCommand: (id: string) => `sprout worker enroll localhost:41030 ${id}`,
+    };
+
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+
+    const isOpen = ref(true);
+    const initialId = ref<string | undefined>(undefined);
+
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value,
+        service: mockService,
+        initialEnrollmentId: initialId.value,
+        'onUpdate:open': (val: boolean) => { isOpen.value = val; },
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 60));
+
+    const doc = dom.window.document;
+
+    // Capture initial instance ID stamp
+    const firstInstanceInput = doc.getElementById('register-host-id') as HTMLInputElement;
+    assert.ok(firstInstanceInput, 'first instance id input found');
+    const firstInstanceId = firstInstanceInput.value;
+    assert.match(firstInstanceId, /^env-macos-/);
+
+    // Fill in name and begin registration
+    const nameInput = doc.getElementById('register-host-name') as HTMLInputElement;
+    nameInput.value = 'Reopen Test Host';
+    nameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+
+    const beginBtn = doc.getElementById('btn-submit-registration') as HTMLButtonElement;
+    beginBtn.click();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify secret and command are visible in active phase
+    assert.equal(doc.getElementById('claim-secret-value')?.textContent?.trim(), 'secret-to-be-cleared-12345');
+    assert.ok(doc.getElementById('bootstrap-command-text'));
+
+    // Advance to review phase
+    currentEnv.identityDigest = 'key-digest-reopen';
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.match(doc.body.textContent ?? '', /Worker Identity Verified/);
+
+    // Approve enrollment
+    const approveBtn = doc.getElementById('btn-approve-enrollment') as HTMLButtonElement;
+    approveBtn.click();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.match(doc.body.textContent ?? '', /Environment Enrolled Successfully/);
+
+    // Close the dialog
+    isOpen.value = false;
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Reopen without initialEnrollmentId (fresh ceremony)
+    isOpen.value = true;
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Verify dialog returned to create phase with fresh form
+    assert.match(doc.body.textContent ?? '', /Host Display Name/);
+    assert.ok(doc.getElementById('btn-submit-registration'), 'Begin Registration button is visible');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Environment Enrolled Successfully/, 'approved phase is gone');
+    assert.equal(doc.getElementById('claim-secret-value'), null, 'previous claim secret is not visible');
+    assert.equal(doc.getElementById('bootstrap-command-text'), null, 'previous bootstrap command is not visible');
+
+    const secondInstanceInput = doc.getElementById('register-host-id') as HTMLInputElement;
+    assert.ok(secondInstanceInput);
+    const secondInstanceId = secondInstanceInput.value;
+    assert.match(secondInstanceId, /^env-macos-/);
+    assert.notEqual(secondInstanceId, firstInstanceId, 'reopening creates a fresh instance-id stamp');
+
+    // Wait through polling interval to verify pollStatus does not auto-jump to approved
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.match(doc.body.textContent ?? '', /Host Display Name/, 'still in create phase after polling tick');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Environment Enrolled Successfully/, 'did not jump to approved');
+
+    // Reopen with initialEnrollmentId pointing to the approved enrollment
+    initialId.value = 'enroll-reopen-test';
+    await new Promise((r) => setTimeout(r, 80));
+    assert.match(doc.body.textContent ?? '', /Environment Enrolled Successfully/, 'initialEnrollmentId loads existing approved enrollment');
+
+    app.unmount();
+    container.remove();
+  } finally {
+    await cleanup();
+  }
+});

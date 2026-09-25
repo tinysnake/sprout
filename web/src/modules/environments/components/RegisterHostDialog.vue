@@ -179,8 +179,23 @@ const engineFactsList = computed(() => {
   });
 });
 
+let lastStampTime = 0;
+let stampSeq = 0;
+function generateInstanceStamp(): string {
+  const nowMs = Date.now();
+  if (nowMs <= lastStampTime) {
+    stampSeq++;
+  } else {
+    lastStampTime = nowMs;
+    stampSeq = 0;
+  }
+  return nowMs.toString(36) + (stampSeq > 0 ? `-${stampSeq}` : '');
+}
+
 function initForm() {
-  const stamp = Date.now().toString(36);
+  const stamp = generateInstanceStamp();
+  phase.value = 'create';
+  activeEnv.value = undefined;
   displayName.value = 'macOS Host';
   environmentInstanceId.value = `env-macos-${stamp}`;
   platform.value = 'macos';
@@ -402,7 +417,6 @@ watch(
         await loadExisting(props.initialEnrollmentId);
       } else {
         initForm();
-        phase.value = 'create';
         await nextTick();
         const input = document.getElementById('register-host-name');
         input?.focus();
@@ -421,9 +435,21 @@ watch(
         clearInterval(clockTimer);
         clockTimer = null;
       }
+      if (!props.initialEnrollmentId) {
+        initForm();
+      }
     }
   },
   { immediate: true }
+);
+
+watch(
+  () => props.initialEnrollmentId,
+  async (newId) => {
+    if (props.open && newId) {
+      await loadExisting(newId);
+    }
+  }
 );
 
 onUnmounted(() => {
@@ -437,10 +463,10 @@ onUnmounted(() => {
     :open="open"
     title="Register New Host Environment"
     description="Production enrollment ceremony for host worker execution"
-    class="register-host-dialog max-w-2xl w-full p-0 overflow-hidden"
+    class="register-host-dialog max-w-2xl sm:max-w-2xl"
     @update:open="(val) => emit('update:open', val)"
   >
-    <div class="enrollment-ceremony-container p-4 sm:p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+    <div class="enrollment-ceremony-container space-y-5">
       <!-- Live Region for Accessibility -->
       <div
         id="register-host-live-region"
@@ -602,13 +628,13 @@ onUnmounted(() => {
           <div class="relative group">
             <pre
               id="bootstrap-command-text"
-              class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] font-mono text-[11px] text-[var(--text-primary)] overflow-x-auto break-all pr-24"
+              class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] font-mono text-[11px] text-[var(--text-primary)] overflow-x-auto break-all sm:pr-36"
             >{{ bootstrapCommand }}</pre>
             <Button
               id="btn-copy-command"
               variant="secondary"
               size="sm"
-              class="absolute right-2 top-2 text-[11px] min-h-[44px]"
+              class="mt-2 w-full sm:w-auto sm:mt-0 sm:absolute sm:right-2 sm:top-2 text-[11px] min-h-[44px]"
               aria-label="Copy bootstrap command"
               @click="handleCopyCommand"
             >
@@ -635,7 +661,7 @@ onUnmounted(() => {
           <div v-if="claimSecret" class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
             <div
               id="claim-secret-value"
-              class="flex-1 p-2.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--accent-primary)] tracking-wider overflow-x-auto select-all"
+              class="flex-1 p-2.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--accent-primary)] tracking-wider overflow-x-auto select-all min-w-0"
             >
               {{ claimSecret }}
             </div>
@@ -643,7 +669,7 @@ onUnmounted(() => {
               id="btn-copy-secret"
               variant="primary"
               size="sm"
-              class="shrink-0 min-h-[44px]"
+              class="w-full sm:w-auto shrink-0 min-h-[44px]"
               aria-label="Copy one-use secret"
               @click="handleCopySecret"
             >
@@ -655,7 +681,7 @@ onUnmounted(() => {
             Secret was presented upon creation and is not retained in cleartext. If you have not copied it, regenerate a fresh secret.
           </div>
 
-          <div class="flex items-center justify-between text-[10px] text-[var(--text-muted)] pt-1">
+          <div class="flex items-center justify-between gap-2 flex-wrap text-[10px] text-[var(--text-muted)] pt-1">
             <span v-if="claimExpiresAt">
               Expires at: {{ new Date(claimExpiresAt).toLocaleTimeString() }}
             </span>
@@ -728,11 +754,11 @@ onUnmounted(() => {
             <div
               v-for="item in engineFactsList"
               :key="item.engine"
-              class="p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs flex flex-col gap-1"
+              class="p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs flex flex-col gap-1 min-w-0"
             >
-              <div class="flex items-center justify-between">
-                <span class="font-semibold capitalize text-[var(--text-primary)]">{{ item.engine }}</span>
-                <Badge :variant="item.readiness === 'ready' ? 'success' : item.readiness === 'login-required' ? 'warning' : 'neutral'" class="text-[10px]">
+              <div class="flex items-center justify-between gap-1 flex-wrap">
+                <span class="font-semibold capitalize text-[var(--text-primary)] truncate">{{ item.engine }}</span>
+                <Badge :variant="item.readiness === 'ready' ? 'success' : item.readiness === 'login-required' ? 'warning' : 'neutral'" class="text-[10px] shrink-0">
                   {{ item.readiness }}
                 </Badge>
               </div>
@@ -742,7 +768,7 @@ onUnmounted(() => {
               <div v-if="item.models.length > 0" class="text-[10px] text-[var(--text-secondary)] truncate">
                 Models: {{ item.models.join(', ') }}
               </div>
-              <div class="text-[10px] text-[var(--text-secondary)]">
+              <div class="text-[10px] text-[var(--text-secondary)] break-words">
                 Source: {{ item.source ?? 'Not reported' }} · Observed: {{ item.observedAt !== undefined ? new Date(item.observedAt).toLocaleString() : 'Not reported' }} · Version: {{ item.version ?? 'Not reported' }}
               </div>
             </div>
@@ -831,12 +857,12 @@ onUnmounted(() => {
     <!-- FOOTER ACTIONS -->
     <template #footer>
       <div class="flex items-center justify-between w-full flex-wrap gap-2">
-        <div>
+        <div class="w-full sm:w-auto">
           <Button
             v-if="phase === 'active' || phase === 'review'"
             variant="ghost"
             size="sm"
-            class="cancel-enroll-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)] min-h-[44px]"
+            class="cancel-enroll-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)] min-h-[44px] w-full sm:w-auto"
             @click="handleCancelEnrollment"
           >
             <Icon name="trash" :size="13" />
@@ -844,12 +870,12 @@ onUnmounted(() => {
           </Button>
         </div>
 
-        <div class="flex items-center gap-2 ml-auto">
+        <div class="flex items-center gap-2 w-full sm:w-auto sm:ml-auto justify-end flex-wrap">
           <Button
             v-if="phase === 'create'"
             variant="secondary"
             size="sm"
-            class="min-h-[44px]"
+            class="min-h-[44px] flex-1 sm:flex-initial"
             @click="emit('update:open', false)"
           >
             Cancel
@@ -859,7 +885,7 @@ onUnmounted(() => {
             id="btn-submit-registration"
             variant="primary"
             size="sm"
-            class="min-h-[44px]"
+            class="min-h-[44px] flex-1 sm:flex-initial"
             :disabled="isSubmitting"
             @click="handleCreatePending"
           >
@@ -871,7 +897,7 @@ onUnmounted(() => {
             v-if="phase === 'active'"
             variant="secondary"
             size="sm"
-            class="min-h-[44px]"
+            class="min-h-[44px] w-full sm:w-auto"
             @click="emit('update:open', false)"
           >
             Close Dialog (Keep Pending)
@@ -882,7 +908,7 @@ onUnmounted(() => {
             id="btn-approve-enrollment"
             variant="primary"
             size="sm"
-            class="min-h-[44px]"
+            class="min-h-[44px] w-full sm:w-auto"
             @click="handleApprove"
           >
             <Icon name="check" :size="14" />
@@ -894,7 +920,7 @@ onUnmounted(() => {
             id="btn-done-enrollment"
             variant="primary"
             size="sm"
-            class="min-h-[44px]"
+            class="min-h-[44px] w-full sm:w-auto"
             @click="handleDone"
           >
             Done
