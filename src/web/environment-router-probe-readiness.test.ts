@@ -31,6 +31,8 @@ import { createReadinessAuthorityTestSeam } from '../environment/readiness-autho
 
 import { EnrollmentError } from '../environment/enrollment.ts';
 
+import { ReadinessOutcomeError } from '../environment/readiness-workflow.ts';
+
 import { InMemoryEnrollmentStore } from '../environment/enrollment-store.ts';
 
 import { InMemoryEnvironmentReadinessStore } from '../environment/readiness-store.ts';
@@ -40,6 +42,8 @@ import { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
 import { InMemoryRecoveryStore } from '../environment/recovery-store.ts';
 
 import { EnvironmentArchiveService } from '../environment/archive.ts';
+
+import type { ReadinessProbeFact, ReadinessReceipt } from '../environment/readiness.ts';
 
 import { workerIdentityFixture } from '../environment/worker-identity-fixture.ts';
 
@@ -87,7 +91,10 @@ interface EnrollmentRuntime {
 }
 
 
-async function enrollmentApi(options: { readonly requiredEngines?: readonly string[] } = {}): Promise<EnrollmentRuntime> {
+async function enrollmentApi(options: {
+  readonly requiredEngines?: readonly string[];
+  readonly requestProbe?: (enrollmentId: string) => Promise<ReadinessProbeFact | ReadinessReceipt>;
+} = {}): Promise<EnrollmentRuntime> {
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const orchestrator = new RunOrchestrator({
     engines: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
@@ -151,7 +158,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
       enrollments,
       recovery,
       archive,
-      requestProbe: async (enrollmentId) => {
+      requestProbe: options.requestProbe ?? (async (enrollmentId) => {
         const enrollment = await enrollments.get(enrollmentId);
         if (enrollment?.status !== 'approved') {
           throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
@@ -177,7 +184,7 @@ async function enrollmentApi(options: { readonly requiredEngines?: readonly stri
         }, authority, { attempt });
         if (!recorded) throw new Error('synthetic Worker probe was rejected');
         return recorded;
-      },
+      }),
     })],
   });
   const { port } = await api.listen(0);
@@ -417,3 +424,83 @@ test('an empty engine configuration does not fabricate a dual-engine requirement
     await runtime.api.close();
   }
 });
+
+test('probe POST maps all ReadinessOutcomeError dispositions to typed 409 responses', async () => {
+  let outcomeErrorToThrow: ReadinessOutcomeError | undefined;
+  const runtime = await enrollmentApi({
+    requestProbe: async (enrollmentId) => {
+      if (outcomeErrorToThrow !== undefined) throw outcomeErrorToThrow;
+      const enrollment = await runtime.enrollments.get(enrollmentId);
+      if (enrollment?.status !== 'approved') {
+        throw new EnrollmentError('not-approved', 'The Environment enrollment is not approved.');
+      }
+      return { observationId: 'obs-1' } as unknown as ReadinessReceipt;
+    },
+  });
+  try {
+    await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Local Mac',
+      publicKey: 'public-key-a',
+      platform: 'macos',
+      capabilityRequests: ['agent-run'],
+      engines: [],
+    });
+    await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+    });
+
+    // 1. unavailable (no code)
+    outcomeErrorToThrow = new ReadinessOutcomeError('unavailable', 'the Environment Worker is offline');
+    const unavailableRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {});
+    assert.equal(unavailableRes.status, 409);
+    assert.deepEqual(await unavailableRes.json(), {
+      error: 'the Environment Worker is offline',
+      code: 'unavailable',
+      disposition: 'unavailable',
+    });
+
+    // 2. malformed (no code)
+    outcomeErrorToThrow = new ReadinessOutcomeError('malformed', 'the Environment Worker returned an invalid readiness probe result');
+    const malformedRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {});
+    assert.equal(malformedRes.status, 409);
+    assert.deepEqual(await malformedRes.json(), {
+      error: 'the Environment Worker returned an invalid readiness probe result',
+      code: 'malformed',
+      disposition: 'malformed',
+    });
+
+    // 3. superseded (no code)
+    outcomeErrorToThrow = new ReadinessOutcomeError('superseded', 'the readiness probe result belongs to a superseded Worker connection epoch');
+    const supersededRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {});
+    assert.equal(supersededRes.status, 409);
+    assert.deepEqual(await supersededRes.json(), {
+      error: 'the readiness probe result belongs to a superseded Worker connection epoch',
+      code: 'superseded',
+      disposition: 'superseded',
+    });
+
+    // 4. superseded with code conflicting-observation
+    outcomeErrorToThrow = new ReadinessOutcomeError('superseded', 'The Worker changed content for an issued readiness attempt.', 'conflicting-observation');
+    const conflictRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {});
+    assert.equal(conflictRes.status, 409);
+    assert.deepEqual(await conflictRes.json(), {
+      error: 'The Worker changed content for an issued readiness attempt.',
+      code: 'conflicting-observation',
+      disposition: 'superseded',
+    });
+
+    // 5. superseded with code superseded-observation
+    outcomeErrorToThrow = new ReadinessOutcomeError('superseded', 'A later-issued readiness observation superseded this attempt.', 'superseded-observation');
+    const supersededObsRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/probes', runtime, {});
+    assert.equal(supersededObsRes.status, 409);
+    assert.deepEqual(await supersededObsRes.json(), {
+      error: 'A later-issued readiness observation superseded this attempt.',
+      code: 'superseded-observation',
+      disposition: 'superseded',
+    });
+  } finally {
+    await runtime.api.close();
+  }
+});
+

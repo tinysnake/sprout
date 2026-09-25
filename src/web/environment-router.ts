@@ -646,8 +646,12 @@ function json(context: ApiRequestContext, status: number, payload: unknown): tru
 }
 
 function enrollmentFailure(context: ApiRequestContext, error: unknown): true {
-  if (error instanceof ReadinessOutcomeError && error.code !== undefined) {
-    return json(context, 409, { error: error.message, code: error.code });
+  if (error instanceof ReadinessOutcomeError) {
+    return json(context, 409, {
+      error: error.message,
+      code: error.code ?? error.disposition,
+      disposition: error.disposition,
+    });
   }
   if (error instanceof EnrollmentError) {
     let status = 409;
