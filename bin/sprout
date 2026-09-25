@@ -22,12 +22,21 @@ switch (command) {
     // process incarnation without putting identity material in argv.
     if ((rest[0] === 'start' || rest[0] === 'reset') && process.env['SPROUT_WORKER_OWNER_TOKEN'] === undefined) {
       const child = spawn(process.execPath, process.argv.slice(1), {
-        env: { ...process.env, SPROUT_WORKER_OWNER_TOKEN: randomBytes(32).toString('base64url') },
+        env: { ...process.env, SPROUT_WORKER_OWNER_TOKEN: randomBytes(32).toString('base64url'), LC_ALL: 'C' },
         stdio: 'inherit',
       });
-      const exitCode = await new Promise<number>((resolve, reject) => {
+      const onSignal = (signal) => {
+        child.kill(signal);
+      };
+      process.on('SIGINT', onSignal);
+      process.on('SIGTERM', onSignal);
+      const exitCode = await new Promise((resolve, reject) => {
         child.once('error', reject);
-        child.once('exit', (code) => resolve(code ?? 1));
+        child.once('exit', (code) => {
+          process.off('SIGINT', onSignal);
+          process.off('SIGTERM', onSignal);
+          resolve(code ?? 1);
+        });
       });
       process.exit(exitCode);
     }

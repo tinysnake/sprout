@@ -168,9 +168,9 @@ export function installLaunchAgent(
   } catch (error) {
     // A launchctl diagnostic is not proof of absence.  In particular, do not
     // treat an errno or a translated message as one: query the domain below.
-    if (!serviceIsAbsent(run, options.uid, options.label)) throw error;
+    if (!waitForServiceAbsent(run, options.uid, options.label)) throw error;
   }
-  if (!serviceIsAbsent(run, options.uid, options.label)) {
+  if (!waitForServiceAbsent(run, options.uid, options.label)) {
     throw new Error(`launchctl bootout for ${service} did not unload the service`);
   }
   run('launchctl', ['bootstrap', domain, options.plistPath]);
@@ -214,14 +214,14 @@ export function uninstallLaunchAgent(options: {
   try {
     run('launchctl', ['bootout', service]);
   } catch (error) {
-    if (!serviceIsAbsent(run, options.uid, options.label)) {
+    if (!waitForServiceAbsent(run, options.uid, options.label)) {
       throw new LaunchAgentUninstallError(
         'bootout-failed',
         'launchctl could not prove that the exact Worker service was unloaded; the service is left in place',
       );
     }
   }
-  if (!serviceIsAbsent(run, options.uid, options.label)) {
+  if (!waitForServiceAbsent(run, options.uid, options.label)) {
     throw new LaunchAgentUninstallError(
       'bootout-failed',
       `launchctl bootout for ${service} did not prove that the service is unloaded`,
@@ -251,6 +251,21 @@ export function uninstallLaunchAgent(options: {
 export function serviceIsAbsent(run: CommandRunner, uid: number, label: string): boolean {
   const listing = run('launchctl', ['print', launchAgentDomain(uid)]);
   return !new RegExp(`(?:^|[^A-Za-z0-9_.-])${escapeRegExp(label)}(?:$|[^A-Za-z0-9_.-])`, 'm').test(listing);
+}
+
+/** Poll briefly for absence after bootout to allow launchd to reap the job. */
+export function waitForServiceAbsent(run: CommandRunner, uid: number, label: string, maxAttempts = 20): boolean {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (serviceIsAbsent(run, uid, label)) return true;
+    if (attempt < maxAttempts - 1) {
+      try {
+        execFileSync('/bin/sleep', ['0.05'], { stdio: 'ignore' });
+      } catch {
+        // Fallback when sleep fails
+      }
+    }
+  }
+  return false;
 }
 
 /** Return every managed label launchd currently reports for this user. */

@@ -32,7 +32,8 @@ import { join } from 'node:path';
 import { parseWorkerConfiguration } from '../../host-config.ts';
 import { EnvironmentWorker } from '../server.ts';
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
-import { createEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
+import { createEnvironmentWorkerEngines, describeEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
+import { probeEnvironmentReadiness } from '../readiness.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
@@ -117,6 +118,8 @@ export type WorkerStatusState =
 
 export interface WorkerStatus {
   readonly state: WorkerStatusState;
+  /** The Worker connection epoch when connected. */
+  readonly epoch?: number;
   /** Whether a LaunchAgent plist is present for this environment. */
   readonly serviceInstalled: boolean;
   /** The Worker protocol version the host-local configuration declares. */
@@ -286,6 +289,7 @@ export function projectStatus(input: {
     case 'stopped':
       return {
         state: runtime.state === 'stopped' ? 'stopped' : runtime.state,
+        ...(runtime.state === 'connected' && runtime.epoch !== undefined ? { epoch: runtime.epoch } : {}),
         ...base,
         ...(runtime.detail !== undefined ? { detail: runtime.detail } : {}),
       };
@@ -681,10 +685,10 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     environment: NodeJS.ProcessEnv,
   ): Promise<void> {
     const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
-    const engines = createEnvironmentWorkerEngines(hostEngineFacts(configuration));
-    // Prefer the same environment-variable allowlisted facts the core forwards,
-    // but fall back to a minimal honest readiness projection when the CLI runs
-    // engine selection in-process.
+    const facts = hostEngineFacts(configuration);
+    const engines = createEnvironmentWorkerEngines(facts);
+    const engineConfigurations = describeEnvironmentWorkerEngines(facts);
+    let workerReadiness = (await probeEnvironmentReadiness(engineConfigurations)).readiness;
     void engineIds;
     const worker = new EnvironmentWorker({
       environmentInstanceId,
@@ -693,16 +697,15 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       output: connection.stream,
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
       workspaceRoot: configuration.workspaceRoot,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        engines: [...engines.keys()].map((engine) => ({
-          engine,
-          installed: true,
-          readiness: 'unknown',
-          modelAvailability: 'unknown',
-          models: [],
-        })),
-      }),
+      readiness: () => workerReadiness,
+      readinessProbe: async (params) => {
+        const result = await probeEnvironmentReadiness(engineConfigurations, {
+          ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
+          ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+        });
+        workerReadiness = result.readiness;
+        return result;
+      },
     });
     await new Promise<void>((resolve) => {
       connection.stream.on('close', () => {
@@ -797,6 +800,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       });
     }
     out(`state: ${projected.state}`);
+    if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
     out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
     if (projected.detail !== undefined) out(`detail: ${projected.detail}`);
@@ -979,6 +983,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     if (process.env['SPROUT_WORKER_HOME'] !== undefined) {
       environment['SPROUT_WORKER_HOME'] = process.env['SPROUT_WORKER_HOME'];
     }
+    environment['LC_ALL'] = 'C';
     return environment;
   }
 

@@ -540,14 +540,22 @@ function linuxStartIdentity(pid: number): string | undefined {
 }
 
 function darwinStartIdentity(pid: number): string | undefined {
-  const output = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const output = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, LC_ALL: 'C' },
+  }).trim();
   return output === '' ? undefined : `darwin:${output}`;
 }
 
 function darwinEnvironmentValue(pid: number): string | undefined {
   // `-E` asks ps for the process environment. We extract only the exact opaque
   // variable; no command text or unrelated environment values are retained.
-  const output = execFileSync('ps', ['-wwE', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const output = execFileSync('ps', ['-wwE', '-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, LC_ALL: 'C' },
+  });
   const match = output.match(/(?:^|\s)SPROUT_WORKER_OWNER_TOKEN=([A-Za-z0-9_-]{43})(?=\s|$)/);
   return match?.[1];
 }
