@@ -12,6 +12,7 @@
   },
   "scripts": {
     "test": "node scripts/test-summary.ts",
+    "test:bench": "node scripts/test-summary.ts --bench",
     "test:full": "node --test --test-concurrency=4 'src/**/*.test.ts' 'web/src/**/*.test.ts'",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "start": "node src/main.ts",
