@@ -127,6 +127,7 @@ workspace.
 
 ```bash
 npm test                # automated tests, failure-only report (no engine, network, or Docker needed)
+npm run test:bench      # same tests, with per-test durations sorted slowest first
 npm run test:full       # same run with every passing test named
 npm run typecheck       # server and client type checking
 npm run smoke           # live check: real Codex in a worker on the macOS host
@@ -146,6 +147,23 @@ real seams and prints the observed evidence.
 counters and, only when something fails, that failure's reason and location. Use
 `npm run test:full` when you need to see every passing test named; run it into a
 file rather than reading the whole thing into context.
+`npm test` and `npm run test:bench` stop the test runner and its workers after
+180 seconds and exit with code 124; override with `SPROUT_TEST_TIMEOUT_MS` if
+needed. Bench durations are per test (not file totals) and can be noisy under
+parallel execution. `test:full` invokes Node directly and does not use this
+suite deadline.
+On timeout, `npm test` only prints the log location, not the test names. It
+appends a JSON line (timestamp, test targets, and still-running candidates) to
+`test-timeout.jsonl` in the current project directory for later triage. This
+file is ignored by Git; project test paths inside it are relative (external
+test fixtures are identified only by filename). Override the path with
+`SPROUT_TEST_TIMEOUT_LOG`. Parallel tests are candidates, not proven root
+causes; if a worker stalls before test execution, the record notes that no
+active test was observed.
+Timeout entries are a separate triage backlog; a timeout does not mean the
+current change caused those candidate tests to hang. Review the log in a
+dedicated test-maintenance pass rather than modifying unrelated tests during
+the current task.
 
 ## Layout
 
