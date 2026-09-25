@@ -446,6 +446,15 @@ export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentV
   };
 }
 
+export interface ModelAuthorizationView {
+  readonly engine: string;
+  readonly model: string;
+  readonly source: 'human-approval';
+  readonly requirementRevision?: string;
+  readonly authorizedAt: number;
+  readonly actor?: string;
+}
+
 /** The client-facing shape of one Environment's independent readiness facts. */
 export interface EnvironmentReadinessView {
   readonly environmentInstanceId: string;
@@ -475,6 +484,7 @@ export interface EnvironmentReadinessView {
     readonly probedAt?: number;
     readonly probeExitCode?: number;
     readonly source?: string;
+    readonly modelAuthorizations?: readonly ModelAuthorizationView[];
   }[];
   readonly probe?: {
     readonly at: number;
@@ -489,6 +499,7 @@ export interface EnvironmentReadinessView {
   readonly observationId?: string;
   readonly receipt?: ReadinessReceiptView;
   readonly workSafety: { readonly state: string };
+  readonly requirements?: import('../environment/readiness.ts').ReadinessRequirementScope;
 }
 
 /** Safe browser projection of one Worker probe; internal authority ids stay core-side. */
@@ -616,12 +627,25 @@ export function toEnvironmentReadinessView(input: {
         ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
         ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
         ...(source !== undefined ? { source } : {}),
+        ...(engine.modelAuthorizations !== undefined
+          ? {
+              modelAuthorizations: engine.modelAuthorizations.map((auth) => ({
+                engine: auth.engine,
+                model: auth.model,
+                source: auth.source,
+                ...(auth.requirementRevision !== undefined ? { requirementRevision: auth.requirementRevision } : {}),
+                authorizedAt: auth.authorizedAt,
+                ...(auth.actor !== undefined ? { actor: auth.actor } : {}),
+              })),
+            }
+          : {}),
       };
     }),
     ...(probe !== undefined ? { probe } : {}),
     ...(readiness.observationId !== undefined ? { observationId: readiness.observationId } : {}),
     ...(receiptView !== undefined ? { receipt: receiptView } : {}),
     workSafety: { state: readiness.workSafety.state },
+    ...(readiness.requirements !== undefined ? { requirements: readiness.requirements } : {}),
   };
 }
 

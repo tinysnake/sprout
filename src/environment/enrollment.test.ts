@@ -312,3 +312,35 @@ test('regenerating an unconsumed claim updates secret digest and expiration', ()
     (error: unknown) => error instanceof EnrollmentError && error.code === 'invalid-claim',
   );
 });
+
+test('#138: Human approval records model authorizations, revocation clears them', () => {
+  const approved = approveEnrollment(pending(), {
+    capabilityPermissions: { 'agent-run': true },
+    modelAuthorizations: [
+      {
+        engine: 'codex',
+        model: 'gpt-5-codex',
+        source: 'human-approval',
+        requirementRevision: 'r-codex-1',
+        authorizedAt: 2_000,
+        actor: 'operator',
+      },
+    ],
+    at: 2_000,
+    actor: 'operator',
+  });
+  assert.equal(approved.status, 'approved');
+  assert.equal(approved.modelAuthorizations?.length, 1);
+  assert.equal(approved.modelAuthorizations[0]?.engine, 'codex');
+  assert.equal(approved.modelAuthorizations[0]?.model, 'gpt-5-codex');
+  assert.equal(approved.modelAuthorizations[0]?.source, 'human-approval');
+
+  // Revocation invalidates and clears model authorizations
+  const revoked = revokeEnrollment(approved, 3_000, 'Security revocation');
+  assert.equal(revoked.status, 'revoked');
+  assert.deepEqual(revoked.modelAuthorizations, []);
+
+  // Reset also clears model authorizations
+  const reset = resetEnrollment(approved, 4_000, 'Reset environment');
+  assert.deepEqual(reset.modelAuthorizations, []);
+});

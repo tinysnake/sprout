@@ -199,6 +199,7 @@ function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance
       ...(engine.probedAt !== undefined ? { observedAt: engine.probedAt } : {}),
       ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
       ...(engine.source !== undefined ? { source: engine.source } : {}),
+      ...(engine.modelAuthorizations !== undefined ? { modelAuthorizations: engine.modelAuthorizations } : {}),
     };
   }
   return details;
@@ -255,6 +256,8 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     claim: enrollment.claim,
     decisions: enrollment.decisions,
     requestedCapabilities: readiness.capabilities.map((c) => c.name),
+    ...(readiness.requirements !== undefined ? { requirements: readiness.requirements } : {}),
+    ...(readiness.requirements?.modelsByEngine !== undefined ? { targetModelsByEngine: readiness.requirements.modelsByEngine } : {}),
   };
 }
 
@@ -368,7 +371,11 @@ export class ProductionEnvironmentService implements EnvironmentService {
     await this.#adapter.cancelEnrollment(id, reason);
   }
 
-  async approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void> {
+  async approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
     if (permissions === undefined || permissions === null || typeof permissions !== 'object' || Array.isArray(permissions)) {
       throw new Error('Human-selected capability permissions are required for approval');
     }
@@ -376,7 +383,7 @@ export class ProductionEnvironmentService implements EnvironmentService {
     for (const [key, val] of Object.entries(permissions)) {
       resolvedPermissions[key] = val === true;
     }
-    await this.#adapter.approveEnrollment(id, resolvedPermissions);
+    await this.#adapter.approveEnrollment(id, resolvedPermissions, modelAuthorizations);
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

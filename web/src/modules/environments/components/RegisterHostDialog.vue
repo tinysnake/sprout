@@ -123,6 +123,44 @@ const requestedCapabilitiesList = computed(() => {
   return Object.keys(activeEnv.value.capabilityPermissions);
 });
 
+// Explicit model authorizations selected by operator
+const selectedModelAuthorizations = ref<Record<string, boolean>>({});
+
+// Target models configured for the environment (from core-owned requirements)
+const configuredTargetModelsList = computed(() => {
+  if (!activeEnv.value) return [];
+  const list: { engine: string; model: string }[] = [];
+  if (activeEnv.value.targetModelsByEngine) {
+    for (const [engine, models] of Object.entries(activeEnv.value.targetModelsByEngine)) {
+      for (const model of models) {
+        if (!list.some((item) => item.engine === engine && item.model === model)) {
+          list.push({ engine, model });
+        }
+      }
+    }
+  }
+  if (activeEnv.value.requirements?.modelsByEngine) {
+    for (const [engine, models] of Object.entries(activeEnv.value.requirements.modelsByEngine)) {
+      for (const model of models) {
+        if (!list.some((item) => item.engine === engine && item.model === model)) {
+          list.push({ engine, model });
+        }
+      }
+    }
+  }
+  if (activeEnv.value.engineDetails) {
+    for (const [engine, details] of Object.entries(activeEnv.value.engineDetails)) {
+      const models = details.targetModels ?? details.models ?? [];
+      for (const model of models) {
+        if (!list.some((item) => item.engine === engine && item.model === model)) {
+          list.push({ engine, model });
+        }
+      }
+    }
+  }
+  return list;
+});
+
 // Engine readiness entries
 const engineFactsList = computed(() => {
   if (!activeEnv.value?.engineReadiness) return [];
@@ -155,6 +193,7 @@ function initForm() {
   commandCopied.value = false;
   stateNotice.value = '';
   selectedPermissions.value = {};
+  selectedModelAuthorizations.value = {};
 }
 
 async function loadExisting(id: string) {
@@ -297,9 +336,21 @@ async function handleCancelEnrollment() {
 async function handleApprove() {
   if (!activeEnv.value || !activeService.value) return;
   try {
-    await activeService.value.approveEnrollment(activeEnv.value.id, selectedPermissions.value);
+    const authorizationsByEngine: Record<string, string[]> = {};
+    for (const target of configuredTargetModelsList.value) {
+      const key = `${target.engine}:${target.model}`;
+      if (selectedModelAuthorizations.value[key] === true) {
+        const list = authorizationsByEngine[target.engine] ?? (authorizationsByEngine[target.engine] = []);
+        list.push(target.model);
+      }
+    }
+    await activeService.value.approveEnrollment(
+      activeEnv.value.id,
+      selectedPermissions.value,
+      authorizationsByEngine,
+    );
     phase.value = 'approved';
-    announcer.announce('Worker enrollment approved with selected permissions.');
+    announcer.announce('Worker enrollment approved with selected permissions and model authorizations.');
     emit('enrolled', activeEnv.value.id);
   } catch (err: any) {
     stateNotice.value = err?.message || 'Approval failed';
@@ -721,6 +772,40 @@ onUnmounted(() => {
                 :id="`perm-${cap}`"
                 v-model="selectedPermissions[cap]"
                 class="min-h-[24px] min-w-[24px]"
+              />
+            </div>
+          </div>
+        </div>
+
+        <!-- Target Model Authorization Selection (Ticket #138, ADR-0013) -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-[var(--text-primary)]">Configured Target Models & Entitlement</span>
+            <span class="text-[10px] text-[var(--text-muted)]">Human Authorization Required</span>
+          </div>
+          <p class="text-[11px] text-[var(--text-secondary)]">
+            Explicit Human authorization establishes account-level model entitlement evidence with provenance human-approval (ADR-0013). Unselected models remain blocked. No model is authorized by default or implication.
+          </p>
+
+          <div v-if="configuredTargetModelsList.length === 0" class="p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] text-xs text-[var(--text-muted)]">
+            No target models are configured for this environment's engines.
+          </div>
+
+          <div v-else class="space-y-2 p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)]">
+            <div
+              v-for="target in configuredTargetModelsList"
+              :key="`${target.engine}:${target.model}`"
+              class="flex items-center justify-between p-2.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)]/50 min-h-[44px]"
+            >
+              <label :for="`auth-model-${target.engine}-${target.model}`" class="flex flex-col cursor-pointer select-none py-1">
+                <span class="text-xs font-medium text-[var(--text-primary)]">{{ target.model }}</span>
+                <span class="text-[10px] text-[var(--text-muted)] uppercase font-semibold">Engine: {{ target.engine }}</span>
+              </label>
+              <Checkbox
+                :id="`auth-model-${target.engine}-${target.model}`"
+                v-model="selectedModelAuthorizations[`${target.engine}:${target.model}`]"
+                class="min-h-[24px] min-w-[24px]"
+                :aria-label="`Authorize model ${target.model} for ${target.engine}`"
               />
             </div>
           </div>

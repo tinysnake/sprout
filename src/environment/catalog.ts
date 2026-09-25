@@ -210,7 +210,7 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     if (input.requirements === undefined) {
       return (
         evaluateEngineOption({ engine: engine.engine, workModel: '' }, engine).state === 'available' &&
-        engine.models.state === 'available'
+        (engine.models.state === 'available' || (engine.modelAuthorizations !== undefined && engine.modelAuthorizations.length > 0))
       );
     }
     const targets = input.requirements.modelsByEngine?.[engine.engine] ?? [];
@@ -227,7 +227,9 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
         JSON.stringify(input.requirements.modelsByEngine?.[engine.engine]) &&
       (authoritativeObserved?.requirements?.revisionsByEngine?.[engine.engine] ?? authoritativeObserved?.requirements?.revision) ===
         (input.requirements.revisionsByEngine?.[engine.engine] ?? input.requirements.revision) &&
-      engine.models.state === 'available'
+      (engine.models.state === 'available' || targets.every((target) =>
+        engine.modelAuthorizations?.some((auth) => auth.engine === engine.engine && auth.model === target && auth.source === 'human-approval'),
+      ))
     );
   };
 

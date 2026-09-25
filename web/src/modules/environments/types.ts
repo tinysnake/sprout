@@ -28,11 +28,20 @@ export interface EngineDetailInfo {
   authType?: string;
   modelAvailability?: string;
   models?: string[];
+  targetModels?: string[];
   modelIdPresent?: boolean;
   observedAt?: number;
   probeExitCode?: number;
   source?: string;
   notes?: string;
+  modelAuthorizations?: readonly {
+    readonly engine: string;
+    readonly model: string;
+    readonly source: 'human-approval';
+    readonly requirementRevision?: string;
+    readonly authorizedAt: number;
+    readonly actor?: string;
+  }[];
 }
 
 export interface ActiveLeaseHolder {
@@ -130,6 +139,8 @@ export interface EnvironmentInstance {
     readonly reason: string;
   }[] | undefined;
   requestedCapabilities?: readonly string[] | undefined;
+  targetModelsByEngine?: Record<string, readonly string[]> | undefined;
+  requirements?: import('../../adapters/environment-api.ts').ReadinessRequirementScope | undefined;
 }
 
 export type EnvironmentFilter = 'all' | 'ready' | 'attention' | 'action-required' | 'archived';

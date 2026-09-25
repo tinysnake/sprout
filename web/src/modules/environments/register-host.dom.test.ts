@@ -113,7 +113,7 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     let requestedEnrollmentCalls: any[] = [];
     let regeneratedSecretCalls: string[] = [];
     let cancelledCalls: string[] = [];
-    let approvedCalls: { id: string; perms?: Record<string, boolean> }[] = [];
+    let approvedCalls: { id: string; perms?: Record<string, boolean>; modelAuths?: Record<string, string[]> }[] = [];
 
     let currentEnv: any = null;
 
@@ -201,8 +201,8 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
           reason: reason ?? 'Pending enrollment cancelled by operator.',
         });
       },
-      approveEnrollment: async (id: string, perms?: Record<string, boolean>) => {
-        approvedCalls.push({ id, perms });
+      approveEnrollment: async (id: string, perms?: Record<string, boolean>, modelAuths?: Record<string, string[]>) => {
+        approvedCalls.push({ id, perms, modelAuths });
         currentEnv.enrollmentStatus = 'approved';
         currentEnv.trafficLight = 'green';
         if (perms) {
@@ -335,6 +335,28 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     execCheckbox.click();
     await new Promise((r) => setTimeout(r, 60));
 
+    // #138: Check target models section and explicit per-model human authorization
+    assert.match(doc.body.textContent ?? '', /Configured Target Models & Entitlement/);
+    assert.match(doc.body.textContent ?? '', /Human Authorization Required/);
+    assert.match(doc.body.textContent ?? '', /provenance human-approval/);
+
+    const codexModelCheck = doc.getElementById('auth-model-codex-gpt-5-codex') as HTMLButtonElement | null;
+    const piModelCheck = doc.getElementById('auth-model-pi-claude-3-7-sonnet') as HTMLButtonElement | null;
+    assert.ok(codexModelCheck, 'Codex target model checkbox found');
+    assert.ok(piModelCheck, 'Pi target model checkbox found');
+
+    // Controls have accessible aria-labels and keyboard associations
+    assert.equal(codexModelCheck.getAttribute('aria-label'), 'Authorize model gpt-5-codex for codex');
+    assert.equal(piModelCheck.getAttribute('aria-label'), 'Authorize model claude-3-7-sonnet for pi');
+
+    // Check touch target: row container has min-h-[44px]
+    const modelRow = codexModelCheck.closest('div');
+    assert.ok(modelRow?.classList.contains('min-h-[44px]'), 'Model authorization row has min-h-[44px] for touch target');
+
+    // Human explicitly authorizes codex:gpt-5-codex, leaves pi unchecked (no default, no implication)
+    codexModelCheck.click();
+    await new Promise((r) => setTimeout(r, 60));
+
     // 9. Explicit Human Approval with selected permissions
     const approveBtn = doc.getElementById('btn-approve-enrollment') as HTMLButtonElement;
     assert.ok(approveBtn, 'Approve Worker & Permissions button found');
@@ -348,6 +370,11 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     assert.equal(approvedCalls[0].perms.processExecution, true);
     assert.equal(approvedCalls[0].perms.fileReadWrite, false);
     assert.equal(approvedCalls[0].perms.networkAccess, false);
+
+    // #138: Only explicitly selected model was authorized; unselected model has no grant
+    assert.ok(approvedCalls[0].modelAuths, 'Model authorizations recorded');
+    assert.deepEqual(approvedCalls[0].modelAuths.codex, ['gpt-5-codex']);
+    assert.equal(approvedCalls[0].modelAuths.pi, undefined, 'Pi model unselected and not authorized');
 
     // 10. Approved Phase
     assert.match(doc.body.textContent ?? '', /Environment Enrolled Successfully/);

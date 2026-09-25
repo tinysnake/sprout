@@ -40,6 +40,23 @@ export interface EnrollmentClaimView {
   readonly consumedAt?: number;
 }
 
+export interface ModelAuthorizationView {
+  readonly engine: string;
+  readonly model: string;
+  readonly source: 'human-approval';
+  readonly requirementRevision?: string;
+  readonly authorizedAt: number;
+  readonly actor?: string;
+}
+
+export interface ReadinessRequirementScope {
+  readonly revision?: string;
+  readonly revisionsByEngine?: Readonly<Record<string, string>>;
+  readonly requiredEngines?: readonly string[];
+  readonly requiredModels?: readonly string[];
+  readonly modelsByEngine?: Readonly<Record<string, readonly string[]>>;
+}
+
 export interface EnvironmentReadinessView {
   readonly environmentInstanceId: string;
   readonly summary: { readonly level: string; readonly reason: string };
@@ -69,6 +86,7 @@ export interface EnvironmentReadinessView {
     readonly probedAt?: number;
     readonly probeExitCode?: number;
     readonly source?: string;
+    readonly modelAuthorizations?: readonly ModelAuthorizationView[];
   }[];
   readonly probe?: {
     readonly at: number;
@@ -80,6 +98,7 @@ export interface EnvironmentReadinessView {
     readonly version?: string;
   };
   readonly workSafety: { readonly state: string };
+  readonly requirements?: ReadinessRequirementScope;
 }
 
 export interface ProbeResultView {
@@ -211,7 +230,11 @@ export interface EnvironmentEnrollmentBrowserAdapter {
       readonly models?: { readonly state: string; readonly models: readonly string[] };
     }[];
   }): Promise<{ readonly outcome: string; readonly requiresHumanApproval: boolean; readonly enrollment: EnrollmentView }>;
-  approveEnrollment(id: string, capabilityPermissions: Readonly<Record<string, boolean>>): Promise<EnrollmentView>;
+  approveEnrollment(
+    id: string,
+    capabilityPermissions: Readonly<Record<string, boolean>>,
+    modelAuthorizations?: Readonly<Record<string, readonly string[]>> | readonly { readonly engine: string; readonly model: string }[],
+  ): Promise<EnrollmentView>;
   revokeEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   cancelEnrollment(id: string, reason?: string): Promise<EnrollmentView>;
@@ -305,10 +328,13 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand(input),
       );
     },
-    async approveEnrollment(id, capabilityPermissions) {
+    async approveEnrollment(id, capabilityPermissions, modelAuthorizations) {
       const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
         `/api/environments/enrollments/${encodeURIComponent(id)}/approve`,
-        jsonCommand({ capabilityPermissions }),
+        jsonCommand({
+          capabilityPermissions,
+          ...(modelAuthorizations !== undefined ? { modelAuthorizations } : {}),
+        }),
       );
       return response.enrollment;
     },

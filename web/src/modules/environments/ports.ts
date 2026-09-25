@@ -30,7 +30,11 @@ export interface EnvironmentService {
     claimExpiresAt: number;
   }>;
   cancelEnrollment(id: string, reason?: string): Promise<void>;
-  approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void>;
+  approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void>;
   triggerProbe(id: string): Promise<ProbeRecord>;
   togglePermission(id: string, cap: CapabilityKey): Promise<void>;
   unbindWorkspace(projectId: string, envId: string): Promise<void>;

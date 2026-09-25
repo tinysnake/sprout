@@ -119,6 +119,18 @@ export interface EnvironmentReadinessStore {
     environmentInstanceId: string,
     query?: ReadinessHistoricalQuery,
   ): Promise<readonly StoredReadinessObservation[]>;
+  recordModelAuthorizations(
+    environmentInstanceId: string,
+    authorizations: readonly import('./readiness.ts').ModelAuthorizationFact[],
+    context?: {
+      readonly enrollmentId?: string;
+      readonly connectionEpoch?: number;
+      readonly lifecycleGeneration?: number;
+      readonly connectionId?: string;
+      readonly requirements?: ReadinessRequirementScope;
+      readonly actor?: string;
+    },
+  ): Promise<void>;
 }
 
 export interface ReadinessAttempt {
@@ -200,16 +212,32 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     this.#sequences.set(environmentInstanceId, Math.max(this.#sequences.get(environmentInstanceId) ?? 0, sequence));
     const committedAt = Date.now();
 
+    const prevReadiness = this.#readiness.get(environmentInstanceId);
+    let effectiveReadiness = pair.readiness;
+    if (prevReadiness?.engines) {
+      const mergedEngines = effectiveReadiness.engines.map((engine) => {
+        const prevEngine = prevReadiness.engines.find((e) => e.engine === engine.engine);
+        if (!prevEngine?.modelAuthorizations?.length) return engine;
+        const currentRev = pair.requirements?.revisionsByEngine?.[engine.engine] ?? pair.requirements?.revision;
+        const validAuths = prevEngine.modelAuthorizations.filter(
+          (a) => currentRev === undefined || a.requirementRevision === undefined || a.requirementRevision === currentRev,
+        );
+        if (!validAuths.length) return engine;
+        return { ...engine, modelAuthorizations: validAuths };
+      });
+      effectiveReadiness = { ...effectiveReadiness, engines: mergedEngines };
+    }
+
     const receipt: ReadinessReceipt = {
       observationId: pair.observationId,
       environmentInstanceId,
-      enrollmentId: pair.readiness.enrollmentId!,
-      connectionEpoch: pair.readiness.connectionEpoch!,
+      enrollmentId: effectiveReadiness.enrollmentId!,
+      connectionEpoch: effectiveReadiness.connectionEpoch!,
       sequence,
       committedAt,
       probe: pair.probe,
       authorityScope: pair.authorityScope,
-      readiness: pair.readiness,
+      readiness: effectiveReadiness,
       at: pair.probe.at,
       latencyMs: pair.probe.latencyMs,
       protocolOk: pair.probe.protocolOk,
@@ -224,11 +252,11 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       ...(pair.workerObservedAt !== undefined ? { workerObservedAt: pair.workerObservedAt } : {}),
       observationId: pair.observationId,
       environmentInstanceId,
-      enrollmentId: pair.readiness.enrollmentId,
-      connectionEpoch: pair.readiness.connectionEpoch,
+      enrollmentId: effectiveReadiness.enrollmentId,
+      connectionEpoch: effectiveReadiness.connectionEpoch,
       sequence,
       committedAt,
-      readiness: pair.readiness,
+      readiness: effectiveReadiness,
       probe: pair.probe,
       receipt,
       authorityScope: pair.authorityScope,
@@ -241,7 +269,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     this.#instanceObservations.set(environmentInstanceId, instObs);
 
     this.#currentObservations.set(environmentInstanceId, pair.observationId);
-    this.#readiness.set(environmentInstanceId, structuredClone(pair.readiness));
+    this.#readiness.set(environmentInstanceId, structuredClone(effectiveReadiness));
 
     const history = this.#probes.get(environmentInstanceId) ?? [];
     history.push(structuredClone(pair.probe));
@@ -264,6 +292,111 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     const observationId = this.#currentObservations.get(environmentInstanceId);
     if (observationId === undefined) return undefined;
     return structuredClone(this.#observations.get(observationId));
+  }
+
+  async recordModelAuthorizations(
+    instance: string,
+    authorizations: readonly import('./readiness.ts').ModelAuthorizationFact[],
+    context?: {
+      readonly enrollmentId?: string;
+      readonly connectionEpoch?: number;
+      readonly lifecycleGeneration?: number;
+      readonly connectionId?: string;
+      readonly requirements?: ReadinessRequirementScope;
+      readonly actor?: string;
+    },
+  ): Promise<void> {
+    const existing = this.#readiness.get(instance);
+    if (!existing && authorizations.length === 0) return;
+    const existingEngines = existing?.engines ?? [];
+    const authEngineNames = new Set(authorizations.map((a) => a.engine));
+    const allEngineNames = new Set([...existingEngines.map((e) => e.engine), ...authEngineNames]);
+    const engines = [...allEngineNames].map((engineName) => {
+      const existingEngine = existingEngines.find((e) => e.engine === engineName);
+      const engineAuths = authorizations.filter((a) => a.engine === engineName);
+      if (existingEngine) {
+        return { ...existingEngine, modelAuthorizations: engineAuths };
+      }
+      return {
+        engine: engineName,
+        installed: false,
+        readiness: 'unknown' as const,
+        required: false,
+        models: { state: 'unknown' as const, models: [] },
+        modelAuthorizations: engineAuths,
+      };
+    });
+    const updated: ObservedReadiness = {
+      ...(existing ?? {
+        connection: { state: 'never-connected' },
+        compatibility: { state: 'unknown' },
+      }),
+      engines,
+      ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+      ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+      ...(context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
+    };
+    this.#readiness.set(instance, structuredClone(updated));
+
+    if (authorizations.length > 0) {
+      const sequence = (this.#sequences.get(instance) ?? 0) + 1;
+      this.#sequences.set(instance, sequence);
+      const observationId = `obs-${crypto.randomUUID()}`;
+      const committedAt = Date.now();
+      const probe: ProbeResultFact = {
+        at: committedAt,
+        latencyMs: 0,
+        protocolOk: true,
+        enginesOk: true,
+        summary: 'Human approved model authorizations',
+        source: 'human-approval' as any,
+        enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
+        connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
+      };
+      const authorityScope = {
+        environmentInstanceId: instance,
+        enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
+        connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
+        ...(context?.lifecycleGeneration !== undefined ? { lifecycleGeneration: context.lifecycleGeneration } : {}),
+        ...(context?.connectionId !== undefined ? { connectionId: context.connectionId } : {}),
+      };
+      const receipt: ReadinessReceipt = {
+        observationId,
+        environmentInstanceId: instance,
+        enrollmentId: authorityScope.enrollmentId,
+        connectionEpoch: authorityScope.connectionEpoch,
+        sequence,
+        committedAt,
+        probe,
+        authorityScope,
+        readiness: updated,
+        at: probe.at,
+        latencyMs: 0,
+        protocolOk: true,
+        enginesOk: true,
+        summary: probe.summary,
+        source: 'human-approval' as any,
+        ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+      };
+      const storedObservation: StoredReadinessObservation = {
+        observationId,
+        environmentInstanceId: instance,
+        enrollmentId: authorityScope.enrollmentId,
+        connectionEpoch: authorityScope.connectionEpoch,
+        sequence,
+        committedAt,
+        readiness: updated,
+        probe,
+        receipt,
+        authorityScope,
+        ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+      };
+      this.#observations.set(observationId, structuredClone(storedObservation));
+      const instObs = this.#instanceObservations.get(instance) ?? [];
+      instObs.push(observationId);
+      this.#instanceObservations.set(instance, instObs);
+      this.#currentObservations.set(instance, observationId);
+    }
   }
 
   async getObservation(

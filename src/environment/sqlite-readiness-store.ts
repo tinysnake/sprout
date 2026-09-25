@@ -161,16 +161,39 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       const sequence = pair.attempt?.sequence ?? Math.max(next.sequence, latestIssued.sequence) + 1;
       const committedAt = Date.now();
 
+      let effectiveReadiness = pair.readiness;
+      const prevDocRow = this.#db
+        .prepare('SELECT document FROM environment_readiness WHERE environment_instance_id = ?')
+        .get(environmentInstanceId) as { document: string } | undefined;
+      if (prevDocRow) {
+        try {
+          const prevReadiness = JSON.parse(prevDocRow.document) as ObservedReadiness;
+          if (prevReadiness?.engines) {
+            const mergedEngines = effectiveReadiness.engines.map((engine) => {
+              const prevEngine = prevReadiness.engines.find((e) => e.engine === engine.engine);
+              if (!prevEngine?.modelAuthorizations?.length) return engine;
+              const currentRev = pair.requirements?.revisionsByEngine?.[engine.engine] ?? pair.requirements?.revision;
+              const validAuths = prevEngine.modelAuthorizations.filter(
+                (a) => currentRev === undefined || a.requirementRevision === undefined || a.requirementRevision === currentRev,
+              );
+              if (!validAuths.length) return engine;
+              return { ...engine, modelAuthorizations: validAuths };
+            });
+            effectiveReadiness = { ...effectiveReadiness, engines: mergedEngines };
+          }
+        } catch {}
+      }
+
       const receipt: ReadinessReceipt = {
         observationId: pair.observationId,
         environmentInstanceId,
-        enrollmentId: pair.readiness.enrollmentId!,
-        connectionEpoch: pair.readiness.connectionEpoch!,
+        enrollmentId: effectiveReadiness.enrollmentId!,
+        connectionEpoch: effectiveReadiness.connectionEpoch!,
         sequence,
         committedAt,
         probe: pair.probe,
         authorityScope: pair.authorityScope,
-        readiness: pair.readiness,
+        readiness: effectiveReadiness,
         at: pair.probe.at,
         latencyMs: pair.probe.latencyMs,
         protocolOk: pair.probe.protocolOk,
@@ -185,11 +208,11 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         ...(pair.workerObservedAt !== undefined ? { workerObservedAt: pair.workerObservedAt } : {}),
         observationId: pair.observationId,
         environmentInstanceId,
-        enrollmentId: pair.readiness.enrollmentId,
-        connectionEpoch: pair.readiness.connectionEpoch,
+        enrollmentId: effectiveReadiness.enrollmentId,
+        connectionEpoch: effectiveReadiness.connectionEpoch,
         sequence,
         committedAt,
-        readiness: pair.readiness,
+        readiness: effectiveReadiness,
         probe: pair.probe,
         receipt,
         authorityScope: pair.authorityScope,
@@ -205,11 +228,11 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         .run(
           pair.observationId,
           environmentInstanceId,
-          pair.readiness.enrollmentId ?? null,
-          pair.readiness.connectionEpoch ?? null,
+          effectiveReadiness.enrollmentId ?? null,
+          effectiveReadiness.connectionEpoch ?? null,
           sequence,
           committedAt,
-          JSON.stringify(pair.readiness),
+          JSON.stringify(effectiveReadiness),
           JSON.stringify(pair.probe),
           JSON.stringify(storedObservation),
         );
@@ -235,10 +258,157 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
              document = excluded.document,
              updated_at = excluded.updated_at`,
         )
-        .run(environmentInstanceId, pair.observationId, JSON.stringify(pair.readiness), committedAt);
+        .run(environmentInstanceId, pair.observationId, JSON.stringify(effectiveReadiness), committedAt);
 
       this.#db.exec('COMMIT');
       return structuredClone(receipt);
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async recordModelAuthorizations(
+    instance: string,
+    authorizations: readonly import('./readiness.ts').ModelAuthorizationFact[],
+    context?: {
+      readonly enrollmentId?: string;
+      readonly connectionEpoch?: number;
+      readonly lifecycleGeneration?: number;
+      readonly connectionId?: string;
+      readonly requirements?: import('./readiness.ts').ReadinessRequirementScope;
+      readonly actor?: string;
+    },
+  ): Promise<void> {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.#db
+        .prepare('SELECT document, current_observation_id FROM environment_readiness WHERE environment_instance_id = ?')
+        .get(instance) as { document: string; current_observation_id: string | null } | undefined;
+      const existing = row ? (JSON.parse(row.document) as ObservedReadiness) : undefined;
+      if (!existing && authorizations.length === 0) {
+        this.#db.exec('COMMIT');
+        return;
+      }
+      const existingEngines = existing?.engines ?? [];
+      const authEngineNames = new Set(authorizations.map((a) => a.engine));
+      const allEngineNames = new Set([...existingEngines.map((e) => e.engine), ...authEngineNames]);
+      const engines = [...allEngineNames].map((engineName) => {
+        const existingEngine = existingEngines.find((e) => e.engine === engineName);
+        const engineAuths = authorizations.filter((a) => a.engine === engineName);
+        if (existingEngine) {
+          return { ...existingEngine, modelAuthorizations: engineAuths };
+        }
+        return {
+          engine: engineName,
+          installed: false,
+          readiness: 'unknown' as const,
+          required: false,
+          models: { state: 'unknown' as const, models: [] },
+          modelAuthorizations: engineAuths,
+        };
+      });
+      const updated: ObservedReadiness = {
+        ...(existing ?? {
+          connection: { state: 'never-connected' },
+          compatibility: { state: 'unknown' },
+        }),
+        engines,
+        ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+        ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+        ...(context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
+      };
+
+      let observationId = row?.current_observation_id ?? null;
+      const committedAt = Date.now();
+      if (authorizations.length > 0) {
+        const next = this.#db
+          .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?')
+          .get(instance) as { readonly sequence: number };
+        const latestIssued = this.#db
+          .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_readiness_attempts WHERE environment_instance_id = ?')
+          .get(instance) as { sequence: number };
+        const sequence = Math.max(next.sequence, latestIssued.sequence) + 1;
+        observationId = `obs-${crypto.randomUUID()}`;
+        const probe: ProbeResultFact = {
+          at: committedAt,
+          latencyMs: 0,
+          protocolOk: true,
+          enginesOk: true,
+          summary: 'Human approved model authorizations',
+          source: 'human-approval' as any,
+          enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
+          connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
+        };
+        const authorityScope = {
+          environmentInstanceId: instance,
+          enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
+          connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
+          ...(context?.lifecycleGeneration !== undefined ? { lifecycleGeneration: context.lifecycleGeneration } : {}),
+          ...(context?.connectionId !== undefined ? { connectionId: context.connectionId } : {}),
+        };
+        const receipt: ReadinessReceipt = {
+          observationId,
+          environmentInstanceId: instance,
+          enrollmentId: authorityScope.enrollmentId,
+          connectionEpoch: authorityScope.connectionEpoch,
+          sequence,
+          committedAt,
+          probe,
+          authorityScope,
+          readiness: updated,
+          at: probe.at,
+          latencyMs: 0,
+          protocolOk: true,
+          enginesOk: true,
+          summary: probe.summary,
+          source: 'human-approval' as any,
+          ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+        };
+        const storedObservation: StoredReadinessObservation = {
+          observationId,
+          environmentInstanceId: instance,
+          enrollmentId: authorityScope.enrollmentId,
+          connectionEpoch: authorityScope.connectionEpoch,
+          sequence,
+          committedAt,
+          readiness: updated,
+          probe,
+          receipt,
+          authorityScope,
+          ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+        };
+        this.#db
+          .prepare(
+            `INSERT INTO environment_observations
+               (observation_id, environment_instance_id, enrollment_id, connection_epoch, sequence, created_at, readiness_document, probe_document, document)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            observationId,
+            instance,
+            authorityScope.enrollmentId || null,
+            authorityScope.connectionEpoch || null,
+            sequence,
+            committedAt,
+            JSON.stringify(updated),
+            JSON.stringify(probe),
+            JSON.stringify(storedObservation),
+          );
+      }
+
+      this.#db
+        .prepare(
+          `INSERT INTO environment_readiness (environment_instance_id, current_observation_id, document, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(environment_instance_id) DO UPDATE SET
+             current_observation_id = excluded.current_observation_id,
+             document = excluded.document,
+             updated_at = excluded.updated_at`,
+        )
+        .run(instance, observationId, JSON.stringify(updated), committedAt);
+
+      this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;

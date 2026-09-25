@@ -268,6 +268,19 @@ export function sanitizeObservedReadiness(observed: ObservedReadiness): Observed
         ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
         ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
         ...(source !== undefined ? { source } : {}),
+        ...(engine.modelAuthorizations !== undefined
+          ? {
+              modelAuthorizations: engine.modelAuthorizations.map((auth) => ({
+                engine: sanitizeIdentifier(auth.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+                model: sanitizeIdentifier(auth.model, { fallback: 'unknown-model', kind: 'model' }),
+                source: 'human-approval' as const,
+                ...(auth.requirementRevision !== undefined && /^[A-Za-z0-9_-]{1,128}$/.test(auth.requirementRevision)
+                  ? { requirementRevision: auth.requirementRevision } : {}),
+                authorizedAt: Number.isSafeInteger(auth.authorizedAt) && auth.authorizedAt > 0 ? auth.authorizedAt : Date.now(),
+                ...(auth.actor !== undefined ? { actor: sanitizeOperatorText(auth.actor, { fallback: 'operator' }) } : {}),
+              })),
+            }
+          : {}),
       };
     }),
   };
