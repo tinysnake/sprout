@@ -28,12 +28,24 @@
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
-import { EnvironmentWorker } from '../server.ts';
-import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
-import { createEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
-import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
+import { EnvironmentWorker, type EnvironmentWorkerOptions } from '../server.ts';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkerEngineReadinessFact,
+  type WorkerReadinessFacts,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
+} from '../protocol.ts';
+import {
+  createEnvironmentWorkerEngines,
+  describeEnvironmentWorkerEngines,
+  hostEngineFacts,
+} from '../engine-selection.ts';
+import { probeEnvironmentReadiness, type ReadinessProbeOptions } from '../readiness.ts';
+import { WORKER_DIAGNOSTICS, type WorkerDiagnostic } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
   WorkerEnrollmentPendingError,
@@ -168,6 +180,8 @@ export interface WorkerCliDependencies {
   readonly processProbe?: WorkerProcessProbe;
   /** Establish this invocation's binding; test-only callers may supply a synthetic OS seam. */
   readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
+  /** Seam for non-inference readiness probe options; test callers may supply custom runners or clocks. */
+  readonly readinessProbeOptions?: ReadinessProbeOptions;
   /**
    * Serve the accepted channel. Defaults to the real `EnvironmentWorker`; tests
    * inject a recorder so `start` can be driven without a live core.
@@ -350,6 +364,127 @@ function engineFacts(engineIds: readonly string[]): readonly {
   readonly models: readonly string[];
 }[] {
   return engineIds.map((engine) => ({ engine, installed: true, authenticated: false, models: [] }));
+}
+
+export interface CreateForegroundWorkerOptionsInput {
+  readonly stream?: (Readable & Writable) | undefined;
+  readonly input?: Readable | undefined;
+  readonly output?: Writable | undefined;
+  readonly environmentInstanceId: string;
+  readonly engineIds?: readonly string[] | undefined;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+  readonly onLog?: ((line: WorkerDiagnostic) => void) | undefined;
+  readonly workingDirectory?: string | undefined;
+  readonly readinessProbeOptions?: ReadinessProbeOptions | undefined;
+  /** Locate engine binaries on the host; tests may substitute a hermetic resolver. */
+  readonly locate?: ((command: string, options: { readonly preferWindowsExecutable: boolean }) => string | undefined) | undefined;
+}
+
+/**
+ * Assemble EnvironmentWorker options for the foreground serve path.
+ *
+ * Startup readiness is measured by the host Worker before exposing its first
+ * `worker/info`, and non-inference readiness probes update that cached
+ * projection. Minimal-honest fallback readiness is preserved for engines that
+ * genuinely cannot be measured (#126).
+ */
+export async function createForegroundWorkerOptions(
+  input: CreateForegroundWorkerOptionsInput,
+): Promise<EnvironmentWorkerOptions> {
+  const inputStream = input.input ?? input.stream;
+  const outputStream = input.output ?? input.stream;
+  if (inputStream === undefined || outputStream === undefined) {
+    throw new Error('createForegroundWorkerOptions requires stream or input and output');
+  }
+
+  const environment = input.environment ?? process.env;
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  const configuration = parseWorkerConfiguration(environment, { workingDirectory });
+  const baseFacts = hostEngineFacts(configuration);
+  const facts = input.locate !== undefined ? { ...baseFacts, locate: input.locate } : baseFacts;
+  const engineConfigurations = describeEnvironmentWorkerEngines(facts);
+  const engines = createEnvironmentWorkerEngines(facts);
+
+  const probeOptions: ReadinessProbeOptions = {
+    ...(environment !== undefined ? { env: environment } : {}),
+    ...(input.readinessProbeOptions ?? {}),
+  };
+
+  const allEngineKeys = new Set([...engines.keys(), ...(input.engineIds ?? [])]);
+  const ensureCovered = (measured: WorkerReadinessFacts): WorkerReadinessFacts => {
+    const known = new Set(measured.engines.map((e) => e.engine));
+    const fallback: WorkerEngineReadinessFact[] = [];
+    for (const engine of allEngineKeys) {
+      if (!known.has(engine)) {
+        fallback.push({
+          engine,
+          installed: true,
+          readiness: 'unknown',
+          modelAvailability: 'unknown',
+          models: [],
+        });
+      }
+    }
+    if (fallback.length === 0) return measured;
+    const probe = measured.probe !== undefined && measured.probe.enginesOk
+      ? {
+          ...measured.probe,
+          enginesOk: false,
+          summary: 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
+        }
+      : measured.probe;
+    return {
+      ...measured,
+      engines: [...measured.engines, ...fallback],
+      ...(probe !== undefined ? { probe } : {}),
+    };
+  };
+
+  const minimalHonestFallback: WorkerReadinessFacts = {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engines: [...allEngineKeys].map((engine) => ({
+      engine,
+      installed: true,
+      readiness: 'unknown',
+      modelAvailability: 'unknown',
+      models: [],
+    })),
+  };
+
+  let workerReadiness: WorkerReadinessFacts;
+  try {
+    const startupProbe = await probeEnvironmentReadiness(engineConfigurations, probeOptions);
+    workerReadiness = ensureCovered(startupProbe.readiness);
+  } catch {
+    workerReadiness = minimalHonestFallback;
+  }
+
+  const runProbe = async (
+    params: WorkerReadinessProbeParams = {},
+  ): Promise<WorkerReadinessProbeResult> => {
+    const result = await probeEnvironmentReadiness(engineConfigurations, {
+      ...probeOptions,
+      ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
+      ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+    });
+    workerReadiness = ensureCovered(result.readiness);
+    return {
+      ...result,
+      readiness: workerReadiness,
+      probe: workerReadiness.probe ?? result.probe,
+    };
+  };
+
+  return {
+    environmentInstanceId: input.environmentInstanceId,
+    engines,
+    input: inputStream,
+    output: outputStream,
+    ...(input.onLog !== undefined ? { onLog: input.onLog } : {}),
+    workspaceRoot: configuration.workspaceRoot,
+    readiness: () => workerReadiness,
+    readinessProbe: (params) => runProbe(params),
+  };
 }
 
 export interface WorkerCli {
@@ -683,38 +818,28 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     engineIds: readonly string[],
     environment: NodeJS.ProcessEnv,
   ): Promise<void> {
-    const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
-    const engines = createEnvironmentWorkerEngines(hostEngineFacts(configuration));
-    // Prefer the same environment-variable allowlisted facts the core forwards,
-    // but fall back to a minimal honest readiness projection when the CLI runs
-    // engine selection in-process.
-    void engineIds;
-    const worker = new EnvironmentWorker({
+    const options = await createForegroundWorkerOptions({
+      stream: connection.stream,
       environmentInstanceId,
-      engines,
-      input: connection.stream,
-      output: connection.stream,
+      engineIds,
+      environment,
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
-      workspaceRoot: configuration.workspaceRoot,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        engines: [...engines.keys()].map((engine) => ({
-          engine,
-          installed: true,
-          readiness: 'unknown',
-          modelAvailability: 'unknown',
-          models: [],
-        })),
-      }),
+      readinessProbeOptions: dependencies.readinessProbeOptions,
     });
+    const worker = new EnvironmentWorker(options);
     await new Promise<void>((resolve) => {
-      connection.stream.on('close', () => {
-        void worker.shutdown().then(resolve, resolve);
-      });
-      connection.stream.on('error', () => resolve());
-      const stop = (): void => {
-        void worker.shutdown().then(resolve, resolve);
+      const cleanUpAndResolve = (): void => {
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+        resolve();
       };
+      const stop = (): void => {
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      };
+      connection.stream.on('close', () => {
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      });
+      connection.stream.on('error', () => cleanUpAndResolve());
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     });
