@@ -115,7 +115,7 @@ watch(
 );
 
 // Filter counts
-const allCount = computed(() => environments.value.length);
+const activeCount = computed(() => environments.value.filter((e) => e.enrollmentStatus !== 'revoked').length);
 const readyCount = computed(
   () => environments.value.filter((e) => e.trafficLight === 'green' && e.enrollmentStatus === 'approved').length
 );
@@ -123,21 +123,26 @@ const attentionCount = computed(
   () => environments.value.filter((e) => e.trafficLight === 'yellow' && e.enrollmentStatus !== 'archived').length
 );
 const actionRequiredCount = computed(
-  () => environments.value.filter((e) => e.trafficLight === 'red').length
+  () => environments.value.filter((e) => e.trafficLight === 'red' && e.enrollmentStatus !== 'revoked').length
 );
 const archivedCount = computed(
   () => environments.value.filter((e) => e.enrollmentStatus === 'archived').length
+);
+const revokedCount = computed(
+  () => environments.value.filter((e) => e.enrollmentStatus === 'revoked').length
 );
 
 // Filtered environments
 const filteredEnvironments = computed(() => {
   const f = activeFilter.value;
   return environments.value.filter((e) => {
+    if (f === 'revoked') return e.enrollmentStatus === 'revoked';
+    if (e.enrollmentStatus === 'revoked') return false;
     if (f === 'ready') return e.trafficLight === 'green' && e.enrollmentStatus === 'approved';
     if (f === 'attention') return e.trafficLight === 'yellow' && e.enrollmentStatus !== 'archived';
     if (f === 'action-required') return e.trafficLight === 'red';
     if (f === 'archived') return e.enrollmentStatus === 'archived';
-    return true;
+    return e.enrollmentStatus !== 'revoked';
   });
 });
 
@@ -160,9 +165,9 @@ const selectedEnv = computed(() => {
     return environments.value.find((e) => e.id === deepLinkId.value);
   }
   return (
-    environments.value.find((e) => e.id === selectedId.value) ??
+    filteredEnvironments.value.find((e) => e.id === selectedId.value) ??
     filteredEnvironments.value[0] ??
-    environments.value[0]
+    undefined
   );
 });
 
@@ -301,7 +306,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
         <FilterPill
           filter-key="all"
           label="All"
-          :count="allCount"
+          :count="activeCount"
           status="purple"
           :active="activeFilter === 'all'"
           @click="activeFilter = 'all'"
@@ -337,6 +342,15 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
           status="neutral"
           :active="activeFilter === 'archived'"
           @click="activeFilter = 'archived'"
+        />
+        <FilterPill
+          filter-key="revoked"
+          label="Revoked"
+          :count="revokedCount"
+          status="neutral"
+          class="text-[var(--text-muted)] opacity-75"
+          :active="activeFilter === 'revoked'"
+          @click="activeFilter = 'revoked'"
         />
       </FilterPillGroup>
     </div>
@@ -425,6 +439,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @restore="handleRestore"
               @unenroll="handleUnenroll"
               @resume-enrollment="handleOpenRegister"
+              @register-replacement="handleOpenRegister(undefined)"
             />
             <div v-else class="p-8 text-center text-xs text-[var(--text-muted)]">
               No environment matches the active filter.
@@ -451,6 +466,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @restore="handleRestore"
               @unenroll="handleUnenroll"
               @resume-enrollment="handleOpenRegister"
+              @register-replacement="handleOpenRegister(undefined)"
             />
           </div>
 
