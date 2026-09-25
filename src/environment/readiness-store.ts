@@ -3,6 +3,7 @@ import type {
   CompatibilityFact,
   EngineReadinessFact,
   ProbeResultFact,
+  ModelAuthorizationFact,
   ReadinessReceipt,
   ReadinessRequirementScope,
 } from './readiness.ts';
@@ -13,13 +14,13 @@ export type { ReadinessObservationAuthority } from './readiness-authority.ts';
 export type { ReadinessReceipt, ReadinessRequirementScope } from './readiness.ts';
 
 /**
- * Durable storage for the observed Environment readiness facts (#87).
+ * Durable storage for the observed Environment readiness facts (#87) and
+ * independent Human model authorization decisions (#138).
  *
- * Enrollment decisions are authority facts (see `enrollment-store.ts`); these are
- * the Worker-observed facts that must survive a restart without being recomputed
- * into a different state. The latest observation is a document per environment,
- * and probe results are an append-only history so a newer probe supersedes a
- * value without erasing what was observed before.
+ * Enrollment decisions are authority facts (see `enrollment-store.ts`). Worker
+ * observations and probe receipts are immutable measured facts. The readiness
+ * document is a current projection that can also carry independently recorded
+ * authorization; neither authorization nor its revocation changes an observation.
  */
 export interface ObservedReadiness {
   readonly requirements?: ReadinessRequirementScope;
@@ -82,6 +83,40 @@ export interface ReadinessHistoricalQuery {
   readonly limit?: number;
 }
 
+/** A Human decision, never a Worker observation or probe receipt. Empty snapshots revoke current authority. */
+export interface ModelAuthorizationEvidence {
+  readonly evidenceId: string;
+  readonly environmentInstanceId: string;
+  readonly recordedAt: number;
+  readonly enrollmentId?: string;
+  readonly requirements?: ReadinessRequirementScope;
+  readonly authorizations: readonly ModelAuthorizationFact[];
+}
+
+export function withModelAuthorizations(
+  existing: ObservedReadiness | undefined,
+  authorizations: readonly ModelAuthorizationFact[],
+  context?: { readonly enrollmentId?: string; readonly connectionEpoch?: number; readonly requirements?: ReadinessRequirementScope },
+): ObservedReadiness {
+  const existingEngines = existing?.engines ?? [];
+  const names = new Set([...existingEngines.map((e) => e.engine), ...authorizations.map((a) => a.engine)]);
+  const engines = [...names].map((name) => {
+    const previous = existingEngines.find((e) => e.engine === name);
+    return {
+      ...(previous ?? { engine: name, installed: false, readiness: 'unknown' as const,
+        required: false, models: { state: 'unknown' as const, models: [] } }),
+      modelAuthorizations: authorizations.filter((a) => a.engine === name),
+    };
+  });
+  return {
+    ...(existing ?? { connection: { state: 'never-connected' }, compatibility: { state: 'unknown' } }),
+    engines,
+    ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+    ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+    ...(context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
+  };
+}
+
 export interface EnvironmentReadinessStore {
   /** Reserve a durable issue order before asking the Worker to collect facts. */
   issueAttempt(environmentInstanceId: string, authority: ReadinessWriteAuthority, bootstrap?: boolean, requiredModels?: readonly string[], requirements?: ReadinessRequirementScope): Promise<ReadinessAttempt | false>;
@@ -119,6 +154,19 @@ export interface EnvironmentReadinessStore {
     environmentInstanceId: string,
     query?: ReadinessHistoricalQuery,
   ): Promise<readonly StoredReadinessObservation[]>;
+  listModelAuthorizationEvidence(environmentInstanceId: string): Promise<readonly ModelAuthorizationEvidence[]>;
+  recordModelAuthorizations(
+    environmentInstanceId: string,
+    authorizations: readonly import('./readiness.ts').ModelAuthorizationFact[],
+    context?: {
+      readonly enrollmentId?: string;
+      readonly connectionEpoch?: number;
+      readonly lifecycleGeneration?: number;
+      readonly connectionId?: string;
+      readonly requirements?: ReadinessRequirementScope;
+      readonly actor?: string;
+    },
+  ): Promise<void>;
 }
 
 export interface ReadinessAttempt {
@@ -154,6 +202,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
   readonly #sequences = new Map<string, number>();
   readonly #issued = new Map<string, ReadinessAttempt>();
   readonly #bootstraps = new Map<string, ReadinessAttempt>();
+  readonly #authorizationEvidence = new Map<string, ModelAuthorizationEvidence[]>();
 
   async issueAttempt(instance: string, authority: ReadinessWriteAuthority, bootstrap = false, requiredModels: readonly string[] = [], requirements?: ReadinessRequirementScope): Promise<ReadinessAttempt | false> {
     if (!authority.isCurrent() || authority.environmentInstanceId !== instance) return false;
@@ -200,16 +249,23 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     this.#sequences.set(environmentInstanceId, Math.max(this.#sequences.get(environmentInstanceId) ?? 0, sequence));
     const committedAt = Date.now();
 
+    const previousReadiness = this.#readiness.get(environmentInstanceId);
+    const authorizations = previousReadiness?.engines.flatMap((e) => e.modelAuthorizations ?? []).filter((a) =>
+      a.requirementRevision === undefined || a.requirementRevision ===
+        (pair.requirements?.revisionsByEngine?.[a.engine] ?? pair.requirements?.revision)) ?? [];
+    // Receipts and observations contain only the Worker pair; authorization is a separate decision.
+    const effectiveReadiness = pair.readiness;
+
     const receipt: ReadinessReceipt = {
       observationId: pair.observationId,
       environmentInstanceId,
-      enrollmentId: pair.readiness.enrollmentId!,
-      connectionEpoch: pair.readiness.connectionEpoch!,
+      enrollmentId: effectiveReadiness.enrollmentId!,
+      connectionEpoch: effectiveReadiness.connectionEpoch!,
       sequence,
       committedAt,
       probe: pair.probe,
       authorityScope: pair.authorityScope,
-      readiness: pair.readiness,
+      readiness: effectiveReadiness,
       at: pair.probe.at,
       latencyMs: pair.probe.latencyMs,
       protocolOk: pair.probe.protocolOk,
@@ -224,11 +280,11 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       ...(pair.workerObservedAt !== undefined ? { workerObservedAt: pair.workerObservedAt } : {}),
       observationId: pair.observationId,
       environmentInstanceId,
-      enrollmentId: pair.readiness.enrollmentId,
-      connectionEpoch: pair.readiness.connectionEpoch,
+      enrollmentId: effectiveReadiness.enrollmentId,
+      connectionEpoch: effectiveReadiness.connectionEpoch,
       sequence,
       committedAt,
-      readiness: pair.readiness,
+      readiness: effectiveReadiness,
       probe: pair.probe,
       receipt,
       authorityScope: pair.authorityScope,
@@ -241,7 +297,7 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     this.#instanceObservations.set(environmentInstanceId, instObs);
 
     this.#currentObservations.set(environmentInstanceId, pair.observationId);
-    this.#readiness.set(environmentInstanceId, structuredClone(pair.readiness));
+    this.#readiness.set(environmentInstanceId, structuredClone(withModelAuthorizations(effectiveReadiness, authorizations)));
 
     const history = this.#probes.get(environmentInstanceId) ?? [];
     history.push(structuredClone(pair.probe));
@@ -264,6 +320,33 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
     const observationId = this.#currentObservations.get(environmentInstanceId);
     if (observationId === undefined) return undefined;
     return structuredClone(this.#observations.get(observationId));
+  }
+
+  async recordModelAuthorizations(
+    instance: string,
+    authorizations: readonly import('./readiness.ts').ModelAuthorizationFact[],
+    context?: {
+      readonly enrollmentId?: string;
+      readonly connectionEpoch?: number;
+      readonly lifecycleGeneration?: number;
+      readonly connectionId?: string;
+      readonly requirements?: ReadinessRequirementScope;
+      readonly actor?: string;
+    },
+  ): Promise<void> {
+    const existing = this.#readiness.get(instance);
+    if (!existing && authorizations.length === 0) return;
+    const updated = withModelAuthorizations(existing, authorizations, context);
+    this.#readiness.set(instance, structuredClone(updated));
+    const history = this.#authorizationEvidence.get(instance) ?? [];
+    history.push(structuredClone({ evidenceId: `auth-${crypto.randomUUID()}`, environmentInstanceId: instance,
+      recordedAt: Date.now(), ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+      ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}), authorizations }));
+    this.#authorizationEvidence.set(instance, history);
+  }
+
+  async listModelAuthorizationEvidence(instance: string): Promise<readonly ModelAuthorizationEvidence[]> {
+    return structuredClone(this.#authorizationEvidence.get(instance) ?? []);
   }
 
   async getObservation(

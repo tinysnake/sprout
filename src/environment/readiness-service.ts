@@ -102,10 +102,15 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
   // visible rather than quietly dropped from the projection.
   const engineIds = new Set<string>([
     ...(input.observed?.engines ?? []).map((engine) => engine.engine),
+    ...(input.enrollment.modelAuthorizations ?? []).map((auth) => auth.engine),
     ...input.requiredEngines,
   ]);
   const engines: readonly EngineReadinessFact[] = [...engineIds].map((engine) => {
     const observed = observedEngines.get(engine);
+    const engineAuths = (input.enrollment.modelAuthorizations ?? []).filter((a) => a.engine === engine);
+    // Only the current enrollment decision can authorize entitlement. An old
+    // Worker observation (or a legacy document) cannot resurrect revoked authority.
+    const modelAuthorizations = engineAuths;
     return {
       engine,
       ...(observed?.version !== undefined ? { version: observed.version } : {}),
@@ -122,6 +127,9 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
       ...(observed?.probedAt !== undefined ? { probedAt: observed.probedAt } : {}),
       ...(observed?.probeExitCode !== undefined ? { probeExitCode: observed.probeExitCode } : {}),
       ...(observed?.source !== undefined ? { source: observed.source } : {}),
+      ...(modelAuthorizations !== undefined && modelAuthorizations.length > 0
+        ? { modelAuthorizations }
+        : {}),
     };
   });
 

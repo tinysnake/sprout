@@ -996,6 +996,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // fabricated dual-engine failure (ADR-0008).
       requiredEngines: [engineId],
       onMutation: onEnrollmentMutation,
+      resolveRequirements: currentRequirements,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
     // One synchronous lifecycle authority is shared by the enrollment service,

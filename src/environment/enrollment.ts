@@ -117,6 +117,7 @@ export interface EnvironmentEnrollment {
    */
   readonly claim: EnrollmentClaim | undefined;
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly modelAuthorizations?: readonly import('./readiness.ts').ModelAuthorizationFact[];
   readonly createdAt: number;
   readonly updatedAt: number;
   /**
@@ -400,6 +401,7 @@ export function reconcileWorkerConnection(
 
 export interface ApprovalInput {
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly modelAuthorizations?: readonly import('./readiness.ts').ModelAuthorizationFact[];
   readonly at: number;
   readonly actor?: string;
 }
@@ -447,11 +449,14 @@ export function approveEnrollment(
       kind: 'approved',
       actor: input.actor ?? 'operator',
       at: input.at,
-      reason: 'Human approved the Worker identity and its capability permissions.',
+      reason: input.modelAuthorizations !== undefined && input.modelAuthorizations.length > 0
+        ? 'Human approved the Worker identity, capability permissions, and model authorizations.'
+        : 'Human approved the Worker identity and its capability permissions.',
     }),
     status: 'approved',
     everApproved: true,
     capabilityPermissions: permissions,
+    ...(input.modelAuthorizations !== undefined ? { modelAuthorizations: [...input.modelAuthorizations] } : {}),
     updatedAt: input.at,
     revision: (enrollment.revision ?? 0) + 1,
   };
@@ -467,6 +472,7 @@ export function revokeEnrollment(enrollment: EnvironmentEnrollment, at: number, 
       reason: sanitizeOperatorText(reason, { fallback: DEFAULT_REVOKE_REASON }),
     }),
     status: 'revoked',
+    modelAuthorizations: [],
     updatedAt: at,
     revision: (enrollment.revision ?? 0) + 1,
   };
@@ -503,6 +509,7 @@ export function resetEnrollment(enrollment: EnvironmentEnrollment, at: number, r
     invalidatedIdentityDigests: invalidated,
     requiresFreshIdentity: true,
     claim: undefined,
+    modelAuthorizations: [],
     capabilityPermissions: Object.fromEntries(
       Object.keys(enrollment.capabilityPermissions).map((capability) => [capability, false]),
     ),
@@ -531,6 +538,7 @@ export function cancelEnrollment(
     }),
     status: 'revoked',
     claim: undefined,
+    modelAuthorizations: [],
     updatedAt: at,
     revision: (enrollment.revision ?? 0) + 1,
   };
@@ -654,6 +662,19 @@ export function normalizeEnrollment(enrollment: EnvironmentEnrollment): Environm
           .filter((digest) => digest !== '')
       : [],
     requiresFreshIdentity: enrollment.requiresFreshIdentity === true,
+    ...(Array.isArray(enrollment.modelAuthorizations)
+      ? {
+          modelAuthorizations: enrollment.modelAuthorizations.map((auth) => ({
+            engine: sanitizeIdentifier(auth.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+            model: sanitizeIdentifier(auth.model, { fallback: 'unknown-model', kind: 'model' }),
+            source: 'human-approval' as const,
+            ...(auth.requirementRevision !== undefined && /^[A-Za-z0-9_-]{1,128}$/.test(auth.requirementRevision)
+              ? { requirementRevision: auth.requirementRevision } : {}),
+            authorizedAt: Number.isSafeInteger(auth.authorizedAt) && auth.authorizedAt > 0 ? auth.authorizedAt : Date.now(),
+            ...(auth.actor !== undefined ? { actor: sanitizeOperatorText(auth.actor, { fallback: 'operator' }) } : {}),
+          })),
+        }
+      : {}),
     claim: normalizeClaim(enrollment.claim),
     decisions: (enrollment.decisions ?? []).map(sanitizeDecision),
   };

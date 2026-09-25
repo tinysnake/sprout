@@ -406,3 +406,18 @@ test('approveEnrollment sends only human-selected permissions', async () => {
     'agent-run': false,
   });
 });
+
+test('#138: approveEnrollment forwards explicit model authorizations', async () => {
+  const facts = enrollmentFacts();
+  let submittedAuthorizations: any = undefined;
+  const wire = adapter(facts);
+  wire.approveEnrollment = async (_id, _perms, modelAuths) => {
+    submittedAuthorizations = modelAuths;
+    return facts.enrollment;
+  };
+
+  const service = new ProductionEnvironmentService(wire);
+  await service.approveEnrollment('enroll-1', { 'agent-run': true }, { codex: ['gpt-5-codex'] });
+
+  assert.deepEqual(submittedAuthorizations, { codex: ['gpt-5-codex'] });
+});

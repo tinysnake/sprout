@@ -101,6 +101,7 @@ export interface EnvironmentEnrollmentServiceOptions {
   readonly claimSecretFactory?: () => string;
   /** How long a host claim stays usable. Defaults to 15 minutes. */
   readonly claimTtlMs?: number;
+  readonly resolveRequirements?: () => Promise<ReadinessRequirementScope> | ReadinessRequirementScope;
   /**
    * The shared synchronous lifecycle authority fence (R118-EPOCH-001).
    *
@@ -164,6 +165,7 @@ export class EnvironmentEnrollmentService {
   /** Local lifecycle generation checked at the store mutation boundary. */
   readonly #authority: EnrollmentLifecycleAuthority;
   readonly #verifyObservationAuthority: ObservationAuthorityVerifier;
+  readonly #resolveRequirements: (() => Promise<ReadinessRequirementScope> | ReadinessRequirementScope) | undefined;
   /** Proven pre-epoch refusal: diagnostic only, never current Worker authority. */
   readonly #connectionAttempts = new Map<string, {
     readonly generation: number;
@@ -190,6 +192,7 @@ export class EnvironmentEnrollmentService {
     this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
     this.#authority = options.lifecycleAuthority ?? new EnrollmentLifecycleAuthority();
     this.#onMutation = options.onMutation;
+    this.#resolveRequirements = options.resolveRequirements;
   }
 
   /** Announce a durable decision to the catalog observer, never throwing. */
@@ -530,22 +533,93 @@ export class EnvironmentEnrollmentService {
 
   async approve(
     enrollmentId: string,
-    input: { readonly capabilityPermissions: Readonly<Record<string, boolean>>; readonly actor?: string },
+    input: {
+      readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+      readonly modelAuthorizations?:
+        | Readonly<Record<string, readonly string[]>>
+        | readonly { readonly engine: string; readonly model: string }[];
+      readonly actor?: string;
+    },
   ): Promise<ApproveEnrollmentResult> {
-    return this.#mutateWithCas(enrollmentId, (current) => approveEnrollment(current, {
+    const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
+    const at = this.#clock();
+    const authorizedFacts: import('./readiness.ts').ModelAuthorizationFact[] = [];
+
+    const rawSelections: { engine: string; model: string }[] = [];
+    if (input.modelAuthorizations !== undefined) {
+      if (Array.isArray(input.modelAuthorizations)) {
+        for (const item of input.modelAuthorizations) {
+          if (item && typeof item === 'object' && typeof item.engine === 'string' && typeof item.model === 'string') {
+            rawSelections.push({ engine: item.engine, model: item.model });
+          }
+        }
+      } else if (typeof input.modelAuthorizations === 'object' && input.modelAuthorizations !== null) {
+        for (const [engine, models] of Object.entries(input.modelAuthorizations)) {
+          if (Array.isArray(models)) {
+            for (const model of models) {
+              if (typeof model === 'string') {
+                rawSelections.push({ engine, model });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (currentRequirements?.modelsByEngine) {
+      for (const [engine, models] of Object.entries(currentRequirements.modelsByEngine)) {
+        for (const model of models) {
+          const isSelected = rawSelections.some((s) => s.engine === engine && s.model === model);
+          if (isSelected) {
+            const requirementRevision = currentRequirements.revisionsByEngine?.[engine] ?? currentRequirements.revision;
+            authorizedFacts.push({
+              engine,
+              model,
+              source: 'human-approval',
+              ...(requirementRevision !== undefined ? { requirementRevision } : {}),
+              authorizedAt: at,
+              actor: input.actor ?? 'operator',
+            });
+          }
+        }
+      }
+    } else if (rawSelections.length > 0) {
+      for (const selection of rawSelections) {
+        authorizedFacts.push({
+          engine: selection.engine,
+          model: selection.model,
+          source: 'human-approval',
+          authorizedAt: at,
+          actor: input.actor ?? 'operator',
+        });
+      }
+    }
+
+    const enrollment = await this.#mutateWithCas(enrollmentId, (current) => approveEnrollment(current, {
       capabilityPermissions: input.capabilityPermissions,
-      at: this.#clock(),
+      modelAuthorizations: authorizedFacts,
+      at,
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
-    })).then((enrollment) => {
-      this.#announce(enrollment);
-      return { enrollment };
+    }));
+
+    const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
+    await this.#readiness.recordModelAuthorizations(enrollment.environmentInstanceId, authorizedFacts, {
+      enrollmentId: enrollment.id,
+      lifecycleGeneration: this.#authority.generation(enrollment.id),
+      ...(currentEpoch !== undefined ? { connectionEpoch: currentEpoch } : {}),
+      ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
+      ...(input.actor !== undefined ? { actor: input.actor } : {}),
     });
+
+    this.#announce(enrollment);
+    return { enrollment };
   }
 
   async revoke(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
     this.#loseAuthority(enrollmentId);
     const at = this.#clock();
     const revoked = await this.#mutateWithCas(enrollmentId, (current) => revokeEnrollment(current, at, reason));
+    await this.#readiness.recordModelAuthorizations(revoked.environmentInstanceId, []);
     this.#announce(revoked);
     return revoked;
   }
@@ -554,6 +628,7 @@ export class EnvironmentEnrollmentService {
     this.#loseAuthority(enrollmentId);
     const at = this.#clock();
     const reset = await this.#mutateWithCas(enrollmentId, (current) => resetEnrollment(current, at, reason));
+    await this.#readiness.recordModelAuthorizations(reset.environmentInstanceId, []);
     this.#announce(reset);
     return reset;
   }
@@ -724,6 +799,7 @@ export class EnvironmentEnrollmentService {
     const probes = lifecycleApproved ? rawProbes.map(sanitizeProbe) : [];
     const latestProbe = observationCurrent ? sanitizeProbe(currentObs.probe) : undefined;
     const receipt = observationCurrent ? currentObs.receipt : undefined;
+    const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
 
     const assembled = assembleEnvironmentReadiness({
       enrollment: currentEnrollment,
@@ -731,6 +807,7 @@ export class EnvironmentEnrollmentService {
       leases,
       ...(recoveryRecords !== undefined ? { recoveryRecords } : {}),
       requiredEngines: this.#requiredEngines,
+      ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
       ...(latestProbe !== undefined ? { probe: latestProbe } : {}),
       receipt,
       supportedProtocol: this.#supportedProtocol,

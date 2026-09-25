@@ -434,6 +434,8 @@ export async function readinessWorkflowHarness(options: {
   readonly engineId?: string;
   /** Reopen the same durable enrollment instead of creating a second one. */
   readonly reopen?: boolean;
+  readonly approve?: boolean;
+  readonly modelAuthorizations?: Record<string, readonly string[]>;
 }): Promise<{
   readonly runtime: SproutRuntime;
   readonly base: string;
@@ -513,9 +515,12 @@ export async function readinessWorkflowHarness(options: {
       compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
       engines: [],
     });
-    await runtime.enrollments.approve(enrollmentId, {
-      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
-    });
+    if (options.approve !== false) {
+      await runtime.enrollments.approve(enrollmentId, {
+        capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+        ...(options.modelAuthorizations !== undefined ? { modelAuthorizations: options.modelAuthorizations } : {}),
+      });
+    }
   }
 
   return {

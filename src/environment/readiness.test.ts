@@ -8,6 +8,7 @@ import {
   protocolMajor,
   readinessRequirements,
   summarizeEnvironmentReadiness,
+  targetEvidenceSatisfiesRequirements,
   workSafetyFromLeases,
   type EngineReadinessFact,
   type EnvironmentReadiness,
@@ -412,4 +413,107 @@ test('#129: evaluateEngineOption interprets committed evidence consistently acro
   const availableOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, matchingFact, scope);
   assert.equal(availableOption.state, 'available');
   assert.match(availableOption.reason, /ready with the option's work model/);
+
+  // 12. #138: Model availability 'unknown' with matching explicit Human authorization
+  const authorizedUnknownFact: EngineReadinessFact = {
+    engine: 'codex',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'unknown', models: [] },
+    targetModels: ['gpt-5'],
+    modelIdPresent: true,
+    requirementRevision: scope.revisionsByEngine!.codex!,
+    modelAuthorizations: [
+      {
+        engine: 'codex',
+        model: 'gpt-5',
+        source: 'human-approval',
+        requirementRevision: scope.revisionsByEngine!.codex!,
+        authorizedAt: 2_000,
+        actor: 'operator',
+      },
+    ],
+  };
+  const authorizedOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, authorizedUnknownFact, scope);
+  assert.equal(authorizedOption.state, 'available');
+  assert.match(authorizedOption.reason, /human-approval/);
+  assert.match(authorizedOption.reason, /authorized work model "gpt-5"/);
+
+  // 13. #138: Model availability 'unknown' without authorization stays blocking
+  const unauthUnknownFact: EngineReadinessFact = {
+    ...authorizedUnknownFact,
+    modelAuthorizations: [],
+  };
+  const unauthOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unauthUnknownFact, scope);
+  assert.equal(unauthOption.state, 'unknown');
+  assert.match(unauthOption.reason, /availability is unknown for "codex"/);
+
+  // 14. #138: Authorization for different model does not authorize unselected model
+  const wrongModelAuthFact: EngineReadinessFact = {
+    ...authorizedUnknownFact,
+    modelAuthorizations: [
+      {
+        engine: 'codex',
+        model: 'other-model',
+        source: 'human-approval',
+        requirementRevision: scope.revisionsByEngine!.codex!,
+        authorizedAt: 2_000,
+      },
+    ],
+  };
+  const wrongModelOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, wrongModelAuthFact, scope);
+  assert.equal(wrongModelOption.state, 'unknown');
+
+  // 15. #138: Scope change (revision mismatch) invalidates authorization (#123 US20)
+  const staleAuthFact: EngineReadinessFact = {
+    ...authorizedUnknownFact,
+    modelAuthorizations: [
+      {
+        engine: 'codex',
+        model: 'gpt-5',
+        source: 'human-approval',
+        requirementRevision: 'r-stale-rev',
+        authorizedAt: 2_000,
+      },
+    ],
+  };
+  const staleAuthOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, staleAuthFact, scope);
+  assert.equal(staleAuthOption.state, 'unknown');
+  assert.match(staleAuthOption.reason, /readiness is not established for the current requirement revision/);
+
+  // 16. #138: Pi target model satisfied via Human authorization
+  const piScope = readinessRequirements([{ engine: 'pi', workModel: 'claude-3-7-sonnet' }]);
+  const piAuthorizedFact: EngineReadinessFact = {
+    engine: 'pi',
+    installed: true,
+    readiness: 'ready',
+    required: true,
+    models: { state: 'unknown', models: [] },
+    targetModels: [],
+    requirementRevision: piScope.revisionsByEngine!.pi!,
+    source: 'pi-auth-check',
+    modelAuthorizations: [
+      {
+        engine: 'pi',
+        model: 'claude-3-7-sonnet',
+        source: 'human-approval',
+        requirementRevision: piScope.revisionsByEngine!.pi!,
+        authorizedAt: 3_000,
+      },
+    ],
+  };
+  assert.equal(targetEvidenceSatisfiesRequirements(piAuthorizedFact, piScope), true);
+  const piOption = evaluateEngineOption({ engine: 'pi', workModel: 'claude-3-7-sonnet' }, piAuthorizedFact, piScope);
+  assert.equal(piOption.state, 'available');
+  assert.match(piOption.reason, /human-approval/);
+
+  // 17. #138: Target evidence fails without authorization on unknown model
+  const piUnauthorizedFact: EngineReadinessFact = {
+    ...piAuthorizedFact,
+    modelAuthorizations: [],
+  };
+  assert.equal(targetEvidenceSatisfiesRequirements(piUnauthorizedFact, piScope), false);
+  const piUnauthOption = evaluateEngineOption({ engine: 'pi', workModel: 'claude-3-7-sonnet' }, piUnauthorizedFact, piScope);
+  assert.equal(piUnauthOption.state, 'unknown');
 });

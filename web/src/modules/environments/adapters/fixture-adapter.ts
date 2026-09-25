@@ -471,7 +471,11 @@ export class FixtureEnvironmentService implements EnvironmentService {
     ];
   }
 
-  async approveEnrollment(id: string, permissions: Record<string, boolean>): Promise<void> {
+  async approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    _modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
     if (permissions === undefined || permissions === null) throw new Error('Human-selected capability permissions are required for approval');
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);

@@ -36,6 +36,7 @@ export interface AgentWorkOptionEngineFact {
   readonly probedAt?: number;
   readonly probeExitCode?: number;
   readonly source?: string;
+  readonly modelAuthorizations?: readonly import('../environment/readiness.ts').ModelAuthorizationFact[];
 }
 
 /**

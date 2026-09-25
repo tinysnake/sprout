@@ -495,3 +495,63 @@ test('POST /api/environments/enrollments/:id/cancel cancels a pending enrollment
     await runtime.api.close();
   }
 });
+
+test('#138: POST /api/environments/enrollments/:id/approve accepts explicit model authorizations', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    const identity = workerIdentityFixture();
+    const postRes = await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-auth',
+      displayName: 'Mac with Auth',
+      platform: 'macos',
+      publicKey: identity.publicKey,
+      capabilityRequests: ['agent-run'],
+      engines: [{ engine: 'codex', installed: true, authenticated: true, models: ['gpt-5-codex'] }],
+    });
+    assert.equal(postRes.status, 201);
+
+    const connectRes = await command(runtime.base, '/api/environments/enrollments/enroll-1/connect', runtime, {
+      proof: await proveWorker(runtime, identity),
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [{ engine: 'codex', installed: true, readiness: 'ready', models: { state: 'unknown', models: [] } }],
+    });
+    assert.equal(connectRes.status, 200);
+
+    // Invalid modelAuthorizations returns 400
+    const invalidAuth = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+      modelAuthorizations: 'not-an-object',
+    });
+    assert.equal(invalidAuth.status, 400);
+
+    // Valid approval with explicit model authorization
+    const approved = await command(runtime.base, '/api/environments/enrollments/enroll-1/approve', runtime, {
+      capabilityPermissions: { 'agent-run': true },
+      modelAuthorizations: { codex: ['gpt-5-codex'] },
+    });
+    assert.equal(approved.status, 200);
+
+    const readinessRes = await read(
+      runtime.base,
+      '/api/environments/enrollments/enroll-1/readiness',
+      runtime,
+    );
+    assert.equal(readinessRes.status, 200);
+    const body = (await readinessRes.json()) as {
+      readiness: {
+        engines: {
+          engine: string;
+          modelAuthorizations?: { engine: string; model: string; source: string }[];
+        }[];
+      };
+    };
+    const codex = body.readiness.engines.find((e) => e.engine === 'codex');
+    assert.ok(codex?.modelAuthorizations, 'Model authorizations projected on readiness view');
+    assert.equal(codex.modelAuthorizations.length, 1);
+    assert.equal(codex.modelAuthorizations[0]?.model, 'gpt-5-codex');
+    assert.equal(codex.modelAuthorizations[0]?.source, 'human-approval');
+  } finally {
+    await runtime.api.close();
+  }
+});

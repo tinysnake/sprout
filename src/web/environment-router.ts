@@ -230,9 +230,16 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         if (permissions === 'invalid') {
           return json(context, 400, { error: 'capabilityPermissions must be a record of booleans' });
         }
+        const modelAuthorizations = parseModelAuthorizations(body['modelAuthorizations']);
+        if (modelAuthorizations === 'invalid') {
+          return json(context, 400, {
+            error: 'modelAuthorizations must be a record of model string arrays or an array of model authorization objects',
+          });
+        }
         try {
           const result = await enrollments.approve(segments[3] ?? '', {
             capabilityPermissions: permissions,
+            ...(modelAuthorizations !== undefined ? { modelAuthorizations } : {}),
           });
           return json(context, 200, { enrollment: toEnrollmentView(result.enrollment) });
         } catch (error) {
@@ -777,6 +784,36 @@ function parseReadinessEngines(value: unknown): readonly EngineReadinessFact[] |
     facts.push({ engine, installed: installed === true, readiness, required: required === true, models });
   }
   return facts;
+}
+
+function parseModelAuthorizations(
+  value: unknown,
+): Record<string, readonly string[]> | 'invalid' | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) return 'invalid';
+  if (Array.isArray(value)) {
+    const result: Record<string, string[]> = {};
+    for (const item of value) {
+      if (typeof item !== 'object' || item === null) return 'invalid';
+      const engine = (item as Record<string, unknown>)['engine'];
+      const model = (item as Record<string, unknown>)['model'];
+      if (typeof engine !== 'string' || typeof model !== 'string') return 'invalid';
+      const list = result[engine] ?? (result[engine] = []);
+      if (!list.includes(model)) list.push(model);
+    }
+    return result;
+  }
+  const result: Record<string, string[]> = {};
+  for (const [engine, models] of Object.entries(value)) {
+    if (!Array.isArray(models)) return 'invalid';
+    const list: string[] = [];
+    for (const model of models) {
+      if (typeof model !== 'string') return 'invalid';
+      if (!list.includes(model)) list.push(model);
+    }
+    result[engine] = list;
+  }
+  return result;
 }
 
 function parseModelAvailability(
