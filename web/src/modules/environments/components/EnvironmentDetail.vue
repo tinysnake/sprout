@@ -35,6 +35,7 @@ const emit = defineEmits<{
   (e: 'restore', id: string): void;
   (e: 'unenroll', id: string): void;
   (e: 'resumeEnrollment', id: string): void;
+  (e: 'registerReplacement'): void;
 }>();
 </script>
 
@@ -48,6 +49,27 @@ const emit = defineEmits<{
       :protocol-mismatch-detail="env.protocolMismatchDetail"
       :is-archived="env.enrollmentStatus === 'archived'"
     />
+
+    <section
+      v-if="env.enrollmentStatus === 'revoked'"
+      class="revoked-enrollment-panel rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 space-y-2"
+      aria-label="Revoked enrollment"
+    >
+      <div>
+        <h3 class="text-xs font-bold text-[var(--text-primary)]">Revoked enrollment</h3>
+        <p class="text-xs text-[var(--text-muted)]">This identity is permanently revoked. Start a fresh enrollment to reset access; this record cannot be restored.</p>
+      </div>
+      <div class="revoked-decision-history space-y-1" aria-label="Decision history">
+        <p v-for="(decision, index) in env.decisions ?? []" :key="`${decision.kind}-${decision.at}-${index}`" class="text-[11px] text-[var(--text-secondary)]">
+          {{ decision.kind }} · {{ decision.actor }} · {{ new Date(decision.at).toLocaleString() }}<span v-if="decision.reason"> — {{ decision.reason }}</span>
+        </p>
+        <p v-if="!env.decisions?.length" class="text-[11px] text-[var(--text-muted)] italic">No enrollment decisions recorded.</p>
+      </div>
+      <Button variant="secondary" size="sm" class="revoked-reset-btn text-xs" :disabled="disabled" @click="emit('registerReplacement')">
+        <Icon name="refresh" :size="13" />
+        <span>Start fresh enrollment</span>
+      </Button>
+    </section>
 
     <!-- 2. 6 Independent Health Dimensions -->
     <div class="flex flex-col gap-3">

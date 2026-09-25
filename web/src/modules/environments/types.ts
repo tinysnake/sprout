@@ -143,7 +143,7 @@ export interface EnvironmentInstance {
   requirements?: import('../../adapters/environment-api.ts').ReadinessRequirementScope | undefined;
 }
 
-export type EnvironmentFilter = 'all' | 'ready' | 'attention' | 'action-required' | 'archived';
+export type EnvironmentFilter = 'all' | 'ready' | 'attention' | 'action-required' | 'archived' | 'revoked';
 
 export interface ForceReleaseParams {
   environmentId: string;

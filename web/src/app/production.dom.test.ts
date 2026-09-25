@@ -274,7 +274,7 @@ test('Production Web: filters environments and exposes accessible current states
 
     // Filter pills check
     const filterPills = doc.querySelectorAll('.env-filter-box-btn');
-    assert.equal(filterPills.length, 5, '5 discrete health filter buttons rendered');
+    assert.equal(filterPills.length, 6, '6 discrete health filter buttons rendered, including Revoked');
 
     const allBtn = doc.querySelector('button[data-filter="all"]') as HTMLButtonElement;
     assert.equal(allBtn.getAttribute('aria-pressed'), 'true', 'All filter active initially');

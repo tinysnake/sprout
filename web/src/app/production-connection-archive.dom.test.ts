@@ -216,6 +216,53 @@ test('M77-NAV-002: an unknown task detail deep link renders not-found and never 
   }
 });
 
+test('revoked enrollments are isolated to their filter while deep links retain history and reset access', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const fixtureModule = (await vite.ssrLoadModule('/src/modules/environments/adapters/fixture-adapter.ts')) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+    const options = await deterministicAppOptions(vite);
+    const base = new fixtureModule.FixtureEnvironmentService();
+    const existing = (await base.listEnvironments())[0]!;
+    const revoked = {
+      ...existing,
+      id: 'env-revoked-test',
+      displayName: 'Revoked Test Host',
+      enrollmentStatus: 'revoked' as const,
+      trafficLight: 'red' as const,
+      trafficLightReason: 'Enrollment identity revoked',
+      decisions: [{ kind: 'revoked', actor: 'operator', at: 1_700_000_000_000, reason: 'Retired identity' }],
+    };
+    const service = Object.create(base) as fixtureModule.FixtureEnvironmentService;
+    service.listEnvironments = async () => [...await base.listEnvironments(), revoked];
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    const { app, router } = createSproutApp({ ...options, environmentService: service });
+    await router.push('/manage/environments');
+    await router.isReady();
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const doc = dom.window.document;
+
+    assert.equal(doc.querySelector('[data-filter="all"]')?.getAttribute('title'), 'All (7)');
+    assert.equal(doc.querySelector('[data-env="env-revoked-test"]'), null, 'default All excludes revoked cards');
+    assert.equal(doc.querySelector('[data-filter="action-required"]')?.getAttribute('title'), 'Action Required (2)', 'revoked red state does not inflate Action Required');
+    const revokedFilter = doc.querySelector('[data-filter="revoked"]') as HTMLButtonElement;
+    assert.match(revokedFilter.textContent ?? '', /1\s*Revoked/);
+    revokedFilter.click();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(doc.querySelector('[data-env="env-revoked-test"]'), 'the dedicated filter shows the revoked card');
+
+    await router.push('/manage/environments/env-revoked-test');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.match(doc.body.textContent ?? '', /Retired identity/, 'revocation decision history remains visible');
+    assert.ok(doc.querySelector('.revoked-reset-btn'), 'a fresh-enrollment reset affordance is available');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('M77-CONN-001: environment controls are disabled and refuse mutation while the connection is unsettled', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
