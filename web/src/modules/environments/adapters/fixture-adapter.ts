@@ -456,6 +456,12 @@ export class FixtureEnvironmentService implements EnvironmentService {
   async cancelEnrollment(id: string, reason?: string): Promise<void> {
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
+    if (env.enrollmentStatus !== 'pending') {
+      const error = new Error('Only a pending enrollment can be cancelled.');
+      (error as any).code = 'not-pending';
+      (error as any).status = 409;
+      throw error;
+    }
     env.enrollmentStatus = 'revoked';
     env.trafficLight = 'red';
     env.trafficLightReason = reason ?? 'Pending enrollment cancelled by operator';

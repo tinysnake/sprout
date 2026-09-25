@@ -9,6 +9,7 @@ import Badge from '../../../primitives/Badge.vue';
 import StatusDot from '../../../primitives/StatusDot.vue';
 import { useAnnouncer } from '../../../primitives/announcer.js';
 import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../ports.js';
+import { formatRefusalNotice } from '../control-boundary.js';
 import type { EnvironmentInstance } from '../types.js';
 
 const props = defineProps<{
@@ -20,6 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:open', value: boolean): void;
   (e: 'enrolled', enrollmentId: string): void;
+  (e: 'updated', enrollmentId: string): void;
 }>();
 
 const injectedService = inject<EnvironmentService | undefined>(ENVIRONMENT_SERVICE, undefined);
@@ -112,6 +114,13 @@ const isConnectionWait = computed(() => {
     !isRevoked.value &&
     !isDuplicateRefused.value
   );
+});
+
+const canCancel = computed(() => {
+  if (!activeEnv.value) return false;
+  if (activeEnv.value.enrollmentStatus !== 'pending') return false;
+  if (isExpired.value || isCancelled.value || isRevoked.value) return false;
+  return phase.value === 'active' || phase.value === 'review';
 });
 
 // Capabilities requested by worker
@@ -340,11 +349,14 @@ async function handleCancelEnrollment() {
   try {
     await activeService.value.cancelEnrollment(activeEnv.value.id, 'Cancelled by operator in registration ceremony');
     stateNotice.value = 'Pending enrollment has been cancelled by operator.';
-    announcer.announce('Pending enrollment has been cancelled by operator.');
+    announcer.announce(stateNotice.value);
     await pollStatus();
+    emit('updated', activeEnv.value.id);
   } catch (err: any) {
-    stateNotice.value = err?.message || 'Failed to cancel enrollment';
-    announcer.announce(`Failed to cancel enrollment: ${stateNotice.value}`);
+    stateNotice.value = formatRefusalNotice(err, 'Failed to cancel enrollment');
+    announcer.announce(stateNotice.value);
+    await pollStatus();
+    emit('updated', activeEnv.value.id);
   }
 }
 
@@ -859,7 +871,7 @@ onUnmounted(() => {
       <div class="flex items-center justify-between w-full flex-wrap gap-2">
         <div class="w-full sm:w-auto">
           <Button
-            v-if="phase === 'active' || phase === 'review'"
+            v-if="canCancel"
             variant="ghost"
             size="sm"
             class="cancel-enroll-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)] min-h-[44px] w-full sm:w-auto"
@@ -900,7 +912,7 @@ onUnmounted(() => {
             class="min-h-[44px] w-full sm:w-auto"
             @click="emit('update:open', false)"
           >
-            Close Dialog (Keep Pending)
+            {{ canCancel ? 'Close Dialog (Keep Pending)' : 'Close Dialog' }}
           </Button>
 
           <Button

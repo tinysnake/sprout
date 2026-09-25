@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { CapabilityKey, EnvironmentInstance } from '../types.js';
 import StateBanner from '../../../primitives/StateBanner.vue';
 import Button from '../../../primitives/Button.vue';
@@ -34,9 +35,27 @@ const emit = defineEmits<{
   (e: 'archive', id: string): void;
   (e: 'restore', id: string): void;
   (e: 'unenroll', id: string): void;
+  (e: 'cancelEnrollment', id: string): void;
   (e: 'resumeEnrollment', id: string): void;
   (e: 'registerReplacement'): void;
 }>();
+
+const isExpired = computed(() => {
+  if (!props.env.claim) return false;
+  return Date.now() >= props.env.claim.expiresAt && props.env.claim.consumedAt === undefined && !props.env.identityDigest;
+});
+
+const isCancelled = computed(() => {
+  const decisions = props.env.decisions ?? [];
+  return (
+    props.env.enrollmentStatus === 'revoked' &&
+    decisions.some((d) => d.kind === 'cancelled' || d.reason.toLowerCase().includes('cancel'))
+  );
+});
+
+const canCancelEnrollment = computed(() => {
+  return props.env.enrollmentStatus === 'pending' && !isExpired.value && !isCancelled.value;
+});
 </script>
 
 <template>
@@ -172,6 +191,18 @@ const emit = defineEmits<{
       >
         <Icon name="key" :size="13" />
         <span>Enrollment Ceremony</span>
+      </Button>
+
+      <Button
+        v-if="canCancelEnrollment"
+        variant="ghost"
+        size="sm"
+        class="cancel-enroll-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)]"
+        :disabled="disabled"
+        @click="emit('cancelEnrollment', env.id)"
+      >
+        <Icon name="trash" :size="13" />
+        <span>Cancel Pending Enrollment</span>
       </Button>
 
       <Button

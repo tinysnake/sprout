@@ -6,6 +6,7 @@ import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../ports.js';
 import {
   createEnvironmentControlBoundary,
   EnvironmentControlRefused,
+  formatRefusalNotice,
 } from '../control-boundary.js';
 import { useShellConnection } from '../../../shell/use-shell-connection.js';
 import { useAnnouncer } from '../../../primitives/announcer.js';
@@ -68,6 +69,7 @@ const environments = ref<EnvironmentInstance[]>([]);
 const activeFilter = ref<EnvironmentFilter>('all');
 const selectedId = ref<string>('env-ready');
 const isLoading = ref(true);
+const actionNotice = ref<string>('');
 
 const isForceReleaseOpen = ref(false);
 const isGuideOpen = ref(false);
@@ -242,6 +244,18 @@ async function handleUnenroll(id: string) {
   }
 }
 
+async function handleCancelEnrollment(id: string) {
+  try {
+    await runControl((service) => service.cancelEnrollment(id, 'Cancelled by operator'));
+    actionNotice.value = 'Pending enrollment has been cancelled by operator.';
+    announcer.announce(actionNotice.value);
+  } catch (error: any) {
+    await loadData();
+    actionNotice.value = formatRefusalNotice(error, 'Failed to cancel enrollment');
+    announcer.announce(actionNotice.value);
+  }
+}
+
 /**
  * Retained settlement evidence is a Worker fact (ADR-0009). The page offers the
  * reconcile action only when the injected authority really reaches a Worker
@@ -355,6 +369,22 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
       </FilterPillGroup>
     </div>
 
+    <!-- Action/Refusal Notice Banner -->
+    <div
+      v-if="actionNotice"
+      role="status"
+      aria-live="polite"
+      class="env-action-notice mx-4 my-2 p-3 rounded text-xs bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)] flex items-center justify-between gap-2"
+    >
+      <div class="flex items-center gap-2">
+        <Icon name="alert" :size="14" class="text-[var(--text-muted)] shrink-0" />
+        <span class="notice-message">{{ actionNotice }}</span>
+      </div>
+      <Button variant="ghost" size="xs" class="h-6 px-1.5" @click="actionNotice = ''">
+        <Icon name="close" :size="12" />
+      </Button>
+    </div>
+
     <!-- Layout: Desktop 2-Column Split vs Mobile Drill-down -->
     <div class="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4">
       <!-- No authority: the production route requires a typed adapter and never
@@ -438,6 +468,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @archive="handleArchive"
               @restore="handleRestore"
               @unenroll="handleUnenroll"
+              @cancel-enrollment="handleCancelEnrollment"
               @resume-enrollment="handleOpenRegister"
               @register-replacement="handleOpenRegister(undefined)"
             />
@@ -465,6 +496,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               @archive="handleArchive"
               @restore="handleRestore"
               @unenroll="handleUnenroll"
+              @cancel-enrollment="handleCancelEnrollment"
               @resume-enrollment="handleOpenRegister"
               @register-replacement="handleOpenRegister(undefined)"
             />
@@ -506,6 +538,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
       :initial-enrollment-id="registerEnrollmentId"
       @update:open="isRegisterOpen = $event"
       @enrolled="handleEnrolled"
+      @updated="loadData"
     />
   </div>
 </template>
