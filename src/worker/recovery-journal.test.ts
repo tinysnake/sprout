@@ -56,6 +56,19 @@ test('corrupt and partial journal is refused, never treated as an empty one', ()
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('journal rejects capacity overflow before changing its durable record', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'worker-bounded-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'journal');
+  const journal = new WorkerRecoveryJournal(path, 1);
+  journal.begin('s', 't');
+  const before = readFileSync(path, 'utf8');
+  assert.throws(() => journal.event('t', { type: 'notice', text: 'x'.repeat(4 * 1024 * 1024) }),
+    /capacity exceeded/);
+  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(new WorkerRecoveryJournal(path, 2).snapshot().turns.length, 1);
+});
+
 test('a killed Worker process leaves its unacknowledged turn and unproved engine fence on disk', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'worker-kill-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

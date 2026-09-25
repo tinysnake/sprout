@@ -66,6 +66,14 @@ test('authenticated reconnect replays only retained evidence, not the interrupte
     await waitFor(async () => (await h.runtime.stores.recovery.workerRunEvents?.(id, runId))?.length === 0,
       'recovered payload pruned after run projection and settlement ack');
     assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { turns: readonly unknown[] }).turns.length, 0);
+    // A duplicate wire notification after ack is at-least-once delivery, not a
+    // new turn or a second Human decision. SQLite metadata remains idempotent.
+    const duplicateFrame = `${JSON.stringify({ jsonrpc: '2.0', method: 'recovery/changed' })}\n`;
+    next.stream.write(duplicateFrame);
+    next.stream.write(duplicateFrame);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal((await h.runtime.stores.recovery.workerRunReceipt?.(id, runId))?.pending, false);
+    assert.equal((await h.runtime.orchestrator.load(runId))?.recoveredEvents?.length, 1);
     assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
     await h.runtime.recovery.resume(begun.environmentLeaseId!);
     assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'blocked');
