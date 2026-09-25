@@ -108,7 +108,9 @@ export function assembleEnvironmentReadiness(input: AssembleReadinessInput): Ass
   const engines: readonly EngineReadinessFact[] = [...engineIds].map((engine) => {
     const observed = observedEngines.get(engine);
     const engineAuths = (input.enrollment.modelAuthorizations ?? []).filter((a) => a.engine === engine);
-    const modelAuthorizations = engineAuths.length > 0 ? engineAuths : observed?.modelAuthorizations;
+    // Only the current enrollment decision can authorize entitlement. An old
+    // Worker observation (or a legacy document) cannot resurrect revoked authority.
+    const modelAuthorizations = engineAuths;
     return {
       engine,
       ...(observed?.version !== undefined ? { version: observed.version } : {}),

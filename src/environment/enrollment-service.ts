@@ -628,6 +628,7 @@ export class EnvironmentEnrollmentService {
     this.#loseAuthority(enrollmentId);
     const at = this.#clock();
     const reset = await this.#mutateWithCas(enrollmentId, (current) => resetEnrollment(current, at, reason));
+    await this.#readiness.recordModelAuthorizations(reset.environmentInstanceId, []);
     this.#announce(reset);
     return reset;
   }

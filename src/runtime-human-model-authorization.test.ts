@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { WORKER_PROTOCOL_VERSION } from './worker/protocol.ts';
+import { INSTANCE_ID } from './runtime-test-harness.ts';
 import {
   agent,
   readinessWorkflowHarness,
@@ -12,6 +13,44 @@ import {
 } from './runtime-test-harness.ts';
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  for (const decision of ['reset', 'revoke'] as const) {
+    test(`#138 ${backend}: ${decision} clears current Human authorization without creating a Worker observation`, async (t) => {
+      const directory = mkdtempSync(join(tmpdir(), `sprout-138-${backend}-${decision}-`));
+      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const h = await readinessWorkflowHarness({ backend, directory, engineId: 'codex',
+        agents: [{ ...agent('scout'), engine: 'codex', model: 'target-model' }],
+        modelAuthorizations: { codex: ['target-model'] } });
+      try {
+        const id = (await h.runtime.enrollments.list())[0]!.id;
+        const before = await h.runtime.enrollments.readiness(id);
+        assert.equal(before.readiness.engines.find((engine) => engine.engine === 'codex')?.modelAuthorizations?.length, 1);
+        assert.equal(before.currentObservation, undefined, 'Human approval is not a Worker observation');
+        await h.connect(id, join(directory, 'worker-key.pem'), { readinessProbe: async () => {
+          const probe = { at: 12345, latencyMs: 7, protocolOk: true, enginesOk: true,
+            source: 'worker' as const, version: '3', summary: 'Worker measured' };
+          return { readiness: { protocolVersion: WORKER_PROTOCOL_VERSION, engines: [{ engine: 'codex',
+            installed: true, readiness: 'ready' as const, modelAvailability: 'unknown' as const, models: [],
+            authenticated: true }], probe }, probe };
+        } });
+        await waitFor(() => h.runtime.workerGateway.liveFor(INSTANCE_ID) !== undefined, 'Worker accepted');
+        const response = await fetch(`${h.base}/api/environments/enrollments/${id}/probes`, {
+          method: 'POST', headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' }, body: '{}',
+        });
+        assert.equal(response.status, 201, await response.text());
+        const current = (await h.runtime.enrollments.readiness(id)).currentObservation;
+        assert.ok(current);
+        assert.equal(current.probe.source, 'worker');
+        assert.equal(current.probe.latencyMs, 7);
+        assert.equal(current.readiness.engines[0]?.modelAuthorizations, undefined);
+        assert.equal(current.receipt.readiness.engines[0]?.modelAuthorizations, undefined);
+        if (decision === 'reset') await h.runtime.enrollments.reset(id, 'rotate');
+        else await h.runtime.enrollments.revoke(id, 'withdraw');
+        const after = await h.runtime.enrollments.readiness(id);
+        assert.equal(after.readiness.engines.find((engine) => engine.engine === 'codex')?.modelAuthorizations, undefined);
+        assert.deepEqual(after.currentObservation, current, 'current Worker pointer and receipt stay measured, without authorization');
+      } finally { await h.close(); }
+    });
+  }
   test(`#138 ${backend}: unselected model blocks admission; ceremony explicit authorization admits run from unknown model state`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), `sprout-138-auth-${backend}-`));
     t.after(() => rmSync(directory, { recursive: true, force: true }));

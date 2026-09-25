@@ -8,9 +8,10 @@ import type {
   ReadinessObservation,
   ReadinessWriteAuthority,
   StoredReadinessObservation,
+  ModelAuthorizationEvidence,
 } from './readiness-store.ts';
 import { readReadinessObservation } from './readiness-observation.ts';
-import { attemptMatches, sameObservationContent, type ReadinessAttempt } from './readiness-store.ts';
+import { attemptMatches, sameObservationContent, withModelAuthorizations, type ReadinessAttempt } from './readiness-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
@@ -73,6 +74,11 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       CREATE TABLE IF NOT EXISTS environment_readiness_attempts (
         observation_id TEXT PRIMARY KEY, environment_instance_id TEXT NOT NULL,
         sequence INTEGER NOT NULL, bootstrap_key TEXT UNIQUE, document TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS environment_model_authorization_evidence (
+        evidence_id TEXT PRIMARY KEY,
+        environment_instance_id TEXT NOT NULL,
+        document TEXT NOT NULL
       );
     `);
     const columns = this.#db
@@ -161,28 +167,14 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       const sequence = pair.attempt?.sequence ?? Math.max(next.sequence, latestIssued.sequence) + 1;
       const committedAt = Date.now();
 
-      let effectiveReadiness = pair.readiness;
+      const effectiveReadiness = pair.readiness;
       const prevDocRow = this.#db
         .prepare('SELECT document FROM environment_readiness WHERE environment_instance_id = ?')
         .get(environmentInstanceId) as { document: string } | undefined;
-      if (prevDocRow) {
-        try {
-          const prevReadiness = JSON.parse(prevDocRow.document) as ObservedReadiness;
-          if (prevReadiness?.engines) {
-            const mergedEngines = effectiveReadiness.engines.map((engine) => {
-              const prevEngine = prevReadiness.engines.find((e) => e.engine === engine.engine);
-              if (!prevEngine?.modelAuthorizations?.length) return engine;
-              const currentRev = pair.requirements?.revisionsByEngine?.[engine.engine] ?? pair.requirements?.revision;
-              const validAuths = prevEngine.modelAuthorizations.filter(
-                (a) => currentRev === undefined || a.requirementRevision === undefined || a.requirementRevision === currentRev,
-              );
-              if (!validAuths.length) return engine;
-              return { ...engine, modelAuthorizations: validAuths };
-            });
-            effectiveReadiness = { ...effectiveReadiness, engines: mergedEngines };
-          }
-        } catch {}
-      }
+      const prevReadiness = prevDocRow ? JSON.parse(prevDocRow.document) as ObservedReadiness : undefined;
+      const authorizations = prevReadiness?.engines.flatMap((e) => e.modelAuthorizations ?? []).filter((a) =>
+        a.requirementRevision === undefined || a.requirementRevision ===
+          (pair.requirements?.revisionsByEngine?.[a.engine] ?? pair.requirements?.revision)) ?? [];
 
       const receipt: ReadinessReceipt = {
         observationId: pair.observationId,
@@ -258,7 +250,8 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
              document = excluded.document,
              updated_at = excluded.updated_at`,
         )
-        .run(environmentInstanceId, pair.observationId, JSON.stringify(effectiveReadiness), committedAt);
+        .run(environmentInstanceId, pair.observationId,
+          JSON.stringify(withModelAuthorizations(effectiveReadiness, authorizations)), committedAt);
 
       this.#db.exec('COMMIT');
       return structuredClone(receipt);
@@ -290,112 +283,16 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
         this.#db.exec('COMMIT');
         return;
       }
-      const existingEngines = existing?.engines ?? [];
-      const authEngineNames = new Set(authorizations.map((a) => a.engine));
-      const allEngineNames = new Set([...existingEngines.map((e) => e.engine), ...authEngineNames]);
-      const engines = [...allEngineNames].map((engineName) => {
-        const existingEngine = existingEngines.find((e) => e.engine === engineName);
-        const engineAuths = authorizations.filter((a) => a.engine === engineName);
-        if (existingEngine) {
-          return { ...existingEngine, modelAuthorizations: engineAuths };
-        }
-        return {
-          engine: engineName,
-          installed: false,
-          readiness: 'unknown' as const,
-          required: false,
-          models: { state: 'unknown' as const, models: [] },
-          modelAuthorizations: engineAuths,
-        };
-      });
-      const updated: ObservedReadiness = {
-        ...(existing ?? {
-          connection: { state: 'never-connected' },
-          compatibility: { state: 'unknown' },
-        }),
-        engines,
-        ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
-        ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
-        ...(context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
-      };
-
-      let observationId = row?.current_observation_id ?? null;
+      const updated = withModelAuthorizations(existing, authorizations, context);
       const committedAt = Date.now();
-      if (authorizations.length > 0) {
-        const next = this.#db
-          .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_probes WHERE environment_instance_id = ?')
-          .get(instance) as { readonly sequence: number };
-        const latestIssued = this.#db
-          .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM environment_readiness_attempts WHERE environment_instance_id = ?')
-          .get(instance) as { sequence: number };
-        const sequence = Math.max(next.sequence, latestIssued.sequence) + 1;
-        observationId = `obs-${crypto.randomUUID()}`;
-        const probe: ProbeResultFact = {
-          at: committedAt,
-          latencyMs: 0,
-          protocolOk: true,
-          enginesOk: true,
-          summary: 'Human approved model authorizations',
-          source: 'human-approval' as any,
-          enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
-          connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
-        };
-        const authorityScope = {
-          environmentInstanceId: instance,
-          enrollmentId: context?.enrollmentId ?? existing?.enrollmentId ?? '',
-          connectionEpoch: context?.connectionEpoch ?? existing?.connectionEpoch ?? 1,
-          ...(context?.lifecycleGeneration !== undefined ? { lifecycleGeneration: context.lifecycleGeneration } : {}),
-          ...(context?.connectionId !== undefined ? { connectionId: context.connectionId } : {}),
-        };
-        const receipt: ReadinessReceipt = {
-          observationId,
-          environmentInstanceId: instance,
-          enrollmentId: authorityScope.enrollmentId,
-          connectionEpoch: authorityScope.connectionEpoch,
-          sequence,
-          committedAt,
-          probe,
-          authorityScope,
-          readiness: updated,
-          at: probe.at,
-          latencyMs: 0,
-          protocolOk: true,
-          enginesOk: true,
-          summary: probe.summary,
-          source: 'human-approval' as any,
-          ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
-        };
-        const storedObservation: StoredReadinessObservation = {
-          observationId,
-          environmentInstanceId: instance,
-          enrollmentId: authorityScope.enrollmentId,
-          connectionEpoch: authorityScope.connectionEpoch,
-          sequence,
-          committedAt,
-          readiness: updated,
-          probe,
-          receipt,
-          authorityScope,
-          ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
-        };
-        this.#db
-          .prepare(
-            `INSERT INTO environment_observations
-               (observation_id, environment_instance_id, enrollment_id, connection_epoch, sequence, created_at, readiness_document, probe_document, document)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            observationId,
-            instance,
-            authorityScope.enrollmentId || null,
-            authorityScope.connectionEpoch || null,
-            sequence,
-            committedAt,
-            JSON.stringify(updated),
-            JSON.stringify(probe),
-            JSON.stringify(storedObservation),
-          );
-      }
+      const evidence: ModelAuthorizationEvidence = {
+        evidenceId: `auth-${crypto.randomUUID()}`, environmentInstanceId: instance, recordedAt: committedAt,
+        ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+        ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
+        authorizations: structuredClone(authorizations),
+      };
+      this.#db.prepare('INSERT INTO environment_model_authorization_evidence VALUES (?, ?, ?)')
+        .run(evidence.evidenceId, instance, JSON.stringify(evidence));
 
       this.#db
         .prepare(
@@ -406,13 +303,19 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
              document = excluded.document,
              updated_at = excluded.updated_at`,
         )
-        .run(instance, observationId, JSON.stringify(updated), committedAt);
+        .run(instance, row?.current_observation_id ?? null, JSON.stringify(updated), committedAt);
 
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  async listModelAuthorizationEvidence(instance: string): Promise<readonly ModelAuthorizationEvidence[]> {
+    const rows = this.#db.prepare('SELECT document FROM environment_model_authorization_evidence WHERE environment_instance_id = ? ORDER BY rowid')
+      .all(instance) as unknown as readonly { readonly document: string }[];
+    return rows.map((row) => JSON.parse(row.document) as ModelAuthorizationEvidence);
   }
 
   async getCurrentObservation(
