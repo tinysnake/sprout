@@ -117,6 +117,8 @@ export type WorkerStatusState =
 
 export interface WorkerStatus {
   readonly state: WorkerStatusState;
+  /** The Worker connection epoch when connected. */
+  readonly epoch?: number;
   /** Whether a LaunchAgent plist is present for this environment. */
   readonly serviceInstalled: boolean;
   /** The Worker protocol version the host-local configuration declares. */
@@ -286,6 +288,7 @@ export function projectStatus(input: {
     case 'stopped':
       return {
         state: runtime.state === 'stopped' ? 'stopped' : runtime.state,
+        ...(runtime.state === 'connected' && runtime.epoch !== undefined ? { epoch: runtime.epoch } : {}),
         ...base,
         ...(runtime.detail !== undefined ? { detail: runtime.detail } : {}),
       };
@@ -797,6 +800,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       });
     }
     out(`state: ${projected.state}`);
+    if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
     out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
     if (projected.detail !== undefined) out(`detail: ${projected.detail}`);
@@ -979,6 +983,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     if (process.env['SPROUT_WORKER_HOME'] !== undefined) {
       environment['SPROUT_WORKER_HOME'] = process.env['SPROUT_WORKER_HOME'];
     }
+    environment['LC_ALL'] = 'C';
     return environment;
   }
 

@@ -215,6 +215,47 @@ test('reinstalling boots the previous job out before bootstrapping the new plist
   }
 });
 
+test('reinstall waits for launchd to reap a booted-out job before bootstrapping', () => {
+  const { paths, cleanup } = tempPaths();
+  const label = workerServiceLabel('env-synthetic');
+  const calls: string[] = [];
+  let printsAfterBootout = 0;
+  let bootedOut = false;
+  const run = (command: string, args: readonly string[]): string => {
+    const verb = `${command} ${args.join(' ')}`;
+    calls.push(verb);
+    if (args[0] === 'bootout') bootedOut = true;
+    if (args[0] === 'print' && bootedOut) {
+      printsAfterBootout += 1;
+      // The first domain listing still contains the job during asynchronous reap.
+      return printsAfterBootout === 1 ? label : '';
+    }
+    return '';
+  };
+  try {
+    installLaunchAgent({
+      paths,
+      label,
+      plistPath: launchAgentPlistPath(paths, 'env-synthetic'),
+      plistContent: renderLaunchAgent({
+        label,
+        executablePath: '/synthetic/bin/sprout',
+        arguments: ['worker', 'start'],
+        logPath: paths.logPath,
+        environment: {},
+      }),
+      uid: 501,
+      run,
+    });
+    const bootstrap = calls.findIndex((call) => call.startsWith('launchctl bootstrap'));
+    assert.equal(printsAfterBootout, 2, 'waits for the second domain listing to prove absence');
+    assert.ok(bootstrap > 0);
+    assert.deepEqual(calls.slice(0, bootstrap).map((call) => call.split(' ')[1]), ['bootout', 'print', 'print']);
+  } finally {
+    cleanup();
+  }
+});
+
 
 test('a malformed runtime state record is refused rather than read as healthy', () => {
   const { paths, cleanup } = tempPaths();
