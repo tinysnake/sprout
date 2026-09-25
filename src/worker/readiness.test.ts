@@ -5,8 +5,15 @@ import { test } from 'node:test';
 import { EnvironmentWorker } from './server.ts';
 import { WorkerClient, WorkerReadinessClient } from './client.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
-import { probeEnvironmentReadiness, piAuthCheckArgs, type ReadinessCommandRunner } from './readiness.ts';
-import { observedFactsFromWorkerReadiness } from '../environment/readiness.ts';
+import {
+  probeEnvironmentReadiness,
+  piAuthCheckArgs,
+  parseSemver,
+  isAtLeastVersion,
+  SUPPORTED_READINESS_VERSION_FLOORS,
+  type ReadinessCommandRunner,
+} from './readiness.ts';
+import { evaluateEngineOption, observedFactsFromWorkerReadiness } from '../environment/readiness.ts';
 import type { EngineConfiguration } from './engine-selection.ts';
 
 const configurations: readonly EngineConfiguration[] = [
@@ -61,20 +68,36 @@ test('malformed or credential-adjacent probe output is unknown and never persist
   assert.doesNotMatch(JSON.stringify(result), /ABCDEFGH|API key/);
 });
 
-test('a version outside the pinned #114 contract stays unknown without trying a fallback command', async () => {
+test('a version below the minimum supported floor stays unknown without running auth probes (#136)', async () => {
   const calls: (readonly string[])[] = [];
   const runner: ReadinessCommandRunner = {
     async run(_binary, args) {
       calls.push(args);
-      return { stdout: args[0] === '--version' ? 'pi 9.9.9' : '{}', exitCode: 0 };
+      return { stdout: args[0] === '--version' ? 'pi 0.85.0' : '{}', exitCode: 0 };
     },
     async accountRead() {
-      throw new Error('Codex account probe must not run for a version-skewed binary');
+      throw new Error('Codex account probe must not run for a version below floor');
     },
   };
-  const result = await probeEnvironmentReadiness([configurations[1]!], { commandRunner: runner, clock: () => 3000 });
-  assert.equal(result.readiness.engines[0]?.readiness, 'unknown');
+  const piResult = await probeEnvironmentReadiness([configurations[1]!], { commandRunner: runner, clock: () => 3000 });
+  assert.equal(piResult.readiness.engines[0]?.readiness, 'unknown');
+  assert.equal(piResult.readiness.engines[0]?.version, '0.85.0');
   assert.deepEqual(calls, [['--version']]);
+
+  const codexCalls: (readonly string[])[] = [];
+  const codexRunner: ReadinessCommandRunner = {
+    async run(_binary, args) {
+      codexCalls.push(args);
+      return { stdout: args[0] === '--version' ? 'codex-cli 0.153.9' : '{}', exitCode: 0 };
+    },
+    async accountRead() {
+      throw new Error('Codex account probe must not run for a version below floor');
+    },
+  };
+  const codexResult = await probeEnvironmentReadiness([configurations[0]!], { commandRunner: codexRunner, clock: () => 3001 });
+  assert.equal(codexResult.readiness.engines[0]?.readiness, 'unknown');
+  assert.equal(codexResult.readiness.engines[0]?.version, '0.153.9');
+  assert.deepEqual(codexCalls, [['--version']]);
 });
 
 test('malformed pinned auth schemas fail closed for both engines', async () => {
@@ -333,4 +356,156 @@ test('a Worker-declared provider or account identity is dropped at the readiness
   });
   assert.equal(allowed.engines[0]?.authMode, 'api_key');
   assert.equal(allowed.engines[0]?.source, 'codex-account-read');
+});
+
+test('semver floor comparison helpers parse standard versions and evaluate floor accurately (#136)', () => {
+  assert.deepEqual(parseSemver('0.154.0'), [0, 154, 0]);
+  assert.deepEqual(parseSemver('  0.86.1\n'), [0, 86, 1]);
+  assert.equal(parseSemver('not-a-version'), undefined);
+  assert.equal(parseSemver('1.2'), undefined);
+
+  // Exact floor match
+  assert.equal(isAtLeastVersion('0.154.0', SUPPORTED_READINESS_VERSION_FLOORS.codex), true);
+  assert.equal(isAtLeastVersion('0.86.1', SUPPORTED_READINESS_VERSION_FLOORS.pi), true);
+
+  // Above floor (including current installed versions 0.156.0 and 0.87.1)
+  assert.equal(isAtLeastVersion('0.156.0', SUPPORTED_READINESS_VERSION_FLOORS.codex), true);
+  assert.equal(isAtLeastVersion('0.87.1', SUPPORTED_READINESS_VERSION_FLOORS.pi), true);
+  assert.equal(isAtLeastVersion('1.0.0', SUPPORTED_READINESS_VERSION_FLOORS.codex), true);
+  assert.equal(isAtLeastVersion('9.9.9', SUPPORTED_READINESS_VERSION_FLOORS.pi), true);
+
+  // Below floor
+  assert.equal(isAtLeastVersion('0.153.9', SUPPORTED_READINESS_VERSION_FLOORS.codex), false);
+  assert.equal(isAtLeastVersion('0.86.0', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
+  assert.equal(isAtLeastVersion('0.85.1', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
+  assert.equal(isAtLeastVersion('bad', SUPPORTED_READINESS_VERSION_FLOORS.pi), false);
+});
+
+test('engine versions at or above minimum supported floors execute verified non-inference probe contracts (#136)', async () => {
+  // Test installed versions (Codex 0.156.0 with workspaceRouting, Pi 0.87.1)
+  const codexAccountWithRouting = {
+    account: { type: 'chatgpt', email: 'must-not-persist@example.com', planType: 'plus' },
+    requiresOpenaiAuth: true,
+    workspaceRouting: {
+      accountRoutingOverride: 'NO_CONSTRAINT',
+      backendOrigin: 'https://chatgpt.com',
+      chatgptAccountId: '00000000-0000-0000-0000-000000000001',
+    },
+  };
+
+  const runner: ReadinessCommandRunner = {
+    async run(binary, args) {
+      if (args[0] === '--version') {
+        return { stdout: binary.endsWith('codex') ? 'codex-cli 0.156.0' : '0.87.1', exitCode: 0 };
+      }
+      return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+    },
+    async accountRead() {
+      return { stdout: JSON.stringify(codexAccountWithRouting), exitCode: 0 };
+    },
+    async bundledModels() {
+      return { stdout: JSON.stringify({ models: [{ slug: 'gpt-6-astra' }] }), exitCode: 0 };
+    },
+  };
+
+  const result = await probeEnvironmentReadiness(configurations, {
+    commandRunner: runner,
+    requiredModels: ['gpt-6-astra'],
+    clock: () => 5000,
+  });
+
+  const codexEngine = result.readiness.engines.find((e) => e.engine === 'codex');
+  const piEngine = result.readiness.engines.find((e) => e.engine === 'pi');
+
+  assert.equal(codexEngine?.version, '0.156.0');
+  assert.equal(codexEngine?.readiness, 'ready');
+  assert.equal(codexEngine?.authenticated, true);
+  assert.equal(codexEngine?.authMode, 'chatgpt');
+  assert.equal(codexEngine?.modelIdPresent, true);
+  // Ensure workspaceRouting and email were dropped, never leaked
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes('workspaceRouting'), false);
+  assert.equal(serialized.includes('chatgptAccountId'), false);
+  assert.equal(serialized.includes('00000000-0000'), false);
+  assert.equal(serialized.includes('must-not-persist'), false);
+
+  assert.equal(piEngine?.version, '0.87.1');
+  assert.equal(piEngine?.readiness, 'ready');
+  assert.equal(piEngine?.authenticated, true);
+  assert.equal(piEngine?.authType, 'oauth');
+
+  // Both engines ok
+  assert.equal(result.probe.enginesOk, true);
+  assert.equal(result.probe.summary, 'Worker non-inference readiness probe completed.');
+
+  // Check consistency with shared evaluation in environment/readiness.ts (#123)
+  const codexEval = evaluateEngineOption({ engine: 'codex' }, {
+    engine: 'codex',
+    version: '0.156.0',
+    installed: true,
+    readiness: codexEngine!.readiness,
+    required: true,
+    models: { state: 'unknown', models: [] },
+  });
+  assert.equal(codexEval.state, 'available');
+  assert.equal(codexEval.reason, 'Engine "codex" is ready.');
+});
+
+test('a newer engine version whose probe output is malformed degrades to unknown with neutral reason (#136)', async () => {
+  // Codex 0.160.0 with malformed account/read output
+  const malformedCodexRunner: ReadinessCommandRunner = {
+    async run(_binary, args) {
+      return { stdout: args[0] === '--version' ? 'codex-cli 0.160.0' : '{}', exitCode: 0 };
+    },
+    async accountRead() {
+      return { stdout: JSON.stringify({ unexpectedKey: 'breaks_contract' }), exitCode: 0 };
+    },
+  };
+  const codexResult = await probeEnvironmentReadiness([configurations[0]!], {
+    commandRunner: malformedCodexRunner,
+    clock: () => 6000,
+  });
+  const codexEngine = codexResult.readiness.engines[0]!;
+  assert.equal(codexEngine.version, '0.160.0');
+  assert.equal(codexEngine.readiness, 'unknown');
+  assert.equal(codexEngine.authenticated, undefined);
+
+  // Evaluate engine option produces neutral reason
+  const codexEval = evaluateEngineOption({ engine: 'codex' }, {
+    engine: 'codex',
+    version: '0.160.0',
+    installed: true,
+    readiness: codexEngine.readiness,
+    required: true,
+    models: { state: 'unknown', models: [] },
+  });
+  assert.equal(codexEval.state, 'unknown');
+  assert.equal(codexEval.reason, 'Engine "codex" readiness is unknown on this Environment.');
+
+  // Pi 0.90.0 with unexpected auth check status
+  const malformedPiRunner: ReadinessCommandRunner = {
+    async run(_binary, args) {
+      if (args[0] === '--version') return { stdout: 'pi 0.90.0', exitCode: 0 };
+      return { stdout: JSON.stringify({ status: 'something_new', provider: 'openai-codex' }), exitCode: 0 };
+    },
+  };
+  const piResult = await probeEnvironmentReadiness([configurations[1]!], {
+    commandRunner: malformedPiRunner,
+    clock: () => 6001,
+  });
+  const piEngine = piResult.readiness.engines[0]!;
+  assert.equal(piEngine.version, '0.90.0');
+  assert.equal(piEngine.readiness, 'unknown');
+  assert.equal(piEngine.authenticated, undefined);
+
+  const piEval = evaluateEngineOption({ engine: 'pi' }, {
+    engine: 'pi',
+    version: '0.90.0',
+    installed: true,
+    readiness: piEngine.readiness,
+    required: true,
+    models: { state: 'unknown', models: [] },
+  });
+  assert.equal(piEval.state, 'unknown');
+  assert.equal(piEval.reason, 'Engine "pi" readiness is unknown on this Environment.');
 });

@@ -125,11 +125,34 @@ export interface ReadinessProbeOptions {
   readonly requirements?: ReadinessRequirementScope;
 }
 
-/** Versions whose non-inference contracts were pinned and verified by #114. */
-export const SUPPORTED_READINESS_VERSIONS = {
+/** Minimum supported versions whose non-inference contracts were pinned and verified by #114. */
+export const SUPPORTED_READINESS_VERSION_FLOORS = {
   codex: '0.154.0',
   pi: '0.86.1',
 } as const;
+
+export const SUPPORTED_READINESS_VERSIONS = SUPPORTED_READINESS_VERSION_FLOORS;
+
+/**
+ * Parse a standard 3-component semantic version number into numeric components.
+ */
+export function parseSemver(version: string): readonly [number, number, number] | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/**
+ * Check whether `actual` version meets or exceeds `floor` version.
+ */
+export function isAtLeastVersion(actual: string, floor: string): boolean {
+  const a = parseSemver(actual);
+  const b = parseSemver(floor);
+  if (!a || !b) return false;
+  if (a[0] !== b[0]) return a[0] > b[0];
+  if (a[1] !== b[1]) return a[1] > b[1];
+  return a[2] >= b[2];
+}
 
 /**
  * The only command arguments allowed for Pi authentication readiness.
@@ -185,9 +208,16 @@ function codexAccountResponse(
 ): { readonly authenticated: boolean; readonly authMode?: 'chatgpt' | 'api_key' | 'workload_identity' } | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (!hasOnlyKeys(record, ['account', 'requiresOpenaiAuth'])) return undefined;
+  if (!hasOnlyKeys(record, ['account', 'requiresOpenaiAuth', 'workspaceRouting'])) return undefined;
   // `requiresOpenaiAuth` is part of the pinned account/read response schema.
   if (typeof record.requiresOpenaiAuth !== 'boolean' || !Object.hasOwn(record, 'account')) return undefined;
+  if (
+    record.workspaceRouting !== undefined &&
+    record.workspaceRouting !== null &&
+    (typeof record.workspaceRouting !== 'object' || Array.isArray(record.workspaceRouting))
+  ) {
+    return undefined;
+  }
   if (record.account === null) return { authenticated: false };
   if (typeof record.account !== 'object' || Array.isArray(record.account)) return undefined;
   const account = record.account as Record<string, unknown>;
@@ -270,7 +300,11 @@ async function probePi(
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
   const version = pinnedVersionFromOutput('pi', versionResult.stdout);
-  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.pi) {
+  if (
+    versionResult.exitCode !== 0 ||
+    version === undefined ||
+    !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.pi)
+  ) {
     return unknownFact('pi', version, at, 'pi-auth-check', versionResult.exitCode);
   }
   const auth = await options.commandRunner.run(
@@ -319,7 +353,11 @@ async function probeCodex(
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
   const version = pinnedVersionFromOutput('codex', versionResult.stdout);
-  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.codex) {
+  if (
+    versionResult.exitCode !== 0 ||
+    version === undefined ||
+    !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.codex)
+  ) {
     return unknownFact('codex', version, at, 'codex-account-read', versionResult.exitCode);
   }
   const account = await (options.commandRunner.accountRead ?? defaultCommandRunner.accountRead!)
