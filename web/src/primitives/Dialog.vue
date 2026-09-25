@@ -31,8 +31,11 @@ const emit = defineEmits<{
 }>();
 
 const contentClasses = computed(() => {
+  const hasCustomMaxW = /(^|\s)(?:[a-z0-9_-]+:)?max-w-/.test(props.class);
+  const defaultMaxW = hasCustomMaxW ? '' : 'sm:max-w-[500px]';
   return cn(
-    'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-[var(--border-strong)] bg-[var(--bg-surface)] p-6 shadow-lg duration-200 rounded-[var(--radius-lg)] sm:max-w-[500px]',
+    'fixed left-[50%] top-[50%] z-50 flex flex-col w-[calc(100%-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-[var(--border-strong)] bg-[var(--bg-surface)] p-4 sm:p-6 shadow-lg duration-200 rounded-[var(--radius-lg)] sm:w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-4rem)]',
+    defaultMaxW,
     props.class
   );
 });
@@ -43,7 +46,7 @@ const contentClasses = computed(() => {
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs transition-opacity" />
       <DialogContent :class="contentClasses">
-        <div class="flex items-center justify-between border-b border-[var(--border-subtle)] pb-3">
+        <div class="flex items-center justify-between border-b border-[var(--border-subtle)] pb-3 shrink-0">
           <div>
             <DialogTitle v-if="title" class="text-base font-bold text-[var(--text-primary)]">
               {{ title }}
@@ -60,11 +63,11 @@ const contentClasses = computed(() => {
           </DialogClose>
         </div>
 
-        <div class="py-2 text-xs text-[var(--text-primary)]">
+        <div class="py-1 text-xs text-[var(--text-primary)] flex-1 min-h-0 overflow-y-auto">
           <slot />
         </div>
 
-        <div v-if="$slots.footer" class="flex justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
+        <div v-if="$slots.footer" class="flex justify-end gap-2 border-t border-[var(--border-subtle)] pt-3 shrink-0">
           <slot name="footer" />
         </div>
       </DialogContent>
