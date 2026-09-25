@@ -31,6 +31,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './protocol.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
   contractDeliveryDiagnostic,
   sanitizeEngineTurnResult,
@@ -73,12 +74,15 @@ export interface EnvironmentWorkerOptions {
   readonly readinessProbe?: (
     params: WorkerReadinessProbeParams,
   ) => Promise<WorkerReadinessProbeResult>;
+  readonly recoveryJournal?: WorkerRecoveryJournal;
 }
 interface LiveSession {
   readonly engine: string;
   readonly session: EngineSession;
   readonly events: EventSink;
+  readonly runId: string | undefined;
   turnId: string | undefined;
+  running: Promise<void> | undefined;
 }
 /**
  * The honest fallback when a Worker has no readiness source: it knows which
@@ -113,6 +117,7 @@ export class EnvironmentWorker {
   readonly #workspace: WorkerWorkspace | undefined;
   #counter = 0;
   #closed = false;
+  #ownedEngineSession = false;
   #readiness: WorkerReadinessFacts | undefined;
 
   constructor(options: EnvironmentWorkerOptions) {
@@ -145,6 +150,21 @@ export class EnvironmentWorker {
         case WORKER_METHODS.info:
           this.#transport.respond(id, this.#info());
           return;
+        case WORKER_METHODS.recoverySnapshot:
+          this.#transport.respond(id, this.#options.recoveryJournal?.snapshot() ?? null);
+          return;
+        case WORKER_METHODS.recoveryAcknowledge: {
+          const ack = params as { epoch: number; turnId: string; sequence: number; settlement: boolean };
+          this.#options.recoveryJournal?.acknowledge(ack.epoch, ack.turnId, ack.sequence, ack.settlement);
+          this.#transport.respond(id, {});
+          return;
+        }
+        case WORKER_METHODS.recoveryAcknowledgeContext: {
+          const ack = params as { epoch: number; taskId: string; state: 'prepared' | 'recycled' };
+          this.#options.recoveryJournal?.acknowledgeContext(ack.epoch, ack.taskId, ack.state);
+          this.#transport.respond(id, {});
+          return;
+        }
         case WORKER_METHODS.readinessProbe:
           this.#transport.respond(id, await this.#probeReadiness(params as WorkerReadinessProbeParams));
           return;
@@ -165,6 +185,9 @@ export class EnvironmentWorker {
           return;
         case WORKER_METHODS.recycleTaskContext:
           this.#transport.respond(id, await this.#recycleTaskContext(params as RecycleTaskContextParams));
+          return;
+        case WORKER_METHODS.inspectTaskContext:
+          this.#transport.respond(id, await this.#requireWorkspace().inspectTaskContext(params as RecycleTaskContextParams));
           return;
         case WORKER_METHODS.validateWorkspace:
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
@@ -248,6 +271,9 @@ export class EnvironmentWorker {
       throw new Error(`worker does not host engine: ${params.engine}`);
     }
 
+    // Fence conservatively before an engine can start, not after it returns.
+    this.#options.recoveryJournal?.engineStarted();
+
     const session = await adapter.startSession({
       agentId: params.agentId,
       workingDirectory: params.projectWorkspaceId === undefined
@@ -265,7 +291,7 @@ export class EnvironmentWorker {
         : {}),
     });
 
-    const sessionId = `session-${++this.#counter}`;
+    const sessionId = `session-${this.#options.recoveryJournal?.snapshot().epoch ?? 'local'}-${++this.#counter}`;
     // Every contract delivery is reported, not just a refusal. An operator must
     // be able to tell from the log whether the contract reached the engine and
     // through which mechanism, for every mechanism — including the two ordinary
@@ -277,24 +303,31 @@ export class EnvironmentWorker {
     }
     this.#sessions.set(sessionId, {
       engine: params.engine,
+      runId: params.runId,
       session,
       turnId: undefined,
+      running: undefined,
       events: {
-        event: (turnId, event) =>
+        event: (turnId, event) => {
+          this.#options.recoveryJournal?.event(turnId, event);
           this.#transport.notify(WORKER_NOTIFICATIONS.event, {
             sessionId,
             turnId,
             event,
-          }),
-        settled: (turnId, result, engineSessionKey) =>
+          });
+        },
+        settled: (turnId, result, engineSessionKey) => {
+          this.#options.recoveryJournal?.settled(turnId, result);
           this.#transport.notify(WORKER_NOTIFICATIONS.settled, {
             sessionId,
             turnId,
             result,
             ...(engineSessionKey !== undefined ? { engineSessionKey } : {}),
-          }),
+          });
+        },
       },
     });
+    this.#ownedEngineSession = true;
     return {
       sessionId,
       ...(session.engineSessionKey !== undefined
@@ -303,12 +336,17 @@ export class EnvironmentWorker {
     };
   }
 
-  #prepareTaskContext(params: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
-    return this.#requireWorkspace().prepare(params);
+  async #prepareTaskContext(params: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
+    const prepared = await this.#requireWorkspace().prepare(params);
+    this.#options.recoveryJournal?.context(params.taskId, 'prepared');
+    if (this.#options.recoveryJournal !== undefined) this.#transport.notify(WORKER_NOTIFICATIONS.recoveryChanged);
+    return prepared;
   }
 
-  #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
-    return this.#requireWorkspace().recycle(params);
+  async #recycleTaskContext(params: RecycleTaskContextParams): Promise<void> {
+    await this.#requireWorkspace().recycle(params);
+    this.#options.recoveryJournal?.context(params.taskId, 'recycled');
+    if (this.#options.recoveryJournal !== undefined) this.#transport.notify(WORKER_NOTIFICATIONS.recoveryChanged);
   }
 
   #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
@@ -328,9 +366,10 @@ export class EnvironmentWorker {
   #run(params: RunParams): RunResult {
     const live = this.#require(params.sessionId);
     const turnId = `${params.sessionId}-turn-${++this.#counter}`;
+    this.#options.recoveryJournal?.begin(params.sessionId, turnId, live.runId);
     live.turnId = turnId;
 
-    void (async () => {
+    live.running = (async () => {
       try {
         const turn = live.session.run(params.prompt);
         // The events iterator throws when a turn fails, so the authoritative
@@ -356,8 +395,13 @@ export class EnvironmentWorker {
         });
       } finally {
         if (live.turnId === turnId) live.turnId = undefined;
+        live.running = undefined;
       }
-    })();
+    })().catch(() => {
+      // The journal refused an unsafe write (capacity or IO). Never turn that
+      // into a fake settlement; the protected lease needs explicit recovery.
+      this.#options.onLog?.(WORKER_DIAGNOSTICS.turnFailed);
+    });
 
     return { turnId };
   }
@@ -370,8 +414,11 @@ export class EnvironmentWorker {
   async #closeSession(params: CloseParams): Promise<Record<string, never>> {
     const live = this.#sessions.get(params.sessionId);
     if (live) {
-      this.#sessions.delete(params.sessionId);
       await live.session.close();
+      if (live.running !== undefined) await settleOrTimeout([live.running]);
+      this.#sessions.delete(params.sessionId);
+      if (this.#sessions.size === 0) this.#options.recoveryJournal?.engineStopped();
+      if (this.#options.recoveryJournal !== undefined) this.#transport.notify(WORKER_NOTIFICATIONS.recoveryChanged);
     }
     return {};
   }
@@ -389,9 +436,27 @@ export class EnvironmentWorker {
   async shutdown(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    let fenced = true;
+    const running: Promise<void>[] = [];
     for (const [sessionId, live] of this.#sessions) {
       this.#sessions.delete(sessionId);
-      await live.session.close().catch(() => undefined);
+      if (live.running !== undefined) running.push(live.running);
+      await live.session.close().catch(() => { fenced = false; });
+    }
+    if (fenced) {
+      await settleOrTimeout(running);
+      // A new process cannot fence an unknown engine left by an earlier killed
+      // process simply by shutting down with no sessions of its own.
+      if (this.#ownedEngineSession) this.#options.recoveryJournal?.engineStopped();
     }
   }
+}
+
+/** Engine close can succeed even if its event iterator never settles. */
+async function settleOrTimeout(running: readonly Promise<void>[]): Promise<void> {
+  if (running.length === 0) return;
+  await Promise.race([
+    Promise.allSettled(running),
+    new Promise<void>((resolve) => { const timer = setTimeout(resolve, 1_000); timer.unref(); }),
+  ]);
 }

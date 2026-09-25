@@ -267,9 +267,28 @@ test('synchronized evidence drives an interrupted record to recovery and never r
   });
   assert.equal(record.phase, 'recovery');
   // The unrecycled Task context is a concrete unresolved fact.
-  assert.match(record.unresolvedFacts.join(' '), /Task context has not been confirmed recycled/);
+  assert.match(record.unresolvedFacts.join(' '), /Task context has not been proved owned/);
+  await assert.rejects(built.recovery.resume(leaseId), /safe held context/,
+    'leftover or unverified Task context cannot unlock an ordinary decision');
   // The interrupted run remains an interrupted history fact, not a replayed run.
   assert.equal((await built.store.get('task-1'))?.environmentLifecycleState, 'recovery');
+});
+
+test('a replacement enrollment or reset identity cannot provide the lost holder’s proof', async () => {
+  const built = build();
+  const { leaseId } = await interruptedTask(built);
+  await built.recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun: true,
+    enrollmentId: 'original', workerIdentityDigest: 'original-digest' });
+  for (const [enrollmentId, workerIdentityDigest] of [
+    ['replacement', 'replacement-digest'], ['original', 'replacement-digest'],
+  ]) {
+    await assert.rejects(built.recovery.observeReconnect(leaseId, {
+      enrollmentId: enrollmentId!, workerIdentityDigest: workerIdentityDigest!,
+      environmentInstanceId: 'mac-1', identityVerified: true,
+      protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    }), /original enrolled Worker identity/);
+  }
+  assert.equal((await built.recovery.forLease(leaseId))?.phase, 'recovery');
 });
 
 
@@ -286,7 +305,7 @@ test('ordinary Resume keeps the existing lease holder and returns to deliberate 
   });
   await built.recovery.synchronizeEvidence(leaseId, {
     hadActiveRun: true,
-    evidence: { retainedEventCount: 4, turnSettlementObserved: true, engineSessionStopped: true, taskContextRecycled: false },
+    evidence: { retainedEventCount: 4, turnSettlementObserved: true, engineSessionStopped: true, taskContextRecycled: false, taskContextPrepared: true },
   });
 
   const resolved = await built.recovery.resume(leaseId);
@@ -296,6 +315,30 @@ test('ordinary Resume keeps the existing lease holder and returns to deliberate 
   assert.equal(resumedTask?.environmentLeaseId, leaseId);
   assert.equal(built.pool.getLease(leaseId)?.state, 'active');
   assert.equal(built.pool.getLease(leaseId)?.taskId, 'task-1');
+});
+
+test('another channel loss or Sprout restart invalidates prior epoch proof before any ordinary decision', async () => {
+  const built = build();
+  const { leaseId } = await interruptedTask(built);
+  const reconnect = { enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true };
+  await built.recovery.observeReconnect(leaseId, reconnect);
+  await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    taskContextRecycled: false, taskContextPrepared: true,
+  } });
+  assert.ok((await built.recovery.forLease(leaseId))?.evidence);
+  await built.recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun: true });
+  assert.equal((await built.recovery.forLease(leaseId))?.evidence, undefined);
+  await assert.rejects(built.recovery.resume(leaseId), /synchronized retained evidence/);
+  await built.recovery.observeReconnect(leaseId, reconnect);
+  await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    taskContextRecycled: false, taskContextPrepared: true,
+  } });
+  await built.recovery.reconcileAfterRestart();
+  assert.equal((await built.recovery.forLease(leaseId))?.evidence, undefined,
+    'restart is not proof that the old Worker channel and engine are safe');
 });
 
 
@@ -367,7 +410,7 @@ test('ordinary Discard performs safe Task end: context recycled then lease relea
   });
   await recovery.synchronizeEvidence(leaseId, {
     hadActiveRun: true,
-    evidence: { retainedEventCount: 2, turnSettlementObserved: true, engineSessionStopped: true, taskContextRecycled: false },
+    evidence: { retainedEventCount: 2, turnSettlementObserved: true, engineSessionStopped: true, taskContextRecycled: false, taskContextPrepared: true },
   });
   const resolved = await recovery.discard(leaseId);
   assert.equal(resolved.phase, 'resolved');

@@ -108,6 +108,8 @@ export interface RunView {
   readonly workspaceBinding?: RunWorkspaceBindingAttributionView;
   readonly failure?: string;
   readonly result?: unknown;
+  readonly recoverySettlement?: AgentRun['recoverySettlement'];
+  readonly recoveredEvents?: AgentRun['recoveredEvents'];
   readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
@@ -164,6 +166,8 @@ export function toRunView(run: AgentRun): RunView {
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
+    ...(run.recoverySettlement !== undefined ? { recoverySettlement: run.recoverySettlement } : {}),
+    ...(run.recoveredEvents !== undefined ? { recoveredEvents: run.recoveredEvents } : {}),
     ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
     createdAt: run.createdAt,
     ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
@@ -645,8 +649,10 @@ export interface EnvironmentRecoveryView {
   readonly evidence?: {
     readonly retainedEventCount: number;
     readonly turnSettlementObserved: boolean;
+    readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
     readonly engineSessionStopped: boolean;
     readonly taskContextRecycled: boolean;
+    readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
   /** Whether the ordinary decision requires synchronized evidence first. */
@@ -679,8 +685,10 @@ export function toEnvironmentRecoveryView(record: EnvironmentRecoveryRecord): En
           evidence: {
             retainedEventCount: record.evidence.retainedEventCount,
             turnSettlementObserved: record.evidence.turnSettlementObserved,
+            ...(record.evidence.terminalStatus !== undefined ? { terminalStatus: record.evidence.terminalStatus } : {}),
             engineSessionStopped: record.evidence.engineSessionStopped,
             taskContextRecycled: record.evidence.taskContextRecycled,
+            ...(record.evidence.taskContextPrepared !== undefined ? { taskContextPrepared: record.evidence.taskContextPrepared } : {}),
           },
         }
       : {}),

@@ -26,7 +26,9 @@ const isRunHolder = computed(() => holder.value?.holderKind === 'run');
  * evidence synchronized first (ADR-0009). Force Release is available in
  * `recovery` even before the evidence arrives — it is the emergency escape.
  */
-const evidenceReady = computed(() => recovery.value?.evidenceSynchronized === true);
+const evidenceReady = computed(() => recovery.value?.evidenceSynchronized === true &&
+  recovery.value.reconciledEvidence?.engineStoppedProof === true &&
+  recovery.value.reconciledEvidence.turnSettlementObserved === true);
 const hasHolder = computed(() => taskId.value !== '');
 
 const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
@@ -67,7 +69,11 @@ const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
       v-if="recovery?.reconciledEvidence"
       class="p-2 rounded-[var(--radius-xs)] bg-[var(--green-ready-bg)] border border-[var(--green-ready)] text-xs text-[var(--text-primary)]"
     >
-      <strong>Reconciliation Proof:</strong> Retained {{ recovery.reconciledEvidence.retainedEventsCount }} events, verified engine session stopped. Ready for Human decision.
+      <strong>Worker Evidence:</strong> Retained {{ recovery.reconciledEvidence.retainedEventsCount }} events.
+      Engine stop {{ recovery.reconciledEvidence.engineStoppedProof ? 'proved' : 'unproved' }};
+      terminal settlement {{ recovery.reconciledEvidence.turnSettlementObserved ? 'observed' : 'missing' }}.
+      <span v-if="recovery.reconciledEvidence.terminalStatus">Outcome: {{ recovery.reconciledEvidence.terminalStatus }}.</span>
+      {{ evidenceReady ? 'Ready for Human decision.' : 'Ordinary recovery remains blocked.' }}
     </div>
 
     <!-- Action Buttons -->

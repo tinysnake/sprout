@@ -10,7 +10,6 @@ import type { EnvironmentEnrollmentService } from '../environment/enrollment-ser
 import { ReadinessOutcomeError } from '../environment/readiness-workflow.ts';
 import type { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
 import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
-import type { RetainedEvidence } from '../environment/recovery.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import type { EnvironmentArchivePort } from '../environment/archive.ts';
 import type {
@@ -531,70 +530,8 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
-      // POST /api/environments/recovery/:leaseId/reconnect — a verified same-identity
-      // reconnect. Moves the record to `reconciling`; it never resolves it.
-      if (
-        method === 'POST' &&
-        segments.length === 5 &&
-        segments[0] === 'api' &&
-        segments[1] === 'environments' &&
-        segments[2] === 'recovery' &&
-        segments[4] === 'reconnect' &&
-        recovery
-      ) {
-        const body = await context.readBody();
-        const connection = parseConnection(body['connection']);
-        if (connection === 'invalid') return json(context, 400, { error: 'connection must be a connection fact' });
-        const compatibility = parseCompatibility(body['compatibility']);
-        if (compatibility === 'invalid') {
-          return json(context, 400, { error: 'compatibility must be a compatibility fact' });
-        }
-        const evidence = parseRetainedEvidence(body['evidence']);
-        if (evidence === 'invalid') {
-          return json(context, 400, { error: 'evidence must be a retained-evidence fact' });
-        }
-        try {
-          const record = await recovery.observeReconnect(segments[3] ?? '', {
-            enrollmentId: stringField(body, 'enrollmentId') ?? '',
-            environmentInstanceId: stringField(body, 'environmentInstanceId') ?? '',
-            identityVerified: body['identityVerified'] === true,
-            protocolCompatible: body['protocolCompatible'] === true,
-            permissionsAllowed: body['permissionsAllowed'] === true,
-            hadActiveRun: body['hadActiveRun'] === true,
-            ...(evidence !== undefined ? { evidence } : {}),
-          });
-          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
-        } catch (error) {
-          return recoveryFailure(context, error);
-        }
-      }
-
-      // POST /api/environments/recovery/:leaseId/evidence — synchronize retained
-      // evidence. The only path that can resolve or reach `recovery`; no replay.
-      if (
-        method === 'POST' &&
-        segments.length === 5 &&
-        segments[0] === 'api' &&
-        segments[1] === 'environments' &&
-        segments[2] === 'recovery' &&
-        segments[4] === 'evidence' &&
-        recovery
-      ) {
-        const body = await context.readBody();
-        const evidence = parseRetainedEvidence(body['evidence']);
-        if (evidence === 'invalid' || evidence === undefined) {
-          return json(context, 400, { error: 'evidence must be a retained-evidence fact' });
-        }
-        try {
-          const record = await recovery.synchronizeEvidence(segments[3] ?? '', {
-            evidence,
-            hadActiveRun: body['hadActiveRun'] === true,
-          });
-          return json(context, 200, { recovery: toEnvironmentRecoveryView(record) });
-        } catch (error) {
-          return recoveryFailure(context, error);
-        }
-      }
+      // Reconnect/evidence is machine-only. No browser credential may claim
+      // Worker identity, engine fencing or a terminal settlement.
 
       // POST /api/environments/recovery/:leaseId/resume — ordinary Resume.
       if (
@@ -729,32 +666,6 @@ function recoveryFailure(context: ApiRequestContext, error: unknown): true {
   }
   if (error instanceof EnrollmentError) return enrollmentFailure(context, error);
   return json(context, 500, { error: 'environment recovery could not be completed' });
-}
-
-/**
- * Parse retained evidence.
- *
- * Every field is a positive boolean or a bounded count; an omitted field is
- * honest "not proven" rather than an assumed true, which is exactly what keeps an
- * unresolved fact unresolved.
- */
-function parseRetainedEvidence(value: unknown): RetainedEvidence | undefined | 'invalid' {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'object' || value === null) return 'invalid';
-  const record = value as Record<string, unknown>;
-  const retainedEventCount = record['retainedEventCount'];
-  if (typeof retainedEventCount !== 'number' || !Number.isFinite(retainedEventCount) || retainedEventCount < 0) {
-    return 'invalid';
-  }
-  for (const key of ['turnSettlementObserved', 'engineSessionStopped', 'taskContextRecycled'] as const) {
-    if (typeof record[key] !== 'boolean') return 'invalid';
-  }
-  return {
-    retainedEventCount: Math.floor(retainedEventCount),
-    turnSettlementObserved: record['turnSettlementObserved'] === true,
-    engineSessionStopped: record['engineSessionStopped'] === true,
-    taskContextRecycled: record['taskContextRecycled'] === true,
-  };
 }
 
 function stringField(body: Record<string, unknown>, key: string): string | undefined {

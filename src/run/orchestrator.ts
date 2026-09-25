@@ -7,7 +7,7 @@ import {
 } from '../agent/admission.ts';
 import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
-import type { EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
+import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
@@ -684,6 +684,25 @@ export class RunOrchestrator {
     return persisted;
   }
 
+  /** Project acknowledged Worker evidence without replaying or rewriting the run outcome. */
+  async recordRecoveryEvidence(runId: string, evidence: {
+    readonly status: 'completed' | 'failed' | 'interrupted' | 'stopped';
+    readonly eventCount: number;
+    readonly events: readonly { readonly turnId: string; readonly sequence: number; readonly event: AgentRunEvent }[];
+  }): Promise<boolean> {
+    const run = await this.load(runId);
+    if (run === undefined || run.status === 'running' || run.status === 'queued') return false;
+    if (run.recoverySettlement !== undefined && (run.recoverySettlement.status !== evidence.status ||
+        run.recoverySettlement.eventCount !== evidence.eventCount)) throw new Error('conflicting recovered settlement');
+    const known = new Set((run.recoveredEvents ?? []).map((entry) => `${entry.turnId}\u0000${entry.sequence}`));
+    const added = evidence.events.filter((entry) => !known.has(`${entry.turnId}\u0000${entry.sequence}`));
+    if (added.length === 0 && run.recoverySettlement !== undefined) return true;
+    const next = await this.#advance(run, { recoverySettlement: { status: evidence.status, eventCount: evidence.eventCount },
+      recoveredEvents: [...(run.recoveredEvents ?? []), ...added] });
+    this.#settled.set(runId, Promise.resolve(next));
+    return true;
+  }
+
   /** Observe status and progress changes for every run. */
   subscribe(observer: RunObserver): () => void {
     this.#observers.add(observer);
@@ -928,6 +947,7 @@ export class RunOrchestrator {
     try {
       session = await adapter.startSession({
         agentId: agent.id,
+        runId: running.id,
         workingDirectory,
         ...(option.workModel !== '' ? { model: option.workModel } : {}),
         ...(option.effort !== '' ? { effort: option.effort } : {}),
@@ -1091,7 +1111,16 @@ export class RunOrchestrator {
 
   /** Record a new run state, persist it, and notify observers in that order. */
   async #advance(run: AgentRun, patch: Partial<AgentRun>): Promise<AgentRun> {
-    const next: AgentRun = { ...run, ...patch };
+    // A late in-flight run write may race machine recovery projection after a
+    // channel loss. Never erase durable, idempotently keyed Worker evidence by
+    // advancing an older snapshot captured before that projection.
+    const observed = this.#runs.get(run.id);
+    const next: AgentRun = { ...run, ...patch,
+      ...(patch.recoverySettlement === undefined && observed?.recoverySettlement !== undefined
+        ? { recoverySettlement: observed.recoverySettlement } : {}),
+      ...(patch.recoveredEvents === undefined && observed?.recoveredEvents !== undefined
+        ? { recoveredEvents: observed.recoveredEvents } : {}),
+    };
     this.#runs.set(next.id, next);
     const replaySequence = await this.#store.save(next);
     for (const observer of this.#observers) observer(next, replaySequence);

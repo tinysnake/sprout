@@ -1,4 +1,18 @@
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.ts';
+import type { JournalTurn } from '../worker/recovery-journal.ts';
+import type { AgentRunEvent } from '../engine/port.ts';
+
+export interface RecoveryReceipt {
+  readonly sequence: number;
+  readonly settlement: boolean;
+  readonly eventCount: number;
+}
+export interface RecoveredRunReceipt {
+  readonly eventCount: number;
+  readonly terminal: boolean;
+  readonly settlementStatus?: string;
+  readonly pending: boolean;
+}
 
 /**
  * Durable storage for Environment recovery records and Force Release outcomes (#88).
@@ -14,6 +28,18 @@ import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.t
  * Environment returns to Green.
  */
 export interface RecoveryStore {
+  /** Optional only for legacy in-memory adapters; production must fail closed without it. */
+  receiveWorkerTurn?(enrollmentId: string, turn: JournalTurn): Promise<RecoveryReceipt>;
+  workerRunReceipt?(enrollmentId: string, runId: string): Promise<RecoveredRunReceipt | undefined>;
+  acknowledgeWorkerTurn?(enrollmentId: string, turnId: string, sequence: number, settlement: boolean): Promise<void>;
+  receiveWorkerContext?(enrollmentId: string, taskId: string, state: 'prepared' | 'recycled'): Promise<void>;
+  workerContext?(enrollmentId: string, taskId: string): Promise<'prepared' | 'recycled' | undefined>;
+  workerRunIds?(enrollmentId: string): Promise<readonly string[]>;
+  workerRunEvents?(enrollmentId: string, runId: string): Promise<readonly {
+    readonly turnId: string; readonly sequence: number; readonly event: AgentRunEvent;
+  }[]>;
+  compactWorkerRun?(enrollmentId: string, runId: string): Promise<void>;
+  compactUnboundWorkerTurns?(enrollmentId: string): Promise<void>;
   save(record: EnvironmentRecoveryRecord): Promise<void>;
   get(recordId: string): Promise<EnvironmentRecoveryRecord | undefined>;
   /** The open (non-resolved) record protecting one lease, if any. */

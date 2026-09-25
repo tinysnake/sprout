@@ -90,6 +90,10 @@ export interface AgentRun {
   readonly leaseId?: string;
   readonly failure?: string;
   readonly result?: EngineTurnResult;
+  /** Distinct machine-evidence history; never silently replaces a run's interrupted outcome. */
+  readonly recoverySettlement?: { readonly status: 'completed' | 'failed' | 'interrupted' | 'stopped'; readonly eventCount: number };
+  /** At-least-once recovered frames with durable turn/sequence identity. */
+  readonly recoveredEvents?: readonly { readonly turnId: string; readonly sequence: number; readonly event: AgentRunEvent }[];
   /** Provider-reported consumption for this run, when the engine exposes it. */
   readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;

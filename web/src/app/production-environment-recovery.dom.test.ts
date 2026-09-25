@@ -416,7 +416,7 @@ test('Production Web: reachable reconciling state presents ReconcilingBox and re
     assert.ok(recoveryAlertBox, 'RecoveryAlertBox rendered after evidence synchronization');
     assert.match(
       recoveryAlertBox.textContent ?? '',
-      /Reconciliation Proof: Retained 4 events, verified engine session stopped/
+      /Worker Evidence: Retained 4 events. Engine stop proved; terminal settlement observed/
     );
 
     // Verify operator recovery actions are now available

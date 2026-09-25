@@ -36,6 +36,7 @@ import {
 import type { EnvironmentSource, HostConfiguration } from './host-config.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
+import { workspaceFor } from './project/resolve.ts';
 import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
@@ -894,11 +895,12 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
       // ownership of the Task state it just made durable.
-      onRecovery: async ({ leaseId, hadActiveRun }) => {
+      onRecovery: async ({ leaseId, hadActiveRun, runId }) => {
         await recovery.open({
           leaseId,
           cause: 'worker-channel-lost',
           hadActiveRun,
+          ...(runId !== undefined ? { runId } : {}),
         });
       },
       // ADR-0009 makes Force Release a narrow, explicit exception to ADR-0005's
@@ -911,9 +913,18 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     recovery = new EnvironmentRecoveryService({
       store: stores.recovery,
       leases: pool,
+      workerIdentityForInstance: async (instanceId) => {
+        const enrollment = (await enrollments.list()).find((candidate) =>
+          candidate.environmentInstanceId === instanceId && candidate.status === 'approved' &&
+          candidate.worker.identityDigest !== '');
+        return enrollment === undefined ? undefined : {
+          enrollmentId: enrollment.id, identityDigest: enrollment.worker.identityDigest,
+        };
+      },
       // The holder decisions reuse the existing lifecycle ordering rather than
       // re-implementing Task context cleanup or lease release here.
       holders: {
+        clearIdleTask: (taskId) => taskLifecycle.clearIdleRecovery(taskId),
         resumeTask: async (taskId) => {
           await taskLifecycle.recover(taskId, 'resume');
         },
@@ -924,6 +935,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       taskRuns: async (taskId) =>
         (await durableStores.tasks.listRuns(taskId)).map((link) => link.runId),
+      activeRunForTask: async (taskId) => (await durableStores.tasks.get(taskId))?.activeRunId,
       // A recovery change (open, reconnect, evidence, resolve, Force Release) is
       // a work-safety fact for the catalog, so eligibility follows it.
       onMutation: onEnrollmentMutation,
@@ -1132,6 +1144,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // never a reason to create or dial a Worker; a lost channel makes that fact
     // offline again. Neither path creates a catalog entry: only a durable
     // enrollment does. Each re-projects the catalog and republishes eligibility.
+    const channelLosses = new Map<string, Promise<void>>();
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
       // Invalidate an in-flight source snapshot before publishing the accepted
@@ -1150,6 +1163,147 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         void readinessWorkflow.observeAccepted(acceptance).catch(() => undefined);
       }, 10);
       timer.unref();
+
+      // Recovery is a machine-channel workflow, not a Web action. Serialize
+      // snapshots with live notifications; the SQLite receipt commits before
+      // acknowledging the Worker outbox. Failed sync leaves the outbox intact.
+      let synchronizing = Promise.resolve();
+      const observedRecoveries = new Set<string>();
+      const current = () => workerGateway.liveFor(acceptance.enrollment.environmentInstanceId)
+        ?.epoch.connectionId === acceptance.epoch.connectionId;
+      const synchronize = () => {
+        synchronizing = synchronizing.then(async () => {
+          await channelLosses.get(acceptance.enrollment.environmentInstanceId);
+          if (!current() || acceptance.enrollment.capabilityPermissions['agent-run'] !== true ||
+              durableStores.recovery.receiveWorkerTurn === undefined) return;
+          const snapshot = await acceptance.transport.request<import('./worker/recovery-journal.ts').JournalSnapshot | null>(
+            'recovery/snapshot');
+          if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
+          const records = (await recovery.listForEnvironment(acceptance.enrollment.environmentInstanceId))
+            .filter((record) => record.phase !== 'resolved');
+          if (records.some((record) => (record.enrollmentId !== undefined && record.enrollmentId !== acceptance.enrollment.id) ||
+              (record.workerIdentityDigest !== undefined &&
+               record.workerIdentityDigest !== acceptance.enrollment.worker.identityDigest))) return;
+          for (const turn of snapshot.turns) {
+            if (!current()) return;
+            const receipt = await durableStores.recovery.receiveWorkerTurn(acceptance.enrollment.id, turn);
+            if (!current() || durableStores.recovery.acknowledgeWorkerTurn === undefined) return;
+            // Commit high-water before acknowledging. Keep the payload until
+            // the correlated run history is durably projected; a lost ack
+            // response redelivers safely using the durable receipt.
+            await durableStores.recovery.acknowledgeWorkerTurn(
+              acceptance.enrollment.id, turn.turnId, receipt.sequence, receipt.settlement);
+            if (!current()) return;
+            await acceptance.transport.request('recovery/acknowledge', {
+              epoch: snapshot.epoch, turnId: turn.turnId, sequence: receipt.sequence,
+              settlement: receipt.settlement,
+            });
+          }
+          for (const [taskId, state] of Object.entries(snapshot.taskContexts)) {
+            if (!current() || durableStores.recovery.receiveWorkerContext === undefined) return;
+            if (state !== 'prepared' && state !== 'recycled') return;
+            await durableStores.recovery.receiveWorkerContext(acceptance.enrollment.id, taskId, state);
+            if (!current()) return;
+            await acceptance.transport.request('recovery/ack-context', { epoch: snapshot.epoch, taskId, state });
+          }
+          for (const record of records) {
+            if (!current() || acceptance.enrollment.capabilityPermissions['agent-run'] !== true) return;
+            const newlyObserved = !observedRecoveries.has(record.leaseId);
+            if (newlyObserved) {
+              await recovery.observeReconnect(record.leaseId, {
+                enrollmentId: acceptance.enrollment.id,
+                workerIdentityDigest: acceptance.enrollment.worker.identityDigest,
+                environmentInstanceId: acceptance.enrollment.environmentInstanceId,
+                identityVerified: true, protocolCompatible: true, permissionsAllowed: true,
+                hadActiveRun: true,
+              });
+              observedRecoveries.add(record.leaseId);
+            }
+            if (!current()) return;
+            if (!newlyObserved && record.phase === 'recovery') continue;
+            const receipt = record.runId !== undefined && durableStores.recovery.workerRunReceipt !== undefined
+              ? await durableStores.recovery.workerRunReceipt(acceptance.enrollment.id, record.runId)
+              : undefined;
+            if (!current()) return;
+            if (record.runId !== undefined && receipt?.terminal === true && !receipt.pending &&
+                (receipt.settlementStatus === 'completed' || receipt.settlementStatus === 'failed' ||
+                 receipt.settlementStatus === 'interrupted' || receipt.settlementStatus === 'stopped')) {
+              if (durableStores.recovery.workerRunEvents === undefined) return;
+              const events = await durableStores.recovery.workerRunEvents(acceptance.enrollment.id, record.runId);
+              if (!current()) return;
+              const projected = await orchestrator.recordRecoveryEvidence(record.runId, {
+                status: receipt.settlementStatus, eventCount: receipt.eventCount, events,
+              });
+              if (!projected || !current()) return; // do not grant a decision before run history is durable
+            }
+            let contextPrepared = false;
+            if (record.taskId !== undefined) {
+              const task = await durableStores.tasks.get(record.taskId);
+              const project = task === undefined ? undefined : projects.get(task.projectId);
+              if (task !== undefined && project !== undefined) {
+                const path = workspaceFor(project, record.environmentInstanceId)?.path;
+                const inspected = await acceptance.transport.request<boolean>('context/inspect', {
+                  projectId: task.projectId, taskId: record.taskId,
+                  environmentInstanceId: record.environmentInstanceId, environmentLeaseId: record.leaseId,
+                  ...(path !== undefined ? { projectWorkspacePath: path } : {}),
+                });
+                if (!current()) return;
+                contextPrepared = inspected === true;
+              }
+            }
+            const idle = record.interruptedRunActive === false && record.holderKind === 'task' && record.runId === undefined;
+            const contextState = record.taskId !== undefined && durableStores.recovery.workerContext !== undefined
+              ? await durableStores.recovery.workerContext(acceptance.enrollment.id, record.taskId) : undefined;
+            if (!current()) return;
+            await recovery.synchronizeEvidence(record.leaseId, {
+              hadActiveRun: !idle,
+              evidence: {
+                retainedEventCount: receipt?.eventCount ?? 0,
+                turnSettlementObserved: idle || (receipt?.terminal === true && !receipt.pending),
+                ...(receipt?.terminal === true &&
+                    (receipt.settlementStatus === 'completed' || receipt.settlementStatus === 'failed' ||
+                     receipt.settlementStatus === 'interrupted' || receipt.settlementStatus === 'stopped')
+                  ? { terminalStatus: receipt.settlementStatus } : {}),
+                engineSessionStopped: snapshot.engineStopped,
+                taskContextPrepared: contextPrepared && contextState !== 'recycled',
+                taskContextRecycled: contextState === 'recycled',
+              },
+            });
+          }
+          await durableStores.recovery.compactUnboundWorkerTurns?.(acceptance.enrollment.id);
+          if (durableStores.recovery.workerRunIds !== undefined &&
+              durableStores.recovery.workerRunReceipt !== undefined &&
+              durableStores.recovery.compactWorkerRun !== undefined) {
+            for (const runId of await durableStores.recovery.workerRunIds(acceptance.enrollment.id)) {
+              if (!current()) return;
+              const receipt = await durableStores.recovery.workerRunReceipt(acceptance.enrollment.id, runId);
+              if (receipt?.terminal !== true || receipt.pending) continue;
+              const run = await orchestrator.load(runId);
+              if (run === undefined || !current()) return;
+              if (run.recoverySettlement !== undefined ||
+                  (run.status !== 'running' && run.status !== 'queued' && run.events.length >= receipt.eventCount)) {
+                await durableStores.recovery.compactWorkerRun(acceptance.enrollment.id, runId);
+              }
+            }
+          }
+        }).catch(() => {
+          // Never leak event payload or host paths through operational logs.
+          // No ack on failure: the next connection must redeliver the outbox.
+          options.onWorkerLog?.('Worker recovery evidence incomplete; retained events remain unacknowledged.');
+        });
+      };
+      const off = acceptance.transport.onNotification((notification) => {
+        if (notification.method === 'turn/event' || notification.method === 'turn/settled' ||
+            notification.method === 'recovery/changed') synchronize();
+      });
+      acceptance.onChannelClosed(off);
+      const offRuns = orchestrator.subscribe((run) => {
+        if (run.environmentInstanceId === acceptance.enrollment.environmentInstanceId &&
+            run.status !== 'running' && run.status !== 'queued') synchronize();
+      });
+      acceptance.onChannelClosed(offRuns);
+      const syncTimer = setTimeout(synchronize, 15);
+      syncTimer.unref();
     });
     workerGateway.onConnectionClosed((closed) => {
       readinessWorkflow.releaseAccepted(closed.epoch.connectionId);
@@ -1160,6 +1314,26 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       catalogProjectionRevision += 1;
       if (environmentCatalog.clearEpoch(closed.enrollmentId, closed.epoch.epoch)) {
         publishCatalogMembership();
+        const lease = pool.activeLease(closed.environmentInstanceId);
+        if (lease !== undefined) {
+          // Synchronous admission fence before any async Task/store work.
+          pool.markRecovering(lease.id);
+          const loss = (async () => {
+            const enrollment = await enrollments.get(closed.enrollmentId);
+            const task = lease.taskId !== undefined ? await durableStores.tasks.get(lease.taskId) : undefined;
+            const lostRunId = task?.activeRunId ?? lease.runId;
+            await recovery.open({ leaseId: lease.id, cause: 'worker-channel-lost',
+              hadActiveRun: task === undefined || task.activeRunId !== undefined,
+              enrollmentId: closed.enrollmentId,
+              ...(enrollment?.worker.identityDigest ? { workerIdentityDigest: enrollment.worker.identityDigest } : {}),
+              ...(lostRunId !== undefined ? { runId: lostRunId } : {}) });
+            if (lease.taskId !== undefined) {
+              await taskLifecycle.workerChannelLost(lease.taskId);
+            }
+          })();
+          void loss.catch(() => options.onWorkerLog?.('Worker channel loss protection is incomplete; admission remains fenced.'));
+          channelLosses.set(closed.environmentInstanceId, loss);
+        }
       }
       void refreshEnvironmentCatalog().catch(() => undefined);
     });
@@ -1405,6 +1579,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // stops reaching them before they are torn down.
         await enrollmentEnvironment.close();
         workerGateway.close();
+        await Promise.allSettled([...channelLosses.values()]);
         // The environment port owns its worker channels. A *container* is not
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.

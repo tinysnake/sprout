@@ -58,7 +58,8 @@ export {
  *   host-local guidance.
  *
  * Domain stores own the SQL for their respective tables:
- * - run domain: `agent_runs`, `agent_session_keys` (`run/sqlite-store.ts`)
+ * - run domain: `agent_runs` (including recovered turn attribution),
+ *   `agent_session_keys` (`run/sqlite-store.ts`)
  * - environment domain: `environment_leases` (`environment/sqlite-store.ts`)
  * - project domain: `projects` (`project/sqlite-store.ts`)
  * - project authority domain: `project_authorities`
@@ -81,7 +82,8 @@ export {
  *   (`environment/sqlite-readiness-store.ts`)
  * - Worker authority domain: `worker_connection_epochs`
  *   (`environment/worker-epoch-store.ts`)
- * - recovery domain: `environment_recovery`, `environment_force_releases`
+ * - recovery domain: `environment_recovery`, `environment_force_releases`,
+ *   `worker_recovery_receipts`, `worker_recovery_events`, `worker_recovery_contexts`
  *   (`environment/sqlite-recovery-store.ts`)
  */
 

@@ -93,6 +93,29 @@ export class WorkerWorkspace {
     await assertProjectSentinel(root, workspace, input.projectId);
   }
 
+  /** Read-only fresh proof of the Task lease's owned context, not a journal claim. */
+  async inspectTaskContext(input: RecycleTaskContextParams): Promise<boolean> {
+    try {
+      const root = await this.#rootPath();
+      const workspace = await this.#workspace(root, input.projectId, false, input.projectWorkspacePath);
+      const context = await this.#directory(root, join(workspace, '.sprout', 'tasks', token(input.taskId)), false);
+      await assertProjectSentinel(root, workspace, input.projectId);
+      const manifestPath = join(context, 'manifest.json');
+      await regularFile(root, manifestPath);
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+      const owned = manifest.sprout === 'sprout-task-context-v1' &&
+        manifest.projectId === input.projectId && manifest.taskId === input.taskId &&
+        manifest.environmentInstanceId === input.environmentInstanceId &&
+        manifest.environmentLeaseId === input.environmentLeaseId;
+      if (!owned) return false;
+      for (const file of await filesBelow(context)) {
+        if (file === manifestPath) continue;
+        if (!(await readFile(file, 'utf8')).startsWith(OWNED_MARKER)) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
+
   /**
    * Resolve one Project's workspace to its absolute location on this host.
    *
