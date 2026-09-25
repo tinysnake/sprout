@@ -876,3 +876,363 @@ test('RegisterHostDialog: ceremony state resets completely across close and reop
     await cleanup();
   }
 });
+
+test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pending status across ceremony, detail, and list contexts', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+    const { default: EnvironmentDetail } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentDetail.vue',
+    )) as { default: any };
+    const { default: EnvironmentMasterCard } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentMasterCard.vue',
+    )) as { default: any };
+
+    const now = Date.now();
+    const makeEnv = (status: string, overrides: Record<string, unknown> = {}) => ({
+      id: `env-${status}`,
+      displayName: `Host ${status}`,
+      platform: 'macos' as const,
+      enrollmentStatus: status as any,
+      trafficLight: status === 'approved' ? 'green' as const : 'yellow' as const,
+      trafficLightReason: 'Test reason',
+      connectionState: 'online' as const,
+      connectionAgeSec: 10,
+      lastConfirmedTime: '10s ago',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible' as const,
+      workSafety: 'clear' as const,
+      capabilityPermissions: { processExecution: true },
+      engineReadiness: { codex: 'ready' as const },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: status === 'approved' ? 'key-approved' : '',
+      claim: status === 'pending'
+        ? { issuedAt: now, expiresAt: now + 60000 }
+        : undefined,
+      decisions: status === 'revoked'
+        ? [{ kind: 'cancelled', actor: 'operator', at: now, reason: 'Pending enrollment cancelled by operator.' }]
+        : [],
+      ...overrides,
+    });
+
+    const pendingEnv = makeEnv('pending');
+    const approvedEnv = makeEnv('approved');
+    const revokedEnv = makeEnv('revoked');
+    const expiredEnv = makeEnv('pending', {
+      id: 'env-expired',
+      displayName: 'Host expired',
+      identityDigest: '',
+      claim: { issuedAt: now - 120000, expiresAt: now - 60000 },
+    });
+    const archivedEnv = makeEnv('archived');
+
+    // Helper to check button presence in RegisterHostDialog
+    async function checkCeremonyCancelBtn(env: any): Promise<boolean> {
+      let current = env;
+      const mockService = {
+        supportsEvidenceReconciliation: false,
+        listEnvironments: async () => [current],
+        getEnvironment: async () => current,
+        getBootstrapCommand: () => '',
+        requestEnrollment: async () => ({} as any),
+        regenerateClaimSecret: async () => ({} as any),
+        cancelEnrollment: async () => {},
+        approveEnrollment: async () => {},
+        triggerProbe: async () => ({} as any),
+        togglePermission: async () => {},
+        unbindWorkspace: async () => {},
+        reconcileEvidence: async () => {},
+        resumeRecovery: async () => {},
+        discardRecovery: async () => {},
+        forceRelease: async () => {},
+        archiveEnvironment: async () => {},
+        restoreEnvironment: async () => {},
+        unenrollEnvironment: async () => {},
+      };
+
+      const container = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(container);
+      const isOpen = ref(true);
+
+      const app = createApp({
+        setup: () => () => h(RegisterHostDialog, {
+          open: isOpen.value,
+          service: mockService,
+          initialEnrollmentId: env.id,
+        }),
+      });
+      app.mount(container);
+      await new Promise((r) => setTimeout(r, 80));
+
+      const hasBtn = dom.window.document.querySelector('.cancel-enroll-btn') !== null;
+      app.unmount();
+      container.remove();
+      return hasBtn;
+    }
+
+    // Helper to check button presence in EnvironmentDetail
+    async function checkDetailCancelBtn(env: any): Promise<boolean> {
+      const container = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(container);
+
+      const app = createApp({
+        setup: () => () => h(EnvironmentDetail, {
+          env,
+          disabled: false,
+        }),
+      });
+      app.mount(container);
+      await new Promise((r) => setTimeout(r, 60));
+
+      const hasBtn = dom.window.document.querySelector('.cancel-enroll-btn') !== null;
+      app.unmount();
+      container.remove();
+      return hasBtn;
+    }
+
+    // Helper to check button presence in EnvironmentMasterCard
+    async function checkMasterCardCancelBtn(env: any): Promise<boolean> {
+      const container = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(container);
+
+      const app = createApp({
+        setup: () => () => h(EnvironmentMasterCard, {
+          env,
+          disabled: false,
+          canControl: true,
+        }),
+      });
+      app.mount(container);
+      await new Promise((r) => setTimeout(r, 60));
+
+      const hasBtn = dom.window.document.querySelector('.cancel-enroll-btn') !== null;
+      app.unmount();
+      container.remove();
+      return hasBtn;
+    }
+
+    // 1. Ceremony context checks
+    assert.equal(await checkCeremonyCancelBtn(pendingEnv), true, 'ceremony: pending shows cancel button');
+    assert.equal(await checkCeremonyCancelBtn(approvedEnv), false, 'ceremony: approved hides cancel button');
+    assert.equal(await checkCeremonyCancelBtn(revokedEnv), false, 'ceremony: revoked hides cancel button');
+    assert.equal(await checkCeremonyCancelBtn(expiredEnv), false, 'ceremony: expired hides cancel button');
+    assert.equal(await checkCeremonyCancelBtn(archivedEnv), false, 'ceremony: archived hides cancel button');
+
+    // 2. Detail context checks
+    assert.equal(await checkDetailCancelBtn(pendingEnv), true, 'detail: pending shows cancel button');
+    assert.equal(await checkDetailCancelBtn(approvedEnv), false, 'detail: approved hides cancel button');
+    assert.equal(await checkDetailCancelBtn(revokedEnv), false, 'detail: revoked hides cancel button');
+    assert.equal(await checkDetailCancelBtn(expiredEnv), false, 'detail: expired hides cancel button');
+    assert.equal(await checkDetailCancelBtn(archivedEnv), false, 'detail: archived hides cancel button');
+
+    // 3. Master-list context checks
+    assert.equal(await checkMasterCardCancelBtn(pendingEnv), true, 'master-list: pending shows cancel button');
+    assert.equal(await checkMasterCardCancelBtn(approvedEnv), false, 'master-list: approved hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(revokedEnv), false, 'master-list: revoked hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(expiredEnv), false, 'master-list: expired hides cancel button');
+    assert.equal(await checkMasterCardCancelBtn(archivedEnv), false, 'master-list: archived hides cancel button');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #141 (reactive expiry): pending cancel controls recompute reactively precisely when claim expiresAt passes without coarse interval lag', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, h } = await import('vue');
+    const { default: EnvironmentDetail } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentDetail.vue',
+    )) as { default: any };
+    const { default: EnvironmentMasterCard } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentMasterCard.vue',
+    )) as { default: any };
+
+    const now = Date.now();
+    // Claim expires precisely 70ms in the future
+    const expiresAt = now + 70;
+    const expiringEnv = {
+      id: 'env-expiring-clock-test',
+      displayName: 'Expiring Host',
+      platform: 'macos' as const,
+      enrollmentStatus: 'pending' as const,
+      trafficLight: 'yellow' as const,
+      trafficLightReason: 'Pending worker claim',
+      connectionState: 'online' as const,
+      connectionAgeSec: 5,
+      lastConfirmedTime: '5s ago',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible' as const,
+      workSafety: 'clear' as const,
+      capabilityPermissions: { processExecution: true },
+      engineReadiness: { codex: 'ready' as const },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: now - 5000, expiresAt },
+      decisions: [],
+    };
+
+    const containerDetail = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(containerDetail);
+    const appDetail = createApp({
+      setup: () => () => h(EnvironmentDetail, { env: expiringEnv, disabled: false }),
+    });
+    appDetail.mount(containerDetail);
+
+    const containerCard = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(containerCard);
+    const appCard = createApp({
+      setup: () => () => h(EnvironmentMasterCard, { env: expiringEnv, disabled: false, canControl: true }),
+    });
+    appCard.mount(containerCard);
+
+    // Initial check (well before the 70ms expiry):
+    await new Promise((r) => setTimeout(r, 15));
+    assert.ok(Date.now() < expiresAt, 'test assertion runs before claim expiry');
+    assert.ok(containerDetail.querySelector('.cancel-enroll-btn'), 'detail shows cancel button before expiry');
+    assert.ok(containerCard.querySelector('.cancel-enroll-btn'), 'card shows cancel button before expiry');
+
+    // Wait past the 70ms expiry (~80ms additional, total elapsed ~95ms).
+    // Notice this is far below any 1000ms coarse interval:
+    await new Promise((r) => setTimeout(r, 80));
+    assert.ok(Date.now() >= expiresAt, 'test assertion runs immediately after claim expiry');
+
+    // The precise expiry timer fired at expiresAt and invalidated the computed gating immediately:
+    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail hides cancel button precisely at expiry');
+    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'card hides cancel button precisely at expiry');
+
+    appDetail.unmount();
+    containerDetail.remove();
+    appCard.unmount();
+    containerCard.remove();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #141 (b): stale cancel click in ceremony surfaces typed 409 refusal and refreshes facts from server', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+
+    const now = Date.now();
+    let currentEnv: any = {
+      id: 'enroll-stale-ceremony',
+      displayName: 'Stale Ceremony Host',
+      platform: 'macos',
+      enrollmentStatus: 'pending',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Pending worker claim',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible',
+      workSafety: 'clear',
+      capabilityPermissions: { processExecution: false },
+      engineReadiness: { codex: 'ready' },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: now, expiresAt: now + 60000 },
+      decisions: [],
+    };
+
+    let getEnvironmentCallCount = 0;
+    const mockService = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: async () => [currentEnv],
+      getEnvironment: async (id: string) => {
+        getEnvironmentCallCount += 1;
+        return currentEnv;
+      },
+      getBootstrapCommand: () => '',
+      requestEnrollment: async () => ({} as any),
+      regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async (_id: string) => {
+        // Mutate currentEnv to simulate concurrent state change on the server
+        currentEnv = {
+          ...currentEnv,
+          enrollmentStatus: 'revoked',
+          trafficLight: 'red',
+          trafficLightReason: 'Pending enrollment cancelled by operator',
+          claim: undefined,
+          decisions: [{
+            kind: 'cancelled',
+            actor: 'operator',
+            at: Date.now(),
+            reason: 'Cancelled by operator',
+          }],
+        };
+        const error = new Error('Only a pending enrollment can be cancelled.');
+        (error as any).code = 'not-pending';
+        (error as any).status = 409;
+        (error as any).refusal = 'Only a pending enrollment can be cancelled.';
+        throw error;
+      },
+      approveEnrollment: async () => {},
+      triggerProbe: async () => ({} as any),
+      togglePermission: async () => {},
+      unbindWorkspace: async () => {},
+      reconcileEvidence: async () => {},
+      resumeRecovery: async () => {},
+      discardRecovery: async () => {},
+      forceRelease: async () => {},
+      archiveEnvironment: async () => {},
+      restoreEnvironment: async () => {},
+      unenrollEnvironment: async () => {},
+    };
+
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+    const isOpen = ref(true);
+    let updatedId = '';
+
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value,
+        service: mockService,
+        initialEnrollmentId: currentEnv.id,
+        onUpdated: (id: string) => { updatedId = id; },
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const doc = dom.window.document;
+    const cancelBtn = doc.querySelector('.cancel-enroll-btn') as HTMLButtonElement;
+    assert.ok(cancelBtn, 'Cancel Pending Enrollment button rendered before click');
+
+    const initialGetEnvCount = getEnvironmentCallCount;
+
+    // Click cancel button on stale enrollment
+    cancelBtn.click();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify facts were refreshed from server
+    assert.ok(getEnvironmentCallCount > initialGetEnvCount, 'facts were refreshed via getEnvironment');
+    assert.equal(updatedId, 'enroll-stale-ceremony', 'updated event was emitted');
+
+    // Verify refusal notice is surfaced
+    const bodyText = doc.body.textContent ?? '';
+    assert.match(bodyText, /not-pending/, 'refusal code not-pending is rendered');
+    assert.match(bodyText, /Only a pending enrollment can be cancelled|no longer pending/i, 'refusal explanation is rendered');
+    assert.equal(bodyText.includes('409'), false, 'raw 409 status code is not shown');
+
+    // Verify cancel button is gone and cancelled state is rendered
+    assert.equal(doc.querySelector('.cancel-enroll-btn'), null, 'Cancel Pending Enrollment button is hidden after refresh');
+    assert.match(bodyText, /Pending enrollment has been cancelled by operator/);
+
+    app.unmount();
+    container.remove();
+  } finally {
+    await cleanup();
+  }
+});

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { EnvironmentInstance } from '../types.js';
+import { useReactiveClock } from '../use-reactive-clock.js';
 import StatusDot from '../../../primitives/StatusDot.vue';
 import Badge from '../../../primitives/Badge.vue';
 import Button from '../../../primitives/Button.vue';
@@ -20,7 +21,27 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string): void;
   (e: 'probe', id: string): void;
+  (e: 'cancelEnrollment', id: string): void;
 }>();
+
+const now = useReactiveClock(() => props.env.claim?.expiresAt);
+
+const isExpired = computed(() => {
+  if (!props.env.claim) return false;
+  return now.value >= props.env.claim.expiresAt && props.env.claim.consumedAt === undefined && !props.env.identityDigest;
+});
+
+const isCancelled = computed(() => {
+  const decisions = props.env.decisions ?? [];
+  return (
+    props.env.enrollmentStatus === 'revoked' &&
+    decisions.some((d) => d.kind === 'cancelled' || d.reason.toLowerCase().includes('cancel'))
+  );
+});
+
+const canCancelEnrollment = computed(() => {
+  return props.env.enrollmentStatus === 'pending' && !isExpired.value && !isCancelled.value;
+});
 
 const platformIcon = computed(() => {
   if (props.env.platform === 'windows') return 'terminal';
@@ -142,18 +163,34 @@ const connectionAgeLabel = computed(() => {
       </span>
     </Card>
 
-    <!-- Quick Probe Action Button -->
-    <Button
-      variant="ghost"
-      size="xs"
-      class="quick-probe-btn absolute right-3 bottom-2.5 z-10 text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-      title="Request quick live probe"
-      aria-label="Request quick live probe"
-      :disabled="disabled"
-      @click.stop="canControl && emit('probe', env.id)"
-    >
-      <Icon name="lightning" :size="12" />
-      <span>Probe</span>
-    </Button>
+    <!-- Quick Actions -->
+    <div class="card-quick-actions absolute right-3 bottom-2.5 z-10 flex items-center gap-1.5">
+      <Button
+        v-if="canCancelEnrollment"
+        variant="ghost"
+        size="xs"
+        class="cancel-enroll-btn text-[10px] h-6 px-2 text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)]"
+        title="Cancel Pending Enrollment"
+        aria-label="Cancel Pending Enrollment"
+        :disabled="disabled"
+        @click.stop="canControl && emit('cancelEnrollment', env.id)"
+      >
+        <Icon name="trash" :size="12" />
+        <span>Cancel Pending Enrollment</span>
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="xs"
+        class="quick-probe-btn text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+        title="Request quick live probe"
+        aria-label="Request quick live probe"
+        :disabled="disabled"
+        @click.stop="canControl && emit('probe', env.id)"
+      >
+        <Icon name="lightning" :size="12" />
+        <span>Probe</span>
+      </Button>
+    </div>
   </div>
 </template>

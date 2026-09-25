@@ -67,3 +67,37 @@ export function createEnvironmentControlBoundary(
     },
   };
 }
+
+/**
+ * Safely format a decisive refusal notice from a server refusal (such as typed
+ * 409 error/code) or client control refusal. Raw status codes and bare error
+ * strings are filtered so operator UI remains decisive and clean.
+ */
+export function formatRefusalNotice(error: unknown, fallback = 'Action could not be completed'): string {
+  if (error instanceof EnvironmentControlRefused) {
+    return error.message;
+  }
+  const err = error as { code?: string; message?: string; refusal?: string; status?: number } | undefined;
+  const code = err?.code;
+  const message = err?.refusal || err?.message;
+
+  if (code === 'not-pending') {
+    return message && message !== 'request could not be completed'
+      ? `This enrollment is no longer pending (${code}): ${message}`
+      : `This enrollment is no longer pending (${code}).`;
+  }
+
+  if (code && message && message !== 'request could not be completed') {
+    return `Action refused (${code}): ${message}`;
+  }
+
+  if (code) {
+    return `Action refused (${code}).`;
+  }
+
+  if (message && message !== 'request could not be completed') {
+    return message;
+  }
+
+  return fallback;
+}
