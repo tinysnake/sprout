@@ -1,3 +1,9 @@
+# Agent instructions
+
+## Development stage: aggressive restructuring is allowed
+
+The project is in its **initial development stage**. Aggressive refactoring and replacement are acceptable: prefer the clean design over preserving legacy behavior, and do not spend effort on backward compatibility with old features. Breaking changes to internal APIs, storage shapes, and prototypes are expected; make the change that leaves the simplest correct result, and update tests and docs to match. (Do not break privacy, authority, and safety guarantees documented elsewhere in this file and in `docs/adr/`.)
+
 ## Privacy and sensitive information
 
 Never commit or write any personal or sensitive information into the Git repository or issue tracker (including commit messages, issue bodies, issue comments, pull requests, work records, and documentation).
@@ -12,7 +18,9 @@ When recording command outputs, probe results, test transcripts, or error logs, 
 
 ## Tests and command output
 
-Run the test suite with `npm test`, never with a raw `node --test ...` invocation. `npm test` prints the pass/fail counters and, only when something fails, the failing tests with their reason and location. A raw `node --test` prints every passing test, which floods an agent's context with material it already knows. Use `npm run test:full` only when every test name is genuinely needed, and redirect it to a file instead of reading all of it.
+Every command must be run with an explicit timeout, and no command may run longer than **3 minutes**.
+
+Run the test suite with `npm test` and an explicit **180-second command timeout**, never with a raw `node --test ...` invocation. `npm test` prints the pass/fail counters and, only when something fails, the failing tests with their reason and location. A raw `node --test` prints every passing test, which floods an agent's context with material it already knows. Use `npm run test:full` only when every test name is genuinely needed, and redirect it to a file instead of reading all of it.
 
 Filter large command output at the shell (`... | tail -40`, `rg -n 'fail|Error|not ok'`) rather than loading the whole output into context.
 
