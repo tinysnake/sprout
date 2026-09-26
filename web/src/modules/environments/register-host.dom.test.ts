@@ -1123,7 +1123,7 @@ test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', asyn
     assert.equal(await checkCeremonyCancelBtn(pendingEnv), true, 'ceremony: pending shows cancel button');
     assert.equal(await checkCeremonyCancelBtn(approvedEnv), false, 'ceremony: approved hides cancel button');
     assert.equal(await checkCeremonyCancelBtn(revokedEnv), false, 'ceremony: revoked hides cancel button');
-    assert.equal(await checkCeremonyCancelBtn(expiredEnv), false, 'ceremony: expired hides cancel button');
+    assert.equal(await checkCeremonyCancelBtn(expiredEnv), true, 'ceremony: pending with expired claim still shows cancel button');
     assert.equal(await checkCeremonyCancelBtn(archivedEnv), false, 'ceremony: archived hides cancel button');
 
     // The ceremony is the sole decision surface; list/detail must not duplicate its action.
@@ -1138,6 +1138,101 @@ test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', asyn
     assert.equal(await checkMasterCardCancelBtn(revokedEnv), false, 'master-list: revoked hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(expiredEnv), false, 'master-list: expired hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(archivedEnv), false, 'master-list: archived hides cancel button');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #149: an expired pending claim remains cancellable and refreshes to revoked', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+
+    const now = Date.now();
+    let currentEnv: any = {
+      id: 'enroll-expired-cancel',
+      displayName: 'Expired Claim Host',
+      platform: 'macos',
+      enrollmentStatus: 'pending',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Enrollment claim expired',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible',
+      workSafety: 'clear',
+      capabilityPermissions: { processExecution: false },
+      engineReadiness: { codex: 'ready' },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: now - 120000, expiresAt: now - 60000 },
+      decisions: [],
+    };
+    let cancelCalls = 0;
+    let refreshCalls = 0;
+    const mockService = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: async () => [currentEnv],
+      getEnvironment: async () => { refreshCalls += 1; return currentEnv; },
+      getBootstrapCommand: () => '',
+      requestEnrollment: async () => ({} as any),
+      regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async () => {
+        cancelCalls += 1;
+        currentEnv = {
+          ...currentEnv,
+          enrollmentStatus: 'revoked',
+          trafficLight: 'red',
+          trafficLightReason: 'Pending enrollment cancelled by operator',
+          claim: undefined,
+          decisions: [{ kind: 'cancelled', actor: 'operator', at: Date.now(), reason: 'Cancelled by operator' }],
+        };
+      },
+      approveEnrollment: async () => {},
+      triggerProbe: async () => ({} as any),
+      togglePermission: async () => {},
+      unbindWorkspace: async () => {},
+      reconcileEvidence: async () => {},
+      resumeRecovery: async () => {},
+      discardRecovery: async () => {},
+      forceRelease: async () => {},
+      archiveEnvironment: async () => {},
+      restoreEnvironment: async () => {},
+      unenrollEnvironment: async () => {},
+    };
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: true,
+        service: mockService,
+        initialEnrollmentId: currentEnv.id,
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const doc = dom.window.document;
+    assert.match(doc.body.textContent ?? '', /Enrollment Claim Expired/);
+    const cancelBtn = doc.querySelector('.cancel-enroll-btn') as HTMLButtonElement | null;
+    assert.ok(cancelBtn, 'expired pending claim still exposes cancellation in the ceremony');
+    const initialRefreshCalls = refreshCalls;
+    cancelBtn.click();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.equal(cancelCalls, 1, 'server cancellation is requested');
+    assert.ok(refreshCalls > initialRefreshCalls, 'ceremony refreshes facts after cancellation');
+    assert.equal(currentEnv.enrollmentStatus, 'revoked');
+    assert.equal(doc.querySelector('.cancel-enroll-btn'), null, 'cancel control disappears after refreshed revoked state');
+    assert.match(doc.body.textContent ?? '', /Pending enrollment has been cancelled by operator/);
+
+    app.unmount();
+    container.remove();
   } finally {
     await cleanup();
   }

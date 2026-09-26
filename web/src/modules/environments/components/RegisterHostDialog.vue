@@ -119,7 +119,7 @@ const isConnectionWait = computed(() => {
 const canCancel = computed(() => {
   if (!activeEnv.value) return false;
   if (activeEnv.value.enrollmentStatus !== 'pending') return false;
-  if (isExpired.value || isCancelled.value || isRevoked.value) return false;
+  if (isCancelled.value || isRevoked.value) return false;
   return phase.value === 'active' || phase.value === 'review';
 });
 
