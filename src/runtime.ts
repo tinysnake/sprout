@@ -1108,6 +1108,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const workerGateway = new WorkerGateway({
       enrollments,
       epochStore: stores.workerConnectionEpochs,
+      allowInsecurePlaintext: options.configuration.allowInsecureWorkerConnections,
       // Agent configuration is the core-owned declaration of the model a
       // future run will target. Codex is the sole engine with a safe local
       // catalog probe; do not feed a Pi-only target to Codex and claim a false

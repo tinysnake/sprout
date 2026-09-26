@@ -35,6 +35,8 @@ export interface WorkerTransportFacts {
   readonly secure: boolean;
   /** The peer address the core observed. */
   readonly remoteAddress: string | undefined;
+  /** Explicit host opt-in for plaintext connections from non-loopback peers. */
+  readonly allowInsecurePlaintext?: boolean;
 }
 
 export type WorkerTransportDecision =
@@ -51,6 +53,7 @@ export type WorkerTransportDecision =
 export function decideWorkerTransport(facts: WorkerTransportFacts): WorkerTransportDecision {
   if (facts.secure) return { allowed: true, kind: 'wss' };
   if (isLoopbackAddress(facts.remoteAddress)) return { allowed: true, kind: 'ws' };
+  if (facts.allowInsecurePlaintext === true) return { allowed: true, kind: 'ws' };
   return {
     allowed: false,
     reason:

@@ -23,6 +23,8 @@ export interface HostConfiguration {
   readonly port: number;
   /** Network interface address the Web surface binds. */
   readonly bindHost: string;
+  /** Whether non-loopback plaintext Worker connections are explicitly trusted. */
+  readonly allowInsecureWorkerConnections: boolean;
   /** The one environment instance this build serves. */
   readonly environmentInstanceId: string;
   /** Default engine when the runtime configuration names none. */
@@ -181,6 +183,11 @@ export function parseHostConfiguration(
     workingDirectory: environment['SPROUT_WORKDIR'] ?? defaults.projectRoot,
     port: numberValue(environment['SPROUT_PORT'], 5174),
     bindHost: bindHostValue(environment['SPROUT_BIND_HOST']),
+    allowInsecureWorkerConnections: booleanValue(
+      environment['SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS'],
+      false,
+      'SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS',
+    ),
     environmentInstanceId,
     engineId: environment['SPROUT_ENGINE'] ?? 'codex',
     runtimeConfiguration: parseRuntimeConfiguration(environment['SPROUT_RUNTIME_CONFIG']),
@@ -271,6 +278,14 @@ export function workerEnvironment(environmentInstanceId: string): Readonly<Recor
  */
 function numberValue(value: string | undefined, fallback: number): number {
   return value === undefined ? fallback : Number(value);
+}
+
+/** Parse strict, case-sensitive boolean host settings. */
+function booleanValue(value: string | undefined, fallback: boolean, name: string): boolean {
+  if (value === undefined) return fallback;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`${name} must be "true" or "false"`);
 }
 
 /** Validate the address passed directly to the HTTP server's listen call. */

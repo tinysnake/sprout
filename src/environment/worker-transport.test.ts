@@ -33,6 +33,21 @@ test('any TLS transport is allowed regardless of peer address', () => {
   });
 });
 
+test('plaintext on a non-loopback peer requires explicit opt-in', () => {
+  assert.deepEqual(
+    decideWorkerTransport({ secure: false, remoteAddress: '10.1.2.3', allowInsecurePlaintext: true }),
+    { allowed: true, kind: 'ws' },
+  );
+  assert.deepEqual(
+    decideWorkerTransport({ secure: false, remoteAddress: '127.0.0.1', allowInsecurePlaintext: true }),
+    { allowed: true, kind: 'ws' },
+  );
+  assert.deepEqual(
+    decideWorkerTransport({ secure: true, remoteAddress: '10.1.2.3', allowInsecurePlaintext: true }),
+    { allowed: true, kind: 'wss' },
+  );
+});
+
 test('the Worker dials ws on loopback and wss off-loopback, and cannot be downgraded', () => {
   assert.equal(
     workerConnectionUrl({ host: '127.0.0.1', port: 5174, path: '/api/worker/connect' }),

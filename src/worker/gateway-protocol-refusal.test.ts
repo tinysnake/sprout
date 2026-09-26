@@ -51,8 +51,8 @@ interface Harness {
 }
 
 
-async function harness(): Promise<Harness> {
-  return harnessWithStore(new InMemoryEnrollmentStore());
+async function harness(allowInsecurePlaintext = false): Promise<Harness> {
+  return harnessWithStore(new InMemoryEnrollmentStore(), allowInsecurePlaintext);
 }
 
 
@@ -62,7 +62,10 @@ async function harness(): Promise<Harness> {
  * A gated store lets a test suspend the gateway's pre-epoch lifecycle re-read so
  * a revoke can be interleaved into an exact acceptance window deterministically.
  */
-async function harnessWithStore(enrollmentStore: InMemoryEnrollmentStore): Promise<Harness> {
+async function harnessWithStore(
+  enrollmentStore: InMemoryEnrollmentStore,
+  allowInsecurePlaintext = false,
+): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
@@ -70,7 +73,7 @@ async function harnessWithStore(enrollmentStore: InMemoryEnrollmentStore): Promi
     onAuthorityLost: (enrollmentId) => invalidateAuthority(enrollmentId),
     idFactory: () => 'enroll-1',
   });
-  const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });
+  const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000, allowInsecurePlaintext });
   let invalidateAuthority: (enrollmentId: string) => void = () => undefined;
   invalidateAuthority = (enrollmentId) => gateway.invalidateEnrollment(enrollmentId);
   const port_ = new EnrollmentWorkerPort({ gateway });
@@ -272,6 +275,23 @@ test('a real gateway refusal never echoes malformed protocol evidence to the str
     for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
       assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through an exposed surface: ${sentinel}`);
     }
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('an opted-in gateway completes the Worker handshake over WS', async () => {
+  const h = await harness(true);
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    const worker = await openRawWorker(h, key.path, '');
+    assert.equal(worker.frame.type, 'worker/accepted');
+    worker.write({ type: 'worker/ready' });
+    assert.equal((await worker.next()).type, 'worker/listening');
+    worker.close();
   } finally {
     key.cleanup();
     await h.close();
