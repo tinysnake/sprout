@@ -221,12 +221,12 @@ test('install-service is refused off macOS', async () => {
 
 test('endpoint parsing accepts only a public host/port authority', () => {
   assert.deepEqual(parseEndpoint('127.0.0.1:5174'), { host: '127.0.0.1', port: 5174 });
-  assert.deepEqual(parseEndpoint('wss://sprout.internal:8443'), { host: 'sprout.internal', port: 8443 });
+  assert.deepEqual(parseEndpoint('wss://sprout.internal:8443'), { host: 'sprout.internal', port: 8443, scheme: 'wss' });
   assert.deepEqual(parseEndpoint('sprout.invalid:80'), { host: 'sprout.invalid', port: 80 });
-  assert.deepEqual(parseEndpoint('http://sprout.invalid:80'), { host: 'sprout.invalid', port: 80 });
-  assert.deepEqual(parseEndpoint('https://sprout.invalid:443'), { host: 'sprout.invalid', port: 443 });
-  assert.deepEqual(parseEndpoint('ws://sprout.invalid:80'), { host: 'sprout.invalid', port: 80 });
-  assert.deepEqual(parseEndpoint('wss://sprout.invalid:443'), { host: 'sprout.invalid', port: 443 });
+  assert.deepEqual(parseEndpoint('http://sprout.invalid:80'), { host: 'sprout.invalid', port: 80, scheme: 'ws' });
+  assert.deepEqual(parseEndpoint('https://sprout.invalid:443'), { host: 'sprout.invalid', port: 443, scheme: 'wss' });
+  assert.deepEqual(parseEndpoint('ws://sprout.invalid:80'), { host: 'sprout.invalid', port: 80, scheme: 'ws' });
+  assert.deepEqual(parseEndpoint('wss://sprout.invalid:443'), { host: 'sprout.invalid', port: 443, scheme: 'wss' });
   assert.throws(() => parseEndpoint('127.0.0.1'), /port/);
   assert.throws(() => parseEndpoint('ftp://127.0.0.1:21'), /scheme/);
   for (const endpoint of [

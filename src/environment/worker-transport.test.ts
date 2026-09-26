@@ -48,7 +48,7 @@ test('plaintext on a non-loopback peer requires explicit opt-in', () => {
   );
 });
 
-test('the Worker dials ws on loopback and wss off-loopback, and cannot be downgraded', () => {
+test('the Worker defaults by host but preserves an explicitly requested scheme', () => {
   assert.equal(
     workerConnectionUrl({ host: '127.0.0.1', port: 5174, path: '/api/worker/connect' }),
     'ws://127.0.0.1:5174/api/worker/connect',
@@ -57,10 +57,10 @@ test('the Worker dials ws on loopback and wss off-loopback, and cannot be downgr
     workerConnectionUrl({ host: 'host.internal', port: 5174, path: '/api/worker/connect' }),
     'wss://host.internal:5174/api/worker/connect',
   );
-  // An explicit plaintext request to a non-loopback host is overridden, not obeyed.
+  // The core decides whether explicit non-loopback plaintext is acceptable.
   assert.equal(
     workerConnectionUrl({ host: 'host.internal', port: 5174, path: '/p', scheme: 'ws' }),
-    'wss://host.internal:5174/p',
+    'ws://host.internal:5174/p',
   );
   // An IPv6 literal is bracketed.
   assert.equal(

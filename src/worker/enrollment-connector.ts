@@ -149,7 +149,7 @@ export function workerPublicKey(privateKeyPem: string): string {
  */
 export function workerEnrollmentUrl(target: WorkerEnrollmentTarget): string {
   const loopback = isLoopbackAddress(target.host);
-  const scheme = loopback ? 'ws' : 'wss';
+  const scheme = target.scheme ?? (loopback ? 'ws' : 'wss');
   const host = target.host.includes(':') && !target.host.startsWith('[') ? `[${target.host}]` : target.host;
   return `${scheme}://${host}:${target.port}/api/worker/connect`;
 }

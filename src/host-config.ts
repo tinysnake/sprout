@@ -140,6 +140,8 @@ export interface WorkerEnrollmentTarget {
   /** The Sprout instance host to dial. */
   readonly host: string;
   readonly port: number;
+  /** Explicit operator-selected transport; omitted for legacy/bare host:port targets. */
+  readonly scheme?: 'ws' | 'wss';
   /** The one-use claim secret, read from the environment, never the command line. */
   readonly claimSecret: string | undefined;
   /** Where the host-local private key lives; the Core never reads this file. */
