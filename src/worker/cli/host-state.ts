@@ -41,9 +41,13 @@ import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import {
+  defaultPrivateFileSecurityDependencies,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
+  verifyWindowsPrivateFileAcl,
   writePrivateFile,
+  type PrivateFileRestriction,
+  type PrivateFileSecurityDependencies,
 } from '../host-files.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
@@ -143,9 +147,9 @@ export type WorkerProcessProbe = (pid: number) => WorkerProcessProbeResult;
 export class WorkerHostStateError extends Error {
   override readonly name = 'WorkerHostStateError';
   /** `not-enrolled` is distinct from `invalid` so the CLI can exit differently. */
-  readonly reason: 'not-enrolled' | 'invalid';
+  readonly reason: 'not-enrolled' | 'invalid' | 'restriction-unverifiable';
 
-  constructor(reason: 'not-enrolled' | 'invalid', message: string) {
+  constructor(reason: 'not-enrolled' | 'invalid' | 'restriction-unverifiable', message: string) {
     super(message);
     this.reason = reason;
   }
@@ -229,15 +233,31 @@ export function ensureStateDirectory(paths: WorkerHostPaths): void {
   chmodSync(paths.stateDirectory, PRIVATE_DIRECTORY_MODE);
 }
 
-/** Whether a file's mode grants no group or world access. */
-export function isRestrictive(filePath: string): boolean {
+/** Assess private-file permissions using the host platform's security model. */
+export function privateFileRestriction(
+  filePath: string,
+  exact = false,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): PrivateFileRestriction {
+  if (security.platform === 'win32') return verifyWindowsPrivateFileAcl(filePath, security);
   const mode = statSync(filePath).mode & 0o777;
-  return (mode & 0o077) === 0;
+  return (exact ? mode === PRIVATE_FILE_MODE : (mode & 0o077) === 0) ? 'restricted' : 'permissive';
+}
+
+/** Whether a file has no group/world access (or a private Windows ACL). */
+export function isRestrictive(
+  filePath: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): boolean {
+  return privateFileRestriction(filePath, false, security) === 'restricted';
 }
 
 /** Whether a private identity file has exactly the mode we create (0600). */
-export function hasExactPrivateFileMode(filePath: string): boolean {
-  return (statSync(filePath).mode & 0o777) === PRIVATE_FILE_MODE;
+export function hasExactPrivateFileMode(
+  filePath: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): boolean {
+  return privateFileRestriction(filePath, true, security) === 'restricted';
 }
 
 export { writePrivateFile };
@@ -270,7 +290,11 @@ export function readIdentityKey(paths: WorkerHostPaths): string {
   try {
     const stat = lstatSync(paths.identityPath);
     if (!stat.isFile()) throw new Error('not a regular file');
-    if ((stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+    const restriction = privateFileRestriction(paths.identityPath, true);
+    if (restriction === 'unverifiable') {
+      throw new WorkerHostStateError('restriction-unverifiable', 'the host-local Worker identity key restrictions could not be verified');
+    }
+    if (restriction !== 'restricted') {
       throw new Error('invalid permissions');
     }
     const privateKey = readFileSync(paths.identityPath, 'utf8');
@@ -307,7 +331,11 @@ export function readConfig(paths: WorkerHostPaths): WorkerHostConfig {
   if (!existsSync(paths.configPath)) {
     throw new WorkerHostStateError('not-enrolled', 'this host has no Sprout Worker enrollment');
   }
-  if (!isRestrictive(paths.configPath)) {
+  const restriction = privateFileRestriction(paths.configPath);
+  if (restriction === 'unverifiable') {
+    throw new WorkerHostStateError('restriction-unverifiable', 'the host-local Worker configuration restrictions could not be verified');
+  }
+  if (restriction !== 'restricted') {
     throw new WorkerHostStateError(
       'invalid',
       'the host-local Worker configuration is readable by other users; run reset and enroll again',

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, isEnrolled, isRestrictive, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
 
 
 /**
@@ -88,6 +88,55 @@ test('a group- or world-readable identity key is refused rather than trusted', (
   } finally {
     cleanup();
   }
+});
+
+test('private-file restriction check preserves POSIX mode semantics', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    writePrivateFile(paths.configPath, '{}');
+    const posix = { platform: 'linux', run: () => '' } as PrivateFileSecurityDependencies;
+    assert.equal(privateFileRestriction(paths.configPath, false, posix), 'restricted');
+    assert.equal(privateFileRestriction(paths.configPath, true, posix), 'restricted');
+    chmodSync(paths.configPath, 0o644);
+    assert.equal(privateFileRestriction(paths.configPath, false, posix), 'permissive');
+    assert.equal(privateFileRestriction(paths.configPath, true, posix), 'permissive');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Windows ACL writer invokes icacls and verifier allows only current user, Administrators, and SYSTEM', () => {
+  const commands: string[] = [];
+  const { paths, cleanup } = tempPaths();
+  const security: PrivateFileSecurityDependencies = {
+    platform: 'win32',
+    run: (program, args) => {
+      commands.push(`${program} ${args.join(' ')}`);
+      if (program === 'whoami') return 'EXAMPLE\\worker\n';
+      return 'EXAMPLE\\worker:(F)\nBUILTIN\\Administrators:(F)\nNT AUTHORITY\\SYSTEM:(F)\n';
+    },
+  };
+  try {
+    writePrivateFile(paths.configPath, '{}', security);
+    assert.deepEqual(commands.slice(0, 2), [
+      'whoami ',
+      `icacls ${paths.configPath} /inheritance:r /grant:r EXAMPLE\\worker:F`,
+    ]);
+    assert.equal(verifyWindowsPrivateFileAcl('synthetic-file', security), 'restricted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Windows ACL verifier refuses unknown principals and unverifiable output', () => {
+  const makeSecurity = (acl: string): PrivateFileSecurityDependencies => ({
+    platform: 'win32',
+    run: (program) => program === 'whoami' ? 'EXAMPLE\\worker\n' : acl,
+  });
+  assert.equal(verifyWindowsPrivateFileAcl('synthetic', makeSecurity('EXAMPLE\\worker:(F)\nEveryone:(R)\n')), 'permissive');
+  assert.equal(verifyWindowsPrivateFileAcl('synthetic', makeSecurity('')), 'unverifiable');
+  assert.equal(verifyWindowsPrivateFileAcl('synthetic', { platform: 'win32', run: () => { throw new Error('private output'); } }), 'unverifiable');
+  assert.equal(hasExactPrivateFileMode('does-not-exist', { platform: 'win32', run: () => '' }), false);
 });
 
 

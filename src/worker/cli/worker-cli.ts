@@ -248,7 +248,7 @@ export function projectStatus(input: {
   readonly paths: WorkerHostPaths;
   readonly enrolled: boolean;
   readonly config: WorkerHostConfig | undefined;
-  readonly configError: 'not-enrolled' | 'invalid' | undefined;
+  readonly configError: 'not-enrolled' | 'invalid' | 'restriction-unverifiable' | undefined;
   readonly runtime: WorkerRuntimeState | undefined;
   readonly processAlive: (pid: number) => boolean;
   readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean | 'unknown';
@@ -852,7 +852,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     const enrolled = isEnrolled(paths);
     let config: WorkerHostConfig | undefined;
-    let configError: 'not-enrolled' | 'invalid' | undefined;
+    let configError: 'not-enrolled' | 'invalid' | 'restriction-unverifiable' | undefined;
     if (!enrolled) {
       configError = 'not-enrolled';
     } else {
