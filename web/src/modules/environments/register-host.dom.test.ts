@@ -652,6 +652,96 @@ test('Privacy Boundary: production enrollment route imports no fixture authority
   assert.equal(command.includes('--private-transport'), false);
 });
 
+test('Ticket #147: closing a newly-created pending ceremony reloads the environment list', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, h } = await import('vue');
+    const { createMemoryHistory, createRouter } = await import('vue-router');
+    const { default: EnvironmentsView } = (await vite.ssrLoadModule(
+      '/src/modules/environments/views/EnvironmentsView.vue',
+    )) as { default: any };
+
+    const pending: any = {
+      id: 'enroll-close-refresh',
+      displayName: 'New pending host',
+      platform: 'macos',
+      enrollmentStatus: 'pending',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Pending worker claim',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible',
+      workSafety: 'clear',
+      capabilityPermissions: {},
+      engineReadiness: {},
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: Date.now(), expiresAt: Date.now() + 60000 },
+      decisions: [],
+    };
+    let listed = false;
+    let listCalls = 0;
+    const service = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: async () => { listCalls++; return listed ? [pending] : []; },
+      getEnvironment: async () => undefined,
+      getBootstrapCommand: () => 'sprout worker enroll token enroll-close-refresh',
+      requestEnrollment: async () => { listed = true; return { enrollment: pending, bootstrapCommand: 'sprout worker enroll token enroll-close-refresh', claimSecret: 'secret', claimExpiresAt: pending.claim.expiresAt }; },
+      regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async () => {},
+      approveEnrollment: async () => {},
+      triggerProbe: async () => ({} as any),
+      togglePermission: async () => {},
+      unbindWorkspace: async () => {},
+      reconcileEvidence: async () => {},
+      resumeRecovery: async () => {},
+      discardRecovery: async () => {},
+      forceRelease: async () => {},
+      archiveEnvironment: async () => {},
+      restoreEnvironment: async () => {},
+      unenrollEnvironment: async () => {},
+    };
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/app/manage/environments', name: 'environments', component: EnvironmentsView }],
+    });
+    await router.push('/app/manage/environments');
+    await router.isReady();
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+    const app = createApp({ render: () => h(EnvironmentsView, { service }) });
+    // Route composables and router links use the same router instance as the view.
+    app.use(router);
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 60));
+
+    (dom.window.document.getElementById('btn-register-host') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 40));
+    const nameInput = dom.window.document.getElementById('register-host-name') as HTMLInputElement;
+    nameInput.value = 'New pending host';
+    nameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    (dom.window.document.getElementById('btn-submit-registration') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(listCalls, 1, 'list was loaded on initial view mount');
+
+    const closeButton = [...dom.window.document.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('Close Dialog (Keep Pending)')) as HTMLButtonElement | undefined;
+    assert.ok(closeButton, 'pending ceremony can be closed while keeping the enrollment');
+    closeButton.click();
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(listCalls > 1, 'closing the ceremony reloads the environment list');
+    assert.match(container.textContent ?? '', /New pending host/, 'new pending enrollment appears without manual reload');
+
+    app.unmount();
+    container.remove();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('RegisterHostDialog: dialog width classes compose predictably on sm+ and mobile viewports', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
@@ -877,7 +967,7 @@ test('RegisterHostDialog: ceremony state resets completely across close and reop
   }
 });
 
-test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pending status across ceremony, detail, and list contexts', async () => {
+test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
     const { createApp, ref, h } = await import('vue');
@@ -1022,15 +1112,14 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
     assert.equal(await checkCeremonyCancelBtn(expiredEnv), false, 'ceremony: expired hides cancel button');
     assert.equal(await checkCeremonyCancelBtn(archivedEnv), false, 'ceremony: archived hides cancel button');
 
-    // 2. Detail context checks
-    assert.equal(await checkDetailCancelBtn(pendingEnv), true, 'detail: pending shows cancel button');
+    // The ceremony is the sole decision surface; list/detail must not duplicate its action.
+    assert.equal(await checkDetailCancelBtn(pendingEnv), false, 'detail: pending has no cancel button');
     assert.equal(await checkDetailCancelBtn(approvedEnv), false, 'detail: approved hides cancel button');
     assert.equal(await checkDetailCancelBtn(revokedEnv), false, 'detail: revoked hides cancel button');
     assert.equal(await checkDetailCancelBtn(expiredEnv), false, 'detail: expired hides cancel button');
     assert.equal(await checkDetailCancelBtn(archivedEnv), false, 'detail: archived hides cancel button');
 
-    // 3. Master-list context checks
-    assert.equal(await checkMasterCardCancelBtn(pendingEnv), true, 'master-list: pending shows cancel button');
+    assert.equal(await checkMasterCardCancelBtn(pendingEnv), false, 'master card: pending has no cancel button');
     assert.equal(await checkMasterCardCancelBtn(approvedEnv), false, 'master-list: approved hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(revokedEnv), false, 'master-list: revoked hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(expiredEnv), false, 'master-list: expired hides cancel button');
@@ -1040,7 +1129,7 @@ test('Ticket #141 (a): Cancel Pending Enrollment button is gated strictly on pen
   }
 });
 
-test('Ticket #141 (reactive expiry): pending cancel controls recompute reactively precisely when claim expiresAt passes without coarse interval lag', async () => {
+test('Ticket #147: detail and master card do not expose duplicate pending cancellation controls', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
     const { createApp, h } = await import('vue');
@@ -1052,8 +1141,6 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
     )) as { default: any };
 
     const now = Date.now();
-    // Claim expires precisely 70ms in the future
-    const expiresAt = now + 70;
     const expiringEnv = {
       id: 'env-expiring-clock-test',
       displayName: 'Expiring Host',
@@ -1072,7 +1159,7 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
       probeHistory: [],
       boundWorkspaces: [],
       identityDigest: '',
-      claim: { issuedAt: now - 5000, expiresAt },
+      claim: { issuedAt: now - 5000, expiresAt: now + 70 },
       decisions: [],
     };
 
@@ -1090,20 +1177,8 @@ test('Ticket #141 (reactive expiry): pending cancel controls recompute reactivel
     });
     appCard.mount(containerCard);
 
-    // Initial check (well before the 70ms expiry):
-    await new Promise((r) => setTimeout(r, 15));
-    assert.ok(Date.now() < expiresAt, 'test assertion runs before claim expiry');
-    assert.ok(containerDetail.querySelector('.cancel-enroll-btn'), 'detail shows cancel button before expiry');
-    assert.ok(containerCard.querySelector('.cancel-enroll-btn'), 'card shows cancel button before expiry');
-
-    // Wait past the 70ms expiry (~80ms additional, total elapsed ~95ms).
-    // Notice this is far below any 1000ms coarse interval:
-    await new Promise((r) => setTimeout(r, 80));
-    assert.ok(Date.now() >= expiresAt, 'test assertion runs immediately after claim expiry');
-
-    // The precise expiry timer fired at expiresAt and invalidated the computed gating immediately:
-    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail hides cancel button precisely at expiry');
-    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'card hides cancel button precisely at expiry');
+    assert.equal(containerDetail.querySelector('.cancel-enroll-btn'), null, 'detail never offers cancellation');
+    assert.equal(containerCard.querySelector('.cancel-enroll-btn'), null, 'master card never offers cancellation');
 
     appDetail.unmount();
     containerDetail.remove();

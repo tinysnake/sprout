@@ -18,7 +18,6 @@ withDefaults(
 const emit = defineEmits<{
   (e: 'select', id: string): void;
   (e: 'probe', id: string): void;
-  (e: 'cancelEnrollment', id: string): void;
 }>();
 </script>
 
@@ -33,7 +32,6 @@ const emit = defineEmits<{
       :can-control="canControl"
       @select="emit('select', $event)"
       @probe="emit('probe', $event)"
-      @cancel-enrollment="emit('cancelEnrollment', $event)"
     />
 
     <EmptyState
