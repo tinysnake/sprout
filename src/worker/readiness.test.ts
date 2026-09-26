@@ -7,6 +7,7 @@ import { WorkerClient, WorkerReadinessClient } from './client.ts';
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
   probeEnvironmentReadiness,
+  requiresWindowsShell,
   piAuthCheckArgs,
   parseSemver,
   isAtLeastVersion,
@@ -20,6 +21,14 @@ const configurations: readonly EngineConfiguration[] = [
   { engine: 'codex', binaryPath: '/synthetic/codex', args: [], sandbox: 'read-only' },
   { engine: 'pi', binaryPath: '/synthetic/pi', sessionDirectory: '/synthetic/sessions' },
 ];
+
+test('only Windows command-script shims require the shell readiness path', () => {
+  assert.equal(requiresWindowsShell('C:/npm/pi.cmd', 'win32'), true);
+  assert.equal(requiresWindowsShell('C:/npm/pi.BAT', 'win32'), true);
+  assert.equal(requiresWindowsShell('C:/npm/codex.exe', 'win32'), false);
+  assert.equal(requiresWindowsShell('/usr/local/bin/pi', 'linux'), false);
+  assert.equal(requiresWindowsShell('/usr/local/bin/pi.cmd', 'darwin'), false);
+});
 
 test('Codex and Pi readiness use only the #114 non-inference contract and keep model entitlement unknown', async () => {
   const calls: { readonly binary: string; readonly args: readonly string[] }[] = [];

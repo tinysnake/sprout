@@ -42,8 +42,11 @@ const defaultCommandRunner: ReadinessCommandRunner = {
     return defaultRun(binary, args, options);
   },
   async accountRead(binary, options) {
-    const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
+    const args = ['app-server', '--listen', 'stdio://'];
+    const useShell = requiresWindowsShell(binary);
+    const child = spawn(binary, useShell ? windowsShellArgs(args) : args, {
       stdio: ['pipe', 'pipe', 'ignore'],
+      ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       windowsHide: true,
     });
@@ -87,7 +90,9 @@ async function defaultRun(
   options?: { readonly env?: NodeJS.ProcessEnv },
 ): Promise<{ readonly stdout: string; readonly exitCode: number }> {
   try {
-    const result = await execFileAsync(binary, [...args], {
+    const useShell = requiresWindowsShell(binary);
+    const result = await execFileAsync(binary, useShell ? windowsShellArgs(args) : [...args], {
+      ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
@@ -102,6 +107,21 @@ async function defaultRun(
         : failure.code === 'ENOENT' ? 127 : 1,
     };
   }
+}
+
+/** npm's Windows `.cmd`/`.bat` shims require cmd.exe; native executables do not. */
+export function requiresWindowsShell(binary: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' && /\.(?:cmd|bat)$/i.test(binary);
+}
+
+/**
+ * shell:true joins argv for cmd.exe without quoting it. Match spawnPi's quoting
+ * convention for arguments that cmd.exe would otherwise split. These calls
+ * use the fixed readiness argument sets (including the fixed Pi provider), not
+ * arbitrary user input, so shell metacharacter injection is not a concern.
+ */
+function windowsShellArgs(args: readonly string[]): string[] {
+  return args.map((arg) => (/^[A-Za-z0-9_.:/=-]+$/.test(arg) ? arg : `"${arg.replaceAll('"', '\\"')}"`));
 }
 
 function commandOptions(env: NodeJS.ProcessEnv | undefined): { readonly env?: NodeJS.ProcessEnv } {
