@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 
-import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 
 import { tmpdir } from 'node:os';
 
@@ -69,6 +69,22 @@ test('state and configuration files are owner-only and the directory is restrict
     assert.equal(statSync(paths.identityPath).mode & 0o777, 0o600, 'identity key is 0600');
     assert.ok(isRestrictive(paths.configPath));
     assert.ok(isRestrictive(paths.identityPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test('worker config round-trips explicit schemes and accepts legacy endpoints without one', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const explicit = config({ endpoint: { host: 'sprout.invalid', port: 443, scheme: 'wss' } });
+    writeConfig(paths, explicit);
+    assert.deepEqual(readConfig(paths), explicit);
+
+    writeFileSync(paths.configPath, JSON.stringify({ ...config(), endpoint: { host: '127.0.0.1', port: 5174 } }));
+    chmodSync(paths.configPath, 0o600);
+    assert.deepEqual(readConfig(paths).endpoint, { host: '127.0.0.1', port: 5174 });
   } finally {
     cleanup();
   }

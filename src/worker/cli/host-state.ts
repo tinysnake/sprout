@@ -73,7 +73,7 @@ export interface WorkerHostConfig {
   readonly enrollmentId: string;
   readonly environmentInstanceId: string;
   readonly protocolVersion: string;
-  readonly endpoint: { readonly host: string; readonly port: number };
+  readonly endpoint: { readonly host: string; readonly port: number; readonly scheme?: 'ws' | 'wss' };
   /** The private key file name, resolved relative to the state directory. */
   readonly identityFileName: string;
 }
@@ -347,6 +347,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
   const endpoint = record['endpoint'];
   const host = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['host'] : undefined;
   const port = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['port'] : undefined;
+  const scheme = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['scheme'] : undefined;
   const enrollmentId = record['enrollmentId'];
   const environmentInstanceId = record['environmentInstanceId'];
   const protocolVersion = record['protocolVersion'];
@@ -364,6 +365,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65_535 ||
+    (scheme !== undefined && scheme !== 'ws' && scheme !== 'wss') ||
     typeof identityFileName !== 'string' ||
     identityFileName !== WORKER_IDENTITY_FILE
   ) {
@@ -374,7 +376,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
     enrollmentId,
     environmentInstanceId,
     protocolVersion,
-    endpoint: { host, port },
+    endpoint: { host, port, ...(scheme !== undefined ? { scheme } : {}) },
     identityFileName,
   };
 }

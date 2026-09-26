@@ -65,8 +65,8 @@ export function decideWorkerTransport(facts: WorkerTransportFacts): WorkerTransp
  * The URL a Worker should dial for one target host.
  *
  * The Worker is the connection initiator, so it chooses the scheme: `wss` for a
- * non-loopback host, `ws` for loopback. A caller that explicitly requests a
- * scheme still cannot force plaintext to a non-loopback host: the rule wins.
+ * non-loopback host, `ws` for loopback. Explicit operator intent is preserved;
+ * the core enforces whether the resulting transport is allowed.
  */
 export function workerConnectionUrl(input: {
   readonly host: string;
@@ -76,11 +76,8 @@ export function workerConnectionUrl(input: {
   readonly scheme?: WorkerTransportKind;
 }): string {
   const loopback = isLoopbackAddress(input.host);
-  const scheme: WorkerTransportKind = loopback ? (input.scheme ?? 'ws') : 'wss';
-  // A loopback target may never be forced to `wss` if the operator asked for
-  // plaintext, but a non-loopback target may never be forced to `ws`.
-  const effective = !loopback && input.scheme === 'ws' ? 'wss' : scheme;
-  return `${effective}://${formatHost(input.host)}:${input.port}${input.path}`;
+  const scheme: WorkerTransportKind = input.scheme ?? (loopback ? 'ws' : 'wss');
+  return `${scheme}://${formatHost(input.host)}:${input.port}${input.path}`;
 }
 
 function formatHost(host: string): string {

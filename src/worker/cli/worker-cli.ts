@@ -316,7 +316,7 @@ export function projectStatus(input: {
  * accepted. The endpoint never carries a secret, so it is safe in argv; the
  * one-use claim secret deliberately has no argument form.
  */
-export function parseEndpoint(value: string): { readonly host: string; readonly port: number } {
+export function parseEndpoint(value: string): { readonly host: string; readonly port: number; readonly scheme?: 'ws' | 'wss' } {
   const schemeMatch = value.match(/^([a-z][a-z0-9+.-]*):\/\//i);
   const scheme = schemeMatch?.[1]?.toLowerCase();
   if (scheme !== undefined && !['ws', 'wss', 'http', 'https'].includes(scheme)) {
@@ -353,7 +353,12 @@ export function parseEndpoint(value: string): { readonly host: string; readonly 
   if (url.hostname === '') {
     throw new WorkerHostStateError('invalid', 'the endpoint must include a host and an explicit port');
   }
-  return { host: url.hostname, port };
+  const websocketScheme = scheme === 'http' ? 'ws' : scheme === 'https' ? 'wss' : scheme;
+  return {
+    host: url.hostname,
+    port,
+    ...(websocketScheme !== undefined ? { scheme: websocketScheme as 'ws' | 'wss' } : {}),
+  };
 }
 
 /** The engine facts the Worker declares to the core on enrollment. */
@@ -605,7 +610,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     const endpointArg = args[0] ?? '';
     const enrollmentId = args[1] ?? '';
-    let endpoint: { host: string; port: number };
+    let endpoint: ReturnType<typeof parseEndpoint>;
     try {
       endpoint = parseEndpoint(endpointArg);
     } catch (error) {
@@ -752,6 +757,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         connection = await connect({
           host: config.endpoint.host,
           port: config.endpoint.port,
+          ...(config.endpoint.scheme !== undefined ? { scheme: config.endpoint.scheme } : {}),
           enrollmentId: config.enrollmentId,
           claimSecret: undefined,
           identityKeyPath: identityPath,
