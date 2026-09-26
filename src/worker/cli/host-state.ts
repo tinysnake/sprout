@@ -821,14 +821,36 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Flush one directory entry update before calling the transition durable. */
-function syncDirectory(directory: string): void {
-  const descriptor = openSync(directory, 'r');
-  try {
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
+export interface DirectorySyncDependencies {
+  readonly platform: NodeJS.Platform;
+  readonly run: (directory: string) => void;
+}
+
+const defaultDirectorySyncDependencies: DirectorySyncDependencies = {
+  platform: process.platform,
+  run: (directory) => {
+    const descriptor = openSync(directory, 'r');
+    try {
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+  },
+};
+
+/**
+ * Flush one directory entry update before calling the transition durable.
+ * Windows does not support fsync on directory handles (it fails with EPERM).
+ * NTFS metadata journaling provides the corresponding metadata ordering, while
+ * the lock protocol's staged-pending-then-rename marker remains its recovery
+ * evidence if a start is interrupted.
+ */
+export function syncDirectory(
+  directory: string,
+  dependencies: DirectorySyncDependencies = defaultDirectorySyncDependencies,
+): void {
+  if (dependencies.platform === 'win32') return;
+  dependencies.run(directory);
 }
 
 /**

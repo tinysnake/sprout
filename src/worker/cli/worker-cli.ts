@@ -149,6 +149,7 @@ export type EnrollmentConnector = (input: {
   readonly enrollmentId: string;
   readonly claimSecret: string | undefined;
   readonly identityKeyPath: string;
+  readonly scheme?: 'ws' | 'wss';
   readonly engineFacts: readonly {
     readonly engine: string;
     readonly installed: boolean;
@@ -523,6 +524,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           port: input.port,
           claimSecret: input.claimSecret,
           identityKeyPath: input.identityKeyPath,
+          ...(input.scheme !== undefined ? { scheme: input.scheme } : {}),
         },
         protocolVersion: WORKER_PROTOCOL_VERSION,
         engineFacts: input.engineFacts,
@@ -681,7 +683,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         removeFileIfPresent(paths.identityPath);
         removeFileIfPresent(paths.configPath);
       }
-      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')}`);
+      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')} :: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`); // DEBUG-E8
       return error instanceof WorkerEnrollmentRefusedError ? WORKER_EXIT.refused : WORKER_EXIT.failure;
     }
   }
