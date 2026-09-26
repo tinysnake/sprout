@@ -70,6 +70,13 @@ const settings: readonly Setting[] = [
     parsed: 41010,
   },
   {
+    variable: 'SPROUT_BIND_HOST',
+    read: (c) => c.bindHost,
+    missing: '127.0.0.1',
+    present: { SPROUT_BIND_HOST: '0.0.0.0' },
+    parsed: '0.0.0.0',
+  },
+  {
     variable: 'SPROUT_ENV_INSTANCE',
     read: (c) => c.environmentInstanceId,
     missing: 'local-macos',
@@ -207,6 +214,7 @@ test('an empty host environment takes exactly the documented defaults', () => {
     databasePath: join(projectRoot, 'sprout.db'),
     workingDirectory: projectRoot,
     port: 5174,
+    bindHost: '127.0.0.1',
     environmentInstanceId: 'local-macos',
     engineId: 'codex',
     runtimeConfiguration: {},
@@ -277,6 +285,16 @@ test('an unparseable numeric host setting stays NaN rather than becoming a new e
 
 test('an empty numeric host setting keeps the runtime conversion it had before', () => {
   assert.equal(parseWith({ SPROUT_PORT: '' }).port, 0);
+});
+
+test('invalid bind hosts are refused with a clear configuration error', () => {
+  for (const bindHost of ['', 'http://x', 'a b', 'host/path']) {
+    assert.throws(
+      () => parseWith({ SPROUT_BIND_HOST: bindHost }),
+      /SPROUT_BIND_HOST must be a non-empty host address without whitespace or URL components/,
+      `expected ${JSON.stringify(bindHost)} to be rejected`,
+    );
+  }
 });
 
 test('an invalid runtime JSON channel keeps its existing startup error', () => {  assert.throws(

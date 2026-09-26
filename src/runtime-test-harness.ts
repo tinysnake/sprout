@@ -157,6 +157,7 @@ export function hostConfiguration(overrides: Partial<HostConfiguration> = {}): H
     databasePath: ':memory:',
     workingDirectory: '/synthetic/work',
     port: 0,
+    bindHost: '127.0.0.1',
     environmentInstanceId: INSTANCE_ID,
     engineId: 'scripted',
     runtimeConfiguration: {

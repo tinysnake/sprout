@@ -68,6 +68,19 @@ test('the complete runtime graph is constructible over in-memory collaborators a
   assert.equal(stores.closes(), 1);
 });
 
+test('the configured bind host is honored by the Web listener', async () => {
+  const configuration = hostConfiguration({ bindHost: '0.0.0.0' });
+  const { runtime } = await build({ configuration, listen: false });
+  try {
+    await runtime.api.listen(configuration.port, configuration.bindHost);
+    const address = runtime.api.server.address();
+    assert.ok(address && typeof address !== 'string');
+    assert.equal(address.address, '0.0.0.0');
+  } finally {
+    await runtime.close();
+  }
+});
+
 test('reconciliation settles orphaned runs first and is idempotent across a clean restart', async () => {
   const { runtime } = await build({ turns: [scriptedTurn('first')] });
 
