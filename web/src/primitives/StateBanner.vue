@@ -81,7 +81,7 @@ const bannerStyles = computed(() => {
 
     <div
       v-if="protocolMismatchDetail"
-      class="mt-0.5 p-2 rounded-[var(--radius-xs)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] text-[var(--red-action)] font-medium"
+      class="protocol-mismatch-guidance mt-0.5 p-2 rounded-[var(--radius-xs)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] text-[var(--red-action)] font-medium"
     >
       <strong>Version Mismatch Guidance:</strong> {{ protocolMismatchDetail }}
     </div>

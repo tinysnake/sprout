@@ -792,6 +792,9 @@ test('Ticket #150 rework: background refresh keeps a complete selected snapshot 
       engineReadiness: {}, probeHistory: [], boundWorkspaces: [], identityDigest: '', decisions: [],
     });
     const before = row('Stable host', 'All readiness facts are current and verified.');
+    before.protocolMismatchDetail = 'The prior protocol guidance remains visible during refresh.';
+    // Model the transient replacement frame: the selected environment has
+    // arrived, but its optional protocol-facts subsection has not settled yet.
     const after = row('Updated host', 'Updated facts are now available.');
     let listCalls = 0;
     let releaseRefresh!: (rows: any[]) => void;
@@ -838,7 +841,11 @@ test('Ticket #150 rework: background refresh keeps a complete selected snapshot 
     ]);
     dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
       const box = boxes.get(this);
-      return box ? ({ ...box, x: 0, width: 500, top: box.y, left: 0, right: 500, bottom: box.y + box.height, toJSON: () => ({}) } as DOMRect) : originalRect.call(this);
+      if (!box) return originalRect.call(this);
+      const detailGuidanceMissing = this === detailCard && !container.querySelector('.protocol-mismatch-guidance');
+      const y = box.y + (detailGuidanceMissing ? 29.5 : 0);
+      const height = box.height - (detailGuidanceMissing ? 29.5 : 0);
+      return ({ ...box, y, height, x: 0, width: 500, top: y, left: 0, right: 500, bottom: y + height, toJSON: () => ({}) } as DOMRect);
     };
     const initialGeometry = [geometry(list), geometry(detailColumn), geometry(detailCard)];
     (dom.window.document.getElementById('btn-register-host') as HTMLButtonElement).click();
@@ -852,16 +859,33 @@ test('Ticket #150 rework: background refresh keeps a complete selected snapshot 
     assert.equal(container.querySelector('.envs-master-column'), list, 'master list remains mounted');
     assert.equal(container.querySelector('.env-detail-card'), detailCard, 'selected detail remains mounted');
     assert.match(container.textContent ?? '', /Stable host/);
+    assert.ok(container.querySelector('.protocol-mismatch-guidance'), 'protocol-mismatch guidance is present before refresh');
     assert.doesNotMatch(container.textContent ?? '', /Updated host/);
     assert.deepEqual([geometry(list), geometry(detailColumn), geometry(detailCard)], initialGeometry,
       'list y and detail y/height stay constant while refresh is pending');
 
     releaseRefresh([after]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const detailSections = [
+      '.env-traffic-light-banner', '.health-dimensions-box', '.engine-readiness-box',
+      '.bound-workspaces-list', '.env-operations-toolbar', '.probe-history-stream',
+      '.protocol-mismatch-guidance',
+    ];
+    for (const selector of detailSections) {
+      assert.ok(container.querySelector(selector), `detail section ${selector} remains mounted during replacement`);
+    }
+    assert.deepEqual([geometry(list), geometry(detailColumn), geometry(detailCard)], initialGeometry,
+      'detail y and height do not pass through the shorter subsection-missing frame');
+    assert.match(container.textContent ?? '', /The prior protocol guidance remains visible during refresh\./,
+      'the previous subsection content is retained until replacement facts settle');
+    (after as any).protocolMismatchDetail = 'Updated protocol guidance is available.';
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(container.querySelector('.envs-master-column'), list, 'snapshot replaces row data in place');
     assert.equal(container.querySelector('.envs-detail-column'), detailColumn,
       `detail column remains mounted; rendered state: ${(container.textContent ?? '').slice(-400)}`);
     assert.match(container.textContent ?? '', /Updated host/);
+    assert.match(container.textContent ?? '', /Updated protocol guidance is available\./,
+      'settled facts replace the retained subsection content');
     assert.doesNotMatch(container.textContent ?? '', /Stable host/);
     assert.deepEqual([geometry(list), geometry(detailColumn), geometry(container.querySelector('.env-detail-card')!)], initialGeometry,
       'summary text update preserves list/detail geometry');
