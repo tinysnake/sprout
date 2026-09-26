@@ -273,16 +273,30 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     const cmdText = cmdEl.textContent ?? '';
     assert.match(cmdText, /^sprout worker enroll \S+ enroll-mac-1$/);
 
+    // The command scrolls as one unbroken line, with the copy action in normal
+    // flex flow below it on mobile and aligned to the right on sm+.
+    assert.ok(cmdEl.classList.contains('overflow-x-auto'));
+    assert.ok(cmdEl.classList.contains('whitespace-pre'));
+    assert.equal(cmdEl.classList.contains('break-all'), false);
+    const commandLayout = cmdEl.parentElement;
+    assert.ok(commandLayout?.classList.contains('flex-col'));
+    const copyCmdBtn = doc.getElementById('btn-copy-command') as HTMLButtonElement;
+    assert.ok(copyCmdBtn, 'Copy command button found');
+    assert.equal(copyCmdBtn.parentElement, commandLayout);
+    assert.equal(copyCmdBtn.classList.contains('absolute'), false);
+    assert.ok(copyCmdBtn.classList.contains('w-full'));
+    assert.ok(copyCmdBtn.classList.contains('sm:w-auto'));
+    assert.ok(copyCmdBtn.classList.contains('sm:self-end'));
+
     // CRITICAL: Secret is NEVER embedded in command text
     assert.equal(cmdText.includes('claim-secret'), false, 'Secret must never appear in command text');
 
     // Test Copy Command button
-    const copyCmdBtn = doc.getElementById('btn-copy-command') as HTMLButtonElement;
-    assert.ok(copyCmdBtn, 'Copy command button found');
     clipboardContent = '';
     copyCmdBtn.click();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(clipboardContent, cmdText);
+    assert.equal(copyCmdBtn.textContent?.trim(), 'Copied!', 'Copied feedback is shown after copying');
 
     // 4. One-Use Secret is visually and semantically separate
     const secretEl = doc.getElementById('claim-secret-value');
