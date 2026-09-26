@@ -15,7 +15,61 @@
  */
 
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname } from 'node:path';
+
+export interface PrivateFileSecurityDependencies {
+  readonly platform: NodeJS.Platform;
+  readonly run: (program: string, args: readonly string[]) => string;
+}
+
+export const defaultPrivateFileSecurityDependencies: PrivateFileSecurityDependencies = {
+  platform: process.platform,
+  run: (program, args) => execFileSync(program, [...args], { encoding: 'utf8', windowsHide: true }),
+};
+
+/** Apply an explicit, non-inheriting ACL to a private file on Windows. */
+export function applyWindowsPrivateFileAcl(
+  filePath: string,
+  dependencies: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): void {
+  try {
+    const currentUser = dependencies.run('whoami', []).trim();
+    if (!currentUser || /[\r\n]/.test(currentUser)) throw new Error('unavailable');
+    dependencies.run('icacls', [filePath, '/inheritance:r', '/grant:r', `${currentUser}:F`]);
+  } catch {
+    // Do not leak the path, user name, or child-process output.
+    throw new Error('could not apply the required host-local file restrictions');
+  }
+}
+
+export type PrivateFileRestriction = 'restricted' | 'permissive' | 'unverifiable';
+
+/** Verify the Windows ACL conservatively; unknown principals or output fail closed. */
+export function verifyWindowsPrivateFileAcl(
+  filePath: string,
+  dependencies: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): PrivateFileRestriction {
+  try {
+    const currentUser = dependencies.run('whoami', []).trim().toLocaleLowerCase('en-US');
+    const output = dependencies.run('icacls', [filePath]).replace(/\r/g, '');
+    if (!currentUser || /\n/.test(currentUser) || !output.trim()) return 'unverifiable';
+    const allowed = new Set([currentUser, 'builtin\\administrators', 'nt authority\\system']);
+    const entries: string[] = [];
+    for (const line of output.split('\n')) {
+      if (!line.includes(':(')) continue;
+      const match = line.match(/^\s*(.+?):((?:\([A-Za-z,]+\))+?)\s*$/);
+      if (!match) return 'unverifiable';
+      const permissions = match[2]!;
+      if (/\(I\)/i.test(permissions)) return 'permissive';
+      entries.push(match[1]!.trim().toLocaleLowerCase('en-US'));
+    }
+    if (entries.length === 0) return 'unverifiable';
+    return entries.includes(currentUser) && entries.every((principal) => allowed.has(principal)) ? 'restricted' : 'permissive';
+  } catch {
+    return 'unverifiable';
+  }
+}
 
 /** Owner-only permissions for a file that holds identity or configuration. */
 export const PRIVATE_FILE_MODE = 0o600;
@@ -31,7 +85,11 @@ export const PRIVATE_DIRECTORY_MODE = 0o700;
  * temporary file is created with the restrictive mode and the final path is
  * chmodded after the rename so a pre-existing permissive target is corrected.
  */
-export function writePrivateFile(filePath: string, content: string): void {
+export function writePrivateFile(
+  filePath: string,
+  content: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): void {
   mkdirSync(dirname(filePath), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   chmodSync(dirname(filePath), PRIVATE_DIRECTORY_MODE);
   const staged = `${filePath}.${process.pid}.${Date.now().toString(36)}.tmp`;
@@ -45,6 +103,7 @@ export function writePrivateFile(filePath: string, content: string): void {
   chmodSync(staged, PRIVATE_FILE_MODE);
   renameSync(staged, filePath);
   chmodSync(filePath, PRIVATE_FILE_MODE);
+  if (security.platform === 'win32') applyWindowsPrivateFileAcl(filePath, security);
   // Persist the directory entry too: a successful rename alone does not survive
   // every power loss on POSIX filesystems.
   if (process.platform !== 'win32') {
