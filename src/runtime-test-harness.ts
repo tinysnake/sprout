@@ -158,6 +158,7 @@ export function hostConfiguration(overrides: Partial<HostConfiguration> = {}): H
     workingDirectory: '/synthetic/work',
     port: 0,
     bindHost: '127.0.0.1',
+    allowInsecureWorkerConnections: false,
     environmentInstanceId: INSTANCE_ID,
     engineId: 'scripted',
     runtimeConfiguration: {

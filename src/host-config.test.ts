@@ -77,6 +77,13 @@ const settings: readonly Setting[] = [
     parsed: '0.0.0.0',
   },
   {
+    variable: 'SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS',
+    read: (c) => c.allowInsecureWorkerConnections,
+    missing: false,
+    present: { SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: 'true' },
+    parsed: true,
+  },
+  {
     variable: 'SPROUT_ENV_INSTANCE',
     read: (c) => c.environmentInstanceId,
     missing: 'local-macos',
@@ -215,6 +222,7 @@ test('an empty host environment takes exactly the documented defaults', () => {
     workingDirectory: projectRoot,
     port: 5174,
     bindHost: '127.0.0.1',
+    allowInsecureWorkerConnections: false,
     environmentInstanceId: 'local-macos',
     engineId: 'codex',
     runtimeConfiguration: {},
@@ -495,6 +503,16 @@ test('the parsed worker configuration exposes no unrelated host key', () => {
   const configuration = parseWorker({ UNRELATED_HOST_FACT: 'not-sprout', SPROUT_UNKNOWN_SETTING: 'ignored' });
   assert.equal('UNRELATED_HOST_FACT' in configuration, false);
   assert.equal('SPROUT_UNKNOWN_SETTING' in configuration, false);
+});
+
+test('plaintext Worker transport opt-in accepts only strict true/false values', () => {
+  assert.equal(parseWith({ SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: 'false' }).allowInsecureWorkerConnections, false);
+  for (const value of ['TRUE', 'yes', '1', '']) {
+    assert.throws(
+      () => parseWith({ SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: value }),
+      /SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS must be "true" or "false"/,
+    );
+  }
 });
 
 /**
