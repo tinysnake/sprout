@@ -32,7 +32,6 @@ import {
   readFileSync,
   renameSync,
   rmdirSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -44,9 +43,8 @@ import {
   defaultPrivateFileSecurityDependencies,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
-  verifyWindowsPrivateFileAcl,
+  privateFileRestriction,
   writePrivateFile,
-  type PrivateFileRestriction,
   type PrivateFileSecurityDependencies,
 } from '../host-files.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
@@ -59,6 +57,7 @@ export const WORKER_SERVICE_LABEL_PREFIX = 'dev.sprout.worker';
 export const WORKER_IDENTITY_FILE = 'identity.pem';
 
 export { PRIVATE_FILE_MODE, PRIVATE_DIRECTORY_MODE };
+export { privateFileRestriction };
 
 /**
  * The connection facts the Worker persists to reconnect.
@@ -231,17 +230,6 @@ export function ensureStateDirectory(paths: WorkerHostPaths): void {
   // `mkdir` respects the mode only on creation; an existing directory is left as
   // the operator made it, so tighten it explicitly.
   chmodSync(paths.stateDirectory, PRIVATE_DIRECTORY_MODE);
-}
-
-/** Assess private-file permissions using the host platform's security model. */
-export function privateFileRestriction(
-  filePath: string,
-  exact = false,
-  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
-): PrivateFileRestriction {
-  if (security.platform === 'win32') return verifyWindowsPrivateFileAcl(filePath, security);
-  const mode = statSync(filePath).mode & 0o777;
-  return (exact ? mode === PRIVATE_FILE_MODE : (mode & 0o077) === 0) ? 'restricted' : 'permissive';
 }
 
 /** Whether a file has no group/world access (or a private Windows ACL). */
@@ -1193,7 +1181,7 @@ export function removeHostState(paths: WorkerHostPaths, options: { readonly pres
       if (!stat.isFile()) {
         throw new WorkerHostStateError('invalid', 'the host-local Worker state contains an unsafe non-file entry');
       }
-      return [{ filePath, content: readFileSync(filePath), mode: stat.mode & 0o777 }];
+      return [{ filePath, content: readFileSync(filePath), mode: stat.mode % 0o1000 }];
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;

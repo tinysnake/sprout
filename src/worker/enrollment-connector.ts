@@ -25,7 +25,7 @@ import type { Duplex } from 'node:stream';
 import { generateWorkerIdentity, signWorkerChallenge, validateWorkerIdentityPrivateKey } from '../environment/worker-proof.ts';
 import { isLoopbackAddress } from '../environment/worker-transport.ts';
 import type { WorkerEnrollmentTarget } from '../host-config.ts';
-import { PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
+import { defaultPrivateFileSecurityDependencies, privateFileRestriction, writePrivateFile, type PrivateFileSecurityDependencies } from './host-files.ts';
 import {
   encodeGatewayFrame,
   type WorkerGatewayClientFrame,
@@ -104,14 +104,17 @@ export class WorkerEnrollmentPendingError extends Error {
  * identity and orphan the approved enrollment. Only an absent file generates a
  * new identity; every other read failure is propagated.
  */
-export function loadOrCreateWorkerIdentity(keyPath: string): {
+export function loadOrCreateWorkerIdentity(
+  keyPath: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): {
   readonly privateKey: string;
   readonly generated: boolean;
 } {
   let privateKey: string;
   try {
     const stat = lstatSync(keyPath);
-    if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+    if (!stat.isFile() || privateFileRestriction(keyPath, true, security) !== 'restricted') {
       throw new Error('the host-local Worker identity key has invalid permissions');
     }
     privateKey = readFileSync(keyPath, 'utf8');
@@ -120,7 +123,7 @@ export function loadOrCreateWorkerIdentity(keyPath: string): {
       const generated = generateWorkerIdentity();
       // Owner-only, staged and renamed, so a key is never readable by other users
       // and is never observed half-written (#117).
-      writePrivateFile(keyPath, generated.privateKey);
+      writePrivateFile(keyPath, generated.privateKey, security);
       return { privateKey: generated.privateKey, generated: true };
     }
     if (error instanceof Error && error.message.startsWith('the host-local')) throw error;

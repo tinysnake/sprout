@@ -3,7 +3,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { AgentRunEvent, EngineTurnResult } from '../engine/port.ts';
-import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, writePrivateFile } from './host-files.ts';
+import { defaultPrivateFileSecurityDependencies, PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, privateFileRestriction, writePrivateFile, type PrivateFileSecurityDependencies } from './host-files.ts';
 
 export interface JournalTurn {
   readonly sessionId: string;
@@ -54,10 +54,10 @@ function withJournalLock<T>(path: string, work: () => T): T {
   }
 }
 
-function readJournal(path: string): JournalSnapshot | undefined {
+function readJournal(path: string, security: PrivateFileSecurityDependencies): JournalSnapshot | undefined {
   try {
     const stat = lstatSync(path);
-    if (!stat.isFile() || (stat.mode & 0o777) !== PRIVATE_FILE_MODE || stat.size > MAX_BYTES) {
+    if (!stat.isFile() || privateFileRestriction(path, true, security) !== 'restricted' || stat.size > MAX_BYTES) {
       throw new Error('invalid recovery journal');
     }
     const previous = JSON.parse(readFileSync(path, 'utf8')) as JournalSnapshot;
@@ -75,17 +75,19 @@ function readJournal(path: string): JournalSnapshot | undefined {
 /** A corrupt, overlarge or inaccessible journal is an error, never an empty outbox. */
 export class WorkerRecoveryJournal {
   readonly #path: string;
+  readonly #security: PrivateFileSecurityDependencies;
   readonly #inheritedUnfenced: boolean;
   #state: JournalSnapshot;
 
-  constructor(path: string, epoch: number) {
+  constructor(path: string, epoch: number, security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies) {
     if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error('invalid recovery journal epoch');
     this.#path = path;
+    this.#security = security;
     const previous = withJournalLock(path, () => {
-      const prior = readJournal(path);
+      const prior = readJournal(path, security);
       const state: JournalSnapshot = { epoch, turns: prior?.turns ?? [],
         engineStopped: prior?.engineStopped ?? true, taskContexts: prior?.taskContexts ?? {} };
-      this.#writeLocked(state);
+      this.#writeLocked(state, security);
       return prior;
     });
     // A process death cannot prove its child was fenced. Do not clear this bit
@@ -98,12 +100,12 @@ export class WorkerRecoveryJournal {
   snapshot(): JournalSnapshot { return structuredClone(this.#state); }
 
   #save(state: JournalSnapshot): void {
-    withJournalLock(this.#path, () => this.#writeLocked(state));
+    withJournalLock(this.#path, () => this.#writeLocked(state, this.#security));
     this.#state = state;
   }
 
   /** Called only while holding the same exclusive lock as journal construction. */
-  #writeLocked(state: JournalSnapshot): void {
+  #writeLocked(state: JournalSnapshot, security: PrivateFileSecurityDependencies): void {
     const bytes = JSON.stringify(state);
     if (Buffer.byteLength(bytes) > MAX_BYTES || state.turns.length > MAX_TURNS) {
       throw new Error('recovery journal capacity exceeded; refusing unrecorded work');
@@ -111,9 +113,9 @@ export class WorkerRecoveryJournal {
     // A superseded Worker may still be unwinding an engine or context action
     // after its channel closes. Never allow it to replace a newer epoch's
     // journal or launder its stale facts into a subsequent reconnect.
-    const disk = readJournal(this.#path);
+    const disk = readJournal(this.#path, security);
     if (disk !== undefined && disk.epoch > state.epoch) throw new Error('stale recovery journal epoch');
-    writePrivateFile(this.#path, bytes);
+    writePrivateFile(this.#path, bytes, security);
   }
 
   engineStarted(): void { this.#save({ ...this.#state, engineStopped: false }); }
