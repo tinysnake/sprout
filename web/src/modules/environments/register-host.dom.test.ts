@@ -756,6 +756,106 @@ test('Ticket #147: closing a newly-created pending ceremony reloads the environm
   }
 });
 
+test('Ticket #150 rework: background refresh keeps a complete selected snapshot visible until atomic replacement', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  try {
+    const { createApp, h } = await import('vue');
+    const { createMemoryHistory, createRouter } = await import('vue-router');
+    const { default: EnvironmentsView } = (await vite.ssrLoadModule(
+      '/src/modules/environments/views/EnvironmentsView.vue',
+    )) as { default: any };
+    const row = (displayName: string, reason: string): any => ({
+      id: 'stable-env', displayName, platform: 'linux', enrollmentStatus: 'approved',
+      trafficLight: 'green', trafficLightReason: reason, connectionState: 'online',
+      connectionAgeSec: 0, lastConfirmedTime: 'Just now', protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible', workSafety: 'clear', capabilityPermissions: {},
+      engineReadiness: {}, probeHistory: [], boundWorkspaces: [], identityDigest: '', decisions: [],
+    });
+    const before = row('Stable host', 'All readiness facts are current and verified.');
+    const after = row('Updated host', 'Updated facts are now available.');
+    let listCalls = 0;
+    let releaseRefresh!: (rows: any[]) => void;
+    const service = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: () => {
+        listCalls++;
+        if (listCalls === 1) return Promise.resolve([before]);
+        return new Promise<any[]>((resolve) => { releaseRefresh = resolve; });
+      },
+      getEnvironment: async () => before,
+      getBootstrapCommand: () => 'sprout worker enroll token stable-env',
+      requestEnrollment: async () => ({} as any), regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async () => {}, approveEnrollment: async () => {}, triggerProbe: async () => ({} as any),
+      togglePermission: async () => {}, unbindWorkspace: async () => {}, reconcileEvidence: async () => {},
+      resumeRecovery: async () => {}, discardRecovery: async () => {}, forceRelease: async () => {},
+      archiveEnvironment: async () => {}, restoreEnvironment: async () => {}, unenrollEnvironment: async () => {},
+    };
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/app/manage/environments', name: 'environments', component: EnvironmentsView }],
+    });
+    await router.push('/app/manage/environments');
+    await router.isReady();
+    const container = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(container);
+    const app = createApp({ render: () => h(EnvironmentsView, { service }) });
+    app.use(router);
+    app.mount(container);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const list = container.querySelector('.envs-master-column');
+    const detailColumn = container.querySelector('.envs-detail-column');
+    const detailCard = container.querySelector('.env-detail-card');
+    assert.ok(list && detailColumn && detailCard, 'loaded list and detail are mounted');
+    const geometry = (el: Element) => {
+      const rect = el.getBoundingClientRect();
+      return { y: rect.y, height: rect.height };
+    };
+    // jsdom has no layout engine; use stable measured boxes for these mounted
+    // columns and assert the refresh does not replace or resize their DOM owners.
+    const boxes = new Map<Element, { y: number; height: number }>([
+      [list, { y: 24, height: 600 }], [detailColumn, { y: 24, height: 600 }], [detailCard, { y: 24, height: 570 }],
+    ]);
+    dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+      const box = boxes.get(this);
+      return box ? ({ ...box, x: 0, width: 500, top: box.y, left: 0, right: 500, bottom: box.y + box.height, toJSON: () => ({}) } as DOMRect) : originalRect.call(this);
+    };
+    const initialGeometry = [geometry(list), geometry(detailColumn), geometry(detailCard)];
+    (dom.window.document.getElementById('btn-register-host') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const close = [...dom.window.document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Cancel');
+    assert.ok(close, 'registration dialog is open');
+    (close as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(listCalls, 2, 'refresh is in flight');
+    assert.equal(container.querySelector('.envs-master-column'), list, 'master list remains mounted');
+    assert.equal(container.querySelector('.env-detail-card'), detailCard, 'selected detail remains mounted');
+    assert.match(container.textContent ?? '', /Stable host/);
+    assert.doesNotMatch(container.textContent ?? '', /Updated host/);
+    assert.deepEqual([geometry(list), geometry(detailColumn), geometry(detailCard)], initialGeometry,
+      'list y and detail y/height stay constant while refresh is pending');
+
+    releaseRefresh([after]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(container.querySelector('.envs-master-column'), list, 'snapshot replaces row data in place');
+    assert.equal(container.querySelector('.envs-detail-column'), detailColumn,
+      `detail column remains mounted; rendered state: ${(container.textContent ?? '').slice(-400)}`);
+    assert.match(container.textContent ?? '', /Updated host/);
+    assert.doesNotMatch(container.textContent ?? '', /Stable host/);
+    assert.deepEqual([geometry(list), geometry(detailColumn), geometry(container.querySelector('.env-detail-card')!)], initialGeometry,
+      'summary text update preserves list/detail geometry');
+
+    dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+    app.unmount();
+    container.remove();
+  } finally {
+    dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+    await cleanup();
+  }
+});
+
 test('RegisterHostDialog: dialog width classes compose predictably on sm+ and mobile viewports', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
