@@ -1192,6 +1192,9 @@ test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', asyn
       await new Promise((r) => setTimeout(r, 80));
 
       const hasBtn = dom.window.document.querySelector('.cancel-enroll-btn') !== null;
+      if (env.enrollmentStatus === 'pending') {
+        assert.match(dom.window.document.body.textContent ?? '', /Expires at:/, 'pending ceremony keeps claim expiry visible');
+      }
       app.unmount();
       container.remove();
       return hasBtn;
@@ -1257,6 +1260,72 @@ test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', asyn
     assert.equal(await checkMasterCardCancelBtn(revokedEnv), false, 'master-list: revoked hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(expiredEnv), false, 'master-list: expired hides cancel button');
     assert.equal(await checkMasterCardCancelBtn(archivedEnv), false, 'master-list: archived hides cancel button');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Ticket #151: pending enrollment has a neutral status in card and detail, distinct from degraded attention', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, h } = await import('vue');
+    const { default: EnvironmentDetail } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentDetail.vue',
+    )) as { default: any };
+    const { default: EnvironmentMasterCard } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/EnvironmentMasterCard.vue',
+    )) as { default: any };
+
+    const makeEnv = (id: string, enrollmentStatus: string) => ({
+      id,
+      displayName: id,
+      platform: 'macos' as const,
+      enrollmentStatus,
+      trafficLight: 'yellow' as const,
+      trafficLightReason: 'Test readiness reason',
+      connectionState: 'online' as const,
+      connectionAgeSec: 10,
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible' as const,
+      workSafety: 'clear' as const,
+      capabilityPermissions: {},
+      engineReadiness: {},
+      probeHistory: [],
+      boundWorkspaces: [],
+      decisions: [],
+    });
+    const pending = makeEnv('Pending host', 'pending');
+    const degraded = makeEnv('Degraded host', 'approved');
+
+    const mount = (component: any, env: any) => {
+      const container = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(container);
+      const app = createApp({ setup: () => () => h(component, { env }) });
+      app.mount(container);
+      return { app, container };
+    };
+
+    const pendingCard = mount(EnvironmentMasterCard, pending);
+    const degradedCard = mount(EnvironmentMasterCard, degraded);
+    const pendingDetail = mount(EnvironmentDetail, pending);
+    const degradedDetail = mount(EnvironmentDetail, degraded);
+
+    const cardPill = pendingCard.container.querySelector('.pending-enrollment-pill');
+    assert.ok(cardPill, 'pending master card displays its status pill');
+    assert.match(cardPill.textContent ?? '', /PENDING/);
+    assert.doesNotMatch(cardPill.textContent ?? '', /ATTENTION/);
+    assert.equal(degradedCard.container.querySelector('.pending-enrollment-pill'), null, 'degraded enrolled card has no pending pill');
+    assert.equal(degradedCard.container.querySelector('[aria-label="ATTENTION"]') !== null, true, 'degraded enrolled card retains yellow attention dot');
+
+    assert.ok(pendingDetail.container.querySelector('.pending-enrollment-pill'), 'detail header displays pending pill');
+    assert.match(pendingDetail.container.querySelector('.env-traffic-light-banner strong')?.textContent ?? '', /Enrollment Pending/);
+    assert.equal(degradedDetail.container.querySelector('.pending-enrollment-pill'), null, 'degraded detail has no pending pill');
+    assert.match(degradedDetail.container.querySelector('.env-traffic-light-banner strong')?.textContent ?? '', /Attention \/ Degraded/);
+
+    for (const mounted of [pendingCard, degradedCard, pendingDetail, degradedDetail]) {
+      mounted.app.unmount();
+      mounted.container.remove();
+    }
   } finally {
     await cleanup();
   }

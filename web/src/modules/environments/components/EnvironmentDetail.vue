@@ -49,6 +49,7 @@ const emit = defineEmits<{
       :platform="env.platform"
       :protocol-mismatch-detail="env.protocolMismatchDetail"
       :is-archived="env.enrollmentStatus === 'archived'"
+      :is-pending="env.enrollmentStatus === 'pending'"
     />
 
     <section
