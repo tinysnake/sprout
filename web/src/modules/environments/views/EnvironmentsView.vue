@@ -90,7 +90,6 @@ async function loadData() {
     isLoading.value = false;
     return;
   }
-  isLoading.value = true;
   environments.value = await service.listEnvironments();
   if (route.params.id && typeof route.params.id === 'string') {
     selectedId.value = route.params.id;

@@ -273,20 +273,24 @@ test('RegisterHostDialog: full production enrollment ceremony flow with separate
     const cmdText = cmdEl.textContent ?? '';
     assert.match(cmdText, /^sprout worker enroll \S+ enroll-mac-1$/);
 
-    // The command scrolls as one unbroken line, with the copy action in normal
-    // flex flow below it on mobile and aligned to the right on sm+.
+    // The command stays unbroken; the copy action stacks on narrow screens and
+    // joins the command in one row on sm+.
     assert.ok(cmdEl.classList.contains('overflow-x-auto'));
     assert.ok(cmdEl.classList.contains('whitespace-pre'));
     assert.equal(cmdEl.classList.contains('break-all'), false);
     const commandLayout = cmdEl.parentElement;
     assert.ok(commandLayout?.classList.contains('flex-col'));
+    assert.ok(commandLayout?.classList.contains('sm:flex-row'));
+    assert.ok(commandLayout?.classList.contains('sm:items-center'));
+    assert.ok(cmdEl.classList.contains('min-w-0'));
+    assert.ok(cmdEl.classList.contains('flex-1'));
     const copyCmdBtn = doc.getElementById('btn-copy-command') as HTMLButtonElement;
     assert.ok(copyCmdBtn, 'Copy command button found');
     assert.equal(copyCmdBtn.parentElement, commandLayout);
     assert.equal(copyCmdBtn.classList.contains('absolute'), false);
     assert.ok(copyCmdBtn.classList.contains('w-full'));
     assert.ok(copyCmdBtn.classList.contains('sm:w-auto'));
-    assert.ok(copyCmdBtn.classList.contains('sm:self-end'));
+    assert.ok(copyCmdBtn.classList.contains('shrink-0'));
 
     // CRITICAL: Secret is NEVER embedded in command text
     assert.equal(cmdText.includes('claim-secret'), false, 'Secret must never appear in command text');
@@ -696,11 +700,22 @@ test('Ticket #147: closing a newly-created pending ceremony reloads the environm
       claim: { issuedAt: Date.now(), expiresAt: Date.now() + 60000 },
       decisions: [],
     };
+    const existing: any = { ...pending, id: 'existing-host', displayName: 'Existing host' };
     let listed = false;
     let listCalls = 0;
+    let releaseRefresh!: () => void;
+    let notifyRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => { notifyRefreshStarted = resolve; });
     const service = {
       supportsEvidenceReconciliation: false,
-      listEnvironments: async () => { listCalls++; return listed ? [pending] : []; },
+      listEnvironments: async () => {
+        listCalls++;
+        if (listCalls === 2) {
+          notifyRefreshStarted();
+          await new Promise<void>((resolve) => { releaseRefresh = resolve; });
+        }
+        return listed ? [existing, pending] : [existing];
+      },
       getEnvironment: async () => undefined,
       getBootstrapCommand: () => 'sprout worker enroll token enroll-close-refresh',
       requestEnrollment: async () => { listed = true; return { enrollment: pending, bootstrapCommand: 'sprout worker enroll token enroll-close-refresh', claimSecret: 'secret', claimExpiresAt: pending.claim.expiresAt }; },
@@ -745,6 +760,10 @@ test('Ticket #147: closing a newly-created pending ceremony reloads the environm
       .find((button) => button.textContent?.includes('Close Dialog (Keep Pending)')) as HTMLButtonElement | undefined;
     assert.ok(closeButton, 'pending ceremony can be closed while keeping the enrollment');
     closeButton.click();
+    await refreshStarted;
+    assert.ok(container.querySelector('.envs-loading-state') === null, 'background refresh keeps the loaded view mounted');
+    assert.match(container.textContent ?? '', /Existing host/, 'existing environment remains visible while refresh is pending');
+    releaseRefresh();
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(listCalls > 1, 'closing the ceremony reloads the environment list');
     assert.match(container.textContent ?? '', /New pending host/, 'new pending enrollment appears without manual reload');
