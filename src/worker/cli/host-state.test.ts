@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
 
 
 /**
@@ -56,6 +56,47 @@ function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessPr
     return identity === undefined ? { state: 'dead' } : { state: 'alive', process: identity };
   };
 }
+
+test('Windows process probe binds only the current pid to its validated owner token', () => {
+  const token = 'a'.repeat(43);
+  const dependencies = {
+    platform: 'win32' as const,
+    isAlive: () => true,
+    currentEnvironment: { SPROUT_WORKER_OWNER_TOKEN: token },
+    windowsStartIdentity: (pid: number) => `windows:${pid}:incarnation`,
+  };
+  const self = probeWorkerProcess(process.pid, dependencies);
+  assert.equal(self.state, 'alive');
+  if (self.state === 'alive') {
+    assert.equal(self.process.pid, process.pid);
+    assert.equal(self.process.ownerToken, token);
+    assert.equal(self.process.startIdentity, `windows:${process.pid}:incarnation`);
+  }
+  assert.deepEqual(probeWorkerProcess(process.pid, {
+    ...dependencies,
+    currentEnvironment: { SPROUT_WORKER_OWNER_TOKEN: 'not-a-valid-token' },
+  }), { state: 'unknown' });
+  assert.deepEqual(probeWorkerProcess(process.pid + 1, dependencies), { state: 'unknown' });
+});
+
+test('Linux and Darwin process probes retain their platform-specific evidence paths', () => {
+  const token = 'b'.repeat(43);
+  for (const platform of ['linux', 'darwin'] as const) {
+    let environmentRead = false;
+    let startRead = false;
+    const result = probeWorkerProcess(process.pid, {
+      platform,
+      isAlive: () => true,
+      linuxEnvironment: () => { environmentRead = true; return token; },
+      darwinEnvironment: () => { environmentRead = true; return token; },
+      linuxStartIdentity: () => { startRead = true; return 'linux:123'; },
+      darwinStartIdentity: () => { startRead = true; return 'darwin:date'; },
+    });
+    assert.equal(result.state, 'alive');
+    assert.equal(environmentRead, true);
+    assert.equal(startRead, true);
+  }
+});
 
 
 test('state and configuration files are owner-only and the directory is restrictive', () => {

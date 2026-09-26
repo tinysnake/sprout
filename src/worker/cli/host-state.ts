@@ -38,6 +38,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 
 import {
   defaultPrivateFileSecurityDependencies,
@@ -505,17 +506,38 @@ export function sameWorkerProcess(
  * and unreadable evidence return `unknown` and therefore fail closed (never
  * trust or steal a possibly live record).
  */
-export function probeWorkerProcess(pid: number): WorkerProcessProbeResult {
-  if (!isProcessAlive(pid)) return { state: 'dead' };
+export interface WorkerProcessProbeDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly currentEnvironment?: NodeJS.ProcessEnv;
+  readonly linuxEnvironment?: (pid: number) => string | undefined;
+  readonly linuxStartIdentity?: (pid: number) => string | undefined;
+  readonly darwinEnvironment?: (pid: number) => string | undefined;
+  readonly darwinStartIdentity?: (pid: number) => string | undefined;
+  readonly windowsStartIdentity?: (pid: number) => string | undefined;
+}
+
+export function probeWorkerProcess(
+  pid: number,
+  dependencies: WorkerProcessProbeDependencies = {},
+): WorkerProcessProbeResult {
+  const platform = dependencies.platform ?? process.platform;
+  if (!(dependencies.isAlive ?? isProcessAlive)(pid)) return { state: 'dead' };
   try {
-    const ownerToken = process.platform === 'linux'
-      ? environmentValue(readFileSync(`/proc/${pid}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')
-      : darwinEnvironmentValue(pid);
-    const startIdentity = process.platform === 'linux'
-      ? linuxStartIdentity(pid)
-      : process.platform === 'darwin'
-        ? darwinStartIdentity(pid)
-        : undefined;
+    const ownerToken = platform === 'linux'
+      ? (dependencies.linuxEnvironment ?? ((processId) => environmentValue(readFileSync(`/proc/${processId}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')))(pid)
+      : platform === 'darwin'
+        ? (dependencies.darwinEnvironment ?? darwinEnvironmentValue)(pid)
+        : platform === 'win32' && pid === process.pid
+          ? environmentValue(`SPROUT_WORKER_OWNER_TOKEN=${(dependencies.currentEnvironment ?? process.env)['SPROUT_WORKER_OWNER_TOKEN'] ?? ''}\0`, 'SPROUT_WORKER_OWNER_TOKEN')
+          : undefined;
+    const startIdentity = platform === 'linux'
+      ? (dependencies.linuxStartIdentity ?? linuxStartIdentity)(pid)
+      : platform === 'darwin'
+        ? (dependencies.darwinStartIdentity ?? darwinStartIdentity)(pid)
+        : platform === 'win32' && pid === process.pid
+          ? (dependencies.windowsStartIdentity ?? windowsStartIdentity)(pid)
+          : undefined;
     if (ownerToken === undefined || startIdentity === undefined) return { state: 'unknown' };
     const identity = { pid, startIdentity, ownerToken };
     return isWorkerProcessIdentity(identity)
@@ -524,6 +546,14 @@ export function probeWorkerProcess(pid: number): WorkerProcessProbeResult {
   } catch {
     return { state: 'unknown' };
   }
+}
+
+function windowsStartIdentity(pid: number): string | undefined {
+  // Node's monotonic process-start marker is stable for this process lifetime.
+  // Persisted records are also bound to a fresh random owner token, so a later
+  // process (including a reused pid) cannot pass sameWorkerProcess by marker
+  // coincidence alone.
+  return `windows:${pid}:${performance.nodeTiming.nodeStart}`;
 }
 
 /** Bind the current process after `start` has installed its owner token. */
