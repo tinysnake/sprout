@@ -637,16 +637,18 @@ onUnmounted(() => {
           <p class="text-[11px] text-[var(--text-secondary)]">
             Execute this command in your operator terminal on the target macOS host. It contains only the Sprout endpoint and pending enrollment ID.
           </p>
-          <div class="relative group">
+          <div class="flex flex-col gap-2">
             <pre
               id="bootstrap-command-text"
-              class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] font-mono text-[11px] text-[var(--text-primary)] overflow-x-auto break-all sm:pr-36"
+              class="min-w-0 overflow-x-auto whitespace-pre p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] font-mono text-[11px] text-[var(--text-primary)]"
+              tabindex="0"
+              aria-label="Bootstrap command; scroll horizontally to view the full command"
             >{{ bootstrapCommand }}</pre>
             <Button
               id="btn-copy-command"
               variant="secondary"
               size="sm"
-              class="mt-2 w-full sm:w-auto sm:mt-0 sm:absolute sm:right-2 sm:top-2 text-[11px] min-h-[44px]"
+              class="w-full sm:w-auto sm:self-end text-[11px] min-h-[44px]"
               aria-label="Copy bootstrap command"
               @click="handleCopyCommand"
             >
