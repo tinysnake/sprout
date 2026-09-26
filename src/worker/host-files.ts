@@ -68,10 +68,11 @@ export function verifyWindowsPrivateFileAcl(
     const allowed = new Set([currentUser, 'builtin\\administrators', 'nt authority\\system']);
     const entries: string[] = [];
     const normalizedPath = filePath.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase('en-US');
-    for (const [index, rawLine] of output.split('\n').entries()) {
-      const line = index === 0 && rawLine.replace(/\\/g, '/').toLocaleLowerCase('en-US').startsWith(normalizedPath)
-        ? rawLine.slice(normalizedPath.length)
-        : rawLine;
+    const lines = output.split('\n');
+    const firstNormalized = lines[0]!.replace(/\\/g, '/').toLocaleLowerCase('en-US');
+    if (!firstNormalized.startsWith(normalizedPath)) return 'unverifiable';
+    for (const [index, rawLine] of lines.entries()) {
+      const line = index === 0 ? rawLine.slice(normalizedPath.length) : rawLine;
       if (!line.includes(':(')) continue;
       const match = line.match(/^\s*(.+?):((?:\([A-Za-z,]+\))+?)\s*$/);
       if (!match) return 'unverifiable';
