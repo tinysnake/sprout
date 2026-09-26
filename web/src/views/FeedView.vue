@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAppStore } from '../stores/app.ts';
+import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.ts';
+import type { EnvironmentInstance } from '../modules/environments/types.ts';
 import { useAnnouncer } from '../primitives/announcer.ts';
 import Icon from '../primitives/Icon.vue';
 import Badge from '../primitives/Badge.vue';
@@ -15,6 +17,7 @@ const route = useRoute();
 const router = useRouter();
 const appStore = useAppStore();
 const announcer = useAnnouncer();
+const environmentService = inject<EnvironmentService | undefined>(ENVIRONMENT_SERVICE, undefined);
 
 const scopes = ['all', 'sprout-m2', 'infra'] as const;
 const urgencies = ['all', 'action_required', 'attention', 'info'] as const;
@@ -62,7 +65,7 @@ interface AttentionItem {
   targetPath: string;
 }
 
-const attentionItems = ref<AttentionItem[]>([
+const fixtureAttentionItems: AttentionItem[] = [
   {
     id: 'att-1',
     severity: 'action_required',
@@ -92,20 +95,6 @@ const attentionItems = ref<AttentionItem[]>([
     targetPath: '/manage/environments/env-incompatible',
   },
   {
-    id: 'att-3',
-    severity: 'attention',
-    category: 'env_enrollment',
-    categoryName: 'Worker Enrollment',
-    icon: 'check',
-    title: 'Pending Host Enrollment: MacBook Pro Operator Local',
-    projectName: 'Sprout M2 Operator',
-    summary: 'New worker instance requested enrollment over private transport. Operator approval required before admitting work.',
-    lifecycleSentence: 'Identity verified · Capabilities declared · Awaiting operator approval',
-    attribution: 'Bootstrap Service',
-    timestamp: 'just now',
-    targetPath: '/manage/environments/env-pending',
-  },
-  {
     id: 'att-4',
     severity: 'attention',
     category: 'env_unhealthy',
@@ -133,7 +122,43 @@ const attentionItems = ref<AttentionItem[]>([
     timestamp: '10s ago',
     targetPath: '/manage/environments/env-ready',
   },
-]);
+];
+
+const pendingEnrollmentItems = ref<AttentionItem[]>([]);
+const attentionItems = computed(() => [...fixtureAttentionItems, ...pendingEnrollmentItems.value]);
+
+function pendingEnrollmentCard(environment: EnvironmentInstance): AttentionItem {
+  return {
+    id: `pending-enrollment-${environment.id}`,
+    severity: 'attention',
+    category: 'env_enrollment',
+    categoryName: 'Worker Enrollment',
+    icon: 'check',
+    title: `Pending Host Enrollment: ${environment.displayName}`,
+    summary: environment.trafficLightReason,
+    lifecycleSentence: `Connection ${environment.connectionState} · Platform ${environment.platform} · Awaiting operator approval`,
+    attribution: 'Environment Service',
+    timestamp: 'just now',
+    targetPath: router.resolve({ name: 'environment-detail', params: { id: environment.id } }).href,
+  };
+}
+
+async function loadPendingEnrollments() {
+  // Feed attention is informational only. If its authority is unavailable,
+  // omit pending cards rather than suggesting an unverified decision.
+  pendingEnrollmentItems.value = [];
+  if (!environmentService) return;
+  try {
+    const environments = await environmentService.listEnvironments();
+    pendingEnrollmentItems.value = environments
+      .filter((environment) => environment.enrollmentStatus === 'pending')
+      .map(pendingEnrollmentCard);
+  } catch {
+    pendingEnrollmentItems.value = [];
+  }
+}
+
+onMounted(loadPendingEnrollments);
 
 const selectedTask = ref<any>(null);
 const isTaskDetailOpen = ref(false);
@@ -287,7 +312,12 @@ function handleNavigate(path: string, label: string) {
     to: router.resolve({ name: 'feed', query: feedQuery.value }).fullPath,
   });
   announcer.announce(`Opening ${label}. Back to Feed is available.`);
-  router.push(path);
+  const base = router.options.history.base;
+  const basePrefix = base.endsWith('/') ? base : `${base}/`;
+  const routePath = base !== '/' && path.startsWith(basePrefix)
+    ? `/${path.slice(basePrefix.length)}`
+    : path;
+  router.push(routePath);
 }
 </script>
 
