@@ -46,7 +46,7 @@ try {
   throw error;
 }
 
-const { port: boundPort } = await runtime.api.listen(configuration.port);
+const { port: boundPort } = await runtime.api.listen(configuration.port, configuration.bindHost);
 
 /**
  * Reconcile leftover durable state after a restart, before serving.

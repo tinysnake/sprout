@@ -21,6 +21,8 @@ export interface HostConfiguration {
   readonly workingDirectory: string;
   /** Port the Web surface binds. */
   readonly port: number;
+  /** Network interface address the Web surface binds. */
+  readonly bindHost: string;
   /** The one environment instance this build serves. */
   readonly environmentInstanceId: string;
   /** Default engine when the runtime configuration names none. */
@@ -178,6 +180,7 @@ export function parseHostConfiguration(
     databasePath: environment['SPROUT_DATABASE'] ?? join(defaults.projectRoot, 'sprout.db'),
     workingDirectory: environment['SPROUT_WORKDIR'] ?? defaults.projectRoot,
     port: numberValue(environment['SPROUT_PORT'], 5174),
+    bindHost: bindHostValue(environment['SPROUT_BIND_HOST']),
     environmentInstanceId,
     engineId: environment['SPROUT_ENGINE'] ?? 'codex',
     runtimeConfiguration: parseRuntimeConfiguration(environment['SPROUT_RUNTIME_CONFIG']),
@@ -268,6 +271,19 @@ export function workerEnvironment(environmentInstanceId: string): Readonly<Recor
  */
 function numberValue(value: string | undefined, fallback: number): number {
   return value === undefined ? fallback : Number(value);
+}
+
+/** Validate the address passed directly to the HTTP server's listen call. */
+function bindHostValue(value: string | undefined): string {
+  const host = value ?? '127.0.0.1';
+  if (
+    host.length === 0 ||
+    /[\s/?#@\\]/.test(host) ||
+    /^[a-z][a-z\d+.-]*:/i.test(host)
+  ) {
+    throw new Error('SPROUT_BIND_HOST must be a non-empty host address without whitespace or URL components');
+  }
+  return host;
 }
 
 /**
