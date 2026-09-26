@@ -29,7 +29,7 @@ const platformIcon = computed(() => {
 });
 
 const trafficLightLabel = computed(() => {
-  if (props.env.enrollmentStatus === 'pending') return 'PENDING';
+  if (props.env.enrollmentStatus === 'pending') return 'ACTION REQUIRED';
   if (props.env.trafficLight === 'green') return 'READY';
   if (props.env.trafficLight === 'yellow') return 'ATTENTION';
   return 'ACTION REQUIRED';
@@ -100,17 +100,8 @@ const connectionAgeLabel = computed(() => {
           </div>
         </div>
 
-        <span
-          v-if="env.enrollmentStatus === 'pending'"
-          class="pending-enrollment-pill inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-2 py-0.5 text-[10px] font-semibold tracking-wide text-[var(--text-secondary)] shrink-0"
-          aria-label="Pending enrollment"
-        >
-          <Icon name="clock" :size="12" />
-          PENDING
-        </span>
-
         <StatusDot
-          :status="env.trafficLight"
+          :status="env.enrollmentStatus === 'pending' ? 'red' : env.trafficLight"
           size="sm"
           :title="trafficLightLabel"
           :aria-label="trafficLightLabel"

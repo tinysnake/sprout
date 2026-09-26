@@ -1289,7 +1289,7 @@ test('Ticket #141 (a): only the ceremony offers Cancel Pending Enrollment', asyn
   }
 });
 
-test('Ticket #151: pending enrollment has a neutral status in card and detail, distinct from degraded attention', async () => {
+test('Ticket #151: pending enrollment uses red action-required treatment without a pending pill', async () => {
   const { dom, vite, cleanup } = await setupDom();
   try {
     const { createApp, h } = await import('vue');
@@ -1306,7 +1306,9 @@ test('Ticket #151: pending enrollment has a neutral status in card and detail, d
       platform: 'macos' as const,
       enrollmentStatus,
       trafficLight: 'yellow' as const,
-      trafficLightReason: 'Test readiness reason',
+      trafficLightReason: enrollmentStatus === 'pending'
+        ? 'Enrollment is pending Human approval.'
+        : 'Test readiness reason',
       connectionState: 'online' as const,
       connectionAgeSec: 10,
       protocolVersion: 'v2.1',
@@ -1334,15 +1336,22 @@ test('Ticket #151: pending enrollment has a neutral status in card and detail, d
     const pendingDetail = mount(EnvironmentDetail, pending);
     const degradedDetail = mount(EnvironmentDetail, degraded);
 
-    const cardPill = pendingCard.container.querySelector('.pending-enrollment-pill');
-    assert.ok(cardPill, 'pending master card displays its status pill');
-    assert.match(cardPill.textContent ?? '', /PENDING/);
-    assert.doesNotMatch(cardPill.textContent ?? '', /ATTENTION/);
+    const pendingCardDot = pendingCard.container.querySelector('[role="img"]');
+    assert.ok(pendingCardDot, 'pending master card displays its status dot');
+    assert.equal(pendingCardDot.getAttribute('aria-label'), 'ACTION REQUIRED');
+    assert.match(pendingCardDot.getAttribute('class') ?? '', /bg-\[var\(--red-action\)\]/);
+    assert.equal(pendingCard.container.querySelector('.pending-enrollment-pill'), null, 'pending master card has no pending pill');
+    assert.match(pendingCard.container.querySelector('.env-reason-snippet')?.textContent ?? '', /Enrollment is pending Human approval\./);
     assert.equal(degradedCard.container.querySelector('.pending-enrollment-pill'), null, 'degraded enrolled card has no pending pill');
     assert.equal(degradedCard.container.querySelector('[aria-label="ATTENTION"]') !== null, true, 'degraded enrolled card retains yellow attention dot');
 
-    assert.ok(pendingDetail.container.querySelector('.pending-enrollment-pill'), 'detail header displays pending pill');
-    assert.match(pendingDetail.container.querySelector('.env-traffic-light-banner strong')?.textContent ?? '', /Enrollment Pending/);
+    const pendingHeaderDot = pendingDetail.container.querySelector('.env-traffic-light-banner [role="img"]');
+    assert.ok(pendingHeaderDot, 'pending detail header displays its status dot');
+    assert.equal(pendingHeaderDot.getAttribute('aria-label'), 'ACTION REQUIRED');
+    assert.match(pendingHeaderDot.getAttribute('class') ?? '', /bg-\[var\(--red-action\)\]/);
+    assert.equal(pendingDetail.container.querySelector('.pending-enrollment-pill'), null, 'pending detail header has no pending pill');
+    assert.match(pendingDetail.container.querySelector('.env-traffic-light-banner strong')?.textContent ?? '', /Red: Unavailable \/ Action Required/);
+    assert.match(pendingDetail.container.querySelector('.env-decisive-reason')?.textContent ?? '', /Enrollment is pending Human approval\./);
     assert.equal(degradedDetail.container.querySelector('.pending-enrollment-pill'), null, 'degraded detail has no pending pill');
     assert.match(degradedDetail.container.querySelector('.env-traffic-light-banner strong')?.textContent ?? '', /Attention \/ Degraded/);
 
