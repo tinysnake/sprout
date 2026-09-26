@@ -75,7 +75,7 @@ const bannerStyles = computed(() => {
       </div>
     </div>
 
-    <div class="env-decisive-reason text-xs sm:text-sm font-semibold text-[var(--text-primary)] leading-snug">
+    <div class="env-decisive-reason min-h-8 text-xs sm:text-sm font-semibold text-[var(--text-primary)] leading-snug">
       Decisive Fact: {{ reason }}
     </div>
 

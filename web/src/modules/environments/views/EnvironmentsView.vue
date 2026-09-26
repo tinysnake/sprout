@@ -68,6 +68,7 @@ const environments = ref<EnvironmentInstance[]>([]);
 const activeFilter = ref<EnvironmentFilter>('all');
 const selectedId = ref<string>('env-ready');
 const isLoading = ref(true);
+let loadGeneration = 0;
 const isForceReleaseOpen = ref(false);
 const isGuideOpen = ref(false);
 const isRegisterOpen = ref(false);
@@ -90,13 +91,26 @@ async function loadData() {
     isLoading.value = false;
     return;
   }
-  environments.value = await service.listEnvironments();
-  if (route.params.id && typeof route.params.id === 'string') {
-    selectedId.value = route.params.id;
-  } else if (!selectedId.value || !environments.value.some((e) => e.id === selectedId.value)) {
-    selectedId.value = environments.value[0]?.id ?? '';
+  const generation = ++loadGeneration;
+  // Keep a complete prior snapshot visible while refreshing. In particular,
+  // adapters may temporarily project unreachable facts while composing the
+  // next snapshot; none of those partial rows should reach the view.
+  if (environments.value.length === 0) isLoading.value = true;
+  try {
+    const snapshot = await service.listEnvironments();
+    if (generation !== loadGeneration) return;
+
+    const routeId = typeof route.params.id === 'string' ? route.params.id : '';
+    const previousSelection = routeId || selectedId.value;
+    environments.value = snapshot;
+    if (routeId) {
+      selectedId.value = routeId;
+    } else if (!snapshot.some((environment) => environment.id === previousSelection)) {
+      selectedId.value = snapshot[0]?.id ?? '';
+    }
+  } finally {
+    if (generation === loadGeneration) isLoading.value = false;
   }
-  isLoading.value = false;
 }
 
 onMounted(() => {
@@ -162,11 +176,9 @@ const selectedEnv = computed(() => {
   if (deepLinkId.value !== '') {
     return environments.value.find((e) => e.id === deepLinkId.value);
   }
-  return (
-    filteredEnvironments.value.find((e) => e.id === selectedId.value) ??
-    filteredEnvironments.value[0] ??
-    undefined
-  );
+  // Keep the selected record stable across atomic snapshots even if its new
+  // health facts move it out of the currently active list filter.
+  return environments.value.find((e) => e.id === selectedId.value) ?? filteredEnvironments.value[0];
 });
 
 // Mobile drill-down detection: route contains :id
