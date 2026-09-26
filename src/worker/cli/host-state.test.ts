@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
 
 
 /**
@@ -103,6 +103,28 @@ test('private-file restriction check preserves POSIX mode semantics', () => {
   } finally {
     cleanup();
   }
+});
+
+test('directory sync skips unsupported Windows directory fsync', () => {
+  let attempted = false;
+  syncDirectory('synthetic-directory', {
+    platform: 'win32',
+    run: () => { attempted = true; },
+  });
+  assert.equal(attempted, false);
+});
+
+test('directory sync preserves POSIX fsync failures', () => {
+  const failure = new Error('directory fsync failed');
+  let attemptedPath: string | undefined;
+  assert.throws(() => syncDirectory('synthetic-directory', {
+    platform: 'linux',
+    run: (directory) => {
+      attemptedPath = directory;
+      throw failure;
+    },
+  }), (error: unknown) => error === failure);
+  assert.equal(attemptedPath, 'synthetic-directory');
 });
 
 test('Windows ACL writer invokes icacls and verifier allows only current user, Administrators, and SYSTEM', () => {
