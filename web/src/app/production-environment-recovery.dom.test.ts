@@ -224,6 +224,90 @@ test('Production Web: pending enrollment offers only the review ceremony, not di
   }
 });
 
+test('Feed builds pending enrollment cards from live Environment facts and navigates to the production detail URL', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { FixtureEnvironmentService } = (await vite.ssrLoadModule(
+      '/src/modules/environments/adapters/fixture-adapter.ts'
+    )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+    const fixtureService = new FixtureEnvironmentService();
+    const template = (await fixtureService.listEnvironments()).find((environment) => environment.enrollmentStatus === 'pending')!;
+    const liveEnvironment = (id: string, displayName: string) => ({
+      ...template,
+      id,
+      displayName,
+      trafficLightReason: `Enrollment is pending Human approval for ${displayName}.`,
+    });
+    class PendingEnvironmentService extends FixtureEnvironmentService {
+      override async listEnvironments() {
+        return [liveEnvironment('enroll-abc123', 'tester1')];
+      }
+    }
+
+    const options = await deterministicAppOptions(vite);
+    const { app, router } = createSproutApp({ ...options, environmentService: new PendingEnvironmentService() });
+    await router.push('/feed?scope=infra&urgency=attention&activity=envs');
+    await router.isReady();
+    app.mount(dom.window.document.getElementById('app')!);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const doc = dom.window.document;
+    const pendingCards = [...doc.querySelectorAll<HTMLButtonElement>('.feed-attention-card')]
+      .filter((card) => card.textContent?.includes('Pending Host Enrollment:'));
+    assert.equal(pendingCards.length, 1);
+    assert.match(pendingCards[0]!.textContent ?? '', /Pending Host Enrollment: tester1/);
+    assert.match(pendingCards[0]!.textContent ?? '', /Enrollment is pending Human approval for tester1\./);
+    pendingCards[0]!.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(dom.window.location.pathname, '/app/manage/environments/enroll-abc123');
+    assert.match(doc.querySelector('.return-context-banner')?.textContent ?? '', /Back to Feed/);
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed renders one live pending card per environment, and fails closed for empty or failed reads', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { FixtureEnvironmentService } = (await vite.ssrLoadModule(
+      '/src/modules/environments/adapters/fixture-adapter.ts'
+    )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+    const fixtureService = new FixtureEnvironmentService();
+    const template = (await fixtureService.listEnvironments()).find((environment) => environment.enrollmentStatus === 'pending')!;
+    const liveEnvironments = [
+      { ...template, id: 'enroll-abc123', displayName: 'tester1' },
+      { ...template, id: 'enroll-def456', displayName: 'tester2' },
+    ];
+
+    async function renderCount(listEnvironments: () => Promise<unknown>) {
+      class StubEnvironmentService extends FixtureEnvironmentService {
+        override async listEnvironments() {
+          return await listEnvironments() as any;
+        }
+      }
+      const options = await deterministicAppOptions(vite);
+      const { app, router } = createSproutApp({ ...options, environmentService: new StubEnvironmentService() });
+      await router.push('/feed?scope=infra&urgency=attention');
+      await router.isReady();
+      app.mount(dom.window.document.getElementById('app')!);
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      const cards = [...dom.window.document.querySelectorAll('.feed-attention-card')]
+        .filter((card) => card.textContent?.includes('Pending Host Enrollment:'));
+      app.unmount();
+      return cards.length;
+    }
+
+    assert.equal(await renderCount(async () => liveEnvironments), 2);
+    assert.equal(await renderCount(async () => []), 0);
+    assert.equal(await renderCount(async () => { throw new Error('service unavailable'); }), 0);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Production Web: capability permission toggling and unbind workspace', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
