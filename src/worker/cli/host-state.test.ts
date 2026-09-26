@@ -113,7 +113,7 @@ test('Windows ACL writer invokes icacls and verifier allows only current user, A
     run: (program, args) => {
       commands.push(`${program} ${args.join(' ')}`);
       if (program === 'whoami') return 'EXAMPLE\\worker\n';
-      return 'EXAMPLE\\worker:(F)\nBUILTIN\\Administrators:(F)\nNT AUTHORITY\\SYSTEM:(F)\n';
+      return `${args[0]} EXAMPLE\\worker:(F)\n  BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`;
     },
   };
   try {
@@ -128,13 +128,43 @@ test('Windows ACL writer invokes icacls and verifier allows only current user, A
   }
 });
 
-test('Windows ACL verifier refuses unknown principals and unverifiable output', () => {
+test('Windows ACL verifier parses the echoed path and real icacls entry layout', () => {
   const makeSecurity = (acl: string): PrivateFileSecurityDependencies => ({
     platform: 'win32',
     run: (program) => program === 'whoami' ? 'EXAMPLE\\worker\n' : acl,
   });
-  assert.equal(verifyWindowsPrivateFileAcl('synthetic', makeSecurity('EXAMPLE\\worker:(F)\nEveryone:(R)\n')), 'permissive');
-  assert.equal(verifyWindowsPrivateFileAcl('synthetic', makeSecurity('')), 'unverifiable');
+  const path = 'C:/Users/worker/.sprout/worker/identity.pem';
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+  const windowsPath = path.replaceAll('/', '\\');
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(`${windowsPath} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(
+      `${path} EXAMPLE\\worker:(F)\n  BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`)),
+    'restricted',
+  );
+  const spacedPath = 'C:/Users/worker/.sprout worker/identity key.pem';
+  assert.equal(
+    verifyWindowsPrivateFileAcl(spacedPath, makeSecurity(`${spacedPath} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+});
+
+test('Windows ACL verifier refuses inherited and unknown principals and fails closed on unverifiable output', () => {
+  const path = 'synthetic';
+  const makeSecurity = (acl: string): PrivateFileSecurityDependencies => ({
+    platform: 'win32',
+    run: (program) => program === 'whoami' ? 'EXAMPLE\\worker\n' : acl,
+  });
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(I)(F)\n`)), 'permissive');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(F)\n  Everyone:(R)\n`)), 'permissive');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity('')), 'unverifiable');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity('not-the-echoed-path EXAMPLE\\worker:(F)\n')), 'unverifiable');
   assert.equal(verifyWindowsPrivateFileAcl('synthetic', { platform: 'win32', run: () => { throw new Error('private output'); } }), 'unverifiable');
   assert.equal(hasExactPrivateFileMode('does-not-exist', { platform: 'win32', run: () => '' }), false);
 });
