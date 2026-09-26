@@ -8,7 +8,7 @@
  * context changes through the shared channel, so streamed state stays readable
  * instead of being interleaved across several live regions.
  */
-import { computed, onMounted, watch } from 'vue';
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
@@ -36,6 +36,33 @@ const { announcer, message } = { announcer: useAnnouncer(), message: useAnnounce
 
 const presentation = computed(() => connection.presentation.value);
 const navigation = computed(() => buildNavigation(route, props.indicators));
+
+// Background connection checks briefly mark control unavailable. Avoid adding
+// a new row to the shell for those transient checks, but keep genuine stalls
+// visible to the operator.
+const CONNECTION_WARNING_GRACE_MS = 700;
+const showConnectionWarning = ref(false);
+let connectionWarningTimer: ReturnType<typeof setTimeout> | undefined;
+watch(
+  () => presentation.value.controlAvailable,
+  (available) => {
+    if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
+    connectionWarningTimer = undefined;
+    if (available) {
+      showConnectionWarning.value = false;
+      return;
+    }
+    showConnectionWarning.value = false;
+    connectionWarningTimer = setTimeout(() => {
+      showConnectionWarning.value = true;
+      connectionWarningTimer = undefined;
+    }, CONNECTION_WARNING_GRACE_MS);
+  },
+  { immediate: true }
+);
+onScopeDispose(() => {
+  if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
+});
 
 // Connection changes are the one shell fact the operator must not be able to
 // miss, so they are announced through the shared region rather than a second
@@ -99,7 +126,7 @@ onMounted(() => {
 
       <!-- Warn before acting on facts that may no longer be live. -->
       <div
-        v-if="!presentation.controlAvailable"
+        v-if="showConnectionWarning"
         class="shell-connection-banner flex items-center gap-2 px-4 py-1.5 border-b text-[11px] font-semibold"
         :class="
           presentation.status === 'red'
