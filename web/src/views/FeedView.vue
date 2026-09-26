@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAppStore } from '../stores/app.ts';
 import { useAnnouncer } from '../primitives/announcer.ts';
@@ -10,11 +10,28 @@ import FilterPillGroup from '../primitives/FilterPillGroup.vue';
 import FilterPill from '../primitives/FilterPill.vue';
 import Dialog from '../primitives/Dialog.vue';
 import Button from '../primitives/Button.vue';
+import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.js';
 
 const route = useRoute();
 const router = useRouter();
 const appStore = useAppStore();
 const announcer = useAnnouncer();
+const environmentService = inject<EnvironmentService | undefined>(ENVIRONMENT_SERVICE, undefined);
+const pendingEnrollmentIds = ref<Set<string>>(new Set());
+
+onMounted(async () => {
+  if (!environmentService) return;
+  try {
+    const environments = await environmentService.listEnvironments();
+    pendingEnrollmentIds.value = new Set(
+      environments.filter((environment) => environment.enrollmentStatus === 'pending').map((environment) => environment.id)
+    );
+  } catch {
+    // Attention items are discovery surfaces, so fail closed when their facts
+    // cannot be confirmed by the authoritative Environment service.
+    pendingEnrollmentIds.value = new Set();
+  }
+});
 
 const scopes = ['all', 'sprout-m2', 'infra'] as const;
 const urgencies = ['all', 'action_required', 'attention', 'info'] as const;
@@ -60,6 +77,7 @@ interface AttentionItem {
   attribution: string;
   timestamp: string;
   targetPath: string;
+  enrollmentId?: string;
 }
 
 const attentionItems = ref<AttentionItem[]>([
@@ -103,6 +121,7 @@ const attentionItems = ref<AttentionItem[]>([
     lifecycleSentence: 'Identity verified · Capabilities declared · Awaiting operator approval',
     attribution: 'Bootstrap Service',
     timestamp: 'just now',
+    enrollmentId: 'env-pending',
     targetPath: '/manage/environments/env-pending',
   },
   {
@@ -244,7 +263,9 @@ const activities = ref([
 ]);
 
 const filteredAttentionItems = computed(() => {
-  let list = attentionItems.value;
+  let list = attentionItems.value.filter(
+    (item) => item.enrollmentId === undefined || pendingEnrollmentIds.value.has(item.enrollmentId)
+  );
   if (activeScope.value !== 'all') {
     if (activeScope.value === 'sprout-m2') {
       list = list.filter((i) => i.projectName === 'Sprout M2 Operator');
