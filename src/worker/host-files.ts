@@ -14,7 +14,7 @@
  * file, and the final path is never briefly more permissive than 0600.
  */
 
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname } from 'node:path';
 
@@ -45,6 +45,17 @@ export function applyWindowsPrivateFileAcl(
 
 export type PrivateFileRestriction = 'restricted' | 'permissive' | 'unverifiable';
 
+/** Assess private-file permissions using the host platform's security model. */
+export function privateFileRestriction(
+  filePath: string,
+  exact = false,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): PrivateFileRestriction {
+  if (security.platform === 'win32') return verifyWindowsPrivateFileAcl(filePath, security);
+  const mode = statSync(filePath).mode & 0o777;
+  return (exact ? mode === PRIVATE_FILE_MODE : (mode & 0o077) === 0) ? 'restricted' : 'permissive';
+}
+
 /** Verify the Windows ACL conservatively; unknown principals or output fail closed. */
 export function verifyWindowsPrivateFileAcl(
   filePath: string,
@@ -56,7 +67,11 @@ export function verifyWindowsPrivateFileAcl(
     if (!currentUser || /\n/.test(currentUser) || !output.trim()) return 'unverifiable';
     const allowed = new Set([currentUser, 'builtin\\administrators', 'nt authority\\system']);
     const entries: string[] = [];
-    for (const line of output.split('\n')) {
+    const normalizedPath = filePath.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase('en-US');
+    for (const [index, rawLine] of output.split('\n').entries()) {
+      const line = index === 0 && rawLine.replace(/\\/g, '/').toLocaleLowerCase('en-US').startsWith(normalizedPath)
+        ? rawLine.slice(normalizedPath.length)
+        : rawLine;
       if (!line.includes(':(')) continue;
       const match = line.match(/^\s*(.+?):((?:\([A-Za-z,]+\))+?)\s*$/);
       if (!match) return 'unverifiable';
