@@ -38,7 +38,6 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { performance } from 'node:perf_hooks';
 
 import {
   defaultPrivateFileSecurityDependencies,
@@ -504,10 +503,10 @@ export function sameWorkerProcess(
  * environment binding.
  *
  * Darwin exposes both the process start time and environment through `ps`; on
- * Linux the equivalent owner-only `/proc` entries are used so local tests and
- * development carriers retain the same safety property. Unsupported platforms
- * and unreadable evidence return `unknown` and therefore fail closed (never
- * trust or steal a possibly live record).
+ * Linux the equivalent owner-only `/proc` entries are used. Windows cannot read
+ * another process's environment: the owner token comes from the canonical
+ * owner-only lock, while an independent OS creation time binds it to the PID.
+ * Unreadable evidence returns `unknown` and fails closed.
  */
 export interface WorkerProcessProbeDependencies {
   readonly platform?: NodeJS.Platform;
@@ -518,6 +517,8 @@ export interface WorkerProcessProbeDependencies {
   readonly darwinEnvironment?: (pid: number) => string | undefined;
   readonly darwinStartIdentity?: (pid: number) => string | undefined;
   readonly windowsStartIdentity?: (pid: number) => string | undefined;
+  readonly windowsLockIdentity?: (pid: number) => WorkerProcessIdentity | undefined;
+  readonly windowsLockPath?: string;
 }
 
 export function probeWorkerProcess(
@@ -531,14 +532,16 @@ export function probeWorkerProcess(
       ? (dependencies.linuxEnvironment ?? ((processId) => environmentValue(readFileSync(`/proc/${processId}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')))(pid)
       : platform === 'darwin'
         ? (dependencies.darwinEnvironment ?? darwinEnvironmentValue)(pid)
-        : platform === 'win32' && pid === process.pid
-          ? environmentValue(`SPROUT_WORKER_OWNER_TOKEN=${(dependencies.currentEnvironment ?? process.env)['SPROUT_WORKER_OWNER_TOKEN'] ?? ''}\0`, 'SPROUT_WORKER_OWNER_TOKEN')
+        : platform === 'win32'
+          ? pid === process.pid
+            ? environmentValue(`SPROUT_WORKER_OWNER_TOKEN=${(dependencies.currentEnvironment ?? process.env)['SPROUT_WORKER_OWNER_TOKEN'] ?? ''}\0`, 'SPROUT_WORKER_OWNER_TOKEN')
+            : windowsForeignOwnerToken(pid, dependencies)
           : undefined;
     const startIdentity = platform === 'linux'
       ? (dependencies.linuxStartIdentity ?? linuxStartIdentity)(pid)
       : platform === 'darwin'
         ? (dependencies.darwinStartIdentity ?? darwinStartIdentity)(pid)
-        : platform === 'win32' && pid === process.pid
+        : platform === 'win32'
           ? (dependencies.windowsStartIdentity ?? windowsStartIdentity)(pid)
           : undefined;
     if (ownerToken === undefined || startIdentity === undefined) return { state: 'unknown' };
@@ -551,12 +554,28 @@ export function probeWorkerProcess(
   }
 }
 
+function windowsForeignOwnerToken(pid: number, dependencies: WorkerProcessProbeDependencies): string | undefined {
+  const identity = (dependencies.windowsLockIdentity ?? ((processId) => windowsLockIdentity(processId, dependencies.windowsLockPath)))(pid);
+  // An older self-only marker cannot be checked across processes. Treat an
+  // already-running pre-upgrade Worker as unknown until the task restarts.
+  return identity !== undefined && /^windows:\d{15,20}$/.test(identity.startIdentity)
+    ? identity.ownerToken
+    : undefined;
+}
+
 function windowsStartIdentity(pid: number): string | undefined {
-  // Node's monotonic process-start marker is stable for this process lifetime.
-  // Persisted records are also bound to a fresh random owner token, so a later
-  // process (including a reused pid) cannot pass sameWorkerProcess by marker
-  // coincidence alone.
-  return `windows:${pid}:${performance.nodeTiming.nodeStart}`;
+  // Win32_Process CreationDate is obtained independently of the lock and of
+  // this Node invocation. Do not use a PID or a process command line as proof.
+  const output = execFileSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference = 'Stop'; $p = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($null -eq $p) { exit 1 }; $p.CreationDate.ToUniversalTime().Ticks`,
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 5_000 }).trim();
+  return /^\d{15,20}$/.test(output) ? `windows:${output}` : undefined;
+}
+
+function windowsLockIdentity(pid: number, lockPath = workerLockPath(workerHostPaths())): WorkerProcessIdentity | undefined {
+  const lock = readWorkerLock(lockPath);
+  return lock?.process.pid === pid ? lock.process : undefined;
 }
 
 /** Bind the current process after `start` has installed its owner token. */

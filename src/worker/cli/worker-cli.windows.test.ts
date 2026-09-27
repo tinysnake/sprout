@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 
 import { createWorkerCli, WORKER_EXIT } from './worker-cli.ts';
 import {
+  acquireWorkerLock,
   createWorkerOwnerToken,
   ensureStateDirectory,
+  probeWorkerProcess,
+  workerLockPath,
   workerHostPaths,
   workerServiceLabel,
   writeConfig,
@@ -27,6 +31,7 @@ function windowsHarness(overrides: {
     readonly state: 'alive' | 'dead' | 'unknown';
     readonly process: WorkerProcessIdentity;
   };
+  readonly windowsEvidence?: { readonly startIdentity: (pid: number) => string | undefined };
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'sprout-worker-win-'));
   const paths = workerHostPaths({
@@ -62,6 +67,7 @@ function windowsHarness(overrides: {
     startIdentity: 'test-process-start',
     ownerToken: token,
   };
+  const windowsEvidence = overrides.windowsEvidence;
 
   const cli = createWorkerCli({
     paths: () => paths,
@@ -71,7 +77,13 @@ function windowsHarness(overrides: {
     run: overrides.run ?? defaultRun,
     uid: 1000,
     currentProcess: (ownerToken) => ({ ...currentIdentity, ownerToken }),
-    processProbe: overrides.processProbe ?? ((pid) => ({ state: 'alive', process: { ...currentIdentity, pid } })),
+    processProbe: overrides.processProbe ?? (windowsEvidence === undefined
+      ? (pid) => ({ state: 'alive', process: { ...currentIdentity, pid } })
+      : (pid) => probeWorkerProcess(pid, {
+        platform: 'win32', isAlive: () => true,
+        windowsLockPath: workerLockPath(paths),
+        windowsStartIdentity: windowsEvidence.startIdentity,
+      })),
   });
 
   const seedConfig = (instanceId = 'env-synthetic'): WorkerHostConfig => {
@@ -419,6 +431,57 @@ test('sprout worker status fails closed when process ownership evidence is unava
     assert.match(h.out.join('\n'), /the Worker process ownership evidence is unavailable; start and reset are fenced/);
     assert.doesNotMatch(h.out.join('\n'), /state: connected/);
   } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker status projects verified foreign Windows process state and epoch', async () => {
+  const marker = 'windows:638000000000000000';
+  const h = windowsHarness({ windowsEvidence: { startIdentity: () => marker } });
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const pid = child.pid as number;
+  const identity = { pid, startIdentity: marker, ownerToken: createWorkerOwnerToken() };
+  try {
+    h.seedConfig();
+    const lock = acquireWorkerLock(h.paths, identity, () => ({ state: 'dead' }));
+    try {
+      writeRuntimeState(h.paths, { pid, process: identity, state: 'connected', epoch: 7, at: 1_000 });
+      assert.equal(await h.cli.run(['status']), WORKER_EXIT.ok);
+      assert.match(h.out.join('\n'), /state: connected\nepoch: 7/);
+      assert.match(h.out.join('\n'), /service: installed and loaded/);
+    } finally {
+      lock.release();
+    }
+  } finally {
+    child.kill();
+    h.cleanup();
+  }
+});
+
+test('sprout worker status fails closed on unverifiable Windows OS evidence and rejects reused PID', async () => {
+  let marker: string | undefined = 'windows:638000000000000000';
+  const h = windowsHarness({ windowsEvidence: { startIdentity: () => marker } });
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const pid = child.pid as number;
+  const identity = { pid, startIdentity: marker, ownerToken: createWorkerOwnerToken() } as WorkerProcessIdentity;
+  try {
+    h.seedConfig();
+    const lock = acquireWorkerLock(h.paths, identity, () => ({ state: 'dead' }));
+    try {
+      writeRuntimeState(h.paths, { pid, process: identity, state: 'reconnecting', at: 1_000 });
+      marker = undefined;
+      assert.equal(await h.cli.run(['status']), WORKER_EXIT.failure);
+      assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+      h.out.length = 0;
+      marker = 'windows:638000000000000001';
+      assert.equal(await h.cli.run(['status']), WORKER_EXIT.ok);
+      assert.match(h.out.join('\n'), /state: stopped/);
+      assert.doesNotMatch(h.out.join('\n'), /state: reconnecting/);
+    } finally {
+      lock.release();
+    }
+  } finally {
+    child.kill();
     h.cleanup();
   }
 });
