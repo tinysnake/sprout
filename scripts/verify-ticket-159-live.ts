@@ -22,16 +22,29 @@
  *   SPROUT_LIVE_SSH          required  ssh target (e.g. a `~/.ssh/config` alias)
  *   SPROUT_LIVE_WORKER_DIR   required  remote directory containing `bin/sprout`
  *   SPROUT_LIVE_CORE_HOST    required  address the remote Worker can reach the core at
- *   SPROUT_LIVE_PORT         optional  review-instance port (default 41435)
+ *   SPROUT_LIVE_PORT         optional  fixed review-instance port; when omitted the
+ *                                      server binds an ephemeral port and advertises it
+ *   SPROUT_LIVE_TARGET_LABEL optional  privacy-safe transcript label (default
+ *                                      `<remote-host>`; pass `<E8-host>` for the E8 run)
  *   SPROUT_LIVE_ENGINE       optional  required engine (default "pi")
  *   SPROUT_LIVE_MODEL        optional  required provider-scoped model id
+ *
+ * The script also attests the target's role from the host itself: it reads the
+ * host-reported OS version, build, product type, architecture, and PowerShell
+ * version over the same SSH channel, and reports the `sprout worker` process as
+ * the host reports it. The attestation is printed under the run-time target
+ * label (for the E8 run, `<E8-host>`) so a reader can tie the successful run to
+ * the documented E8 Windows host without retaining the alias, address,
+ * username, or path.
  *
  * Privilege note: a successful run starts a short-lived plaintext WebSocket to
  * the review instance. Use only on a trusted private channel, as the operator
  * already does for the enrollment-to-run journey.
  */
 import { exec, spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createSproutRuntime } from '../src/runtime.ts';
 import { parseHostConfiguration } from '../src/host-config.ts';
 import { admissionRefusal, projectCatalogEntry } from '../src/environment/catalog.ts';
@@ -60,23 +73,71 @@ function execAsync(command: string): Promise<{ stdout: string; stderr: string }>
 const SSH = requiredEnv('SPROUT_LIVE_SSH');
 const REMOTE_DIR = requiredEnv('SPROUT_LIVE_WORKER_DIR');
 const CORE_HOST = requiredEnv('SPROUT_LIVE_CORE_HOST');
-const PORT = Number(process.env['SPROUT_LIVE_PORT'] ?? '41435');
+const PORT = process.env['SPROUT_LIVE_PORT'] !== undefined && process.env['SPROUT_LIVE_PORT'] !== ''
+  ? Number(process.env['SPROUT_LIVE_PORT'])
+  : 0;
+const TARGET_LABEL = process.env['SPROUT_LIVE_TARGET_LABEL'] ?? '<remote-host>';
 const ENGINE = process.env['SPROUT_LIVE_ENGINE'] ?? 'pi';
 const MODEL = process.env['SPROUT_LIVE_MODEL'] ?? 'example/model';
 const CREDENTIAL = 'live-verification-operator-credential';
-const DB_PATH = '/tmp/sprout-verify-159-live.db';
+const DB_DIR = mkdtempSync(join(tmpdir(), 'sprout-verify-159-live-'));
+const DB_PATH = join(DB_DIR, 'review.db');
 const INSTANCE_ID = 'web-enrolled-windows-host';
-
-for (const file of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
-  if (existsSync(file)) rmSync(file);
-}
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const ssh = (remote: string) => `ssh -T -o BatchMode=yes ${SSH} ${remote}`;
 const remoteWorker = (args: string) => `cd ${REMOTE_DIR} && node bin/sprout worker ${args}`;
 
+interface HostAttestation {
+  readonly isWindows: boolean;
+  readonly osVersion: string;
+  readonly osBuild: string;
+  readonly osProductType: number;
+  readonly osArchitecture: string;
+  readonly psVersion: string;
+  readonly workerProcessRole: string;
+  readonly workerProcessCount: number;
+}
+
+/**
+ * Query the host, over the operator's SSH channel, for evidence of its own
+ * identity and role. Nothing here is trusted from the local side: the OS facts
+ * and the `sprout worker` process are what the host reports about itself.
+ */
+async function hostAttestation(): Promise<HostAttestation> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$os = Get-CimInstance Win32_OperatingSystem',
+    "$procs = @(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -and ($_.CommandLine -match 'sprout') -and ($_.CommandLine -match 'worker') })",
+    '$worker = $procs | Select-Object -First 1',
+    "$role = 'none'",
+    "if ($worker) { if ($worker.CommandLine -match 'worker start') { $role = 'worker-start' } elseif ($worker.CommandLine -match 'worker enroll') { $role = 'worker-enroll' } else { $role = 'worker-other' } }",
+    "$isWindows = [System.Environment]::OSVersion.Platform -eq 'Win32NT'",
+    '[ordered]@{',
+    '  isWindows = $isWindows',
+    '  osVersion = [string]$os.Version',
+    '  osBuild = [string]$os.BuildNumber',
+    '  osProductType = [int]$os.ProductType',
+    '  osArchitecture = [string]$env:PROCESSOR_ARCHITECTURE',
+    '  psVersion = [string]$PSVersionTable.PSVersion',
+    '  workerProcessRole = $role',
+    '  workerProcessCount = @($procs).Count',
+    '} | ConvertTo-Json -Compress',
+  ].join('\n');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const { stdout } = await execAsync(ssh(`"powershell -NoProfile -EncodedCommand ${encoded}"`));
+  const json = stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith('{')).pop();
+  if (json === undefined) throw new Error(`host attestation returned no JSON: ${stdout.trim()}`);
+  return JSON.parse(json) as HostAttestation;
+}
+
+function describeAttestation(attestation: HostAttestation): string {
+  const platform = attestation.isWindows ? 'windows' : 'container';
+  return `platform=${platform} osVersion=${attestation.osVersion} build=${attestation.osBuild} productType=${attestation.osProductType} arch=${attestation.osArchitecture} ps=${attestation.psVersion} workerProcessRole=${attestation.workerProcessRole} workerProcessCount=${attestation.workerProcessCount}`;
+}
+
 async function run(): Promise<void> {
-  console.log(`1. Starting the review instance on port ${PORT}`);
+  console.log(`1. Starting the review instance on ${PORT === 0 ? 'an ephemeral port' : `port ${PORT}`}`);
   const configuration = parseHostConfiguration({
     SPROUT_PORT: String(PORT),
     SPROUT_BIND_HOST: '0.0.0.0',
@@ -98,6 +159,10 @@ async function run(): Promise<void> {
   let workerProcess: ReturnType<typeof spawn> | undefined;
 
   try {
+    const host = await hostAttestation();
+    const platform = host.isWindows ? 'windows' : 'container';
+    console.log(`1a. Host-role attestation [${TARGET_LABEL}]: ${describeAttestation(host)}`);
+
     console.log('2. Signing in through the Web surface');
     const authRes = await fetch(`${base}/api/auth/session`, {
       method: 'POST',
@@ -112,7 +177,7 @@ async function run(): Promise<void> {
     const createRes = await fetch(`${base}/api/environments/enrollments`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrf },
-      body: JSON.stringify({ environmentInstanceId: INSTANCE_ID, displayName: 'Web-enrolled Windows host', platform: 'windows' }),
+      body: JSON.stringify({ environmentInstanceId: INSTANCE_ID, displayName: 'Web-enrolled Windows host', platform }),
     });
     if (!createRes.ok) throw new Error(`creation failed: ${createRes.status} ${await createRes.text()}`);
     const created = (await createRes.json()) as {
@@ -132,7 +197,7 @@ async function run(): Promise<void> {
     let enrollOutput = '';
     try {
       const result = await execAsync(
-        `echo "${created.claim.secret}" | ${ssh(`"${remoteWorker(`enroll ws://${CORE_HOST}:${PORT} ${created.enrollment.id}`)}"`)}`,
+        `echo "${created.claim.secret}" | ${ssh(`"${remoteWorker(`enroll ws://${CORE_HOST}:${boundPort} ${created.enrollment.id}`)}"`)}`,
       );
       enrollOutput = result.stdout + result.stderr;
     } catch (error) {
@@ -173,6 +238,12 @@ async function run(): Promise<void> {
     for (let i = 0; i < 30 && !connected; i += 1) await wait(1000);
     if (!connected) throw new Error('the Worker never reported an accepted connection');
 
+    const connectedHost = await hostAttestation();
+    console.log(`6a. Host-role attestation after connect [${TARGET_LABEL}]: ${describeAttestation(connectedHost)}`);
+    if (connectedHost.workerProcessRole !== 'worker-start') {
+      throw new Error(`expected the host to report a running worker-start process, got ${connectedHost.workerProcessRole}`);
+    }
+
     console.log('7. Observing the durable catalog projection');
     let entry = runtime.environmentCatalog.entries().find((candidate) => candidate.instanceId === INSTANCE_ID);
     for (let i = 0; i < 30; i += 1) {
@@ -184,7 +255,10 @@ async function run(): Promise<void> {
     }
     if (entry === undefined) throw new Error('the catalog has no entry for the enrolled instance');
     if (entry.eligible !== true) throw new Error(`expected eligible === true, got ${JSON.stringify(admissionRefusal(entry))}`);
-    console.log(`   platform=${entry.definition.platform} epoch=${entry.currentEpoch} connection=${entry.readiness.readiness.connection.state} compatibility=${entry.readiness.readiness.compatibility.state}`);
+    if (entry.definition.platform !== platform) {
+      throw new Error(`host-attested platform ${platform} does not match catalog platform ${entry.definition.platform}`);
+    }
+    console.log(`   platform=${entry.definition.platform} (host-attested) epoch=${entry.currentEpoch} connection=${entry.readiness.readiness.connection.state} compatibility=${entry.readiness.readiness.compatibility.state}`);
     console.log(`   engines=${JSON.stringify(entry.readiness.readiness.engines.map((engine) => ({ engine: engine.engine, required: engine.required, models: engine.models.state })))}`);
     console.log(`   admission=${JSON.stringify(admissionRefusal(entry))}`);
     console.log('   PASS: live catalog projection reports eligible === true');
@@ -213,9 +287,7 @@ async function run(): Promise<void> {
     await execAsync(ssh(`"${remoteWorker('stop')}"`)).catch(() => undefined);
     await execAsync(ssh(`"${remoteWorker('reset --yes')}"`)).catch(() => undefined);
     await runtime.close();
-    for (const file of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
-      if (existsSync(file)) rmSync(file);
-    }
+    rmSync(DB_DIR, { recursive: true, force: true });
   }
 }
 
