@@ -79,6 +79,40 @@ test('Windows process probe binds only the current pid to its validated owner to
   assert.deepEqual(probeWorkerProcess(process.pid + 1, dependencies), { state: 'unknown' });
 });
 
+test('Windows foreign process probe requires a canonical lock and independently verified OS start', () => {
+  const { paths, cleanup } = tempPaths();
+  const pid = process.pid + 10_000;
+  const identity = { pid, startIdentity: 'windows:638000000000000000', ownerToken: 'a'.repeat(43) };
+  const dependencies = {
+    platform: 'win32' as const,
+    isAlive: () => true,
+    windowsLockPath: join(paths.stateDirectory, 'worker.lock'),
+    windowsStartIdentity: () => identity.startIdentity,
+  };
+  try {
+    assert.deepEqual(probeWorkerProcess(pid, dependencies), { state: 'unknown' });
+    const lock = acquireWorkerLock(paths, identity, () => ({ state: 'dead' }));
+    try {
+      assert.deepEqual(probeWorkerProcess(pid, dependencies), { state: 'alive', process: identity });
+      assert.deepEqual(probeWorkerProcess(pid, { ...dependencies, windowsStartIdentity: () => undefined }), { state: 'unknown' });
+      const reused = probeWorkerProcess(pid, { ...dependencies, windowsStartIdentity: () => 'windows:638000000000000001' });
+      assert.equal(reused.state, 'alive');
+      if (reused.state === 'alive') assert.notEqual(reused.process.startIdentity, identity.startIdentity);
+    } finally {
+      lock.release();
+    }
+    assert.deepEqual(probeWorkerProcess(pid, dependencies), { state: 'unknown' });
+    const legacy = acquireWorkerLock(paths, { ...identity, startIdentity: `windows:${pid}:12345` }, () => ({ state: 'dead' }));
+    try {
+      assert.deepEqual(probeWorkerProcess(pid, dependencies), { state: 'unknown' });
+    } finally {
+      legacy.release();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 test('Linux and Darwin process probes retain their platform-specific evidence paths', () => {
   const token = 'b'.repeat(43);
   for (const platform of ['linux', 'darwin'] as const) {
