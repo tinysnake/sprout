@@ -158,7 +158,7 @@ export class PiSession implements EngineSession {
     // stderr forwarding below.
     const turnProcess = this.#options.spawnProcess
       ? this.#options.spawnProcess(this.#binaryPath, args)
-      : spawnPi(this.#binaryPath, args, this.#workingDirectory, this.#options.env);
+      : spawnPi(this.#binaryPath, args, this.#workingDirectory, this.#options.env, prompt);
     this.#current = turnProcess;
 
     turnProcess.onExit((code) => {
@@ -209,8 +209,15 @@ export class PiSession implements EngineSession {
     return { events: queue, completion };
   }
 
-  /** The argv for one turn; each turn is a fresh process resuming the session. */
+  /**
+   * The argv for one turn; each turn is a fresh process resuming the session.
+   *
+   * On Windows the prompt travels on stdin (see spawnPi): cmd.exe's re-parsing
+   * of the joined command line cannot survive prompt text with embedded double
+   * quotes, so the prompt must never enter argv there.
+   */
   #turnArgs(prompt: string): string[] {
+    void prompt;
     return [
       '--mode',
       'json',
@@ -224,10 +231,12 @@ export class PiSession implements EngineSession {
       ...(this.#effort !== undefined ? ['--thinking', this.#effort] : []),
       ...(this.#instructions !== undefined ? ['--append-system-prompt', this.#instructions] : []),
       ...(this.#options.args ?? []),
-      // The prompt is a POSITIONAL argument: `--print`/`-p` is a boolean flag.
-      // Passing `-p=<prompt>` is silently accepted and does nothing, so the
-      // prompt must follow the flags as its own argument.
-      prompt,
+      ...(process.platform === 'win32'
+        ? []
+        : // The prompt is a POSITIONAL argument: `--print`/`-p` is a boolean flag.
+          // Passing `-p=<prompt>` is silently accepted and does nothing, so the
+          // prompt must follow the flags as its own argument.
+          [prompt]),
     ];
   }
 
@@ -261,6 +270,7 @@ function spawnPi(
   args: readonly string[],
   cwd: string,
   env: NodeJS.ProcessEnv | undefined,
+  stdinPrompt?: string,
 ): PiSpawnedProcess {
   // With shell:true node joins argv into a single command line that cmd.exe
   // re-parses — WITHOUT adding quotes itself, so any argument containing
@@ -270,17 +280,25 @@ function spawnPi(
   const joinedArgs = process.platform === 'win32'
     ? args.map((arg) => (/^[A-Za-z0-9_.:/=-]+$/.test(arg) ? arg : `\"${arg.replaceAll('"', '\\\"')}\"`))
     : args;
+  // On Windows the prompt never enters argv: cmd.exe cannot carry embedded
+  // double quotes through the joined command line (found live: a run prompt
+  // quoting the task title failed every turn). Pi reads the prompt from
+  // stdin when no positional argument is given.
+  const promptOnStdin = process.platform === 'win32' && stdinPrompt !== undefined;
   const child: ChildProcess = spawn(binaryPath, [...joinedArgs], {
     cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [promptOnStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     // On Windows the resolved binary is often a .cmd shim, which node only
     // executes through the shell. Without this, spawn fails with ENOENT.
     ...(process.platform === 'win32' ? { shell: true } : {}),
     ...(env !== undefined ? { env } : {}),
   });
-  if (!child.stdout || !child.stderr) {
+  if (!child.stdout || !child.stderr || (promptOnStdin && !child.stdin)) {
     child.kill('SIGTERM');
-    throw new Error('pi did not expose stdout/stderr');
+    throw new Error('pi did not expose stdin/stdout/stderr');
+  }
+  if (promptOnStdin) {
+    child.stdin!.end(stdinPrompt);
   }
   return {
     stdout: child.stdout,

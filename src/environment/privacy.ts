@@ -364,7 +364,14 @@ export function sanitizeIdentifier(value: string, options: SanitizeIdentifierOpt
   const redacted = redactSensitiveText(trimmed);
   if (redacted !== trimmed || /<redacted-[a-z-]+>/i.test(redacted)) return options.fallback;
   // Stage 2: drop characters no identifier category may contain and bound it.
-  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]/g, '').slice(0, maxLength);
+  // A single interior slash is a provider-scoped model id (`xiaomi/mimo-v2.6-flash`,
+  // `openrouter/moonshotai/kimi-k2.6`), the form engines actually resolve, so it
+  // is preserved for the model kind instead of silently joining provider and id
+  // (found live: the stripped form became ambiguous across the worker's
+  // authenticated providers and every run refused to start).
+  const cleaned = (kind === 'model'
+    ? trimmed.replace(/[^A-Za-z0-9._/-]/g, '').replace(/\/{2,}/g, '/').replace(/^\/+|\/+$/g, '')
+    : trimmed.replace(/[^A-Za-z0-9._-]/g, '')).slice(0, maxLength);
   if (cleaned === '') return options.fallback;
   if (!matchesIdentifierShape(cleaned, kind)) return options.fallback;
   return cleaned;
@@ -392,6 +399,11 @@ const WORD_ENUM = /^[a-z]+(?:[._-][a-z][a-z0-9]*)*$/;
 
 /** A model id: a word enum or an allowlisted versioned model. */
 function isModelShaped(value: string): boolean {
+  // A provider-scoped id keeps the vendor form the engine CLI consumes.
+  if (value.includes('/')) {
+    const segments = value.split('/');
+    return segments.length >= 2 && segments.every((segment) => segment !== '' && isModelShaped(segment));
+  }
   if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(value)) return false;
   return !looksLikeMachineHost(value) || isVersionedModel(value);
 }

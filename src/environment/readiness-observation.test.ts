@@ -205,7 +205,10 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const malformedScopes: unknown[] = [null, [], 1, 'bad', true, { unknown: true },
       { revision: '' }, { revision: 4 }, { revision: 'bad/revision' },
       { requiredModels: null }, { requiredModels: 'model' }, { requiredModels: [1] },
-      { requiredModels: ['bad/model'] }, { requiredModels: [, 'model'] },
+      // A single interior slash is a valid provider-scoped model id now; a
+      // double slash or a leading/trailing slash stays malformed.
+      { requiredModels: ['bad//model'] }, { requiredModels: ['/bad'] }, { requiredModels: ['bad/'] },
+      { requiredModels: [, 'model'] },
       { requiredEngines: [null] }, { requiredEngines: {} },
       { requiredModels: ['model'], extra: true },
     ];

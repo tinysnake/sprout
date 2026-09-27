@@ -64,33 +64,49 @@ function validateRequirementScope(value: unknown): ReadinessRequirementScope | u
   const revision = field('revision');
   if ('revision' in descriptors &&
       (typeof revision !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(revision))) return undefined;
-  const validList = (key: string): boolean => {
+  const validList = (key: string, allowProviderScoped: boolean): boolean => {
     if (!(key in descriptors)) return true;
     const list = field(key);
     if (!Array.isArray(list) || Object.getPrototypeOf(list) !== Array.prototype ||
         Reflect.ownKeys(list).length !== list.length + 1) return false;
+    // Model ids keep their provider-scoped vendor form (`provider/model`); see
+    // sanitizeIdentifier's model kind in privacy.ts. Engine names stay word enums.
+    const pattern = allowProviderScoped
+      ? /^[A-Za-z0-9_.\-/]{1,128}$/ : /^[A-Za-z0-9_.-]{1,128}$/;
+    const shapeOk = (value: string): boolean => !value.includes('/') ||
+      (value.split('/').every((segment) => segment !== '') && !value.endsWith('/'));
     for (let i = 0; i < list.length; i++) {
       const entry = Object.getOwnPropertyDescriptor(list, String(i));
       if (entry === undefined || typeof entry.value !== 'string' ||
-          !/^[A-Za-z0-9_.-]{1,128}$/.test(entry.value)) return false;
+          !pattern.test(entry.value) || (allowProviderScoped && !shapeOk(entry.value))) return false;
     }
     return true;
   };
-  if (!validList('requiredEngines') || !validList('requiredModels')) return undefined;
+  if (!validList('requiredEngines', false) || !validList('requiredModels', true)) return undefined;
+  // Model ids keep their provider-scoped vendor form (`provider/model`); see
+  // sanitizeIdentifier's model kind in privacy.ts. A provider-scoped id is one
+  // or more non-empty segments joined by single slashes.
+  const MODEL_ID = /^[A-Za-z0-9_.\-/]{1,128}$/;
+  const isModelId = (value: string): boolean => MODEL_ID.test(value) &&
+    (!value.includes('/') || value.split('/').every((segment) => segment !== ''));
+  const hasValidMapping = (key: string, valueShape: 'models' | 'revisions'): boolean => {
+    if (!(key in descriptors)) return true;
+    const candidate = field(key);
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return false;
+    return Object.entries(candidate).every(([engine, entry]) => MODEL_ID.test(engine) &&
+      (valueShape === 'revisions'
+        ? typeof entry === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(entry)
+        : Array.isArray(entry) && entry.every((model) => isModelId(model))));
+  };
+  if (!hasValidMapping('modelsByEngine', 'models') || !hasValidMapping('revisionsByEngine', 'revisions')) return undefined;
   const mapping = field('modelsByEngine');
   const revisions = field('revisionsByEngine');
-  if (revisions !== undefined && (typeof revisions !== 'object' || revisions === null || Array.isArray(revisions) ||
-      Object.entries(revisions).some(([engine, value]) => !/^[A-Za-z0-9_.-]{1,128}$/.test(engine) ||
-        typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)))) return undefined;
-  if (mapping !== undefined && (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping) ||
-      Object.entries(mapping).some(([engine, models]) => !/^[A-Za-z0-9_.-]{1,128}$/.test(engine) ||
-        !Array.isArray(models) || models.some((model) => typeof model !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(model))))) return undefined;
   return {
     ...('revision' in descriptors ? { revision: revision as string } : {}),
     ...(revisions !== undefined ? { revisionsByEngine: { ...revisions as Record<string, string> } } : {}),
     ...('requiredEngines' in descriptors ? { requiredEngines: [...field('requiredEngines') as string[]] } : {}),
     ...('requiredModels' in descriptors ? { requiredModels: [...field('requiredModels') as string[]] } : {}),
-    ...(mapping !== undefined ? { modelsByEngine: Object.fromEntries(Object.entries(mapping).map(([engine, models]) => [engine, [...models as string[]]])) } : {}),
+    ...(mapping !== undefined && mapping !== null ? { modelsByEngine: Object.fromEntries(Object.entries(mapping).map(([engine, models]) => [engine, [...models as string[]]])) } : {}),
   };
 }
 
