@@ -78,6 +78,7 @@ test('the packaged start re-execs with an inspectable host-local process binding
       env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'), SPROUT_WORKER_RECONNECT_MAX_MS: '2000' },
     });
     assert.equal(result.status, 1, result.stderr);
+    assert.doesNotMatch(result.stderr, /Promise resolver undefined is not a function/);
     assert.doesNotMatch(result.stderr, /could not establish a host-local Worker process identity/);
     const runtime = JSON.parse(readFileSync(join(state, 'runtime.json'), 'utf8')) as { process?: { startIdentity?: unknown; ownerToken?: unknown } };
     assert.equal(typeof runtime.process?.startIdentity, 'string');
