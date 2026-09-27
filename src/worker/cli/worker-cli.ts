@@ -1,23 +1,25 @@
 /**
  * The `sprout worker` macOS CLI (#117, ADR-0003/0012).
  *
- * Six executable subcommands give one macOS Environment host a real, repeatable
+ * Seven executable subcommands give one macOS Environment host a real, repeatable
  * bootstrap and user-session lifecycle:
  *
  * - `enroll <endpoint> <enrollment-id>` reads the one-use claim secret from
  *   non-echoing stdin (never argv, never shell history), generates the Worker key
  *   on this host, proves possession to the Sprout instance, and persists the
  *   minimum reconnection facts.
- * - `start` establishes the E1 outbound connection and serves the existing
- *   neutral Worker JSON-RPC until the channel ends.
- * - `status` distinguishes not-enrolled, stopped, connecting, connected,
- *   incompatible, revoked, and local-configuration failure without printing a
- *   secret.
+ * - `start` detaches a background daemon that establishes the E1 outbound
+ *   connection and reconnects with a capped backoff whenever the channel ends;
+ *   `--foreground` keeps the attempt in this process for service managers.
+ * - `status` distinguishes not-enrolled, stopped, connecting, reconnecting,
+ *   connected, incompatible, revoked, and local-configuration failure without
+ *   printing a secret.
  * - `reset` requires explicit Human confirmation, removes host-local identity and
  *   configuration, and leaves the old identity unable to reconnect.
  * - `install-service` renders and installs a signed-in-user LaunchAgent that
  *   starts after sign-in and restarts after an unexpected exit.
  * - `uninstall-service` cleanly boots the LaunchAgent out and removes its plist.
+ * - `stop` signals the running Worker daemon to shut down cleanly.
  *
  * Every command is dependency-injected through `createWorkerCli`, so the tests
  * drive the real control flow with a controlled connectors, command runner, and
@@ -25,15 +27,27 @@
  * real ones.
  */
 
-import { existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { closeSync, existsSync, openSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
-import { EnvironmentWorker } from '../server.ts';
-import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
-import { createEnvironmentWorkerEngines, hostEngineFacts } from '../engine-selection.ts';
-import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
+import { EnvironmentWorker, type EnvironmentWorkerOptions } from '../server.ts';
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkerEngineReadinessFact,
+  type WorkerReadinessFacts,
+  type WorkerReadinessProbeParams,
+  type WorkerReadinessProbeResult,
+} from '../protocol.ts';
+import {
+  createEnvironmentWorkerEngines,
+  describeEnvironmentWorkerEngines,
+  hostEngineFacts,
+} from '../engine-selection.ts';
+import { probeEnvironmentReadiness, type ReadinessProbeOptions } from '../readiness.ts';
+import { WORKER_DIAGNOSTICS, type WorkerDiagnostic } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
   WorkerEnrollmentPendingError,
@@ -110,6 +124,7 @@ export type WorkerStatusState =
   | 'stopped'
   | 'connecting'
   | 'connected'
+  | 'reconnecting'
   | 'pending-approval'
   | 'incompatible'
   | 'revoked'
@@ -117,6 +132,8 @@ export type WorkerStatusState =
 
 export interface WorkerStatus {
   readonly state: WorkerStatusState;
+  /** The Worker connection epoch when connected. */
+  readonly epoch?: number;
   /** Whether a LaunchAgent plist is present for this environment. */
   readonly serviceInstalled: boolean;
   /** The Worker protocol version the host-local configuration declares. */
@@ -135,6 +152,7 @@ export type EnrollmentConnector = (input: {
   readonly enrollmentId: string;
   readonly claimSecret: string | undefined;
   readonly identityKeyPath: string;
+  readonly scheme?: 'ws' | 'wss';
   readonly engineFacts: readonly {
     readonly engine: string;
     readonly installed: boolean;
@@ -166,15 +184,23 @@ export interface WorkerCliDependencies {
   readonly processProbe?: WorkerProcessProbe;
   /** Establish this invocation's binding; test-only callers may supply a synthetic OS seam. */
   readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
+  /** Seam for non-inference readiness probe options; test callers may supply custom runners or clocks. */
+  readonly readinessProbeOptions?: ReadinessProbeOptions;
+  /** The reconnect backoff sleep; injectable so tests run without real delays. */
+  readonly sleep?: (ms: number) => Promise<void>;
   /**
    * Serve the accepted channel. Defaults to the real `EnvironmentWorker`; tests
    * inject a recorder so `start` can be driven without a live core.
+   *
+   * The optional return is the session-end reason: `channel-closed` makes the
+   * reconnect loop retry (a lost core is transient), while `void` or
+   * `shutdown` ends the loop (an operator stop is deliberate).
    */
   readonly serve?: (input: {
     connection: WorkerEnrollmentConnection;
     environmentInstanceId: string;
     engineIds: readonly string[];
-  }) => Promise<void>;
+  }) => Promise<'shutdown' | 'channel-closed' | void>;
 }
 
 /**
@@ -232,7 +258,7 @@ export function projectStatus(input: {
   readonly paths: WorkerHostPaths;
   readonly enrolled: boolean;
   readonly config: WorkerHostConfig | undefined;
-  readonly configError: 'not-enrolled' | 'invalid' | undefined;
+  readonly configError: 'not-enrolled' | 'invalid' | 'restriction-unverifiable' | undefined;
   readonly runtime: WorkerRuntimeState | undefined;
   readonly processAlive: (pid: number) => boolean;
   readonly processMatchesRuntime?: (process: WorkerProcessIdentity) => boolean | 'unknown';
@@ -280,12 +306,14 @@ export function projectStatus(input: {
   switch (runtime.state) {
     case 'connecting':
     case 'connected':
+    case 'reconnecting':
     case 'pending-approval':
     case 'incompatible':
     case 'revoked':
     case 'stopped':
       return {
         state: runtime.state === 'stopped' ? 'stopped' : runtime.state,
+        ...(runtime.state === 'connected' && runtime.epoch !== undefined ? { epoch: runtime.epoch } : {}),
         ...base,
         ...(runtime.detail !== undefined ? { detail: runtime.detail } : {}),
       };
@@ -299,7 +327,7 @@ export function projectStatus(input: {
  * accepted. The endpoint never carries a secret, so it is safe in argv; the
  * one-use claim secret deliberately has no argument form.
  */
-export function parseEndpoint(value: string): { readonly host: string; readonly port: number } {
+export function parseEndpoint(value: string): { readonly host: string; readonly port: number; readonly scheme?: 'ws' | 'wss' } {
   const schemeMatch = value.match(/^([a-z][a-z0-9+.-]*):\/\//i);
   const scheme = schemeMatch?.[1]?.toLowerCase();
   if (scheme !== undefined && !['ws', 'wss', 'http', 'https'].includes(scheme)) {
@@ -336,7 +364,12 @@ export function parseEndpoint(value: string): { readonly host: string; readonly 
   if (url.hostname === '') {
     throw new WorkerHostStateError('invalid', 'the endpoint must include a host and an explicit port');
   }
-  return { host: url.hostname, port };
+  const websocketScheme = scheme === 'http' ? 'ws' : scheme === 'https' ? 'wss' : scheme;
+  return {
+    host: url.hostname,
+    port,
+    ...(websocketScheme !== undefined ? { scheme: websocketScheme as 'ws' | 'wss' } : {}),
+  };
 }
 
 /** The engine facts the Worker declares to the core on enrollment. */
@@ -347,6 +380,153 @@ function engineFacts(engineIds: readonly string[]): readonly {
   readonly models: readonly string[];
 }[] {
   return engineIds.map((engine) => ({ engine, installed: true, authenticated: false, models: [] }));
+}
+
+export interface CreateForegroundWorkerOptionsInput {
+  readonly stream?: (Readable & Writable) | undefined;
+  readonly input?: Readable | undefined;
+  readonly output?: Writable | undefined;
+  readonly environmentInstanceId: string;
+  readonly engineIds?: readonly string[] | undefined;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+  readonly onLog?: ((line: WorkerDiagnostic) => void) | undefined;
+  readonly workingDirectory?: string | undefined;
+  readonly readinessProbeOptions?: ReadinessProbeOptions | undefined;
+  /** Locate engine binaries on the host; tests may substitute a hermetic resolver. */
+  readonly locate?: ((command: string, options: { readonly preferWindowsExecutable: boolean }) => string | undefined) | undefined;
+}
+
+/**
+ * Assemble EnvironmentWorker options for the foreground serve path.
+ *
+ * Startup readiness is measured by the host Worker before exposing its first
+ * `worker/info`, and non-inference readiness probes update that cached
+ * projection. Minimal-honest fallback readiness is preserved for engines that
+ * genuinely cannot be measured (#126).
+ */
+export async function createForegroundWorkerOptions(
+  input: CreateForegroundWorkerOptionsInput,
+): Promise<EnvironmentWorkerOptions> {
+  const inputStream = input.input ?? input.stream;
+  const outputStream = input.output ?? input.stream;
+  if (inputStream === undefined || outputStream === undefined) {
+    throw new Error('createForegroundWorkerOptions requires stream or input and output');
+  }
+
+  const environment = input.environment ?? process.env;
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  const configuration = parseWorkerConfiguration(environment, { workingDirectory });
+  const baseFacts = hostEngineFacts(configuration);
+  const facts = input.locate !== undefined ? { ...baseFacts, locate: input.locate } : baseFacts;
+  const engineConfigurations = describeEnvironmentWorkerEngines(facts);
+  const engines = createEnvironmentWorkerEngines(facts);
+
+  const probeOptions: ReadinessProbeOptions = {
+    ...(environment !== undefined ? { env: environment } : {}),
+    ...(input.readinessProbeOptions ?? {}),
+  };
+
+  const allEngineKeys = new Set([...engines.keys(), ...(input.engineIds ?? [])]);
+  const ensureCovered = (measured: WorkerReadinessFacts): WorkerReadinessFacts => {
+    const known = new Set(measured.engines.map((e) => e.engine));
+    const fallback: WorkerEngineReadinessFact[] = [];
+    for (const engine of allEngineKeys) {
+      if (!known.has(engine)) {
+        fallback.push({
+          engine,
+          installed: true,
+          readiness: 'unknown',
+          modelAvailability: 'unknown',
+          models: [],
+        });
+      }
+    }
+    if (fallback.length === 0) return measured;
+    const probe = measured.probe !== undefined && measured.probe.enginesOk
+      ? {
+          ...measured.probe,
+          enginesOk: false,
+          summary: 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
+        }
+      : measured.probe;
+    return {
+      ...measured,
+      engines: [...measured.engines, ...fallback],
+      ...(probe !== undefined ? { probe } : {}),
+    };
+  };
+
+  const minimalHonestFallback: WorkerReadinessFacts = {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    engines: [...allEngineKeys].map((engine) => ({
+      engine,
+      installed: true,
+      readiness: 'unknown',
+      modelAvailability: 'unknown',
+      models: [],
+    })),
+  };
+
+  let workerReadiness: WorkerReadinessFacts;
+  try {
+    const startupProbe = await probeEnvironmentReadiness(engineConfigurations, probeOptions);
+    workerReadiness = ensureCovered(startupProbe.readiness);
+  } catch {
+    workerReadiness = minimalHonestFallback;
+  }
+
+  const runProbe = async (
+    params: WorkerReadinessProbeParams = {},
+  ): Promise<WorkerReadinessProbeResult> => {
+    const result = await probeEnvironmentReadiness(engineConfigurations, {
+      ...probeOptions,
+      ...(params.requiredModels !== undefined ? { requiredModels: params.requiredModels } : {}),
+      ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+    });
+    workerReadiness = ensureCovered(result.readiness);
+    return {
+      ...result,
+      readiness: workerReadiness,
+      probe: workerReadiness.probe ?? result.probe,
+    };
+  };
+
+  return {
+    environmentInstanceId: input.environmentInstanceId,
+    engines,
+    input: inputStream,
+    output: outputStream,
+    ...(input.onLog !== undefined ? { onLog: input.onLog } : {}),
+    workspaceRoot: configuration.workspaceRoot,
+    readiness: () => workerReadiness,
+    readinessProbe: (params) => runProbe(params),
+  };
+}
+
+
+/**
+ * Detach one background child running this same CLI with `args`.
+ *
+ * `detached` + `unref` is the cross-platform daemon primitive: the child
+ * outlives the parent on both darwin and win32, and its output is redirected
+ * into the host log file so the parent can return without holding pipes.
+ * The child inherits this process environment, including the private owner
+ * token, so its runtime and lock records bind the same identity lineage.
+ * Returns the child's pid so the caller can report it.
+ */
+function spawnDetachedWorker(paths: WorkerHostPaths, args: readonly string[]): number {
+  const log = openSync(paths.logPath, 'a');
+  try {
+    const child = spawn(paths.nodeExecutable, [paths.executablePath, ...args], {
+      detached: true,
+      stdio: ['ignore', log, log],
+      env: process.env,
+    });
+    child.unref();
+    return child.pid ?? 0;
+  } finally {
+    closeSync(log);
+  }
 }
 
 export interface WorkerCli {
@@ -369,6 +549,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   const runCommand = dependencies.run;
   const processProbe = dependencies.processProbe ?? probeWorkerProcess;
   const currentProcess = dependencies.currentProcess ?? currentWorkerProcess;
+  const sleepFn = dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
 
   const connect: EnrollmentConnector =
     dependencies.connect ??
@@ -380,6 +561,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           port: input.port,
           claimSecret: input.claimSecret,
           identityKeyPath: input.identityKeyPath,
+          ...(input.scheme !== undefined ? { scheme: input.scheme } : {}),
         },
         protocolVersion: WORKER_PROTOCOL_VERSION,
         engineFacts: input.engineFacts,
@@ -423,6 +605,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         return installService(paths, rest);
       case 'uninstall-service':
         return uninstallService(paths, rest);
+      case 'stop':
+        return stop(paths, rest);
       case undefined:
       case 'help':
       case '--help':
@@ -442,8 +626,9 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       '',
       'Commands:',
       '  enroll <endpoint> <enrollment-id>   Claim a pending enrollment (secret on stdin)',
-      '  start                               Run the outbound Worker in the foreground',
+      '  start [--foreground]                Start the Worker daemon in the background',
       '  status                              Report host-local Worker state',
+      '  stop                                Signal the running Worker daemon to stop',
       '  reset                               Remove host-local identity and configuration',
       '  install-service                     Install the signed-in-user LaunchAgent',
       '  uninstall-service                   Remove the signed-in-user LaunchAgent',
@@ -467,7 +652,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     const endpointArg = args[0] ?? '';
     const enrollmentId = args[1] ?? '';
-    let endpoint: { host: string; port: number };
+    let endpoint: ReturnType<typeof parseEndpoint>;
     try {
       endpoint = parseEndpoint(endpointArg);
     } catch (error) {
@@ -538,7 +723,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         removeFileIfPresent(paths.identityPath);
         removeFileIfPresent(paths.configPath);
       }
-      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')}`);
+      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')} :: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`); // DEBUG-E8
       return error instanceof WorkerEnrollmentRefusedError ? WORKER_EXIT.refused : WORKER_EXIT.failure;
     }
   }
@@ -556,10 +741,74 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     args: readonly string[],
     environment: NodeJS.ProcessEnv,
   ): Promise<number> {
-    if (args.length !== 0) {
-      err('sprout worker start: takes no arguments');
+    const foreground = args.includes('--foreground');
+    const rest = args.filter((a) => a !== '--foreground');
+    if (rest.length !== 0) {
+      err('sprout worker start: takes no arguments besides --foreground');
       return WORKER_EXIT.usage;
     }
+    // Background is a plain detached child running this same command with
+    // --foreground; the parent returns immediately and the daemon keeps the
+    // reconnect loop alive (its output lands in the host log file). Service
+    // managers (launchd, scheduled tasks) should keep using --foreground.
+    if (!foreground) {
+      const config = peekConfigOrReport(paths, err);
+      if (config === undefined) return WORKER_EXIT.failure;
+      // Authoritative duplicate check: probe the worker lock with this parent's
+      // own identity before spawning the daemon child. The child re-acquires
+      // the lock under its own identity after the parent releases it, so two
+      // concurrent daemon starts are resolved by the child-side lock anyway.
+      const previousOwnerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'];
+      // The exec-time token is the identity `ps -E` reports on darwin, so the
+      // pre-check must probe with it; only a caller that never re-exec'd (a
+      // test harness) gets a fresh token here.
+      const ownerToken = previousOwnerToken ?? createWorkerOwnerToken();
+      process.env['SPROUT_WORKER_OWNER_TOKEN'] = ownerToken;
+      try {
+        const parentIdentity = currentProcess(ownerToken);
+        const probeLock = acquireWorkerLock(paths, parentIdentity, processProbe);
+        probeLock.release();
+      } catch (error) {
+        if (error instanceof DuplicateWorkerProcessError) {
+          err(`sprout worker start: ${error.message}`);
+          return WORKER_EXIT.alreadyRunning;
+        }
+        err(`sprout worker start: ${diagnosticOf(error, 'host-local Worker lock could not be acquired')}`);
+        return WORKER_EXIT.failure;
+      } finally {
+        if (previousOwnerToken === undefined) delete process.env['SPROUT_WORKER_OWNER_TOKEN'];
+        else process.env['SPROUT_WORKER_OWNER_TOKEN'] = previousOwnerToken;
+      }
+      try {
+        const child = spawnDetachedWorker(paths, ['worker', 'start', '--foreground']);
+        out(`Worker daemon started (pid ${String(child)}). Logs: ${paths.logPath}`);
+        return WORKER_EXIT.ok;
+      } catch (error) {
+        err(`sprout worker start: ${diagnosticOf(error, 'the Worker daemon could not be started')}`);
+        return WORKER_EXIT.failure;
+      }
+    }
+    return startForeground(paths, environment);
+  }
+
+  /** Read the host config for the daemon parent, reporting sanitized failures. */
+  function peekConfigOrReport(paths: WorkerHostPaths, report: (line: string) => void): WorkerHostConfig | undefined {
+    try {
+      return readConfig(paths);
+    } catch (error) {
+      if (error instanceof WorkerHostStateError && error.reason === 'not-enrolled') {
+        report('sprout worker start: this host is not enrolled; run `sprout worker enroll` first');
+        return undefined;
+      }
+      report(`sprout worker start: ${diagnosticOf(error, 'host-local configuration could not be read')}`);
+      return undefined;
+    }
+  }
+
+  async function startForeground(
+    paths: WorkerHostPaths,
+    environment: NodeJS.ProcessEnv,
+  ): Promise<number> {
     let config: WorkerHostConfig;
     try {
       config = readConfig(paths);
@@ -585,6 +834,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     const previousOwnerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'];
     const ownerToken = process.env['SPROUT_WORKER_OWNER_TOKEN'] ?? createWorkerOwnerToken();
     process.env['SPROUT_WORKER_OWNER_TOKEN'] = ownerToken;
+    let detachSignals: (() => void) | undefined;
     try {
       let processIdentity: WorkerProcessIdentity;
       try {
@@ -607,111 +857,176 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       }
 
       const engineIds = safeEngineIds(environment);
-      recordState(paths, { pid: process.pid, process: processIdentity, state: 'connecting', at: now() });
-
-      let connection: WorkerEnrollmentConnection;
-      try {
-        connection = await connect({
-          host: config.endpoint.host,
-          port: config.endpoint.port,
-          enrollmentId: config.enrollmentId,
-          claimSecret: undefined,
-          identityKeyPath: identityPath,
-          engineFacts: engineFacts(engineIds),
-          log: () => err('[sprout-worker] host-local Worker operation completed'),
-        });
-      } catch (error) {
-        if (error instanceof WorkerEnrollmentPendingError) {
-          recordState(paths, {
-            pid: process.pid, process: processIdentity, state: 'pending-approval', at: now(),
-            detail: 'the Worker identity is proven and awaiting Human approval',
-          });
-          err('sprout worker start: identity proven; waiting for Human approval in Sprout Web');
-          lock.release();
-          return WORKER_EXIT.awaitingApproval;
-        }
-        if (error instanceof WorkerEnrollmentRefusedError) {
-          recordState(paths, {
-            pid: process.pid,
-            process: processIdentity,
-            state: error.code === 'incompatible' ? 'incompatible' : 'revoked',
-            at: now(),
-            detail: error.code === 'incompatible'
-              ? WORKER_DIAGNOSTICS.protocolIncompatible
-              : WORKER_DIAGNOSTICS.enrollmentRefused,
-          });
-          err(`sprout worker start: ${diagnosticOf(error, WORKER_DIAGNOSTICS.connectionRefused)}`);
-          lock.release();
-          return WORKER_EXIT.refused;
-        }
-        recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: 'the Worker connection could not be established' });
-        err(`sprout worker start: ${diagnosticOf(error, 'the Worker connection could not be established')}`);
-        lock.release();
-        return WORKER_EXIT.failure;
-      }
-
-      recordState(paths, { pid: process.pid, process: processIdentity, state: 'connected', at: now(), epoch: connection.epoch });
-      out(`Connected to Sprout as enrollment ${connection.enrollmentId} (epoch ${connection.epoch}).`);
-
-      const release = (finalState: WorkerConnectionState): void => {
-        recordState(paths, { pid: process.pid, process: processIdentity, state: finalState, at: now() });
-        lock.release();
+      // The reconnect loop: a lost channel or an unreachable core is transient
+      // (a core restart is normal operation), so the daemon retries with a
+      // capped backoff instead of exiting. Enrollment-level refusals are
+      // terminal decisions, not outages: pending-approval, revoked, and
+      // incompatible exit so the operator fixes the cause and restarts.
+      let lockHeld = true;
+      // SPROUT_WORKER_RECONNECT_MAX_MS bounds the total reconnect window. It is
+      // unset by production daemons (they reconnect for as long as the host
+      // runs); operators and packaged checks can set it to get an exit instead
+      // of an unbounded retry when the core is unreachable.
+      const maxWindowMs = Number.parseInt(environment['SPROUT_WORKER_RECONNECT_MAX_MS'] ?? '', 10);
+      const reconnectDeadline = Number.isFinite(maxWindowMs) && maxWindowMs > 0 ? now() + maxWindowMs : undefined;
+      // A stop can arrive while the loop is still retrying. Record a clean
+      // stop and release the lock instead of leaving a stale lock directory
+      // and a `reconnecting` record for the next start to recover.
+      let stopRequested = false;
+      let wakeBackoff: (() => void) | undefined;
+      const onSignal = (): void => {
+        stopRequested = true;
+        wakeBackoff?.();
       };
-
-      try {
-        if (dependencies.serve !== undefined) {
-          await dependencies.serve({ connection, environmentInstanceId: config.environmentInstanceId, engineIds });
-        } else {
-          await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
+      process.on('SIGINT', onSignal);
+      process.on('SIGTERM', onSignal);
+      detachSignals = () => {
+        process.removeListener('SIGINT', onSignal);
+        process.removeListener('SIGTERM', onSignal);
+      };
+      // The backoff races the injected sleep against the wake-up from a stop,
+      // so `stop` does not wait out the current retry delay.
+      const backoff = async (ms: number): Promise<void> => {
+        let wake: () => void = () => {};
+        const woken = new Promise<void>((resolve) => { wake = resolve; });
+        wakeBackoff = wake;
+        try {
+          await Promise.race([sleepFn(ms), woken]);
+        } finally {
+          wakeBackoff = undefined;
         }
-      } finally {
-        release('stopped');
-      }
-      return WORKER_EXIT.ok;
+      };
+      const attempt = async (): Promise<number> => {
+        let delayMs = 2_000;
+        for (;;) {
+          if (stopRequested) {
+            recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: 'the Worker was stopped by the operator' });
+            err('sprout worker start: stopped by the operator');
+            lock.release();
+            return WORKER_EXIT.ok;
+          }
+          if (reconnectDeadline !== undefined && now() >= reconnectDeadline) {
+            recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now(), detail: 'the core remained unreachable for the whole reconnect window' });
+            err(`sprout worker start: the core remained unreachable for the whole reconnect window (${String(Math.round(maxWindowMs / 1000))}s)`);
+            lock.release();
+            return WORKER_EXIT.failure;
+          }
+          recordState(paths, { pid: process.pid, process: processIdentity, state: lockHeld ? 'reconnecting' : 'connecting', at: now() });
+          let connection: WorkerEnrollmentConnection;
+          try {
+            connection = await connect({
+              host: config.endpoint.host,
+              port: config.endpoint.port,
+              ...(config.endpoint.scheme !== undefined ? { scheme: config.endpoint.scheme } : {}),
+              enrollmentId: config.enrollmentId,
+              claimSecret: undefined,
+              identityKeyPath: identityPath,
+              engineFacts: engineFacts(engineIds),
+              log: () => err('[sprout-worker] host-local Worker operation completed'),
+            });
+          } catch (error) {
+            if (error instanceof WorkerEnrollmentPendingError) {
+              recordState(paths, {
+                pid: process.pid, process: processIdentity, state: 'pending-approval', at: now(),
+                detail: 'the Worker identity is proven and awaiting Human approval',
+              });
+              err('sprout worker start: identity proven; waiting for Human approval in Sprout Web');
+              return WORKER_EXIT.awaitingApproval;
+            }
+            if (error instanceof WorkerEnrollmentRefusedError) {
+              recordState(paths, {
+                pid: process.pid,
+                process: processIdentity,
+                state: error.code === 'incompatible' ? 'incompatible' : 'revoked',
+                at: now(),
+                detail: error.code === 'incompatible'
+                  ? WORKER_DIAGNOSTICS.protocolIncompatible
+                  : WORKER_DIAGNOSTICS.enrollmentRefused,
+              });
+              err(`sprout worker start: ${diagnosticOf(error, WORKER_DIAGNOSTICS.connectionRefused)}`);
+              return WORKER_EXIT.refused;
+            }
+            recordState(paths, { pid: process.pid, process: processIdentity, state: 'reconnecting', at: now(), detail: 'the Worker connection could not be established; retrying' });
+            err(`sprout worker start: ${diagnosticOf(error, 'the Worker connection could not be established')}; retrying in ${String(Math.round(delayMs / 1000))}s`);
+            await backoff(delayMs);
+            delayMs = Math.min(delayMs * 2, 60_000);
+            continue;
+          }
+
+          recordState(paths, { pid: process.pid, process: processIdentity, state: 'connected', at: now(), epoch: connection.epoch });
+          out(`Connected to Sprout as enrollment ${connection.enrollmentId} (epoch ${connection.epoch}).`);
+          lockHeld = false;
+          let reason: 'shutdown' | 'channel-closed';
+          try {
+            if (dependencies.serve !== undefined) {
+              reason = (await dependencies.serve({ connection, environmentInstanceId: config.environmentInstanceId, engineIds })) ?? 'shutdown';
+            } else {
+              reason = await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
+            }
+          } finally {
+            lockHeld = true;
+          }
+          if (reason === 'shutdown') {
+            recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now() });
+            lock.release();
+            return WORKER_EXIT.ok;
+          }
+          // The channel ended without a terminal refusal or an operator stop:
+          // transient. Record, release the lock so a concurrent start can take
+          // over, and retry.
+          recordState(paths, { pid: process.pid, process: processIdentity, state: 'reconnecting', at: now(), detail: 'the Worker channel closed; reconnecting' });
+          err('[sprout-worker] channel closed; reconnecting');
+          await backoff(delayMs);
+          delayMs = Math.min(delayMs * 2, 60_000);
+        }
+      };
+      const code = await attempt();
+      lock.release();
+      return code;
     } finally {
+      detachSignals?.();
       if (previousOwnerToken === undefined) delete process.env['SPROUT_WORKER_OWNER_TOKEN'];
       else process.env['SPROUT_WORKER_OWNER_TOKEN'] = previousOwnerToken;
     }
   }
 
+  /**
+   * Serve the accepted channel until it ends or a signal arrives.
+   *
+   * The returned reason drives the reconnect loop: a lost channel is transient
+   * (a core restart is normal operation) and is retried, while an operator
+   * signal is a deliberate stop.
+   */
   async function serveForeground(
     connection: WorkerEnrollmentConnection,
     environmentInstanceId: string,
     engineIds: readonly string[],
     environment: NodeJS.ProcessEnv,
-  ): Promise<void> {
-    const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
-    const engines = createEnvironmentWorkerEngines(hostEngineFacts(configuration));
-    // Prefer the same environment-variable allowlisted facts the core forwards,
-    // but fall back to a minimal honest readiness projection when the CLI runs
-    // engine selection in-process.
-    void engineIds;
-    const worker = new EnvironmentWorker({
+  ): Promise<'shutdown' | 'channel-closed'> {
+    const options = await createForegroundWorkerOptions({
+      stream: connection.stream,
       environmentInstanceId,
-      engines,
-      input: connection.stream,
-      output: connection.stream,
+      engineIds,
+      environment,
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
-      workspaceRoot: configuration.workspaceRoot,
-      readiness: () => ({
-        protocolVersion: WORKER_PROTOCOL_VERSION,
-        engines: [...engines.keys()].map((engine) => ({
-          engine,
-          installed: true,
-          readiness: 'unknown',
-          modelAvailability: 'unknown',
-          models: [],
-        })),
-      }),
+      readinessProbeOptions: dependencies.readinessProbeOptions,
     });
-    await new Promise<void>((resolve) => {
-      connection.stream.on('close', () => {
-        void worker.shutdown().then(resolve, resolve);
-      });
-      connection.stream.on('error', () => resolve());
-      const stop = (): void => {
-        void worker.shutdown().then(resolve, resolve);
+    const worker = new EnvironmentWorker(options);
+    return new Promise<'shutdown' | 'channel-closed'>((resolve) => {
+      let reason: 'shutdown' | 'channel-closed' = 'channel-closed';
+      const cleanUpAndResolve = (): void => {
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+        resolve(reason);
       };
+      const stop = (): void => {
+        reason = 'shutdown';
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      };
+      connection.stream.on('close', () => {
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      });
+      connection.stream.on('error', () => cleanUpAndResolve());
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     });
@@ -724,7 +1039,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     const enrolled = isEnrolled(paths);
     let config: WorkerHostConfig | undefined;
-    let configError: 'not-enrolled' | 'invalid' | undefined;
+    let configError: 'not-enrolled' | 'invalid' | 'restriction-unverifiable' | undefined;
     if (!enrolled) {
       configError = 'not-enrolled';
     } else {
@@ -797,6 +1112,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       });
     }
     out(`state: ${projected.state}`);
+    if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
     out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
     if (projected.detail !== undefined) out(`detail: ${projected.detail}`);
@@ -881,6 +1197,47 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
   }
 
+  /**
+   * `stop` asks the running daemon to shut down cleanly.
+   *
+   * SIGTERM is the graceful channel both the reconnect loop and the serve
+   * promise already honour (`process.once('SIGTERM', stop)`); the daemon
+   * records its final state and releases the lock itself, so `stop` never
+   * mutates host state it does not own. Windows delivers SIGTERM as a hard
+   * termination via the C runtime; the daemon's next start recovers through
+   * the existing lock-recovery path.
+   */
+  async function stop(paths: WorkerHostPaths, args: readonly string[]): Promise<number> {
+    if (args.length !== 0) {
+      err('sprout worker stop: takes no arguments');
+      return WORKER_EXIT.usage;
+    }
+    let runtime: WorkerRuntimeState | undefined;
+    try {
+      runtime = readRuntimeState(paths);
+    } catch (error) {
+      if (error instanceof WorkerHostStateError && error.reason === 'not-enrolled') {
+        err('sprout worker stop: this host is not enrolled; nothing to stop');
+        return WORKER_EXIT.notEnrolled;
+      }
+      err(`sprout worker stop: ${diagnosticOf(error, 'the Worker runtime state could not be read')}`);
+      return WORKER_EXIT.failure;
+    }
+    if (runtime === undefined || !isProcessAlive(runtime.pid)) {
+      err('sprout worker stop: no running Worker was recorded on this host');
+      return WORKER_EXIT.ok;
+    }
+
+    try {
+      process.kill(runtime.pid, 'SIGTERM');
+    } catch (error) {
+      err(`sprout worker stop: the Worker process could not be signalled: ${error instanceof Error ? error.message : String(error)}`);
+      return WORKER_EXIT.failure;
+    }
+    out(`Stop signalled to the Worker (pid ${String(runtime.pid)}).`);
+    return WORKER_EXIT.ok;
+  }
+
   async function installService(paths: WorkerHostPaths, args: readonly string[]): Promise<number> {
     if (args.length !== 0) {
       err('sprout worker install-service: takes no arguments');
@@ -906,7 +1263,9 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     const plist = renderLaunchAgent({
       label,
       executablePath: paths.executablePath,
-      arguments: ['worker', 'start'],
+      // launchd supervises one foreground process: the reconnect loop then
+      // keeps that supervised process alive across core restarts.
+      arguments: ['worker', 'start', '--foreground'],
       logPath: paths.logPath,
       environment: plistEnvironment(),
     });
@@ -979,6 +1338,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     if (process.env['SPROUT_WORKER_HOME'] !== undefined) {
       environment['SPROUT_WORKER_HOME'] = process.env['SPROUT_WORKER_HOME'];
     }
+    environment['LC_ALL'] = 'C';
     return environment;
   }
 
@@ -997,6 +1357,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
 }
 
 function diagnosticOf(_error: unknown, fallback: string): string {
+
   // Filesystem, launchd, transport, endpoint, and key errors can contain
   // paths, host names, command output, or secret-adjacent material. The CLI
   // boundary therefore emits only caller-supplied, sanitized categories.

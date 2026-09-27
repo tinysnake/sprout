@@ -46,6 +46,11 @@ interface ColumnShape {
 
 /** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  environment_model_authorization_evidence: [
+    { name: 'evidence_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_readiness_attempts: [
     { name: 'observation_id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -92,6 +97,8 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'work_option', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'configuration_version', type: 'INTEGER', notnull: 0, pk: 0 },
     { name: 'workspace_binding', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'recovery_settlement', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'recovered_events', type: 'TEXT', notnull: 0, pk: 0 },
   ],
   environment_leases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
@@ -230,6 +237,30 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'phase', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  worker_recovery_receipts: [
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'turn_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'run_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'settlement', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'event_count', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'settlement_payload', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'settlement_status', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'acknowledged', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'settlement_acked', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'compacted', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  worker_recovery_events: [
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'turn_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 3 },
+    { name: 'payload', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
+  worker_recovery_contexts: [
+    { name: 'enrollment_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'task_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_force_releases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -357,6 +388,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'environment_force_releases',
         'environment_instance_enrollment_authority',
         'environment_leases',
+        'environment_model_authorization_evidence',
         'environment_observations',
         'environment_probes',
         'environment_readiness',
@@ -369,6 +401,9 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'task_run_links',
         'tasks',
         'worker_connection_epochs',
+        'worker_recovery_contexts',
+        'worker_recovery_events',
+        'worker_recovery_receipts',
       ],
     );
   });

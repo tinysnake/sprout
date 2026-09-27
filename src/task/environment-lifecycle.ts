@@ -74,6 +74,7 @@ export interface TaskEnvironmentLifecycleOptions {
     readonly taskId: string;
     readonly leaseId: string;
     readonly hadActiveRun: boolean;
+    readonly runId?: string;
   }) => Promise<void>;
   /**
    * How the Environment domain resolves a permanent Force Release (#88).
@@ -229,6 +230,7 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#store.get(taskId);
     if (!task || task.activeRunId !== run.id) return; // idempotent restart redelivery
     if (run.status === 'queued' || run.status === 'running') return;
+    if (task.environmentLifecycleState === 'recovery') return; // channel loss already protected it
     if (run.status === 'interrupted' || isWorkerLoss(run)) {
       await this.#toRecovery(task, 'running', true);
       return;
@@ -275,6 +277,28 @@ export class TaskEnvironmentLifecycle {
     await this.#store.save(resumed); return resumed;
   }
 
+  /** No turn was active: restore exactly the prior held state, without replay. */
+  async clearIdleRecovery(taskId: string): Promise<void> {
+    const task = await this.#require(taskId);
+    if (task.environmentLifecycleState !== 'recovery') return; // retry after a crash
+    if (!['idle', 'blocked', 'awaiting-validation'].includes(task.recoveryState ?? '') || task.activeRunId) {
+      throw new Error('Task has active or unproven work');
+    }
+    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) {
+      throw new Error('Task lease cannot be restored');
+    }
+    await this.#store.save(omit({ ...task, environmentLifecycleState: task.recoveryState!,
+      updatedAt: this.#clock.now() }, 'recoveryState'));
+  }
+
+  /** A lost Worker protects even an idle Task's preserved workspace. */
+  async workerChannelLost(taskId: string): Promise<void> {
+    const task = await this.#require(taskId);
+    if (task.environmentLifecycleState === 'recovery' || !task.environmentLeaseId) return;
+    if (!['beginning', 'idle', 'blocked', 'awaiting-validation', 'running', 'ending'].includes(task.environmentLifecycleState ?? '')) return;
+    await this.#toRecovery(task, task.environmentLifecycleState!, task.activeRunId !== undefined);
+  }
+
   /** Enter the retained human-validation gap without releasing the Task lease. */
   async awaitHumanValidation(taskId: string): Promise<Task> {
     const task = await this.#require(taskId);
@@ -298,6 +322,10 @@ export class TaskEnvironmentLifecycle {
   async reconcile(): Promise<void> {
     for (const task of await this.#store.list()) {
       if (!task.environmentLeaseId || ['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')) continue;
+      if (task.environmentLifecycleState === 'recovery') {
+        this.#pool.markRecovering(task.environmentLeaseId);
+        continue; // preserve the original prior state across repeated restarts
+      }
       await this.#toRecovery(task, task.environmentLifecycleState ?? 'beginning', task.activeRunId !== undefined);
     }
   }
@@ -391,7 +419,8 @@ export class TaskEnvironmentLifecycle {
     // `recovering`, which already blocks reassignment.
     if (this.#onRecovery !== undefined && task.environmentLeaseId !== undefined) {
       try {
-        await this.#onRecovery({ taskId: task.id, leaseId: task.environmentLeaseId, hadActiveRun });
+        await this.#onRecovery({ taskId: task.id, leaseId: task.environmentLeaseId, hadActiveRun,
+          ...(hadActiveRun && task.activeRunId !== undefined ? { runId: task.activeRunId } : {}) });
       } catch (error) {
         process.stderr.write(
           `[recovery] failed to open the recovery record for task ${task.id}: ` +

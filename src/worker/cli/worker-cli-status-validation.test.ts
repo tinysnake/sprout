@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { createWorkerCli, WORKER_EXIT, type EnrollmentConnector } from './worker-cli.ts';import { acquireWorkerLock, ensureStateDirectory, writeRuntimeState, workerHostPaths, writePrivateFile, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';
+import { join } from 'node:path';import { createWorkerCli, WORKER_EXIT, type EnrollmentConnector } from './worker-cli.ts';import { acquireWorkerLock, ensureStateDirectory, readRuntimeState, writeRuntimeState, workerHostPaths, writePrivateFile, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';
 
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
 
@@ -159,6 +159,7 @@ test('status reports a live connected Worker only when the pid is a verified Wor
     });
     assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
     assert.match(h.out.join('\n'), /state: connected/);
+    assert.match(h.out.join('\n'), /epoch: 2/);
 
     // A reused PID with a different token is not trusted.
     const h2 = harness();
@@ -381,6 +382,153 @@ test('reset refuses its maintenance fence when a live Worker binding is unavaila
     assert.ok(existsSync(h.paths.identityPath), 'the destructive reset is fenced by unavailable evidence');
     assert.ok(existsSync(h.paths.configPath), 'the configuration survives the refused reset');
     holder.release();
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('status projection truthfulness distinguishes connected with epoch from connecting and stopped', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const liveIdentity = processIdentity(process.pid, 'm');
+
+    // 1. Connected with epoch 42
+    writeRuntimeState(h.paths, { pid: process.pid, process: liveIdentity, state: 'connected', at: 1, epoch: 42 });
+    const liveCli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+      processProbe: probe(liveIdentity),
+    });
+    assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: connected/);
+    assert.match(h.out.join('\n'), /epoch: 42/);
+
+    // 2. Connecting (no epoch established yet)
+    h.out.length = 0;
+    writeRuntimeState(h.paths, { pid: process.pid, process: liveIdentity, state: 'connecting', at: 2 });
+    assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: connecting/);
+    assert.doesNotMatch(h.out.join('\n'), /epoch:/);
+
+    // 3. Stopped
+    h.out.length = 0;
+    writeRuntimeState(h.paths, { pid: process.pid, process: liveIdentity, state: 'stopped', at: 3 });
+    assert.equal(await liveCli.run(['status']), WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: stopped/);
+    assert.doesNotMatch(h.out.join('\n'), /epoch:/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('start decisively refuses duplicate Worker while another live Worker holds the connection lock', async () => {
+  const h = harness();
+  const holderPid = 77_888;
+  const holderIdentity = processIdentity(holderPid, 'x');
+  let connectCalled = false;
+  const connector: EnrollmentConnector = async () => {
+    connectCalled = true;
+    throw new Error('connect must not be called when duplicate is refused');
+  };
+  const cli = createWorkerCli({
+    paths: () => h.paths,
+    stdout: (line) => h.out.push(line),
+    stderr: (line) => h.err.push(line),
+    connect: connector,
+    platform: 'darwin',
+    uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+    run: () => '',
+    processProbe: probe(holderIdentity),
+  });
+  try {
+    seedEnrolledHost(h.paths);
+    const lock = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
+    writeRuntimeState(h.paths, {
+      pid: holderPid,
+      process: holderIdentity,
+      state: 'connected',
+      at: 1_000,
+      epoch: 1,
+    });
+
+    const status = await cli.run(['start']);
+    assert.equal(status, WORKER_EXIT.alreadyRunning);
+    assert.equal(connectCalled, false, 'the connector must never be called on duplicate start');
+    const errText = h.err.join('\n');
+    assert.match(errText, /sprout worker start: another Sprout Worker for this environment is already running \(pid 77888\)/);
+    // Non-sensitive: no secret, no host identity, no private path
+    assert.doesNotMatch(errText, /token|key|secret|path|127\.0\.0\.1/i);
+
+    // Existing lock and runtime state remain untouched
+    const runtime = readRuntimeState(h.paths);
+    assert.equal(runtime?.state, 'connected');
+    assert.equal(runtime?.epoch, 1);
+    assert.equal(runtime?.pid, holderPid);
+
+    lock.release();
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('start reclaims lock and reconnects after genuine process death of previous holder', async () => {
+  const h = harness();
+  const deadPid = 77_999;
+  const deadIdentity = processIdentity(deadPid, 'd');
+  let connectCalled = false;
+  const connector: EnrollmentConnector = async (input) => {
+    connectCalled = true;
+    const { PassThrough } = await import('node:stream');
+    const stream = new PassThrough();
+    return {
+      stream,
+      enrollmentId: input.enrollmentId,
+      environmentInstanceId: 'env-synthetic',
+      epoch: 2,
+      connectionId: 'c-reconnect',
+      close: () => stream.end(),
+    };
+  };
+  const currentIdentity = { pid: process.pid, startIdentity: 'test-current-process', ownerToken: 'k'.repeat(43) };
+  const cli = createWorkerCli({
+    paths: () => h.paths,
+    stdout: (line) => h.out.push(line),
+    stderr: (line) => h.err.push(line),
+    connect: connector,
+    platform: 'darwin',
+    uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+    run: () => '',
+    // deadPid is dead (not returned by probe); current process is alive
+    processProbe: probe(currentIdentity),
+    serve: async () => undefined,
+  });
+  try {
+    seedEnrolledHost(h.paths);
+    // Simulate dead process that died while holding the lock
+    acquireWorkerLock(h.paths, deadIdentity, probe(deadIdentity));
+    writeRuntimeState(h.paths, {
+      pid: deadPid,
+      process: deadIdentity,
+      state: 'connected',
+      at: 500,
+      epoch: 1,
+    });
+
+    const status = await cli.run(['start', '--foreground']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.equal(connectCalled, true, 'start must reconnect when previous holder is dead');
+    assert.match(h.out.join('\n'), /Connected to Sprout as enrollment enroll-synthetic \(epoch 2\)/);
   } finally {
     h.cleanup();
   }

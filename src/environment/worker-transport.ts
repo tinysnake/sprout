@@ -35,6 +35,8 @@ export interface WorkerTransportFacts {
   readonly secure: boolean;
   /** The peer address the core observed. */
   readonly remoteAddress: string | undefined;
+  /** Explicit host opt-in for plaintext connections from non-loopback peers. */
+  readonly allowInsecurePlaintext?: boolean;
 }
 
 export type WorkerTransportDecision =
@@ -51,6 +53,7 @@ export type WorkerTransportDecision =
 export function decideWorkerTransport(facts: WorkerTransportFacts): WorkerTransportDecision {
   if (facts.secure) return { allowed: true, kind: 'wss' };
   if (isLoopbackAddress(facts.remoteAddress)) return { allowed: true, kind: 'ws' };
+  if (facts.allowInsecurePlaintext === true) return { allowed: true, kind: 'ws' };
   return {
     allowed: false,
     reason:
@@ -62,8 +65,8 @@ export function decideWorkerTransport(facts: WorkerTransportFacts): WorkerTransp
  * The URL a Worker should dial for one target host.
  *
  * The Worker is the connection initiator, so it chooses the scheme: `wss` for a
- * non-loopback host, `ws` for loopback. A caller that explicitly requests a
- * scheme still cannot force plaintext to a non-loopback host: the rule wins.
+ * non-loopback host, `ws` for loopback. Explicit operator intent is preserved;
+ * the core enforces whether the resulting transport is allowed.
  */
 export function workerConnectionUrl(input: {
   readonly host: string;
@@ -73,11 +76,8 @@ export function workerConnectionUrl(input: {
   readonly scheme?: WorkerTransportKind;
 }): string {
   const loopback = isLoopbackAddress(input.host);
-  const scheme: WorkerTransportKind = loopback ? (input.scheme ?? 'ws') : 'wss';
-  // A loopback target may never be forced to `wss` if the operator asked for
-  // plaintext, but a non-loopback target may never be forced to `ws`.
-  const effective = !loopback && input.scheme === 'ws' ? 'wss' : scheme;
-  return `${effective}://${formatHost(input.host)}:${input.port}${input.path}`;
+  const scheme: WorkerTransportKind = input.scheme ?? (loopback ? 'ws' : 'wss');
+  return `${scheme}://${formatHost(input.host)}:${input.port}${input.path}`;
 }
 
 function formatHost(host: string): string {

@@ -399,3 +399,54 @@ test('M77-NAV-002: an unknown chat scope deep link blocks composer mutation of t
     await cleanup();
   }
 });
+
+test('Feed pending enrollment attention card opens its authoritative detail and preserves Feed context', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { app, pinia, router } = createSproutApp(await deterministicAppOptions(vite));
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    await router.push('/feed?scope=infra&urgency=attention');
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const card = [...dom.window.document.querySelectorAll<HTMLButtonElement>('.feed-attention-card')]
+      .find((item) => item.textContent?.includes('Pending Host Enrollment:'));
+    assert.ok(card, 'the live pending enrollment appears in Attention');
+    card.click();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(router.currentRoute.value.fullPath, '/manage/environments/env-pending');
+    const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts') as typeof import('../stores/app.ts');
+    assert.equal(useAppStore(pinia).returnContext?.to, '/feed?scope=infra&urgency=attention&activity=all');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed hides a pending enrollment attention item when its enrollment is absent', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    options.environmentService.listEnvironments = async () => [];
+    const { app, router } = createSproutApp(options);
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    await router.push('/feed');
+    app.mount(appMount);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(
+      [...dom.window.document.querySelectorAll('.feed-attention-card')]
+        .some((item) => item.textContent?.includes('Pending Host Enrollment:')),
+      false,
+      'a stale fixture card is not rendered without its live enrollment'
+    );
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});

@@ -335,7 +335,7 @@ test('an explicitly required engine is Red when unavailable, and only that one',
 });
 
 
-test('a reconnect route re-authenticates the checks and only reaches reconciling over HTTP', async () => {
+test('Human browser cannot impersonate a Worker reconnect or publish recovery evidence', async () => {
   const runtime = await recoveryApi();
   try {
     // An unverified identity is refused before the record moves at all.
@@ -352,8 +352,7 @@ test('a reconnect route re-authenticates the checks and only reaches reconciling
         hadActiveRun: true,
       },
     );
-    assert.equal(unverified.status, 409);
-    assert.equal(((await unverified.json()) as { code: string }).code, 'identity-not-verified');
+    assert.equal(unverified.status, 404);
 
     const reconnect = await command(
       runtime.base,
@@ -368,10 +367,11 @@ test('a reconnect route re-authenticates the checks and only reaches reconciling
         hadActiveRun: true,
       },
     );
-    assert.equal(reconnect.status, 200);
-    const body = (await reconnect.json()) as { recovery: { phase: string; unresolvedFacts: readonly string[] } };
-    assert.equal(body.recovery.phase, 'reconciling');
-    assert.ok(body.recovery.unresolvedFacts.length > 0, 'a reconnect alone resolves nothing');
+    assert.equal(reconnect.status, 404);
+    const evidence = await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/evidence`, runtime, {
+      evidence: { retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true, taskContextRecycled: true },
+    });
+    assert.equal(evidence.status, 404);
 
     // An ordinary decision before synchronized evidence is refused with 409.
     const early = await command(runtime.base, `/api/environments/recovery/${runtime.leaseId}/discard`, runtime, {});
@@ -383,7 +383,7 @@ test('a reconnect route re-authenticates the checks and only reaches reconciling
 });
 
 
-test('an incompatible protocol or denied permission keeps the Environment in recovery over HTTP', async () => {
+test('browser protocol and permission claims cannot change recovery', async () => {
   const runtime = await recoveryApi();
   try {
     const incompatible = await command(
@@ -399,8 +399,7 @@ test('an incompatible protocol or denied permission keeps the Environment in rec
         hadActiveRun: true,
       },
     );
-    assert.equal(incompatible.status, 409);
-    assert.equal(((await incompatible.json()) as { code: string }).code, 'protocol-incompatible');
+    assert.equal(incompatible.status, 404);
 
     const denied = await command(
       runtime.base,
@@ -415,8 +414,7 @@ test('an incompatible protocol or denied permission keeps the Environment in rec
         hadActiveRun: true,
       },
     );
-    assert.equal(denied.status, 409);
-    assert.equal(((await denied.json()) as { code: string }).code, 'permissions-denied');
+    assert.equal(denied.status, 404);
     assert.equal(runtime.pool.getLease(runtime.leaseId)?.state, 'recovering');
   } finally {
     await runtime.api.close();

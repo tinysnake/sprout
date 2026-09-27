@@ -172,3 +172,30 @@ test('environmentFacts composes the enrollment, readiness, and recovery reads wi
     ],
   );
 });
+
+test('regenerateClaimSecret and cancelEnrollment dispatch through typed POST routes', async () => {
+  const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/claim-secret')) {
+      return { enrollment: { id: 'e1', status: 'pending' }, claim: { secret: 'sec-2', expiresAt: 9999 } };
+    }
+    if (path.endsWith('/cancel')) {
+      return { enrollment: { id: 'e1', status: 'revoked' } };
+    }
+    return {};
+  });
+  const adapter = createEnvironmentEnrollmentBrowserAdapter(transport);
+
+  const regen = await adapter.regenerateClaimSecret('e1');
+  assert.equal(regen.claim.secret, 'sec-2');
+
+  const cancelled = await adapter.cancelEnrollment('e1', 'dialog closed');
+  assert.equal(cancelled.status, 'revoked');
+
+  assert.deepEqual(
+    calls.map((call) => `${call.init?.method} ${call.path}`),
+    [
+      'POST /api/environments/enrollments/e1/claim-secret',
+      'POST /api/environments/enrollments/e1/cancel',
+    ],
+  );
+});

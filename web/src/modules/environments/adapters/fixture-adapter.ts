@@ -346,6 +346,9 @@ export function createInitialFixtures(): EnvironmentInstance[] {
 }
 
 export class FixtureEnvironmentService implements EnvironmentService {
+  getBootstrapCommand(enrollmentId: string): string {
+    return `sprout worker enroll localhost:41030 ${enrollmentId}`;
+  }
   private instances: EnvironmentInstance[];
 
   /**
@@ -368,13 +371,127 @@ export class FixtureEnvironmentService implements EnvironmentService {
     return found ? JSON.parse(JSON.stringify(found)) : undefined;
   }
 
-  async approveEnrollment(id: string): Promise<void> {
+  async requestEnrollment(input: {
+    environmentInstanceId: string;
+    displayName: string;
+    platform?: string;
+  }): Promise<{
+    enrollment: EnvironmentInstance;
+    claimSecret?: string;
+    claimExpiresAt?: number;
+    bootstrapCommand: string;
+  }> {
+    const id = `enroll-${Date.now().toString(36)}`;
+    const now = Date.now();
+    const expiresAt = now + 15 * 60 * 1000;
+    const newEnv: EnvironmentInstance = {
+      id,
+      displayName: input.displayName,
+      platform: (input.platform as any) ?? 'macos',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Pending worker enrollment · Waiting for host connection',
+      enrollmentStatus: 'pending',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'unknown',
+      workSafety: 'clear',
+      capabilityPermissions: {
+        fileReadWrite: false,
+        processExecution: false,
+        networkAccess: false,
+        guiAutomation: false,
+      },
+      engineReadiness: {
+        codex: 'unknown',
+        pi: 'unknown',
+        agy: 'unknown',
+        opencode: 'unknown',
+      },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: {
+        issuedAt: now,
+        expiresAt,
+      },
+      decisions: [
+        {
+          kind: 'requested',
+          actor: 'operator',
+          at: now,
+          reason: 'Pending enrollment created in Web; awaiting Worker proof and Human approval.',
+        },
+      ],
+      requestedCapabilities: ['fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'],
+    };
+    this.instances.push(newEnv);
+    return {
+      enrollment: JSON.parse(JSON.stringify(newEnv)),
+      claimSecret: 'claim-secret-mock-12345',
+      claimExpiresAt: expiresAt,
+      bootstrapCommand: this.getBootstrapCommand(id),
+    };
+  }
+
+  async regenerateClaimSecret(id: string): Promise<{
+    claimSecret: string;
+    claimExpiresAt: number;
+  }> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    const now = Date.now();
+    const expiresAt = now + 15 * 60 * 1000;
+    env.claim = {
+      issuedAt: now,
+      expiresAt,
+    };
+    return {
+      claimSecret: 'claim-secret-mock-regenerated-67890',
+      claimExpiresAt: expiresAt,
+    };
+  }
+
+  async cancelEnrollment(id: string, reason?: string): Promise<void> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    if (env.enrollmentStatus !== 'pending') {
+      const error = new Error('Only a pending enrollment can be cancelled.');
+      (error as any).code = 'not-pending';
+      (error as any).status = 409;
+      throw error;
+    }
+    env.enrollmentStatus = 'revoked';
+    env.trafficLight = 'red';
+    env.trafficLightReason = reason ?? 'Pending enrollment cancelled by operator';
+    env.claim = undefined;
+    env.decisions = [
+      ...(env.decisions ?? []),
+      {
+        kind: 'cancelled',
+        actor: 'operator',
+        at: Date.now(),
+        reason: reason ?? 'Pending enrollment cancelled by operator',
+      },
+    ];
+  }
+
+  async approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    _modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
+    if (permissions === undefined || permissions === null) throw new Error('Human-selected capability permissions are required for approval');
     const env = this.instances.find((e) => e.id === id);
     if (!env) throw new Error(`Environment ${id} not found`);
     env.enrollmentStatus = 'approved';
     env.connectionState = 'online';
     env.trafficLight = 'green';
     env.trafficLightReason = 'Approved by operator · All health checks passed';
+    env.capabilityPermissions = Object.fromEntries(
+      Object.keys(env.capabilityPermissions).map((capability) => [capability, permissions[capability] === true]),
+    );
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {
@@ -413,6 +530,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
       env.leaseRecovery.reconciledEvidence = {
         retainedEventsCount: 4,
         engineStoppedProof: true,
+        turnSettlementObserved: true,
       };
       env.trafficLightReason = 'Evidence reconciled (4 events, engine stopped proof) · Ready for Human recovery decision';
     }

@@ -61,9 +61,11 @@ Worker's bootstrap and signed-in-user lifecycle (ADR-0012):
 # 2. On the macOS host, claim it. The secret is read from stdin, never argv.
 sprout worker enroll 127.0.0.1:5174 <enrollment-id>
 # 3. After a Human approves the identity in Web:
-sprout worker start            # foreground; establishes the E1 outbound connection
+sprout worker start            # background daemon; reconnects with capped backoff
+sprout worker start --foreground  # stay in this process (service managers use this)
+sprout worker stop             # signal the running daemon to shut down cleanly
 sprout worker install-service  # per-user LaunchAgent: start at sign-in, restart on crash
-sprout worker status           # not-enrolled / stopped / connecting / connected / …
+sprout worker status           # not-enrolled / stopped / connecting / reconnecting / connected / …
 sprout worker reset --yes      # remove host-local identity and configuration
 sprout worker uninstall-service
 ```

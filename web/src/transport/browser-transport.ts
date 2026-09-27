@@ -17,22 +17,45 @@ export interface BrowserTransportState {
 
 export type RequestFailureKind = 'authentication-required' | 'forbidden' | 'rejected' | 'unavailable';
 
+export interface RequestFailureDetails {
+  readonly message?: string | undefined;
+  readonly code?: string | undefined;
+  readonly disposition?: string | undefined;
+}
+
 /** Safe, typed request failure. Raw response bodies and network errors stay private. */
 export class BrowserRequestError extends Error {
   readonly kind: RequestFailureKind;
   readonly status?: number;
+  readonly code?: string;
+  readonly refusal?: string;
+  readonly disposition?: string;
 
-  constructor(kind: RequestFailureKind, status?: number) {
+  constructor(
+    kind: RequestFailureKind,
+    status?: number,
+    details?: RequestFailureDetails | string,
+  ) {
+    const detailMessage = typeof details === 'string' ? details : details?.message;
     super(
       kind === 'authentication-required'
         ? 'operator authentication is required'
         : kind === 'forbidden'
           ? 'operator authority is required for this action'
-          : 'request could not be completed',
+          : detailMessage && detailMessage !== ''
+            ? detailMessage
+            : 'request could not be completed',
     );
     this.name = 'BrowserRequestError';
     this.kind = kind;
     if (status !== undefined) this.status = status;
+    if (typeof details === 'object' && details !== null) {
+      if (details.code !== undefined) this.code = details.code;
+      if (details.disposition !== undefined) this.disposition = details.disposition;
+      if (details.message !== undefined) this.refusal = details.message;
+    } else if (typeof details === 'string') {
+      this.refusal = details;
+    }
   }
 }
 
@@ -118,7 +141,10 @@ export function createBrowserTransport(options: BrowserTransportOptions = {}): B
         const headers = new Headers(init.headers);
         if (!safeMethod(init.method) && csrfToken !== undefined) headers.set('x-sprout-csrf', csrfToken);
         const response = await requestFetch(path, { ...init, headers, credentials: 'same-origin' });
-        if (!response.ok) throw responseFailure(response.status);
+        if (!response.ok) {
+          const body = await response.json().catch(() => undefined);
+          throw responseFailure(response.status, body);
+        }
         setConnection('online');
         return await response.json() as T;
       } catch (error) {
@@ -181,10 +207,14 @@ function safeMethod(method: string | undefined): boolean {
   return method === undefined || method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
 }
 
-function responseFailure(status: number): BrowserRequestError {
+function responseFailure(status: number, body?: unknown): BrowserRequestError {
   if (status === 401) return new BrowserRequestError('authentication-required', status);
   if (status === 403) return new BrowserRequestError('forbidden', status);
-  return new BrowserRequestError('rejected', status);
+  const json = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : undefined;
+  const message = typeof json?.error === 'string' ? json.error : undefined;
+  const code = typeof json?.code === 'string' ? json.code : undefined;
+  const disposition = typeof json?.disposition === 'string' ? json.disposition : undefined;
+  return new BrowserRequestError('rejected', status, { message, code, disposition });
 }
 
 function navigatorOnline(): boolean {

@@ -108,6 +108,8 @@ export interface RunView {
   readonly workspaceBinding?: RunWorkspaceBindingAttributionView;
   readonly failure?: string;
   readonly result?: unknown;
+  readonly recoverySettlement?: AgentRun['recoverySettlement'];
+  readonly recoveredEvents?: AgentRun['recoveredEvents'];
   readonly tokenUsage?: TokenUsage;
   readonly createdAt: number;
   readonly completedAt?: number;
@@ -164,6 +166,8 @@ export function toRunView(run: AgentRun): RunView {
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
+    ...(run.recoverySettlement !== undefined ? { recoverySettlement: run.recoverySettlement } : {}),
+    ...(run.recoveredEvents !== undefined ? { recoveredEvents: run.recoveredEvents } : {}),
     ...(run.tokenUsage !== undefined ? { tokenUsage: run.tokenUsage } : {}),
     createdAt: run.createdAt,
     ...(run.completedAt !== undefined ? { completedAt: run.completedAt } : {}),
@@ -387,6 +391,14 @@ export interface EnrollmentView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
+  readonly claim?: EnrollmentClaimView;
+  readonly requiresFreshIdentity?: boolean;
+}
+
+export interface EnrollmentClaimView {
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly consumedAt?: number;
 }
 
 export interface EnrollmentDecisionView {
@@ -415,6 +427,16 @@ export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentV
     capabilityPermissions: safe.capabilityPermissions,
     createdAt: safe.createdAt,
     updatedAt: safe.updatedAt,
+    ...(safe.claim !== undefined
+      ? {
+          claim: {
+            issuedAt: safe.claim.issuedAt,
+            expiresAt: safe.claim.expiresAt,
+            ...(safe.claim.consumedAt !== undefined ? { consumedAt: safe.claim.consumedAt } : {}),
+          },
+        }
+      : {}),
+    ...(safe.requiresFreshIdentity ? { requiresFreshIdentity: true } : {}),
     decisions: safe.decisions.map((decision) => ({
       kind: decision.kind,
       actor: decision.actor,
@@ -422,6 +444,15 @@ export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentV
       reason: sanitizeOperatorText(decision.reason, { fallback: DEFAULT_DECISION_REASON }),
     })),
   };
+}
+
+export interface ModelAuthorizationView {
+  readonly engine: string;
+  readonly model: string;
+  readonly source: 'human-approval';
+  readonly requirementRevision?: string;
+  readonly authorizedAt: number;
+  readonly actor?: string;
 }
 
 /** The client-facing shape of one Environment's independent readiness facts. */
@@ -453,6 +484,7 @@ export interface EnvironmentReadinessView {
     readonly probedAt?: number;
     readonly probeExitCode?: number;
     readonly source?: string;
+    readonly modelAuthorizations?: readonly ModelAuthorizationView[];
   }[];
   readonly probe?: {
     readonly at: number;
@@ -467,6 +499,7 @@ export interface EnvironmentReadinessView {
   readonly observationId?: string;
   readonly receipt?: ReadinessReceiptView;
   readonly workSafety: { readonly state: string };
+  readonly requirements?: import('../environment/readiness.ts').ReadinessRequirementScope;
 }
 
 /** Safe browser projection of one Worker probe; internal authority ids stay core-side. */
@@ -594,12 +627,25 @@ export function toEnvironmentReadinessView(input: {
         ...(engine.probedAt !== undefined ? { probedAt: engine.probedAt } : {}),
         ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
         ...(source !== undefined ? { source } : {}),
+        ...(engine.modelAuthorizations !== undefined
+          ? {
+              modelAuthorizations: engine.modelAuthorizations.map((auth) => ({
+                engine: auth.engine,
+                model: auth.model,
+                source: auth.source,
+                ...(auth.requirementRevision !== undefined ? { requirementRevision: auth.requirementRevision } : {}),
+                authorizedAt: auth.authorizedAt,
+                ...(auth.actor !== undefined ? { actor: auth.actor } : {}),
+              })),
+            }
+          : {}),
       };
     }),
     ...(probe !== undefined ? { probe } : {}),
     ...(readiness.observationId !== undefined ? { observationId: readiness.observationId } : {}),
     ...(receiptView !== undefined ? { receipt: receiptView } : {}),
     workSafety: { state: readiness.workSafety.state },
+    ...(readiness.requirements !== undefined ? { requirements: readiness.requirements } : {}),
   };
 }
 
@@ -627,8 +673,10 @@ export interface EnvironmentRecoveryView {
   readonly evidence?: {
     readonly retainedEventCount: number;
     readonly turnSettlementObserved: boolean;
+    readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
     readonly engineSessionStopped: boolean;
     readonly taskContextRecycled: boolean;
+    readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
   /** Whether the ordinary decision requires synchronized evidence first. */
@@ -661,8 +709,10 @@ export function toEnvironmentRecoveryView(record: EnvironmentRecoveryRecord): En
           evidence: {
             retainedEventCount: record.evidence.retainedEventCount,
             turnSettlementObserved: record.evidence.turnSettlementObserved,
+            ...(record.evidence.terminalStatus !== undefined ? { terminalStatus: record.evidence.terminalStatus } : {}),
             engineSessionStopped: record.evidence.engineSessionStopped,
             taskContextRecycled: record.evidence.taskContextRecycled,
+            ...(record.evidence.taskContextPrepared !== undefined ? { taskContextPrepared: record.evidence.taskContextPrepared } : {}),
           },
         }
       : {}),

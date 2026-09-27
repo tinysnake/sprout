@@ -192,6 +192,8 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(60);
+    assert.equal(notice(), null, 'a brief connection check does not insert a shell row');
+    await settle(700);
     assert.match(notice()?.textContent ?? '', /Checking connection/i, 'loading is announced as a pending check');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
@@ -208,6 +210,50 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
     await settle(60);
     assert.equal(notice(), null, 'the warning clears when the connection returns');
 
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+
+test('transient connection refreshes preserve shell geometry and prolonged stalls show the warning', async () => {
+  const { vite, doc, mountInto, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { createShellConnectionController } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({ routerBase: '/app/', connectionSource: controller });
+    await router.push('/feed');
+    await router.isReady();
+    mountInto(app);
+    await settle();
+
+    const shell = doc.querySelector('.sprout-app-shell');
+    const main = doc.querySelector('#sprout-main-content');
+    const header = doc.querySelector('header');
+    assert.ok(shell && main && header);
+    const geometry = () => [shell, main, header].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return [rect.x, rect.y, rect.width, rect.height];
+    });
+    const before = geometry();
+
+    controller.set({ status: 'loading', connection: 'online', loading: true });
+    await settle(100);
+    assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
+      'the short-lived refresh banner is not laid out');
+    assert.deepEqual(geometry(), before, 'main/header positions and app-shell dimensions stay constant');
+
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await settle(750);
+    assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
+      'the transient warning timer is cancelled when the connection returns');
+
+    controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
+    await settle(750);
+    assert.match(doc.querySelector('[data-testid="shell-connection-notice"]')?.textContent ?? '', /Reconnecting/i,
+      'a prolonged connection stall still surfaces the warning');
     app.unmount();
   } finally {
     await cleanup();

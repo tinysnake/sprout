@@ -62,6 +62,8 @@ export interface RecoveryLeasePort {
  * missing is refused rather than recorded as done.
  */
 export interface RecoveryHolderActions {
+  /** Restore an idle Task on its own retained lease, with no run replay. */
+  clearIdleTask?(taskId: string): Promise<void>;
   /**
    * Ordinary Resume: keep the interrupted run as history and return the Task to
    * deliberate blocked work on the same Environment. Never reruns.
@@ -88,6 +90,7 @@ export interface RecoveryHolderActions {
 /** The verified connection facts a reconnect must present to this service. */
 export interface VerifiedWorkerReconnect {
   readonly enrollmentId: string;
+  readonly workerIdentityDigest?: string;
   readonly environmentInstanceId: string;
   /** Always `true`: this service refuses a reconnect that was not authenticated. */
   readonly identityVerified: boolean;
@@ -129,6 +132,10 @@ export interface EnvironmentRecoveryServiceOptions {
   readonly holders?: RecoveryHolderActions;
   /** Every run linked to a Task, so the Force Release outcome names them all. */
   readonly taskRuns?: (taskId: string) => Promise<readonly string[]>;
+  readonly workerIdentityForInstance?: (instanceId: string) => Promise<{
+    readonly enrollmentId: string; readonly identityDigest: string;
+  } | undefined>;
+  readonly activeRunForTask?: (taskId: string) => Promise<string | undefined>;
   readonly clock?: () => number;
   readonly idFactory?: () => string;
   /** The operator identity recorded on a Force Release outcome. */
@@ -149,6 +156,9 @@ export interface OpenRecoveryInput {
   readonly cause: EnvironmentRecoveryCause;
   /** Whether an Agent run was active when the work was interrupted. */
   readonly hadActiveRun: boolean;
+  readonly runId?: string;
+  readonly enrollmentId?: string;
+  readonly workerIdentityDigest?: string;
 }
 
 export interface RecoveryDecisionInput {
@@ -161,6 +171,8 @@ export class EnvironmentRecoveryService {
   readonly #leases: RecoveryLeasePort;
   readonly #holders: RecoveryHolderActions;
   readonly #taskRuns: ((taskId: string) => Promise<readonly string[]>) | undefined;
+  readonly #workerIdentityForInstance: EnvironmentRecoveryServiceOptions['workerIdentityForInstance'];
+  readonly #activeRunForTask: ((taskId: string) => Promise<string | undefined>) | undefined;
   readonly #clock: () => number;
   readonly #idFactory: () => string;
   readonly #operatorActor: string;
@@ -171,6 +183,8 @@ export class EnvironmentRecoveryService {
     this.#leases = options.leases;
     this.#holders = options.holders ?? {};
     this.#taskRuns = options.taskRuns;
+    this.#workerIdentityForInstance = options.workerIdentityForInstance;
+    this.#activeRunForTask = options.activeRunForTask;
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
     this.#operatorActor = options.operatorActor ?? 'operator';
@@ -190,12 +204,19 @@ export class EnvironmentRecoveryService {
   async open(input: OpenRecoveryInput): Promise<EnvironmentRecoveryRecord> {
     const lease = this.#requireLease(input.leaseId);
     const existing = await this.#store.forLease(input.leaseId);
+    const identity = existing?.enrollmentId !== undefined ? undefined :
+      await this.#workerIdentityForInstance?.(lease.instanceId);
+    const enrollmentId = input.enrollmentId ?? identity?.enrollmentId;
+    const workerIdentityDigest = input.workerIdentityDigest ?? identity?.identityDigest;
     const at = this.#clock();
     // The lease registry and the recovery record must agree. Marking the lease
     // recovering is what stops an ordinary acquisition from racing ahead of the
     // record; the record is written first so a crash between the two leaves the
     // stricter state (a record with no lease) rather than a reassignable lease.
-    const record = this.#buildRecord(lease, input, at, existing);
+    const record = this.#buildRecord(lease, { ...input,
+      ...(enrollmentId !== undefined ? { enrollmentId } : {}),
+      ...(workerIdentityDigest !== undefined ? { workerIdentityDigest } : {}),
+    }, at, existing);
     await this.#store.save(record);
     this.#leases.markRecovering(input.leaseId);
     this.#announce();
@@ -211,19 +232,23 @@ export class EnvironmentRecoveryService {
    */
   async reconcileAfterRestart(): Promise<readonly EnvironmentRecoveryRecord[]> {
     const reopened: EnvironmentRecoveryRecord[] = [];
-    const all = await this.#store.list();
     for (const lease of this.#leases.leases()) {
       if (lease.state !== 'recovering' && lease.state !== 'active') continue;
-      // A Human already resolved this lease; a restart must not reopen a decided
-      // outcome. `forLease` returns only open records, so the resolved history is
-      // checked explicitly here.
-      const resolved = all.some((record) => record.leaseId === lease.id && record.phase === 'resolved');
-      if (resolved) continue;
+      // A Task lease remains active after an earlier resolved Resume or idle
+      // clear. A new restart is new uncertainty on that SAME held lease; old
+      // resolved history must never suppress its new protective record.
       const existing = await this.#store.forLease(lease.id);
-      if (existing !== undefined) continue;
-      reopened.push(
-        await this.open({ leaseId: lease.id, cause: 'sprout-restart', hadActiveRun: true }),
-      );
+      if (existing !== undefined) {
+        if (existing.evidence !== undefined || existing.phase === 'reconciling') {
+          reopened.push(await this.open({ leaseId: lease.id, cause: 'sprout-restart',
+            hadActiveRun: existing.interruptedRunActive !== false,
+            ...(existing.runId !== undefined ? { runId: existing.runId } : {}) }));
+        }
+        continue;
+      }
+      const runId = lease.taskId !== undefined ? await this.#activeRunForTask?.(lease.taskId) : undefined;
+      reopened.push(await this.open({ leaseId: lease.id, cause: 'sprout-restart', hadActiveRun: runId !== undefined || lease.holderKind !== 'task',
+        ...(runId !== undefined ? { runId } : {}) }));
     }
     return reopened;
   }
@@ -275,6 +300,10 @@ export class EnvironmentRecoveryService {
         'holder-mismatch',
         'The reconnecting Worker does not serve the Environment this recovery record protects.',
       );
+    }
+    if ((record.enrollmentId !== undefined && reconnect.enrollmentId !== record.enrollmentId) ||
+        (record.workerIdentityDigest !== undefined && reconnect.workerIdentityDigest !== record.workerIdentityDigest)) {
+      throw new EnvironmentRecoveryError('identity-not-verified', 'Recovery requires the original enrolled Worker identity.');
     }
     if (!reconnect.protocolCompatible) {
       throw new EnvironmentRecoveryError(
@@ -358,6 +387,11 @@ export class EnvironmentRecoveryService {
         },
       ],
     };
+    if (next.phase === 'resolved' && record.holderKind === 'task' && record.taskId !== undefined) {
+      if (this.#holders.clearIdleTask === undefined) throw new EnvironmentRecoveryError(
+        'holder-action-unavailable', 'The idle Task cannot be restored without its retained lease.');
+      await this.#holders.clearIdleTask(record.taskId);
+    }
     await this.#store.save(next);
     this.#announce();
     return next;
@@ -543,6 +577,14 @@ export class EnvironmentRecoveryService {
         'An ordinary decision requires synchronized retained evidence.',
       );
     }
+    if (!record.evidence.engineSessionStopped || !record.evidence.turnSettlementObserved ||
+        (record.runId !== undefined && record.evidence.terminalStatus === undefined) ||
+        (record.holderKind === 'task' && record.evidence.taskContextPrepared !== true)) {
+      throw new EnvironmentRecoveryError(
+        'evidence-not-synchronized',
+        'Ordinary recovery requires an acknowledged terminal outcome, engine fence, and safe held context.',
+      );
+    }
     return record;
   }
 
@@ -591,24 +633,27 @@ export class EnvironmentRecoveryService {
     existing: EnvironmentRecoveryRecord | undefined,
   ): EnvironmentRecoveryRecord {
     const holderKind = lease.holderKind ?? 'run';
-    const evidenceSynchronized = existing?.evidence !== undefined;
     const base: EnvironmentRecoveryRecord = {
       id: existing?.id ?? this.#idFactory(),
       environmentInstanceId: lease.instanceId,
+      ...(existing?.enrollmentId !== undefined || input.enrollmentId !== undefined
+        ? { enrollmentId: existing?.enrollmentId ?? input.enrollmentId } : {}),
+      ...(existing?.workerIdentityDigest !== undefined || input.workerIdentityDigest !== undefined
+        ? { workerIdentityDigest: existing?.workerIdentityDigest ?? input.workerIdentityDigest } : {}),
       leaseId: lease.id,
       holderKind,
       holderId: lease.holderId,
+      interruptedRunActive: input.hadActiveRun,
       ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
-      ...(lease.runId !== undefined ? { runId: lease.runId } : {}),
+      ...(input.runId !== undefined || lease.runId !== undefined ? { runId: input.runId ?? lease.runId } : {}),
       cause: input.cause,
       phase: 'recovery',
       startedAt: existing?.startedAt ?? at,
       updatedAt: at,
-      ...(existing?.reconnectObservedAt !== undefined
-        ? { reconnectObservedAt: existing.reconnectObservedAt }
-        : {}),
-      ...(existing?.evidence !== undefined ? { evidence: existing.evidence } : {}),
-      unresolvedFacts: deriveUnresolvedFacts({ holderKind, evidenceSynchronized }),
+      // A new channel loss invalidates prior connection proof. Keep the
+      // historical decisions, but never authorize a Human action from an old
+      // epoch's settlement/fence or context observation.
+      unresolvedFacts: deriveUnresolvedFacts({ holderKind, evidenceSynchronized: false }),
       decisions: [
         ...(existing?.decisions ?? []),
         {

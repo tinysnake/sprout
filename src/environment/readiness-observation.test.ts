@@ -38,6 +38,45 @@ async function issued(store: EnvironmentReadinessStore, result: unknown,
 
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  test(`#138 ${backend}: authorization is independent of Worker observations and revocation preserves only historical authorization`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-auth-evidence-'));
+    const store = backend === 'memory' ? new InMemoryEnvironmentReadinessStore() :
+      new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    let closed = false;
+    t.after(() => { if (store instanceof SqliteEnvironmentReadinessStore && !closed) store.close(); rmSync(directory, { recursive: true, force: true }); });
+    const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 7 });
+    const requirements = readinessRequirements([{ engine: 'codex', workModel: 'target' }]);
+    const probe = workerReadinessProbeFixture({ protocolVersion: '2', observedAt: 1234,
+      engines: [{ engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [] }] });
+    const scope = { environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 2 }, at: 1234,
+      verifyAuthority: readinessAuthorityTestSeam.verify, requirements };
+    const observation = await issued(store, probe, scope);
+    assert.ok(observation);
+    assert.ok(await store.commitObservation('env-1', observation, authority));
+    const before = await store.getCurrentObservation('env-1');
+    const facts = [{ engine: 'codex', model: 'target', source: 'human-approval' as const,
+      ...(requirements.revisionsByEngine!.codex !== undefined ? { requirementRevision: requirements.revisionsByEngine!.codex } : {}), authorizedAt: 2000 }];
+    await store.recordModelAuthorizations('env-1', facts, { enrollmentId: 'enroll-1', requirements });
+    assert.deepEqual(await store.getCurrentObservation('env-1'), before);
+    assert.deepEqual(await store.listProbes('env-1'), [before!.probe]);
+    assert.equal((await store.listObservations('env-1')).length, 1);
+    assert.equal((await store.getReadiness('env-1'))?.engines[0]?.modelAuthorizations?.length, 1);
+    assert.equal((await store.listModelAuthorizationEvidence('env-1')).length, 1);
+    await store.recordModelAuthorizations('env-1', []);
+    assert.deepEqual(await store.getCurrentObservation('env-1'), before);
+    assert.deepEqual((await store.getReadiness('env-1'))?.engines[0]?.modelAuthorizations, []);
+    const history = await store.listModelAuthorizationEvidence('env-1');
+    assert.deepEqual(history.map((entry) => entry.authorizations.length), [1, 0]);
+    if (store instanceof SqliteEnvironmentReadinessStore) {
+      store.close();
+      closed = true;
+      const reopened = new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+      assert.deepEqual(await reopened.listModelAuthorizationEvidence('env-1'), history);
+      assert.deepEqual(await reopened.getCurrentObservation('env-1'), before);
+      assert.deepEqual((await reopened.getReadiness('env-1'))?.engines[0]?.modelAuthorizations, []);
+      reopened.close();
+    }
+  });
   test(`#128 ${backend}: committed old aggregate and new revision-bound target evidence remain distinct`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-scope-'));
     const store = backend === 'memory' ? new InMemoryEnvironmentReadinessStore() :
@@ -166,7 +205,10 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const malformedScopes: unknown[] = [null, [], 1, 'bad', true, { unknown: true },
       { revision: '' }, { revision: 4 }, { revision: 'bad/revision' },
       { requiredModels: null }, { requiredModels: 'model' }, { requiredModels: [1] },
-      { requiredModels: ['bad/model'] }, { requiredModels: [, 'model'] },
+      // A single interior slash is a valid provider-scoped model id now; a
+      // double slash or a leading/trailing slash stays malformed.
+      { requiredModels: ['bad//model'] }, { requiredModels: ['/bad'] }, { requiredModels: ['bad/'] },
+      { requiredModels: [, 'model'] },
       { requiredEngines: [null] }, { requiredEngines: {} },
       { requiredModels: ['model'], extra: true },
     ];

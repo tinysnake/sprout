@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   approveEnrollment,
+  cancelEnrollment,
   createPendingEnrollment,
   reconcileWorkerConnection,
+  regenerateEnrollmentClaim,
   resetEnrollment,
   revokeEnrollment,
   setCapabilityPermission,
@@ -65,6 +67,12 @@ test('Human approval records the decision, grants permissions, and is durable in
     'read-only-investigation': false,
   });
   assert.deepEqual(approved.decisions.map((decision) => decision.kind), ['requested', 'approved']);
+});
+
+test('an omitted capability is denied even if a pending record carries a stale grant', () => {
+  const stale = { ...pending(), capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true } };
+  const approved = approveEnrollment(stale, { capabilityPermissions: { 'agent-run': true }, at: 2_000 });
+  assert.deepEqual(approved.capabilityPermissions, { 'agent-run': true, 'read-only-investigation': false });
 });
 
 test('only a pending enrollment can be approved', () => {
@@ -246,4 +254,93 @@ test('the recorded enrollment carries no private key, credential, hostname, or a
   assert.equal(/\/Users\//.test(serialized), false);
   assert.equal(/\/home\//.test(serialized), false);
   assert.equal(/[A-Za-z]:\\/.test(serialized), false);
+});
+
+test('cancelling a pending enrollment moves status to revoked and records operator decision', () => {
+  const enrollment = pending();
+  const cancelled = cancelEnrollment(enrollment, 2_000, 'Operator cancelled from dialog');
+  assert.equal(cancelled.status, 'revoked');
+  assert.equal(cancelled.decisions.at(-1)?.kind, 'cancelled');
+  assert.equal(cancelled.decisions.at(-1)?.actor, 'operator');
+  assert.match(cancelled.decisions.at(-1)?.reason ?? '', /cancelled/i);
+  assert.equal(cancelled.claim, undefined);
+
+  // Cancelling an already approved or revoked enrollment is refused
+  assert.throws(
+    () => cancelEnrollment(cancelled, 3_000),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'not-pending',
+  );
+});
+
+test('regenerating an unconsumed claim updates secret digest and expiration', () => {
+  const enrollment = pending({
+    claim: {
+      secretDigest: 'old-digest',
+      issuedAt: 1_000,
+      expiresAt: 2_000,
+    },
+  });
+  const updated = regenerateEnrollmentClaim(
+    enrollment,
+    {
+      secretDigest: 'new-digest',
+      issuedAt: 2_500,
+      expiresAt: 5_000,
+    },
+    2_500,
+  );
+  assert.equal(updated.claim?.secretDigest, 'new-digest');
+  assert.equal(updated.claim?.expiresAt, 5_000);
+  assert.equal(updated.decisions.at(-1)?.kind, 'secret-regenerated');
+
+  // Refused if already consumed
+  const consumed = pending({
+    claim: {
+      secretDigest: 'old-digest',
+      issuedAt: 1_000,
+      expiresAt: 2_000,
+      consumedAt: 1_500,
+    },
+  });
+  assert.throws(
+    () =>
+      regenerateEnrollmentClaim(
+        consumed,
+        { secretDigest: 'new-digest', issuedAt: 2_500, expiresAt: 5_000 },
+        2_500,
+      ),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'invalid-claim',
+  );
+});
+
+test('#138: Human approval records model authorizations, revocation clears them', () => {
+  const approved = approveEnrollment(pending(), {
+    capabilityPermissions: { 'agent-run': true },
+    modelAuthorizations: [
+      {
+        engine: 'codex',
+        model: 'gpt-5-codex',
+        source: 'human-approval',
+        requirementRevision: 'r-codex-1',
+        authorizedAt: 2_000,
+        actor: 'operator',
+      },
+    ],
+    at: 2_000,
+    actor: 'operator',
+  });
+  assert.equal(approved.status, 'approved');
+  assert.equal(approved.modelAuthorizations?.length, 1);
+  assert.equal(approved.modelAuthorizations[0]?.engine, 'codex');
+  assert.equal(approved.modelAuthorizations[0]?.model, 'gpt-5-codex');
+  assert.equal(approved.modelAuthorizations[0]?.source, 'human-approval');
+
+  // Revocation invalidates and clears model authorizations
+  const revoked = revokeEnrollment(approved, 3_000, 'Security revocation');
+  assert.equal(revoked.status, 'revoked');
+  assert.deepEqual(revoked.modelAuthorizations, []);
+
+  // Reset also clears model authorizations
+  const reset = resetEnrollment(approved, 4_000, 'Reset environment');
+  assert.deepEqual(reset.modelAuthorizations, []);
 });

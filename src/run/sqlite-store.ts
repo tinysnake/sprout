@@ -57,6 +57,8 @@ interface RunRow {
   readonly work_option: string | null;
   readonly configuration_version: number | null;
   readonly workspace_binding: string | null;
+  readonly recovery_settlement: string | null;
+  readonly recovered_events: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -101,7 +103,9 @@ export class SqliteRunStore implements RunStore {
         replay_sequence INTEGER,
         work_option TEXT,
         configuration_version INTEGER,
-        workspace_binding TEXT
+        workspace_binding TEXT,
+        recovery_settlement TEXT,
+        recovered_events TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
@@ -116,6 +120,8 @@ export class SqliteRunStore implements RunStore {
     // attribution), which the view layer presents as unspecified.
     this.#addColumnIfMissing('agent_runs', 'work_option', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
+    this.#addColumnIfMissing('agent_runs', 'recovery_settlement', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'recovered_events', 'TEXT');
     this.#backfillReplaySequences();
     this.#db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
@@ -150,8 +156,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -165,7 +171,9 @@ export class SqliteRunStore implements RunStore {
            replay_sequence = excluded.replay_sequence,
            work_option = excluded.work_option,
            configuration_version = excluded.configuration_version,
-           workspace_binding = excluded.workspace_binding`,
+           workspace_binding = excluded.workspace_binding,
+           recovery_settlement = excluded.recovery_settlement,
+           recovered_events = excluded.recovered_events`,
       )
       .run(
         run.id,
@@ -187,6 +195,8 @@ export class SqliteRunStore implements RunStore {
         run.workOption ? JSON.stringify(run.workOption) : null,
         run.configurationVersion ?? null,
         run.workspaceBinding ? JSON.stringify(run.workspaceBinding) : null,
+        run.recoverySettlement ? JSON.stringify(run.recoverySettlement) : null,
+        run.recoveredEvents ? JSON.stringify(run.recoveredEvents) : null,
       );
     return replaySequence;
   }
@@ -319,6 +329,10 @@ function toRun(row: RunRow): AgentRun {
     row.workspace_binding !== null && row.workspace_binding !== undefined
       ? (JSON.parse(row.workspace_binding) as AgentRun['workspaceBinding'])
       : undefined;
+  const recoverySettlement = row.recovery_settlement
+    ? JSON.parse(row.recovery_settlement) as AgentRun['recoverySettlement'] : undefined;
+  const recoveredEvents = row.recovered_events
+    ? JSON.parse(row.recovered_events) as AgentRun['recoveredEvents'] : undefined;
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -335,6 +349,8 @@ function toRun(row: RunRow): AgentRun {
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(workOption !== undefined ? { workOption } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
+    ...(recoverySettlement !== undefined ? { recoverySettlement } : {}),
+    ...(recoveredEvents !== undefined ? { recoveredEvents } : {}),
     ...(row.configuration_version !== null ? { configurationVersion: row.configuration_version } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),

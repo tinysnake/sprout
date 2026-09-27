@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue';
 import type { CapabilityKey, EnvironmentInstance } from '../types.js';
 import StateBanner from '../../../primitives/StateBanner.vue';
 import Button from '../../../primitives/Button.vue';
@@ -23,8 +24,22 @@ const props = defineProps<{
   canReconcile?: boolean;
 }>();
 
+// A refreshed environment can be assembled over more than one reactive tick.
+// Keep the previous detail snapshot mounted until that update has settled so
+// optional fact-backed sections (notably protocol-mismatch guidance) are not
+// removed for an intermediate render.
+const displayedEnv = ref(props.env);
+watch(
+  () => props.env,
+  async (incoming) => {
+    // Keep the prior detail for one paint interval: the refreshed record's
+    // fact-backed subsections may be populated immediately after replacement.
+    await new Promise((resolve) => setTimeout(resolve, 16));
+    if (props.env === incoming) displayedEnv.value = incoming;
+  },
+);
+
 const emit = defineEmits<{
-  (e: 'approve', id: string): void;
   (e: 'probe', id: string): void;
   (e: 'togglePermission', cap: CapabilityKey): void;
   (e: 'unbindWorkspace', payload: { projectId: string; envId: string }): void;
@@ -35,19 +50,45 @@ const emit = defineEmits<{
   (e: 'archive', id: string): void;
   (e: 'restore', id: string): void;
   (e: 'unenroll', id: string): void;
+  (e: 'resumeEnrollment', id: string): void;
+  (e: 'registerReplacement'): void;
 }>();
+
 </script>
 
 <template>
   <Card class="env-detail-card p-3.5 sm:p-4 flex flex-col gap-4 shadow-sm">
     <!-- 1. Prominent Traffic Light Summary Banner -->
     <StateBanner
-      :traffic-light="env.trafficLight"
-      :reason="env.trafficLightReason"
-      :platform="env.platform"
-      :protocol-mismatch-detail="env.protocolMismatchDetail"
-      :is-archived="env.enrollmentStatus === 'archived'"
+      :traffic-light="displayedEnv.trafficLight"
+      :reason="displayedEnv.trafficLightReason"
+      :platform="displayedEnv.platform"
+      :protocol-mismatch-detail="displayedEnv.protocolMismatchDetail"
+      :is-archived="displayedEnv.enrollmentStatus === 'archived'"
+      :is-pending="displayedEnv.enrollmentStatus === 'pending'"
+
     />
+
+    <section
+      v-if="displayedEnv.enrollmentStatus === 'revoked'"
+      class="revoked-enrollment-panel rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 space-y-2"
+      aria-label="Revoked enrollment"
+    >
+      <div>
+        <h3 class="text-xs font-bold text-[var(--text-primary)]">Revoked enrollment</h3>
+        <p class="text-xs text-[var(--text-muted)]">This identity is permanently revoked. Start a fresh enrollment to reset access; this record cannot be restored.</p>
+      </div>
+      <div class="revoked-decision-history space-y-1" aria-label="Decision history">
+        <p v-for="(decision, index) in displayedEnv.decisions ?? []" :key="`${decision.kind}-${decision.at}-${index}`" class="text-[11px] text-[var(--text-secondary)]">
+          {{ decision.kind }} · {{ decision.actor }} · {{ new Date(decision.at).toLocaleString() }}<span v-if="decision.reason"> — {{ decision.reason }}</span>
+        </p>
+        <p v-if="!displayedEnv.decisions?.length" class="text-[11px] text-[var(--text-muted)] italic">No enrollment decisions recorded.</p>
+      </div>
+      <Button variant="secondary" size="sm" class="revoked-reset-btn text-xs" :disabled="disabled" @click="emit('registerReplacement')">
+        <Icon name="refresh" :size="13" />
+        <span>Start fresh enrollment</span>
+      </Button>
+    </section>
 
     <!-- 2. 6 Independent Health Dimensions -->
     <div class="flex flex-col gap-3">
@@ -58,19 +99,19 @@ const emit = defineEmits<{
       </div>
 
       <!-- 1–4. Core Operational Status & Safety Dimensions -->
-      <HealthDimensionsGrid :env="env" :disabled="disabled" @approve="emit('approve', $event)" />
+      <HealthDimensionsGrid :env="displayedEnv" />
 
       <!-- 5. Capability Permissions (Granular & Safety Guarded) -->
       <CapabilityPermissionsGrid
-        :permissions="env.capabilityPermissions"
+        :permissions="displayedEnv.capabilityPermissions"
         :disabled="disabled"
         @toggle="emit('togglePermission', $event)"
       />
 
       <!-- 6. Engine Harness Readiness (Host-Local Facts) -->
       <EngineReadinessGrid
-        :readiness="env.engineReadiness"
-        :details="env.engineDetails"
+        :readiness="displayedEnv.engineReadiness"
+        :details="displayedEnv.engineDetails"
       />
     </div>
 
@@ -83,7 +124,7 @@ const emit = defineEmits<{
 
       <div class="bound-workspaces-list flex flex-col gap-1.5">
         <div
-          v-for="ws in env.boundWorkspaces"
+          v-for="ws in displayedEnv.boundWorkspaces"
           :key="ws.projectId"
           class="flex items-center justify-between p-2.5 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex-wrap gap-2"
         >
@@ -100,14 +141,14 @@ const emit = defineEmits<{
               size="xs"
               class="unbind-env-btn text-[10px] h-6 px-2"
               :disabled="disabled"
-              @click="emit('unbindWorkspace', { projectId: ws.projectId, envId: env.id })"
+              @click="emit('unbindWorkspace', { projectId: ws.projectId, envId: displayedEnv.id })"
             >
               Unbind
             </Button>
           </div>
         </div>
 
-        <div v-if="env.boundWorkspaces.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
+        <div v-if="displayedEnv.boundWorkspaces.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
           No projects currently bound to this environment instance.
         </div>
       </div>
@@ -115,41 +156,41 @@ const emit = defineEmits<{
 
     <!-- 4. Active Lease, Recovery, and Force Release Resolution Area -->
     <ReconcilingBox
-      v-if="env.workSafety === 'reconciling'"
-      :env="env"
+      v-if="displayedEnv.workSafety === 'reconciling'"
+      :env="displayedEnv"
       :disabled="disabled"
       :can-reconcile="props.canReconcile === true"
       @reconcile="emit('reconcile', $event)"
     />
     <RecoveryAlertBox
-      v-else-if="env.workSafety === 'recovery'"
-      :env="env"
+      v-else-if="displayedEnv.workSafety === 'recovery'"
+      :env="displayedEnv"
       :disabled="disabled"
       @resume="emit('resume', $event)"
       @discard="emit('discard', $event)"
       @force-release="emit('forceRelease', $event)"
     />
     <ActiveLeaseBox
-      v-else-if="env.activeLeaseHolder"
-      :lease="env.activeLeaseHolder"
+      v-else-if="displayedEnv.activeLeaseHolder"
+      :lease="displayedEnv.activeLeaseHolder"
     />
     <ForcedReleaseAuditBox
-      v-else-if="env.forcedReleaseRecord"
-      :record="env.forcedReleaseRecord"
+      v-else-if="displayedEnv.forcedReleaseRecord"
+      :record="displayedEnv.forcedReleaseRecord"
     />
 
     <!-- 5. Interactive Operations Toolbar -->
     <div class="env-operations-toolbar flex items-center justify-end gap-2 pt-3 border-t border-[var(--border-subtle)] flex-wrap">
       <Button
-        v-if="env.enrollmentStatus === 'pending'"
-        variant="primary"
+        v-if="displayedEnv.enrollmentStatus === 'pending'"
+        variant="secondary"
         size="sm"
-        class="approve-enroll-btn text-xs"
+        class="resume-enroll-btn text-xs"
         :disabled="disabled"
-        @click="emit('approve', env.id)"
+        @click="emit('resumeEnrollment', displayedEnv.id)"
       >
-        <Icon name="check" :size="13" />
-        <span>Approve Enrollment (Human Action)</span>
+        <Icon name="key" :size="13" />
+        <span>Enrollment Ceremony</span>
       </Button>
 
       <Button
@@ -157,43 +198,43 @@ const emit = defineEmits<{
         size="sm"
         class="run-probe-btn text-xs"
         :disabled="disabled"
-        @click="emit('probe', env.id)"
+        @click="emit('probe', displayedEnv.id)"
       >
         <Icon name="lightning" :size="13" />
         <span>Request Readiness Probe</span>
       </Button>
 
       <Button
-        v-if="env.enrollmentStatus === 'approved' && !env.activeLeaseHolder && env.workSafety === 'clear'"
+        v-if="displayedEnv.enrollmentStatus === 'approved' && !displayedEnv.activeLeaseHolder && displayedEnv.workSafety === 'clear'"
         variant="secondary"
         size="sm"
         class="archive-env-btn text-xs"
         :disabled="disabled"
-        @click="emit('archive', env.id)"
+        @click="emit('archive', displayedEnv.id)"
       >
         <Icon name="archive" :size="13" />
         <span>Archive Instance</span>
       </Button>
 
       <Button
-        v-if="env.enrollmentStatus === 'archived'"
+        v-if="displayedEnv.enrollmentStatus === 'archived'"
         variant="secondary"
         size="sm"
         class="restore-env-btn text-xs"
         :disabled="disabled"
-        @click="emit('restore', env.id)"
+        @click="emit('restore', displayedEnv.id)"
       >
         <Icon name="refresh" :size="13" />
         <span>Restore Instance</span>
       </Button>
 
       <Button
-        v-if="env.enrollmentStatus === 'approved' && !env.activeLeaseHolder && env.workSafety === 'clear'"
+        v-if="displayedEnv.enrollmentStatus === 'approved' && !displayedEnv.activeLeaseHolder && displayedEnv.workSafety === 'clear'"
         variant="ghost"
         size="sm"
         class="unenroll-env-btn text-xs text-[var(--red-action)] hover:text-[var(--red-action)] hover:bg-[var(--red-action-bg)]"
         :disabled="disabled"
-        @click="emit('unenroll', env.id)"
+        @click="emit('unenroll', displayedEnv.id)"
       >
         <Icon name="trash" :size="13" />
         <span>Unenroll & Revoke</span>
@@ -211,7 +252,7 @@ const emit = defineEmits<{
 
       <div class="probe-history-stream flex flex-col gap-1.5 max-h-48 overflow-y-auto">
         <div
-          v-for="(pr, idx) in env.probeHistory"
+          v-for="(pr, idx) in displayedEnv.probeHistory"
           :key="idx"
           class="flex items-center justify-between p-2 rounded-[var(--radius-xs)] border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] text-[11px] gap-2"
         >
@@ -225,7 +266,7 @@ const emit = defineEmits<{
           </Badge>
         </div>
 
-        <div v-if="env.probeHistory.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
+        <div v-if="displayedEnv.probeHistory.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
           No probe records yet. Click 'Request Readiness Probe' above.
         </div>
       </div>

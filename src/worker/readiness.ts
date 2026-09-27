@@ -42,8 +42,11 @@ const defaultCommandRunner: ReadinessCommandRunner = {
     return defaultRun(binary, args, options);
   },
   async accountRead(binary, options) {
-    const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
+    const args = ['app-server', '--listen', 'stdio://'];
+    const useShell = requiresWindowsShell(binary);
+    const child = spawn(binary, useShell ? windowsShellArgs(args) : args, {
       stdio: ['pipe', 'pipe', 'ignore'],
+      ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       windowsHide: true,
     });
@@ -87,7 +90,9 @@ async function defaultRun(
   options?: { readonly env?: NodeJS.ProcessEnv },
 ): Promise<{ readonly stdout: string; readonly exitCode: number }> {
   try {
-    const result = await execFileAsync(binary, [...args], {
+    const useShell = requiresWindowsShell(binary);
+    const result = await execFileAsync(binary, useShell ? windowsShellArgs(args) : [...args], {
+      ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
@@ -102,6 +107,21 @@ async function defaultRun(
         : failure.code === 'ENOENT' ? 127 : 1,
     };
   }
+}
+
+/** npm's Windows `.cmd`/`.bat` shims require cmd.exe; native executables do not. */
+export function requiresWindowsShell(binary: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' && /\.(?:cmd|bat)$/i.test(binary);
+}
+
+/**
+ * shell:true joins argv for cmd.exe without quoting it. Match spawnPi's quoting
+ * convention for arguments that cmd.exe would otherwise split. These calls
+ * use the fixed readiness argument sets (including the fixed Pi provider), not
+ * arbitrary user input, so shell metacharacter injection is not a concern.
+ */
+function windowsShellArgs(args: readonly string[]): string[] {
+  return args.map((arg) => (/^[A-Za-z0-9_.:/=-]+$/.test(arg) ? arg : `"${arg.replaceAll('"', '\\"')}"`));
 }
 
 function commandOptions(env: NodeJS.ProcessEnv | undefined): { readonly env?: NodeJS.ProcessEnv } {
@@ -125,11 +145,56 @@ export interface ReadinessProbeOptions {
   readonly requirements?: ReadinessRequirementScope;
 }
 
-/** Versions whose non-inference contracts were pinned and verified by #114. */
-export const SUPPORTED_READINESS_VERSIONS = {
+/** Minimum supported versions whose non-inference contracts were pinned and verified by #114. */
+export const SUPPORTED_READINESS_VERSION_FLOORS = {
   codex: '0.154.0',
   pi: '0.86.1',
 } as const;
+
+export const SUPPORTED_READINESS_VERSIONS = SUPPORTED_READINESS_VERSION_FLOORS;
+
+type ParsedSemver = {
+  readonly core: readonly [bigint, bigint, bigint];
+  readonly prerelease?: readonly (bigint | string)[];
+};
+
+/**
+ * Strict SemVer 2.0 precedence for the readiness floor: three numeric core
+ * components, optional prerelease identifiers, and optional build metadata.
+ * Prereleases are below their stable core; numeric prerelease identifiers sort
+ * numerically and before alphanumeric ones, then by list length. Build metadata
+ * has no precedence. Invalid/missing components fail closed (never probe auth).
+ */
+export function parseSemver(version: string): ParsedSemver | undefined {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version.trim());
+  if (!match || match[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined;
+  const identifiers = match[4]?.split('.');
+  if (identifiers?.some((id) => /^\d+$/.test(id) && id.length > 1 && id.startsWith('0'))) return undefined;
+  return {
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    ...(identifiers !== undefined ? { prerelease: identifiers.map((id) => /^\d+$/.test(id) ? BigInt(id) : id) } : {}),
+  };
+}
+
+/** Check whether `actual` meets or exceeds `floor` by SemVer precedence. */
+export function isAtLeastVersion(actual: string, floor: string): boolean {
+  const a = parseSemver(actual);
+  const b = parseSemver(floor);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a.core[i]! !== b.core[i]!) return a.core[i]! > b.core[i]!;
+  }
+  if (a.prerelease === undefined) return true;
+  if (b.prerelease === undefined) return false;
+  for (let i = 0; i < Math.min(a.prerelease.length, b.prerelease.length); i++) {
+    const left = a.prerelease[i]!;
+    const right = b.prerelease[i]!;
+    if (left === right) continue;
+    if (typeof left !== typeof right) return typeof left === 'string';
+    return left > right;
+  }
+  return a.prerelease.length >= b.prerelease.length;
+}
 
 /**
  * The only command arguments allowed for Pi authentication readiness.
@@ -148,9 +213,10 @@ function pinnedVersionFromOutput(engine: 'codex' | 'pi', output: string): string
   // command is not evidence that this executable implements the pinned schema.
   const text = output.trim();
   const match = engine === 'codex'
-    ? /^codex-cli\s+v?(\d+\.\d+\.\d+)$/.exec(text)
-    : /^(?:pi\s+)?v?(\d+\.\d+\.\d+)$/.exec(text);
-  return match?.[1];
+    ? /^codex-cli\s+v?(\S+)$/.exec(text)
+    : /^(?:pi\s+)?v?(\S+)$/.exec(text);
+  const version = match?.[1];
+  return version !== undefined && parseSemver(version) !== undefined ? version : undefined;
 }
 
 function safePiAuthType(value: unknown): 'oauth' | 'api_key' | undefined {
@@ -185,9 +251,16 @@ function codexAccountResponse(
 ): { readonly authenticated: boolean; readonly authMode?: 'chatgpt' | 'api_key' | 'workload_identity' } | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (!hasOnlyKeys(record, ['account', 'requiresOpenaiAuth'])) return undefined;
+  if (!hasOnlyKeys(record, ['account', 'requiresOpenaiAuth', 'workspaceRouting'])) return undefined;
   // `requiresOpenaiAuth` is part of the pinned account/read response schema.
   if (typeof record.requiresOpenaiAuth !== 'boolean' || !Object.hasOwn(record, 'account')) return undefined;
+  if (
+    record.workspaceRouting !== undefined &&
+    record.workspaceRouting !== null &&
+    (typeof record.workspaceRouting !== 'object' || Array.isArray(record.workspaceRouting))
+  ) {
+    return undefined;
+  }
   if (record.account === null) return { authenticated: false };
   if (typeof record.account !== 'object' || Array.isArray(record.account)) return undefined;
   const account = record.account as Record<string, unknown>;
@@ -270,7 +343,11 @@ async function probePi(
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
   const version = pinnedVersionFromOutput('pi', versionResult.stdout);
-  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.pi) {
+  if (
+    versionResult.exitCode !== 0 ||
+    version === undefined ||
+    !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.pi)
+  ) {
     return unknownFact('pi', version, at, 'pi-auth-check', versionResult.exitCode);
   }
   const auth = await options.commandRunner.run(
@@ -319,7 +396,11 @@ async function probeCodex(
   const at = options.clock();
   const versionResult = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
   const version = pinnedVersionFromOutput('codex', versionResult.stdout);
-  if (versionResult.exitCode !== 0 || version !== SUPPORTED_READINESS_VERSIONS.codex) {
+  if (
+    versionResult.exitCode !== 0 ||
+    version === undefined ||
+    !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.codex)
+  ) {
     return unknownFact('codex', version, at, 'codex-account-read', versionResult.exitCode);
   }
   const account = await (options.commandRunner.accountRead ?? defaultCommandRunner.accountRead!)

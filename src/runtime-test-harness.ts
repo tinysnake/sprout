@@ -23,6 +23,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './worker/protocol.ts';
 import { EnvironmentWorker } from './worker/server.ts';
+import type { WorkerRecoveryJournal } from './worker/recovery-journal.ts';
 import {
   connectWorkerEnrollment,
   loadOrCreateWorkerIdentity,
@@ -156,6 +157,8 @@ export function hostConfiguration(overrides: Partial<HostConfiguration> = {}): H
     databasePath: ':memory:',
     workingDirectory: '/synthetic/work',
     port: 0,
+    bindHost: '127.0.0.1',
+    allowInsecureWorkerConnections: false,
     environmentInstanceId: INSTANCE_ID,
     engineId: 'scripted',
     runtimeConfiguration: {
@@ -433,6 +436,8 @@ export async function readinessWorkflowHarness(options: {
   readonly engineId?: string;
   /** Reopen the same durable enrollment instead of creating a second one. */
   readonly reopen?: boolean;
+  readonly approve?: boolean;
+  readonly modelAuthorizations?: Record<string, readonly string[]>;
 }): Promise<{
   readonly runtime: SproutRuntime;
   readonly base: string;
@@ -445,6 +450,7 @@ export async function readinessWorkflowHarness(options: {
       readonly readiness?: () => WorkerReadinessFacts;
       readonly readinessProbe?: (params: WorkerReadinessProbeParams) => Promise<WorkerReadinessProbeResult>;
       readonly engines?: ReadonlyMap<string, EngineAdapter>;
+      readonly recoveryJournal?: WorkerRecoveryJournal;
     },
     /** Dial protocol version, so an incompatible handshake can be composed. */
     dialProtocolVersion?: string,
@@ -511,9 +517,12 @@ export async function readinessWorkflowHarness(options: {
       compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
       engines: [],
     });
-    await runtime.enrollments.approve(enrollmentId, {
-      capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
-    });
+    if (options.approve !== false) {
+      await runtime.enrollments.approve(enrollmentId, {
+        capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+        ...(options.modelAuthorizations !== undefined ? { modelAuthorizations: options.modelAuthorizations } : {}),
+      });
+    }
   }
 
   return {
@@ -535,6 +544,7 @@ export async function readinessWorkflowHarness(options: {
         engines: worker.engines ?? new Map(),
         input: connection.stream,
         output: connection.stream,
+        ...(worker.recoveryJournal !== undefined ? { recoveryJournal: worker.recoveryJournal } : {}),
         ...(declaration !== undefined ? { readiness: declaration } : {}),
         ...(worker.readinessProbe !== undefined ? { readinessProbe: worker.readinessProbe } : {}),
       }));

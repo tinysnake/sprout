@@ -33,7 +33,11 @@ export function createOperatorSessionBrowserAdapter(transport: BrowserTransport)
       transport.setCsrfToken(response.csrfToken);
     },
     async listSessions() {
-      const response = await transport.request<{ readonly sessions: readonly BrowserSessionView[] }>('/api/auth/sessions');
+      const response = await transport.request<{
+        readonly sessions: readonly BrowserSessionView[];
+        readonly csrfToken: string;
+      }>('/api/auth/sessions');
+      transport.setCsrfToken(response.csrfToken);
       return response.sessions;
     },
     async signOut() {

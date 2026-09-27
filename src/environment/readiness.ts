@@ -38,6 +38,15 @@ export interface ModelAvailability {
   readonly models: readonly string[];
 }
 
+export interface ModelAuthorizationFact {
+  readonly engine: string;
+  readonly model: string;
+  readonly source: 'human-approval';
+  readonly requirementRevision?: string;
+  readonly authorizedAt: number;
+  readonly actor?: string;
+}
+
 export interface EngineReadinessFact {
   readonly engine: string;
   readonly version?: string;
@@ -56,6 +65,7 @@ export interface EngineReadinessFact {
   readonly probedAt?: number;
   readonly probeExitCode?: number;
   readonly source?: string;
+  readonly modelAuthorizations?: readonly ModelAuthorizationFact[];
 }
 /** One Worker-produced readiness probe before core-side authority binding. */
 export interface ReadinessProbeFact {
@@ -116,9 +126,17 @@ export function readinessRequirements(options: readonly { readonly engine: strin
 export function targetEvidenceSatisfiesRequirements(engine: EngineReadinessFact, scope: ReadinessRequirementScope | undefined): boolean {
   if (!scope?.revision) return false;
   const targets = scope.modelsByEngine?.[engine.engine];
-  if (!targets || engine.requirementRevision !== (scope.revisionsByEngine?.[engine.engine] ?? scope.revision) || !engine.targetModels) return false;
-  return targets.every((target) => engine.targetModels!.includes(target)) &&
-    (targets.length === 0 || engine.modelIdPresent === true);
+  const expectedRevision = scope.revisionsByEngine?.[engine.engine] ?? scope.revision;
+  if (!targets || engine.requirementRevision !== expectedRevision) return false;
+  if (targets.length === 0) return true;
+  return targets.every((target) => {
+    const hasAuth = engine.modelAuthorizations?.some(
+      (auth) => auth.engine === engine.engine && auth.model === target && auth.source === 'human-approval' &&
+        (auth.requirementRevision === undefined || auth.requirementRevision === expectedRevision),
+    );
+    if (hasAuth) return true;
+    return engine.targetModels !== undefined && engine.targetModels.includes(target) && engine.modelIdPresent === true;
+  });
 }
 
 export type EngineOptionEvaluationState =
@@ -176,19 +194,22 @@ export function evaluateEngineOption(
 
   if (workModel === '') {
     if (requirementScope?.revision !== undefined) {
-      const expectedRevision =
-        requirementScope.revisionsByEngine?.[option.engine] ?? requirementScope.revision;
-      if (expectedRevision !== undefined && fact.requirementRevision !== expectedRevision) {
-        return {
-          state: 'unknown',
-          reason: `Engine "${option.engine}" readiness is not established for the current requirement revision.`,
-        };
-      }
-      if (!targetEvidenceSatisfiesRequirements(fact, requirementScope)) {
-        return {
-          state: 'unknown',
-          reason: `Target evidence does not satisfy current requirements for engine "${option.engine}".`,
-        };
+      const targets = requirementScope.modelsByEngine?.[option.engine];
+      if (targets !== undefined && targets.length > 0) {
+        const expectedRevision =
+          requirementScope.revisionsByEngine?.[option.engine] ?? requirementScope.revision;
+        if (expectedRevision !== undefined && fact.requirementRevision !== expectedRevision) {
+          return {
+            state: 'unknown',
+            reason: `Engine "${option.engine}" readiness is not established for the current requirement revision.`,
+          };
+        }
+        if (!targetEvidenceSatisfiesRequirements(fact, requirementScope)) {
+          return {
+            state: 'unknown',
+            reason: `Target evidence does not satisfy current requirements for engine "${option.engine}".`,
+          };
+        }
       }
     }
     return {
@@ -204,7 +225,41 @@ export function evaluateEngineOption(
     };
   }
 
+  const expectedRevision = requirementScope !== undefined
+    ? (requirementScope.revisionsByEngine?.[option.engine] ?? requirementScope.revision)
+    : undefined;
+  const matchingAuth = fact.modelAuthorizations?.find(
+    (auth) => auth.engine === option.engine && auth.model === workModel && auth.source === 'human-approval',
+  );
+  const authRevisionMatches = matchingAuth !== undefined &&
+    (expectedRevision === undefined || matchingAuth.requirementRevision === undefined || matchingAuth.requirementRevision === expectedRevision);
+  const authValid = matchingAuth !== undefined && authRevisionMatches;
+
   if (fact.models.state === 'unknown') {
+    if (authValid) {
+      if (requirementScope !== undefined && expectedRevision !== undefined && fact.requirementRevision !== expectedRevision) {
+        return {
+          state: 'unknown',
+          reason: `Work model "${workModel}" readiness is not established for the current requirement revision.`,
+        };
+      }
+      if (fact.modelIdPresent === false) {
+        return {
+          state: 'model-unavailable',
+          reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+        };
+      }
+      return {
+        state: 'available',
+        reason: `Engine "${option.engine}" is ready with authorized work model "${workModel}" (human-approval).`,
+      };
+    }
+    if (matchingAuth !== undefined && !authRevisionMatches) {
+      return {
+        state: 'unknown',
+        reason: `Work model "${workModel}" readiness is not established for the current requirement revision.`,
+      };
+    }
     return {
       state: 'unknown',
       reason: `Work model "${workModel}" availability is unknown for "${option.engine}" on this Environment.`,
@@ -377,7 +432,7 @@ export function protocolCompatibility(
  */
 export const READINESS_AUTH_MODES = new Set(['chatgpt', 'api_key', 'workload_identity']);
 export const READINESS_AUTH_TYPES = new Set(['oauth', 'api_key']);
-export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'unknown']);
+export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'human-approval', 'unknown']);
 
 /**
  * Reduce a Worker-declared auth/source field to the allowlisted enum, or drop it.
@@ -567,8 +622,9 @@ export function summarizeEnvironmentReadiness(
     }
   }
   for (const engine of readiness.engines) {
+    const targetModel = engine.targetModels?.[0] ?? readiness.requirements?.modelsByEngine?.[engine.engine]?.[0] ?? '';
     const evaluation = evaluateEngineOption(
-      { engine: engine.engine, workModel: engine.targetModels?.[0] ?? '' },
+      { engine: engine.engine, workModel: targetModel },
       engine,
       readiness.requirements,
     );
@@ -581,7 +637,7 @@ export function summarizeEnvironmentReadiness(
       }
       return yellow(`Engine "${engine.engine}" is ${engine.readiness}.`);
     }
-    if (engine.models.state === 'unknown') {
+    if (engine.models.state === 'unknown' && !targetEvidenceSatisfiesRequirements(engine, readiness.requirements)) {
       return yellow(`Model availability for engine "${engine.engine}" is unknown.`);
     }
   }

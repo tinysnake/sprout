@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';import { chmodSync, mkdtempSync, rmSync,
 import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 
 
 import { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
@@ -17,7 +18,7 @@ import { WorkerGateway } from './gateway.ts';
 
 import { EnrollmentWorkerPort } from './enrollment-port.ts';
 
-import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } from './enrollment-connector.ts';
+import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerEnrollmentUrl, workerPublicKey } from './enrollment-connector.ts';
 
 import { EnvironmentWorker } from './server.ts';
 
@@ -51,8 +52,8 @@ interface Harness {
 }
 
 
-async function harness(): Promise<Harness> {
-  return harnessWithStore(new InMemoryEnrollmentStore());
+async function harness(allowInsecurePlaintext = false): Promise<Harness> {
+  return harnessWithStore(new InMemoryEnrollmentStore(), allowInsecurePlaintext);
 }
 
 
@@ -62,7 +63,10 @@ async function harness(): Promise<Harness> {
  * A gated store lets a test suspend the gateway's pre-epoch lifecycle re-read so
  * a revoke can be interleaved into an exact acceptance window deterministically.
  */
-async function harnessWithStore(enrollmentStore: InMemoryEnrollmentStore): Promise<Harness> {
+async function harnessWithStore(
+  enrollmentStore: InMemoryEnrollmentStore,
+  allowInsecurePlaintext = false,
+): Promise<Harness> {
   const enrollments = new EnvironmentEnrollmentService({
     enrollments: enrollmentStore,
     readiness: new InMemoryEnvironmentReadinessStore(),
@@ -70,7 +74,7 @@ async function harnessWithStore(enrollmentStore: InMemoryEnrollmentStore): Promi
     onAuthorityLost: (enrollmentId) => invalidateAuthority(enrollmentId),
     idFactory: () => 'enroll-1',
   });
-  const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000 });
+  const gateway = new WorkerGateway({ enrollments, handshakeTimeoutMs: 5_000, allowInsecurePlaintext });
   let invalidateAuthority: (enrollmentId: string) => void = () => undefined;
   invalidateAuthority = (enrollmentId) => gateway.invalidateEnrollment(enrollmentId);
   const port_ = new EnrollmentWorkerPort({ gateway });
@@ -274,6 +278,47 @@ test('a real gateway refusal never echoes malformed protocol evidence to the str
     }
   } finally {
     key.cleanup();
+    await h.close();
+  }
+});
+
+test('an opted-in gateway completes the Worker handshake over WS', async () => {
+  const h = await harness(true);
+  const key = tmpKey();
+  try {
+    const secret = await requestPending(h);
+    await claimProveApprove(h, key.path, secret);
+    assert.equal(workerEnrollmentUrl({ ...target(h.port, '', key.path), host: '10.0.0.2', scheme: 'ws' }), `ws://10.0.0.2:${h.port}/api/worker/connect`);
+    assert.equal(workerEnrollmentUrl({ ...target(h.port, '', key.path), host: 'host.internal', scheme: 'wss' }), `wss://host.internal:${h.port}/api/worker/connect`);
+    const worker = await openRawWorker(h, key.path, '');
+    assert.equal(worker.frame.type, 'worker/accepted');
+    worker.write({ type: 'worker/ready' });
+    assert.equal((await worker.next()).type, 'worker/listening');
+    worker.close();
+    const enrolled = await connectWorkerEnrollment({
+      target: { ...target(h.port, '', key.path), scheme: 'ws' },
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      engineFacts: [],
+    });
+    assert.ok(enrolled.connectionId);
+    enrolled.close();
+  } finally {
+    key.cleanup();
+    await h.close();
+  }
+});
+
+test('the gateway rejects an explicit WS transport from a non-loopback peer when opt-in is off', async () => {
+  const h = await harness(false);
+  const stream = new PassThrough();
+  try {
+    const outcome = await h.gateway.handle(stream, { secure: false, remoteAddress: 'public-peer.invalid' });
+    assert.deepEqual(outcome, {
+      accepted: false,
+      reason: 'a non-loopback Worker connection must use WSS; plaintext WS is refused before any command is accepted',
+    });
+  } finally {
+    stream.destroy();
     await h.close();
   }
 });

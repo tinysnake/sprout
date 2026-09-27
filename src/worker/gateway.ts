@@ -55,6 +55,8 @@ export const DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 export interface WorkerGatewayOptions {
   readonly enrollments: EnvironmentEnrollmentService;
+  /** Explicitly allow plaintext WS from non-loopback peers on trusted networks. */
+  readonly allowInsecurePlaintext?: boolean;
   /** Durable high-water allocation; the mutable registry remains gateway-owned. */
   readonly epochStore?: WorkerConnectionEpochStore;
   /**
@@ -125,6 +127,7 @@ export class WorkerGateway {
   readonly #epochs: WorkerConnectionRegistry;
   readonly #handshakeTimeoutMs: number;
   readonly #supportedProtocol: ProtocolVersionRange;
+  readonly #allowInsecurePlaintext: boolean;
   readonly #requiredModels: () => readonly string[] | Promise<readonly string[]>;
   /**
    * Live accepted connections per enrollment. Normal enrollment creation makes
@@ -179,6 +182,7 @@ export class WorkerGateway {
     });
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_GATEWAY_HANDSHAKE_TIMEOUT_MS;
     this.#supportedProtocol = options.supportedProtocol ?? SUPPORTED_WORKER_PROTOCOL;
+    this.#allowInsecurePlaintext = options.allowInsecurePlaintext ?? false;
     this.#requiredModels = options.requiredModels ?? (() => []);
   }
 
@@ -306,7 +310,10 @@ export class WorkerGateway {
    * a command.
    */
   async handle(stream: Duplex, facts: WorkerTransportFacts): Promise<WorkerGatewayOutcome> {
-    const decision = decideWorkerTransport(facts);
+    const decision = decideWorkerTransport({
+      ...facts,
+      allowInsecurePlaintext: this.#allowInsecurePlaintext,
+    });
     if (!decision.allowed) {
       safeWrite(stream, { type: 'worker/refused', reason: decision.reason, code: 'refused' });
       stream.destroy();

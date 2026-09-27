@@ -54,10 +54,14 @@ export interface RetainedEvidence {
   readonly retainedEventCount: number;
   /** Whether the interrupted turn reached a durable terminal settlement. */
   readonly turnSettlementObserved: boolean;
+  /** The neutral terminal status, never the engine's result text. */
+  readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
   /** Whether the Worker proved the previous engine session stopped. */
   readonly engineSessionStopped: boolean;
   /** Whether the Worker confirmed the Task context was recycled. */
   readonly taskContextRecycled: boolean;
+  /** Fresh Worker-side ownership-manifest check for the held Task context. */
+  readonly taskContextPrepared?: boolean;
 }
 
 /** One durable reconciliation decision, retained in order for the whole record. */
@@ -81,12 +85,17 @@ export interface ReconciliationDecision {
 export interface EnvironmentRecoveryRecord {
   readonly id: string;
   readonly environmentInstanceId: string;
+  /** The enrolled Worker identity that owned the lost channel, never a browser claim. */
+  readonly enrollmentId?: string;
+  readonly workerIdentityDigest?: string;
   readonly leaseId: string;
   readonly holderKind: 'task' | 'run';
   /** The holder identity, so ordinary decisions can prove they match it. */
   readonly holderId: string;
   readonly taskId?: string;
   readonly runId?: string;
+  /** Durable interruption classification; unknown is conservatively active. */
+  readonly interruptedRunActive?: boolean;
   readonly cause: EnvironmentRecoveryCause;
   readonly phase: EnvironmentRecoveryPhase;
   readonly startedAt: number;
@@ -205,7 +214,7 @@ export const UNRESOLVED_FACT_ENGINE_SESSION =
 export const UNRESOLVED_FACT_SETTLEMENT =
   'The interrupted run has no durable terminal settlement and no retained events.';
 export const UNRESOLVED_FACT_TASK_CONTEXT =
-  'The Task context has not been confirmed recycled on the Environment host.';
+  'The Task context has not been proved owned by this lease or safely recycled on the Environment host.';
 export const UNRESOLVED_FACT_WORKER_OFFLINE =
   'The Worker channel is lost; no retained evidence has been synchronized.';
 
@@ -228,10 +237,10 @@ export function deriveUnresolvedFacts(input: {
   }
   const facts: string[] = [];
   if (!input.evidence.engineSessionStopped) facts.push(UNRESOLVED_FACT_ENGINE_SESSION);
-  if (!input.evidence.turnSettlementObserved || input.evidence.retainedEventCount === 0) {
+  if (!input.evidence.turnSettlementObserved) {
     facts.push(UNRESOLVED_FACT_SETTLEMENT);
   }
-  if (input.holderKind === 'task' && !input.evidence.taskContextRecycled) {
+  if (input.holderKind === 'task' && !input.evidence.taskContextRecycled && !input.evidence.taskContextPrepared) {
     facts.push(UNRESOLVED_FACT_TASK_CONTEXT);
   }
   return facts;
@@ -252,8 +261,9 @@ export function canAutoResolve(input: {
   readonly evidence: RetainedEvidence;
 }): boolean {
   if (input.hadActiveRun) return false;
+  if (input.holderKind !== 'task') return false;
   if (!input.evidence.engineSessionStopped) return false;
-  if (input.holderKind === 'task' && !input.evidence.taskContextRecycled) return false;
+  if (!input.evidence.taskContextPrepared) return false;
   return true;
 }
 

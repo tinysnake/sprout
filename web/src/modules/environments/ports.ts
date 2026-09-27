@@ -13,7 +13,28 @@ import type {
 export interface EnvironmentService {
   listEnvironments(): Promise<EnvironmentInstance[]>;
   getEnvironment(id: string): Promise<EnvironmentInstance | undefined>;
-  approveEnrollment(id: string): Promise<void>;
+  /** Recreate the public E3 command for a durable pending enrollment using the current endpoint. Never includes the one-use secret. */
+  getBootstrapCommand(enrollmentId: string): string;
+  requestEnrollment(input: {
+    environmentInstanceId: string;
+    displayName: string;
+    platform?: string;
+  }): Promise<{
+    enrollment: EnvironmentInstance;
+    claimSecret?: string | undefined;
+    claimExpiresAt?: number | undefined;
+    bootstrapCommand: string;
+  }>;
+  regenerateClaimSecret(id: string): Promise<{
+    claimSecret: string;
+    claimExpiresAt: number;
+  }>;
+  cancelEnrollment(id: string, reason?: string): Promise<void>;
+  approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void>;
   triggerProbe(id: string): Promise<ProbeRecord>;
   togglePermission(id: string, cap: CapabilityKey): Promise<void>;
   unbindWorkspace(projectId: string, envId: string): Promise<void>;

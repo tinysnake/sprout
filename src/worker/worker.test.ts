@@ -248,6 +248,7 @@ test('Agent model and effort serialize through the worker and deserialize for th
     {
       engine: 'scripted',
       agentId: 'agent-scout',
+      runId: worker.sessionStartParams[0]?.runId,
       workingDirectory: '/tmp',
       model: 'configured-model',
       effort: 'medium',

@@ -21,6 +21,10 @@ export interface HostConfiguration {
   readonly workingDirectory: string;
   /** Port the Web surface binds. */
   readonly port: number;
+  /** Network interface address the Web surface binds. */
+  readonly bindHost: string;
+  /** Whether non-loopback plaintext Worker connections are explicitly trusted. */
+  readonly allowInsecureWorkerConnections: boolean;
   /** The one environment instance this build serves. */
   readonly environmentInstanceId: string;
   /** Default engine when the runtime configuration names none. */
@@ -136,6 +140,8 @@ export interface WorkerEnrollmentTarget {
   /** The Sprout instance host to dial. */
   readonly host: string;
   readonly port: number;
+  /** Explicit operator-selected transport; omitted for legacy/bare host:port targets. */
+  readonly scheme?: 'ws' | 'wss';
   /** The one-use claim secret, read from the environment, never the command line. */
   readonly claimSecret: string | undefined;
   /** Where the host-local private key lives; the Core never reads this file. */
@@ -178,6 +184,12 @@ export function parseHostConfiguration(
     databasePath: environment['SPROUT_DATABASE'] ?? join(defaults.projectRoot, 'sprout.db'),
     workingDirectory: environment['SPROUT_WORKDIR'] ?? defaults.projectRoot,
     port: numberValue(environment['SPROUT_PORT'], 5174),
+    bindHost: bindHostValue(environment['SPROUT_BIND_HOST']),
+    allowInsecureWorkerConnections: booleanValue(
+      environment['SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS'],
+      false,
+      'SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS',
+    ),
     environmentInstanceId,
     engineId: environment['SPROUT_ENGINE'] ?? 'codex',
     runtimeConfiguration: parseRuntimeConfiguration(environment['SPROUT_RUNTIME_CONFIG']),
@@ -268,6 +280,27 @@ export function workerEnvironment(environmentInstanceId: string): Readonly<Recor
  */
 function numberValue(value: string | undefined, fallback: number): number {
   return value === undefined ? fallback : Number(value);
+}
+
+/** Parse strict, case-sensitive boolean host settings. */
+function booleanValue(value: string | undefined, fallback: boolean, name: string): boolean {
+  if (value === undefined) return fallback;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`${name} must be "true" or "false"`);
+}
+
+/** Validate the address passed directly to the HTTP server's listen call. */
+function bindHostValue(value: string | undefined): string {
+  const host = value ?? '127.0.0.1';
+  if (
+    host.length === 0 ||
+    /[\s/?#@\\]/.test(host) ||
+    /^[a-z][a-z\d+.-]*:/i.test(host)
+  ) {
+    throw new Error('SPROUT_BIND_HOST must be a non-empty host address without whitespace or URL components');
+  }
+  return host;
 }
 
 /**

@@ -30,6 +30,8 @@ test('a Worker persists Project workspaces, refreshes Task context, and safely r
   assert.doesNotMatch(prepared.bootstrapInstructions, /\/Users\/|\\Users\\/);
   const workspace = onlyWorkspace(root);
   const context = onlyContext(workspace);
+  assert.equal(await new WorkerWorkspace(root).inspectTaskContext(recycle()), true);
+  assert.equal(await new WorkerWorkspace(root).inspectTaskContext({ ...recycle(), environmentLeaseId: 'wrong-lease' }), false);
   writeFileSync(join(workspace, 'AGENTS.md'), '# repository-owned rules\n');
   writeFileSync(join(workspace, 'repository-sentinel.txt'), 'keep\n');
 
@@ -45,6 +47,8 @@ test('a Worker persists Project workspaces, refreshes Task context, and safely r
   );
   assert.equal(existsSync(context), true, 'a mismatched manifest never authorizes deletion');
   writeFileSync(join(context, 'foreign.txt'), 'do not delete\n');
+  assert.equal(await new WorkerWorkspace(root).inspectTaskContext(recycle()), false,
+    'a foreign context file is unresolved, not proof of safe Task cleanup');
   await assert.rejects(
     first.contexts.recycle(recycle()),
     new RegExp(WORKER_DIAGNOSTICS.requestFailed, 'i'),

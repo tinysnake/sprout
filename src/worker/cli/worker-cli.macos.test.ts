@@ -73,9 +73,9 @@ test('the packaged start re-execs with an inspectable host-local process binding
     writeFileSync(join(state, 'identity.pem'), generateWorkerIdentity().privateKey);
     chmodSync(join(state, 'config.json'), 0o600);
     chmodSync(join(state, 'identity.pem'), 0o600);
-    const result = spawnSync(sproutExecutable, ['worker', 'start'], {
+    const result = spawnSync(sproutExecutable, ['worker', 'start', '--foreground'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents') },
+      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'), SPROUT_WORKER_RECONNECT_MAX_MS: '2000' },
     });
     assert.equal(result.status, 1, result.stderr);
     assert.doesNotMatch(result.stderr, /could not establish a host-local Worker process identity/);
@@ -83,6 +83,43 @@ test('the packaged start re-execs with an inspectable host-local process binding
     assert.equal(typeof runtime.process?.startIdentity, 'string');
     assert.match(runtime.process?.ownerToken as string, /^[A-Za-z0-9_-]{43}$/);
     assert.ok(!result.stdout.includes(runtime.process?.ownerToken as string) && !result.stderr.includes(runtime.process?.ownerToken as string));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the packaged start produces a POSIX C start identity regardless of caller locale', { skip: !onMac }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-exec-locale-'));
+  try {
+    const state = join(root, 'state');
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    const config = {
+      version: 1,
+      enrollmentId: 'enroll-synthetic',
+      environmentInstanceId: 'env-synthetic',
+      protocolVersion: '2',
+      endpoint: { host: '127.0.0.1', port: 1 },
+      identityFileName: 'identity.pem',
+    };
+    writeFileSync(join(state, 'config.json'), JSON.stringify(config));
+    writeFileSync(join(state, 'identity.pem'), generateWorkerIdentity().privateKey);
+    chmodSync(join(state, 'config.json'), 0o600);
+    chmodSync(join(state, 'identity.pem'), 0o600);
+    const result = spawnSync(sproutExecutable, ['worker', 'start', '--foreground'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: root,
+        SPROUT_WORKER_HOME: state,
+        SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'),
+        LANG: 'zh_CN.UTF-8',
+        LC_TIME: 'zh_CN.UTF-8',
+        SPROUT_WORKER_RECONNECT_MAX_MS: '2000',
+      },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    const runtime = JSON.parse(readFileSync(join(state, 'runtime.json'), 'utf8')) as { process?: { startIdentity?: string } };
+    assert.match(runtime.process?.startIdentity ?? '', /^darwin:[A-Z][a-z]{2} [A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4}$/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -152,7 +189,7 @@ test('the rendered LaunchAgent is a valid property list according to plutil', { 
       renderLaunchAgent({
         label: workerServiceLabel('env-synthetic'),
         executablePath: sproutExecutable,
-        arguments: ['worker', 'start'],
+        arguments: ['worker', 'start', '--foreground'],
         logPath: join(root, 'worker.log'),
         environment: { HOME: root, PATH: '/usr/bin:/bin' },
       }),
@@ -169,7 +206,7 @@ test('the rendered LaunchAgent is a valid property list according to plutil', { 
     assert.equal(json['RunAtLoad'], true);
     assert.deepEqual(json['KeepAlive'], { SuccessfulExit: false });
     assert.equal(json['ThrottleInterval'], 10);
-    assert.deepEqual(json['ProgramArguments'], [sproutExecutable, 'worker', 'start']);
+    assert.deepEqual(json['ProgramArguments'], [sproutExecutable, 'worker', 'start', '--foreground']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

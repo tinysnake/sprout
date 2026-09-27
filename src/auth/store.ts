@@ -41,6 +41,7 @@ export interface OperatorSessionStore {
   createSession(record: BrowserSessionRecord): Promise<void>;
   listSessions(): Promise<readonly BrowserSessionRecord[]>;
   touchSession(id: string, at: number, idleExpiresAt: number): Promise<boolean>;
+  replaceCsrfHash(id: string, csrfHash: string, at: number): Promise<boolean>;
   /** Revoke active sessions whose persisted deadline has passed. */
   revokeExpiredSessions(at: number): Promise<number>;
   revokeSession(id: string, at: number): Promise<boolean>;
@@ -85,6 +86,13 @@ export class InMemoryOperatorSessionStore implements OperatorSessionStore {
     const session = this.#sessions.get(id);
     if (!session || session.revokedAt !== undefined) return false;
     this.#sessions.set(id, { ...session, lastSeenAt: at, idleExpiresAt });
+    return true;
+  }
+
+  async replaceCsrfHash(id: string, csrfHash: string, at: number): Promise<boolean> {
+    const session = this.#sessions.get(id);
+    if (!session || session.revokedAt !== undefined || session.absoluteExpiresAt <= at || session.idleExpiresAt <= at) return false;
+    this.#sessions.set(id, { ...session, csrfHash });
     return true;
   }
 

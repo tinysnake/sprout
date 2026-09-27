@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 
-import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, isEnrolled, isRestrictive, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
 
 
 /**
@@ -57,6 +57,47 @@ function probe(...identities: readonly WorkerProcessIdentity[]): WorkerProcessPr
   };
 }
 
+test('Windows process probe binds only the current pid to its validated owner token', () => {
+  const token = 'a'.repeat(43);
+  const dependencies = {
+    platform: 'win32' as const,
+    isAlive: () => true,
+    currentEnvironment: { SPROUT_WORKER_OWNER_TOKEN: token },
+    windowsStartIdentity: (pid: number) => `windows:${pid}:incarnation`,
+  };
+  const self = probeWorkerProcess(process.pid, dependencies);
+  assert.equal(self.state, 'alive');
+  if (self.state === 'alive') {
+    assert.equal(self.process.pid, process.pid);
+    assert.equal(self.process.ownerToken, token);
+    assert.equal(self.process.startIdentity, `windows:${process.pid}:incarnation`);
+  }
+  assert.deepEqual(probeWorkerProcess(process.pid, {
+    ...dependencies,
+    currentEnvironment: { SPROUT_WORKER_OWNER_TOKEN: 'not-a-valid-token' },
+  }), { state: 'unknown' });
+  assert.deepEqual(probeWorkerProcess(process.pid + 1, dependencies), { state: 'unknown' });
+});
+
+test('Linux and Darwin process probes retain their platform-specific evidence paths', () => {
+  const token = 'b'.repeat(43);
+  for (const platform of ['linux', 'darwin'] as const) {
+    let environmentRead = false;
+    let startRead = false;
+    const result = probeWorkerProcess(process.pid, {
+      platform,
+      isAlive: () => true,
+      linuxEnvironment: () => { environmentRead = true; return token; },
+      darwinEnvironment: () => { environmentRead = true; return token; },
+      linuxStartIdentity: () => { startRead = true; return 'linux:123'; },
+      darwinStartIdentity: () => { startRead = true; return 'darwin:date'; },
+    });
+    assert.equal(result.state, 'alive');
+    assert.equal(environmentRead, true);
+    assert.equal(startRead, true);
+  }
+});
+
 
 test('state and configuration files are owner-only and the directory is restrictive', () => {
   const { paths, cleanup } = tempPaths();
@@ -69,6 +110,22 @@ test('state and configuration files are owner-only and the directory is restrict
     assert.equal(statSync(paths.identityPath).mode & 0o777, 0o600, 'identity key is 0600');
     assert.ok(isRestrictive(paths.configPath));
     assert.ok(isRestrictive(paths.identityPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test('worker config round-trips explicit schemes and accepts legacy endpoints without one', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const explicit = config({ endpoint: { host: 'sprout.invalid', port: 443, scheme: 'wss' } });
+    writeConfig(paths, explicit);
+    assert.deepEqual(readConfig(paths), explicit);
+
+    writeFileSync(paths.configPath, JSON.stringify({ ...config(), endpoint: { host: '127.0.0.1', port: 5174 } }));
+    chmodSync(paths.configPath, 0o600);
+    assert.deepEqual(readConfig(paths).endpoint, { host: '127.0.0.1', port: 5174 });
   } finally {
     cleanup();
   }
@@ -88,6 +145,107 @@ test('a group- or world-readable identity key is refused rather than trusted', (
   } finally {
     cleanup();
   }
+});
+
+test('private-file restriction check preserves POSIX mode semantics', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    writePrivateFile(paths.configPath, '{}');
+    const posix = { platform: 'linux', run: () => '' } as PrivateFileSecurityDependencies;
+    assert.equal(privateFileRestriction(paths.configPath, false, posix), 'restricted');
+    assert.equal(privateFileRestriction(paths.configPath, true, posix), 'restricted');
+    chmodSync(paths.configPath, 0o644);
+    assert.equal(privateFileRestriction(paths.configPath, false, posix), 'permissive');
+    assert.equal(privateFileRestriction(paths.configPath, true, posix), 'permissive');
+  } finally {
+    cleanup();
+  }
+});
+
+test('directory sync skips unsupported Windows directory fsync', () => {
+  let attempted = false;
+  syncDirectory('synthetic-directory', {
+    platform: 'win32',
+    run: () => { attempted = true; },
+  });
+  assert.equal(attempted, false);
+});
+
+test('directory sync preserves POSIX fsync failures', () => {
+  const failure = new Error('directory fsync failed');
+  let attemptedPath: string | undefined;
+  assert.throws(() => syncDirectory('synthetic-directory', {
+    platform: 'linux',
+    run: (directory) => {
+      attemptedPath = directory;
+      throw failure;
+    },
+  }), (error: unknown) => error === failure);
+  assert.equal(attemptedPath, 'synthetic-directory');
+});
+
+test('Windows ACL writer invokes icacls and verifier allows only current user, Administrators, and SYSTEM', () => {
+  const commands: string[] = [];
+  const { paths, cleanup } = tempPaths();
+  const security: PrivateFileSecurityDependencies = {
+    platform: 'win32',
+    run: (program, args) => {
+      commands.push(`${program} ${args.join(' ')}`);
+      if (program === 'whoami') return 'EXAMPLE\\worker\n';
+      return `${args[0]} EXAMPLE\\worker:(F)\n  BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`;
+    },
+  };
+  try {
+    writePrivateFile(paths.configPath, '{}', security);
+    assert.deepEqual(commands.slice(0, 2), [
+      'whoami ',
+      `icacls ${paths.configPath} /inheritance:r /grant:r EXAMPLE\\worker:F`,
+    ]);
+    assert.equal(verifyWindowsPrivateFileAcl('synthetic-file', security), 'restricted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Windows ACL verifier parses the echoed path and real icacls entry layout', () => {
+  const makeSecurity = (acl: string): PrivateFileSecurityDependencies => ({
+    platform: 'win32',
+    run: (program) => program === 'whoami' ? 'EXAMPLE\\worker\n' : acl,
+  });
+  const path = 'C:/Users/worker/.sprout/worker/identity.pem';
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+  const windowsPath = path.replaceAll('/', '\\');
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(`${windowsPath} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+  assert.equal(
+    verifyWindowsPrivateFileAcl(path, makeSecurity(
+      `${path} EXAMPLE\\worker:(F)\n  BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`)),
+    'restricted',
+  );
+  const spacedPath = 'C:/Users/worker/.sprout worker/identity key.pem';
+  assert.equal(
+    verifyWindowsPrivateFileAcl(spacedPath, makeSecurity(`${spacedPath} EXAMPLE\\worker:(F)\n`)),
+    'restricted',
+  );
+});
+
+test('Windows ACL verifier refuses inherited and unknown principals and fails closed on unverifiable output', () => {
+  const path = 'synthetic';
+  const makeSecurity = (acl: string): PrivateFileSecurityDependencies => ({
+    platform: 'win32',
+    run: (program) => program === 'whoami' ? 'EXAMPLE\\worker\n' : acl,
+  });
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(I)(F)\n`)), 'permissive');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity(`${path} EXAMPLE\\worker:(F)\n  Everyone:(R)\n`)), 'permissive');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity('')), 'unverifiable');
+  assert.equal(verifyWindowsPrivateFileAcl(path, makeSecurity('not-the-echoed-path EXAMPLE\\worker:(F)\n')), 'unverifiable');
+  assert.equal(verifyWindowsPrivateFileAcl('synthetic', { platform: 'win32', run: () => { throw new Error('private output'); } }), 'unverifiable');
+  assert.equal(hasExactPrivateFileMode('does-not-exist', { platform: 'win32', run: () => '' }), false);
 });
 
 

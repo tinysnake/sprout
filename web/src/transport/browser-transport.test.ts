@@ -86,6 +86,30 @@ test('browser transport identifies authenticated failures without exposing respo
   assert.equal(transport.state().connection, 'online');
 });
 
+test('browser transport parses typed 409 refusal bodies into safe error properties', async () => {
+  const transport = createBrowserTransport({
+    fetch: async () => new Response(JSON.stringify({
+      error: 'Only a pending enrollment can be cancelled.',
+      code: 'not-pending',
+      disposition: 'conflict',
+    }), { status: 409, headers: { 'content-type': 'application/json' } }),
+  });
+  await assert.rejects(
+    () => transport.request('/api/environments/enrollments/env-1/cancel', { method: 'POST' }),
+    (error: unknown) => {
+      assert.ok(error instanceof BrowserRequestError);
+      assert.equal(error.kind, 'rejected');
+      assert.equal(error.status, 409);
+      assert.equal(error.code, 'not-pending');
+      assert.equal(error.refusal, 'Only a pending enrollment can be cancelled.');
+      assert.equal(error.message, 'Only a pending enrollment can be cancelled.');
+      assert.equal(error.disposition, 'conflict');
+      return true;
+    },
+  );
+  assert.equal(transport.state().connection, 'online');
+});
+
 test('an unreachable command becomes observable offline and is not retained for replay', async () => {
   let calls = 0;
   const transport = createBrowserTransport({

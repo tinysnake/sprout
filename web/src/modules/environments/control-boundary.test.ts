@@ -15,6 +15,7 @@ import type { EnvironmentService } from './ports.ts';
 import {
   createEnvironmentControlBoundary,
   EnvironmentControlRefused,
+  formatRefusalNotice,
 } from './control-boundary.ts';
 
 function presentation(controlAvailable: boolean): ConnectionPresentation {
@@ -60,7 +61,7 @@ for (const state of ['loading', 'reconnecting', 'stale', 'offline'] as const) {
     assert.equal(boundary.canControl(), false, `${state}: control reports unavailable`);
 
     await assert.rejects(
-      () => boundary.run((s) => s.approveEnrollment('env-1')),
+      () => boundary.run((s) => s.approveEnrollment('env-1', {})),
       (error: unknown) => {
         assert.ok(error instanceof EnvironmentControlRefused, 'a typed refusal is raised');
         assert.equal(error.kind, 'connection-unsettled');
@@ -100,4 +101,26 @@ test('control reaches the typed service immediately once the connection is settl
   assert.equal(boundary.canControl(), true);
   await boundary.run((s) => s.triggerProbe('env-1'));
   assert.deepEqual(calls, ['triggerProbe']);
+});
+
+test('formatRefusalNotice formats typed 409 not-pending refusals decisively without raw error or status codes', () => {
+  const notice = formatRefusalNotice({
+    status: 409,
+    code: 'not-pending',
+    refusal: 'Only a pending enrollment can be cancelled.',
+    message: 'Only a pending enrollment can be cancelled.',
+  });
+  assert.equal(notice, 'This enrollment is no longer pending (not-pending): Only a pending enrollment can be cancelled.');
+  assert.equal(notice.includes('409'), false);
+  assert.equal(/error/i.test(notice), false);
+
+  const fallbackNotice = formatRefusalNotice({ code: 'not-pending' });
+  assert.equal(fallbackNotice, 'This enrollment is no longer pending (not-pending).');
+
+  const genericNotice = formatRefusalNotice({ code: 'invalid-proof', message: 'Proof signature expired' });
+  assert.equal(genericNotice, 'Action refused (invalid-proof): Proof signature expired');
+  assert.equal(genericNotice.includes('409'), false);
+
+  const refusedError = new EnvironmentControlRefused('connection-unsettled', 'Connection is unsettled');
+  assert.equal(formatRefusalNotice(refusedError), 'Connection is unsettled');
 });

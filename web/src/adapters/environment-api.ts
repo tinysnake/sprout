@@ -30,6 +30,31 @@ export interface EnrollmentView {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
+  readonly claim?: EnrollmentClaimView;
+  readonly requiresFreshIdentity?: boolean;
+}
+
+export interface EnrollmentClaimView {
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly consumedAt?: number;
+}
+
+export interface ModelAuthorizationView {
+  readonly engine: string;
+  readonly model: string;
+  readonly source: 'human-approval';
+  readonly requirementRevision?: string;
+  readonly authorizedAt: number;
+  readonly actor?: string;
+}
+
+export interface ReadinessRequirementScope {
+  readonly revision?: string;
+  readonly revisionsByEngine?: Readonly<Record<string, string>>;
+  readonly requiredEngines?: readonly string[];
+  readonly requiredModels?: readonly string[];
+  readonly modelsByEngine?: Readonly<Record<string, readonly string[]>>;
 }
 
 export interface EnvironmentReadinessView {
@@ -61,6 +86,7 @@ export interface EnvironmentReadinessView {
     readonly probedAt?: number;
     readonly probeExitCode?: number;
     readonly source?: string;
+    readonly modelAuthorizations?: readonly ModelAuthorizationView[];
   }[];
   readonly probe?: {
     readonly at: number;
@@ -72,6 +98,7 @@ export interface EnvironmentReadinessView {
     readonly version?: string;
   };
   readonly workSafety: { readonly state: string };
+  readonly requirements?: ReadinessRequirementScope;
 }
 
 export interface ProbeResultView {
@@ -120,8 +147,10 @@ export interface EnvironmentRecoveryView {
   readonly evidence?: {
     readonly retainedEventCount: number;
     readonly turnSettlementObserved: boolean;
+    readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
     readonly engineSessionStopped: boolean;
     readonly taskContextRecycled: boolean;
+    readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
   readonly evidenceSynchronized: boolean;
@@ -155,8 +184,10 @@ export interface ForceReleaseView {
 export interface RetainedEvidenceView {
   readonly retainedEventCount: number;
   readonly turnSettlementObserved: boolean;
+  readonly terminalStatus?: 'completed' | 'failed' | 'interrupted' | 'stopped';
   readonly engineSessionStopped: boolean;
   readonly taskContextRecycled: boolean;
+  readonly taskContextPrepared?: boolean;
 }
 
 export interface EnvironmentEnrollmentBrowserAdapter {
@@ -199,9 +230,18 @@ export interface EnvironmentEnrollmentBrowserAdapter {
       readonly models?: { readonly state: string; readonly models: readonly string[] };
     }[];
   }): Promise<{ readonly outcome: string; readonly requiresHumanApproval: boolean; readonly enrollment: EnrollmentView }>;
-  approveEnrollment(id: string, capabilityPermissions: Readonly<Record<string, boolean>>): Promise<EnrollmentView>;
+  approveEnrollment(
+    id: string,
+    capabilityPermissions: Readonly<Record<string, boolean>>,
+    modelAuthorizations?: Readonly<Record<string, readonly string[]>> | readonly { readonly engine: string; readonly model: string }[],
+  ): Promise<EnrollmentView>;
   revokeEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
+  cancelEnrollment(id: string, reason?: string): Promise<EnrollmentView>;
+  regenerateClaimSecret(id: string): Promise<{
+    readonly enrollment: EnrollmentView;
+    readonly claim: { readonly secret: string; readonly expiresAt: number };
+  }>;
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
   readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[];
     readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number } }>;
@@ -215,21 +255,6 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly recovery: readonly EnvironmentRecoveryView[];
     readonly forceReleases: readonly ForceReleaseView[];
   }>;
-  /** Record a verified same-identity reconnect; moves the record to reconciling. */
-  observeReconnect(leaseId: string, input: {
-    readonly enrollmentId: string;
-    readonly environmentInstanceId: string;
-    readonly identityVerified: boolean;
-    readonly protocolCompatible: boolean;
-    readonly permissionsAllowed: boolean;
-    readonly hadActiveRun: boolean;
-    readonly evidence?: RetainedEvidenceView;
-  }): Promise<EnvironmentRecoveryView>;
-  /** Synchronize retained evidence; the only path that can resolve or reach recovery. */
-  synchronizeEvidence(leaseId: string, input: {
-    readonly evidence: RetainedEvidenceView;
-    readonly hadActiveRun: boolean;
-  }): Promise<EnvironmentRecoveryView>;
   /** Ordinary Resume: keep the interrupted run as history on the same lease. */
   resumeRecovery(leaseId: string, reason?: string): Promise<EnvironmentRecoveryView>;
   /** Ordinary Discard: safe Task end that recycles context before release. */
@@ -303,10 +328,13 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand(input),
       );
     },
-    async approveEnrollment(id, capabilityPermissions) {
+    async approveEnrollment(id, capabilityPermissions, modelAuthorizations) {
       const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
         `/api/environments/enrollments/${encodeURIComponent(id)}/approve`,
-        jsonCommand({ capabilityPermissions }),
+        jsonCommand({
+          capabilityPermissions,
+          ...(modelAuthorizations !== undefined ? { modelAuthorizations } : {}),
+        }),
       );
       return response.enrollment;
     },
@@ -323,6 +351,19 @@ export function createEnvironmentEnrollmentBrowserAdapter(
         jsonCommand({ reason }),
       );
       return response.enrollment;
+    },
+    async cancelEnrollment(id, reason) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/cancel`,
+        jsonCommand(reason !== undefined ? { reason } : {}),
+      );
+      return response.enrollment;
+    },
+    async regenerateClaimSecret(id) {
+      return transport.request(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/claim-secret`,
+        jsonCommand({}),
+      );
     },
     async setCapabilityPermission(id, capability, allowed) {
       const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
@@ -342,20 +383,6 @@ export function createEnvironmentEnrollmentBrowserAdapter(
     },
     recovery: (id) =>
       transport.request(`/api/environments/enrollments/${encodeURIComponent(id)}/recovery`),
-    async observeReconnect(leaseId, input) {
-      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
-        `/api/environments/recovery/${encodeURIComponent(leaseId)}/reconnect`,
-        jsonCommand(input),
-      );
-      return response.recovery;
-    },
-    async synchronizeEvidence(leaseId, input) {
-      const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
-        `/api/environments/recovery/${encodeURIComponent(leaseId)}/evidence`,
-        jsonCommand(input),
-      );
-      return response.recovery;
-    },
     async resumeRecovery(leaseId, reason) {
       const response = await transport.request<{ readonly recovery: EnvironmentRecoveryView }>(
         `/api/environments/recovery/${encodeURIComponent(leaseId)}/resume`,

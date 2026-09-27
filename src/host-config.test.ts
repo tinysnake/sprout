@@ -70,6 +70,20 @@ const settings: readonly Setting[] = [
     parsed: 41010,
   },
   {
+    variable: 'SPROUT_BIND_HOST',
+    read: (c) => c.bindHost,
+    missing: '127.0.0.1',
+    present: { SPROUT_BIND_HOST: '0.0.0.0' },
+    parsed: '0.0.0.0',
+  },
+  {
+    variable: 'SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS',
+    read: (c) => c.allowInsecureWorkerConnections,
+    missing: false,
+    present: { SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: 'true' },
+    parsed: true,
+  },
+  {
     variable: 'SPROUT_ENV_INSTANCE',
     read: (c) => c.environmentInstanceId,
     missing: 'local-macos',
@@ -207,6 +221,8 @@ test('an empty host environment takes exactly the documented defaults', () => {
     databasePath: join(projectRoot, 'sprout.db'),
     workingDirectory: projectRoot,
     port: 5174,
+    bindHost: '127.0.0.1',
+    allowInsecureWorkerConnections: false,
     environmentInstanceId: 'local-macos',
     engineId: 'codex',
     runtimeConfiguration: {},
@@ -277,6 +293,16 @@ test('an unparseable numeric host setting stays NaN rather than becoming a new e
 
 test('an empty numeric host setting keeps the runtime conversion it had before', () => {
   assert.equal(parseWith({ SPROUT_PORT: '' }).port, 0);
+});
+
+test('invalid bind hosts are refused with a clear configuration error', () => {
+  for (const bindHost of ['', 'http://x', 'a b', 'host/path']) {
+    assert.throws(
+      () => parseWith({ SPROUT_BIND_HOST: bindHost }),
+      /SPROUT_BIND_HOST must be a non-empty host address without whitespace or URL components/,
+      `expected ${JSON.stringify(bindHost)} to be rejected`,
+    );
+  }
 });
 
 test('an invalid runtime JSON channel keeps its existing startup error', () => {  assert.throws(
@@ -477,6 +503,16 @@ test('the parsed worker configuration exposes no unrelated host key', () => {
   const configuration = parseWorker({ UNRELATED_HOST_FACT: 'not-sprout', SPROUT_UNKNOWN_SETTING: 'ignored' });
   assert.equal('UNRELATED_HOST_FACT' in configuration, false);
   assert.equal('SPROUT_UNKNOWN_SETTING' in configuration, false);
+});
+
+test('plaintext Worker transport opt-in accepts only strict true/false values', () => {
+  assert.equal(parseWith({ SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: 'false' }).allowInsecureWorkerConnections, false);
+  for (const value of ['TRUE', 'yes', '1', '']) {
+    assert.throws(
+      () => parseWith({ SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS: value }),
+      /SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS must be "true" or "false"/,
+    );
+  }
 });
 
 /**

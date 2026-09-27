@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
 
-import { PassThrough } from 'node:stream';import { createWorkerCli, WORKER_EXIT, type EnrollmentConnector } from './worker-cli.ts';import { acquireWorkerLock, ensureStateDirectory, readConfig, readRuntimeState, workerHostPaths, writePrivateFile, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';
+import { PassThrough } from 'node:stream';import { createWorkerCli, WORKER_EXIT, type EnrollmentConnector } from './worker-cli.ts';import { acquireWorkerLock, ensureStateDirectory, readConfig, readRuntimeState, writeRuntimeState, workerHostPaths, workerLockPath, writePrivateFile, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';
 
 import {
   WorkerEnrollmentPendingError,
@@ -337,7 +337,7 @@ test('start refuses a duplicate live Worker for the same environment', async () 
     // A live lock held by a distinct opaque owner binding refuses start.
     const held = acquireWorkerLock(h.paths, holderIdentity, probe(holderIdentity));
     void held;
-    const status = await cli.run(['start']);
+    const status = await cli.run(['start', '--foreground']);
     assert.equal(status, WORKER_EXIT.alreadyRunning);
     assert.match(h.err.join('\n'), /already running/);
   } finally {
@@ -358,7 +358,7 @@ test('start keeps a hostile protocol refusal out of CLI and persisted diagnostic
   });
   try {
     seedEnrolledHost(h.paths);
-    assert.equal(await h.run(['start']), WORKER_EXIT.refused);
+    assert.equal(await h.run(['start', '--foreground']), WORKER_EXIT.refused);
     const runtime = readRuntimeState(h.paths);
     assert.equal(runtime?.detail, WORKER_DIAGNOSTICS.protocolIncompatible);
     assert.match(h.err.join('\n'), new RegExp(WORKER_DIAGNOSTICS.connectionRefused));
@@ -398,7 +398,7 @@ test('status reports not-enrolled before and stopped/connected after start', asy
       identityFileName: 'identity.pem',
     }));
     writePrivateFile(h.paths.identityPath, generateWorkerIdentity().privateKey);
-    assert.equal(await cli.run(['start']), WORKER_EXIT.ok);
+    assert.equal(await cli.run(['start', '--foreground']), WORKER_EXIT.ok);
     const runtime = readRuntimeState(h.paths);
     // After `serve` returns, the recorded state is `stopped`, so status is a
     // clean stopped state rather than a false connected one.
@@ -421,6 +421,187 @@ test('status reports a local configuration failure for a corrupt config', async 
     const printed = h.out.join('\n');
     assert.match(printed, /local-configuration-failure/);
     assert.doesNotMatch(printed, /sk-live-sentinel/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('start reconnects after the channel closes and stops on the operator signal', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    // Connect succeeds, the channel closes, the CLI re-connects: two accepted
+    // connections total. The loop's sleep is injected so this runs instantly.
+    const sleeps: number[] = [];
+    let connectCount = 0;
+    ensureStateDirectory(h.paths);
+    writePrivateFile(h.paths.configPath, JSON.stringify({
+      version: 1,
+      enrollmentId: 'enroll-synthetic',
+      environmentInstanceId: 'env-synthetic',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      endpoint: { host: '127.0.0.1', port: 5174 },
+      identityFileName: 'identity.pem',
+    }));
+    writePrivateFile(h.paths.identityPath, generateWorkerIdentity().privateKey);
+
+    // The first serve session ends with a lost channel (a core restart is a
+    // transient outage); the second ends with a deliberate operator stop. The
+    // loop must reconnect once and then exit cleanly.
+    const cli2 = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      connect: async (input) => {
+        connectCount += 1;
+        const stream = new PassThrough();
+        return {
+          stream,
+          enrollmentId: input.enrollmentId,
+          environmentInstanceId: 'env-synthetic',
+          epoch: connectCount,
+          connectionId: `c-${String(connectCount)}`,
+          close: () => stream.end(),
+        };
+      },
+      sleep: async (ms) => { sleeps.push(ms); },
+      platform: 'darwin',
+      uid: 501,
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+      serve: async () => (connectCount === 1 ? 'channel-closed' : 'shutdown'),
+    });
+    const status = await cli2.run(['start', '--foreground']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.equal(connectCount, 2, 'the daemon reconnected once after the channel closed');
+    assert.ok(sleeps.length >= 1, 'the reconnect loop slept before retrying');
+    assert.match(h.err.join('\n'), /reconnect/);
+    assert.match(h.out.join('\n'), /epoch 2/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('stop during the reconnect backoff ends the loop, records stopped, and releases the lock', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    let connects = 0;
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      connect: async () => {
+        connects += 1;
+        throw new Error('the core is unreachable');
+      },
+      // The backoff never resolves on its own: only a stop may wake it. A
+      // regression that ignores the signal fails the bounded wait below
+      // instead of hanging the suite.
+      sleep: () => new Promise<void>(() => {}),
+      platform: 'darwin',
+      uid: 501,
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+    });
+    const runPromise = cli.run(['start', '--foreground']);
+    // `retrying in` is printed immediately before the loop parks in its
+    // backoff, so waiting for it removes the race between the first attempt
+    // and the stop below.
+    const waitForBackoff = Date.now() + 2_000;
+    while (!h.err.some((line) => /retrying in/.test(line)) && Date.now() < waitForBackoff) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(connects, 1, 'the loop attempted a connection before the stop');
+    assert.match(h.err.join('\n'), /retrying in/, 'the loop reached its backoff');
+    process.emit('SIGTERM');
+    const status = await Promise.race([
+      runPromise,
+      new Promise<string>((resolve) => { setTimeout(() => resolve('timeout'), 2_000); }),
+    ]);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.match(h.err.join('\n'), /stopped by the operator/);
+    assert.equal(readRuntimeState(h.paths)?.state, 'stopped');
+    assert.equal(existsSync(workerLockPath(h.paths)), false, 'the lock is free for the next start');
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('start daemonizes by default: it spawns a detached foreground child and returns', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    const spawned: { args: readonly string[]; detached: boolean }[] = [];
+    const cli = createWorkerCli({
+      paths: () => h.paths,
+      stdout: (line) => h.out.push(line),
+      stderr: (line) => h.err.push(line),
+      platform: 'darwin',
+      uid: 501,
+      currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+      run: () => '',
+      // Intercept the daemon spawn: the real spawnDetachedWorker is a module
+      // function, so assert via the child-process seam instead. The CLI must
+      // return without serving (no connect call) and report the log path.
+      serve: async () => { throw new Error('the daemon parent must not serve'); },
+    });
+    // The daemon path spawns a real detached child; in tests that child would
+    // run the real CLI. Assert the observable parent-side contract instead:
+    // the parent does not serve and does not connect (the injected connect is
+    // absent, so a connect attempt would hit the network and fail the test
+    // loudly). The parent exits ok with the daemon message.
+    const status = await cli.run(['start']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /daemon started/);
+    assert.match(h.out.join('\n'), /Logs:/);
+    void spawned;
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('stop signals the recorded running daemon and reports a quiet host', async () => {
+  const h = harness();
+  try {
+    // No runtime record: stop is a clean no-op ok.
+    ensureStateDirectory(h.paths);
+    assert.equal(await h.run(['stop']), WORKER_EXIT.ok);
+    assert.match(h.err.join('\n') + h.out.join('\n'), /no running Worker|not running/);
+
+    // A recorded live daemon (this process, so isProcessAlive passes) is
+    // signalled with SIGTERM.
+    writePrivateFile(h.paths.configPath, JSON.stringify({
+      version: 1,
+      enrollmentId: 'enroll-synthetic',
+      environmentInstanceId: 'env-synthetic',
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      endpoint: { host: '127.0.0.1', port: 5174 },
+      identityFileName: 'identity.pem',
+    }));
+    const killed: number[] = [];
+    const originalKill = process.kill;
+    process.kill = ((pid: number, signal?: string | number) => {
+      if (signal !== undefined && signal !== 0) killed.push(pid);
+      return true;
+    }) as typeof process.kill;
+    try {
+      writeRuntimeState(h.paths, {
+        pid: process.pid,
+        process: { pid: process.pid, startIdentity: 'test-start-stop', ownerToken: 'a'.repeat(43) },
+        state: 'connected',
+        at: 1_000,
+      });
+      const status = await h.run(['stop']);
+      assert.equal(status, WORKER_EXIT.ok);
+      assert.deepEqual(killed, [process.pid]);
+      assert.match(h.out.join('\n'), /Stop signalled/);
+    } finally {
+      process.kill = originalKill;
+    }
   } finally {
     h.cleanup();
   }

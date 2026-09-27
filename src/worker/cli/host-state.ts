@@ -32,18 +32,21 @@ import {
   readFileSync,
   renameSync,
   rmdirSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 
 import {
+  defaultPrivateFileSecurityDependencies,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
+  privateFileRestriction,
   writePrivateFile,
+  type PrivateFileSecurityDependencies,
 } from '../host-files.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
 import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
@@ -55,6 +58,7 @@ export const WORKER_SERVICE_LABEL_PREFIX = 'dev.sprout.worker';
 export const WORKER_IDENTITY_FILE = 'identity.pem';
 
 export { PRIVATE_FILE_MODE, PRIVATE_DIRECTORY_MODE };
+export { privateFileRestriction };
 
 /**
  * The connection facts the Worker persists to reconnect.
@@ -70,7 +74,7 @@ export interface WorkerHostConfig {
   readonly enrollmentId: string;
   readonly environmentInstanceId: string;
   readonly protocolVersion: string;
-  readonly endpoint: { readonly host: string; readonly port: number };
+  readonly endpoint: { readonly host: string; readonly port: number; readonly scheme?: 'ws' | 'wss' };
   /** The private key file name, resolved relative to the state directory. */
   readonly identityFileName: string;
 }
@@ -80,6 +84,7 @@ export type WorkerConnectionState =
   | 'stopped'
   | 'connecting'
   | 'connected'
+  | 'reconnecting'
   | 'pending-approval'
   | 'incompatible'
   | 'revoked';
@@ -143,9 +148,9 @@ export type WorkerProcessProbe = (pid: number) => WorkerProcessProbeResult;
 export class WorkerHostStateError extends Error {
   override readonly name = 'WorkerHostStateError';
   /** `not-enrolled` is distinct from `invalid` so the CLI can exit differently. */
-  readonly reason: 'not-enrolled' | 'invalid';
+  readonly reason: 'not-enrolled' | 'invalid' | 'restriction-unverifiable';
 
-  constructor(reason: 'not-enrolled' | 'invalid', message: string) {
+  constructor(reason: 'not-enrolled' | 'invalid' | 'restriction-unverifiable', message: string) {
     super(message);
     this.reason = reason;
   }
@@ -229,15 +234,20 @@ export function ensureStateDirectory(paths: WorkerHostPaths): void {
   chmodSync(paths.stateDirectory, PRIVATE_DIRECTORY_MODE);
 }
 
-/** Whether a file's mode grants no group or world access. */
-export function isRestrictive(filePath: string): boolean {
-  const mode = statSync(filePath).mode & 0o777;
-  return (mode & 0o077) === 0;
+/** Whether a file has no group/world access (or a private Windows ACL). */
+export function isRestrictive(
+  filePath: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): boolean {
+  return privateFileRestriction(filePath, false, security) === 'restricted';
 }
 
 /** Whether a private identity file has exactly the mode we create (0600). */
-export function hasExactPrivateFileMode(filePath: string): boolean {
-  return (statSync(filePath).mode & 0o777) === PRIVATE_FILE_MODE;
+export function hasExactPrivateFileMode(
+  filePath: string,
+  security: PrivateFileSecurityDependencies = defaultPrivateFileSecurityDependencies,
+): boolean {
+  return privateFileRestriction(filePath, true, security) === 'restricted';
 }
 
 export { writePrivateFile };
@@ -270,7 +280,11 @@ export function readIdentityKey(paths: WorkerHostPaths): string {
   try {
     const stat = lstatSync(paths.identityPath);
     if (!stat.isFile()) throw new Error('not a regular file');
-    if ((stat.mode & 0o777) !== PRIVATE_FILE_MODE) {
+    const restriction = privateFileRestriction(paths.identityPath, true);
+    if (restriction === 'unverifiable') {
+      throw new WorkerHostStateError('restriction-unverifiable', 'the host-local Worker identity key restrictions could not be verified');
+    }
+    if (restriction !== 'restricted') {
       throw new Error('invalid permissions');
     }
     const privateKey = readFileSync(paths.identityPath, 'utf8');
@@ -307,7 +321,11 @@ export function readConfig(paths: WorkerHostPaths): WorkerHostConfig {
   if (!existsSync(paths.configPath)) {
     throw new WorkerHostStateError('not-enrolled', 'this host has no Sprout Worker enrollment');
   }
-  if (!isRestrictive(paths.configPath)) {
+  const restriction = privateFileRestriction(paths.configPath);
+  if (restriction === 'unverifiable') {
+    throw new WorkerHostStateError('restriction-unverifiable', 'the host-local Worker configuration restrictions could not be verified');
+  }
+  if (restriction !== 'restricted') {
     throw new WorkerHostStateError(
       'invalid',
       'the host-local Worker configuration is readable by other users; run reset and enroll again',
@@ -331,6 +349,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
   const endpoint = record['endpoint'];
   const host = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['host'] : undefined;
   const port = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['port'] : undefined;
+  const scheme = typeof endpoint === 'object' && endpoint !== null ? (endpoint as Record<string, unknown>)['scheme'] : undefined;
   const enrollmentId = record['enrollmentId'];
   const environmentInstanceId = record['environmentInstanceId'];
   const protocolVersion = record['protocolVersion'];
@@ -348,6 +367,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65_535 ||
+    (scheme !== undefined && scheme !== 'ws' && scheme !== 'wss') ||
     typeof identityFileName !== 'string' ||
     identityFileName !== WORKER_IDENTITY_FILE
   ) {
@@ -358,7 +378,7 @@ export function validateConfig(parsed: unknown): WorkerHostConfig {
     enrollmentId,
     environmentInstanceId,
     protocolVersion,
-    endpoint: { host, port },
+    endpoint: { host, port, ...(scheme !== undefined ? { scheme } : {}) },
     identityFileName,
   };
 }
@@ -438,7 +458,7 @@ function isWorkerProcessIdentity(value: unknown): value is WorkerProcessIdentity
 }
 
 function isConnectionState(value: string): value is WorkerConnectionState {
-  return ['stopped', 'connecting', 'connected', 'pending-approval', 'incompatible', 'revoked'].includes(value);
+  return ['stopped', 'connecting', 'connected', 'reconnecting', 'pending-approval', 'incompatible', 'revoked'].includes(value);
 }
 
 /** Remove the runtime state record. */
@@ -489,17 +509,38 @@ export function sameWorkerProcess(
  * and unreadable evidence return `unknown` and therefore fail closed (never
  * trust or steal a possibly live record).
  */
-export function probeWorkerProcess(pid: number): WorkerProcessProbeResult {
-  if (!isProcessAlive(pid)) return { state: 'dead' };
+export interface WorkerProcessProbeDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly currentEnvironment?: NodeJS.ProcessEnv;
+  readonly linuxEnvironment?: (pid: number) => string | undefined;
+  readonly linuxStartIdentity?: (pid: number) => string | undefined;
+  readonly darwinEnvironment?: (pid: number) => string | undefined;
+  readonly darwinStartIdentity?: (pid: number) => string | undefined;
+  readonly windowsStartIdentity?: (pid: number) => string | undefined;
+}
+
+export function probeWorkerProcess(
+  pid: number,
+  dependencies: WorkerProcessProbeDependencies = {},
+): WorkerProcessProbeResult {
+  const platform = dependencies.platform ?? process.platform;
+  if (!(dependencies.isAlive ?? isProcessAlive)(pid)) return { state: 'dead' };
   try {
-    const ownerToken = process.platform === 'linux'
-      ? environmentValue(readFileSync(`/proc/${pid}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')
-      : darwinEnvironmentValue(pid);
-    const startIdentity = process.platform === 'linux'
-      ? linuxStartIdentity(pid)
-      : process.platform === 'darwin'
-        ? darwinStartIdentity(pid)
-        : undefined;
+    const ownerToken = platform === 'linux'
+      ? (dependencies.linuxEnvironment ?? ((processId) => environmentValue(readFileSync(`/proc/${processId}/environ`), 'SPROUT_WORKER_OWNER_TOKEN')))(pid)
+      : platform === 'darwin'
+        ? (dependencies.darwinEnvironment ?? darwinEnvironmentValue)(pid)
+        : platform === 'win32' && pid === process.pid
+          ? environmentValue(`SPROUT_WORKER_OWNER_TOKEN=${(dependencies.currentEnvironment ?? process.env)['SPROUT_WORKER_OWNER_TOKEN'] ?? ''}\0`, 'SPROUT_WORKER_OWNER_TOKEN')
+          : undefined;
+    const startIdentity = platform === 'linux'
+      ? (dependencies.linuxStartIdentity ?? linuxStartIdentity)(pid)
+      : platform === 'darwin'
+        ? (dependencies.darwinStartIdentity ?? darwinStartIdentity)(pid)
+        : platform === 'win32' && pid === process.pid
+          ? (dependencies.windowsStartIdentity ?? windowsStartIdentity)(pid)
+          : undefined;
     if (ownerToken === undefined || startIdentity === undefined) return { state: 'unknown' };
     const identity = { pid, startIdentity, ownerToken };
     return isWorkerProcessIdentity(identity)
@@ -508,6 +549,14 @@ export function probeWorkerProcess(pid: number): WorkerProcessProbeResult {
   } catch {
     return { state: 'unknown' };
   }
+}
+
+function windowsStartIdentity(pid: number): string | undefined {
+  // Node's monotonic process-start marker is stable for this process lifetime.
+  // Persisted records are also bound to a fresh random owner token, so a later
+  // process (including a reused pid) cannot pass sameWorkerProcess by marker
+  // coincidence alone.
+  return `windows:${pid}:${performance.nodeTiming.nodeStart}`;
 }
 
 /** Bind the current process after `start` has installed its owner token. */
@@ -540,14 +589,22 @@ function linuxStartIdentity(pid: number): string | undefined {
 }
 
 function darwinStartIdentity(pid: number): string | undefined {
-  const output = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const output = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, LC_ALL: 'C' },
+  }).trim();
   return output === '' ? undefined : `darwin:${output}`;
 }
 
 function darwinEnvironmentValue(pid: number): string | undefined {
   // `-E` asks ps for the process environment. We extract only the exact opaque
   // variable; no command text or unrelated environment values are retained.
-  const output = execFileSync('ps', ['-wwE', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const output = execFileSync('ps', ['-wwE', '-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, LC_ALL: 'C' },
+  });
   const match = output.match(/(?:^|\s)SPROUT_WORKER_OWNER_TOKEN=([A-Za-z0-9_-]{43})(?=\s|$)/);
   return match?.[1];
 }
@@ -765,14 +822,36 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Flush one directory entry update before calling the transition durable. */
-function syncDirectory(directory: string): void {
-  const descriptor = openSync(directory, 'r');
-  try {
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
+export interface DirectorySyncDependencies {
+  readonly platform: NodeJS.Platform;
+  readonly run: (directory: string) => void;
+}
+
+const defaultDirectorySyncDependencies: DirectorySyncDependencies = {
+  platform: process.platform,
+  run: (directory) => {
+    const descriptor = openSync(directory, 'r');
+    try {
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+  },
+};
+
+/**
+ * Flush one directory entry update before calling the transition durable.
+ * Windows does not support fsync on directory handles (it fails with EPERM).
+ * NTFS metadata journaling provides the corresponding metadata ordering, while
+ * the lock protocol's staged-pending-then-rename marker remains its recovery
+ * evidence if a start is interrupted.
+ */
+export function syncDirectory(
+  directory: string,
+  dependencies: DirectorySyncDependencies = defaultDirectorySyncDependencies,
+): void {
+  if (dependencies.platform === 'win32') return;
+  dependencies.run(directory);
 }
 
 /**
@@ -1157,7 +1236,7 @@ export function removeHostState(paths: WorkerHostPaths, options: { readonly pres
       if (!stat.isFile()) {
         throw new WorkerHostStateError('invalid', 'the host-local Worker state contains an unsafe non-file entry');
       }
-      return [{ filePath, content: readFileSync(filePath), mode: stat.mode & 0o777 }];
+      return [{ filePath, content: readFileSync(filePath), mode: stat.mode % 0o1000 }];
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;

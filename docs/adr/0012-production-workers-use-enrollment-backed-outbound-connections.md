@@ -15,3 +15,7 @@ This supersedes ADR-0003 only where it describes production carrier initiation a
 - The M1 container exec carrier remains a test and development carrier. Container enrollment and product operation are deferred and are not a macOS or Windows acceptance gate.
 
 **Rejected alternatives**: keeping both configured and enrolled production paths would make management and execution refer to different Environment objects; Core-initiated remote dialing would require address and inbound-network management that the Web-led flow is intended to avoid; automatically trusting an old configured Worker would bypass identity proof and Human approval.
+
+### Trusted-private-network plaintext exception
+
+The non-loopback WSS rule remains in force by default. An operator may explicitly set `SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS=true` to accept plaintext WS from a trusted private network; it is default-off and emits a startup warning because Worker identity keys and capability grants cross the network unencrypted. WSS and SSH-tunnel transport remain the recommended paths.

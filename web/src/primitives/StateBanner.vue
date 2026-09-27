@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { cn } from '../lib/utils.js';
 import StatusDot from './StatusDot.vue';
 import StatusPill from './StatusPill.vue';
 
@@ -11,6 +10,7 @@ export interface StateBannerProps {
   platform?: string;
   protocolMismatchDetail?: string;
   isArchived?: boolean;
+  isPending?: boolean;
   class?: string;
 }
 
@@ -18,11 +18,13 @@ const props = withDefaults(defineProps<StateBannerProps>(), {
   title: '',
   platform: '',
   isArchived: false,
+  isPending: false,
   class: '',
 });
 
-const isGreen = computed(() => props.trafficLight === 'green');
-const isYellow = computed(() => props.trafficLight === 'yellow');
+const presentationTrafficLight = computed(() => (props.isPending ? 'red' : props.trafficLight));
+const isGreen = computed(() => presentationTrafficLight.value === 'green');
+const isYellow = computed(() => presentationTrafficLight.value === 'yellow');
 
 const computedTitle = computed(() => {
   if (props.title) return props.title;
@@ -60,13 +62,13 @@ const bannerStyles = computed(() => {
   >
     <div class="flex items-center justify-between flex-wrap gap-2">
       <div class="flex items-center gap-2">
-        <StatusDot :status="trafficLight" size="lg" />
+        <StatusDot :status="presentationTrafficLight" size="lg" />
         <strong class="text-sm sm:text-base font-bold text-[var(--text-primary)]">
           {{ computedTitle }}
         </strong>
       </div>
       <div class="flex items-center gap-1.5">
-        <StatusPill v-if="platform" :status="trafficLight">
+        <StatusPill v-if="platform" :status="presentationTrafficLight">
           {{ platform.toUpperCase() }}
         </StatusPill>
         <StatusPill status="neutral">
@@ -75,13 +77,13 @@ const bannerStyles = computed(() => {
       </div>
     </div>
 
-    <div class="env-decisive-reason text-xs sm:text-sm font-semibold text-[var(--text-primary)] leading-snug">
+    <div class="env-decisive-reason min-h-8 text-xs sm:text-sm font-semibold text-[var(--text-primary)] leading-snug">
       Decisive Fact: {{ reason }}
     </div>
 
     <div
       v-if="protocolMismatchDetail"
-      class="mt-0.5 p-2 rounded-[var(--radius-xs)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] text-[var(--red-action)] font-medium"
+      class="protocol-mismatch-guidance mt-0.5 p-2 rounded-[var(--radius-xs)] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] text-[var(--red-action)] font-medium"
     >
       <strong>Version Mismatch Guidance:</strong> {{ protocolMismatchDetail }}
     </div>

@@ -106,23 +106,28 @@ function leaseRecoveryOf(recovery: readonly EnvironmentRecoveryView[]): LeaseRec
     cause: open.cause,
     leaseId: open.leaseId,
     unresolvedFacts: [...open.unresolvedFacts],
-    evidenceSynchronized: open.evidenceSynchronized,
+    // The wire's synchronized bit means only that facts arrived. Ordinary
+    // decisions require terminal and fence proof as well; unresolved evidence
+    // is for Force Release, never an enabled Resume/Discard/Release control.
+    evidenceSynchronized: open.phase === 'recovery' && open.evidenceSynchronized &&
+      open.evidence?.turnSettlementObserved === true && open.evidence.engineSessionStopped === true &&
+      (open.runId === undefined || open.evidence.terminalStatus !== undefined) &&
+      (open.holderKind !== 'task' || open.evidence.taskContextPrepared === true),
   };
-  if (open.runId !== undefined) {
-    return { ...composed, interruptedRunId: open.runId };
-  }
   if (open.evidence !== undefined) {
     return {
       ...composed,
+      ...(open.runId !== undefined ? { interruptedRunId: open.runId } : {}),
       reconciledEvidence: {
         retainedEventsCount: open.evidence.retainedEventCount,
         engineStoppedProof: open.evidence.engineSessionStopped,
         turnSettlementObserved: open.evidence.turnSettlementObserved,
+        ...(open.evidence.terminalStatus !== undefined ? { terminalStatus: open.evidence.terminalStatus } : {}),
         taskContextRecycled: open.evidence.taskContextRecycled,
       },
     };
   }
-  return composed;
+  return { ...composed, ...(open.runId !== undefined ? { interruptedRunId: open.runId } : {}) };
 }
 
 /** The audit record the page's ForcedReleaseAuditBox renders, when one exists. */
@@ -194,9 +199,23 @@ function engineDetails(readiness: EnvironmentReadinessView): EnvironmentInstance
       ...(engine.probedAt !== undefined ? { observedAt: engine.probedAt } : {}),
       ...(engine.probeExitCode !== undefined ? { probeExitCode: engine.probeExitCode } : {}),
       ...(engine.source !== undefined ? { source: engine.source } : {}),
+      ...(engine.modelAuthorizations !== undefined ? { modelAuthorizations: engine.modelAuthorizations } : {}),
     };
   }
   return details;
+}
+
+function resolveSproutEndpoint(): string {
+  if (typeof window !== 'undefined' && window.location) {
+    const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+    return `${window.location.hostname}:${port}`;
+  }
+  return 'localhost:41030';
+}
+
+export function buildBootstrapCommand(enrollmentId: string): string {
+  const endpoint = resolveSproutEndpoint();
+  return `sprout worker enroll ${endpoint} ${enrollmentId}`;
 }
 
 /** Compose one page row from the production facts. */
@@ -233,11 +252,21 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     forcedReleaseRecord: auditOf(forceReleases),
     probeHistory: probesOf(probes),
     boundWorkspaces: [],
+    identityDigest: enrollment.identityDigest,
+    claim: enrollment.claim,
+    decisions: enrollment.decisions,
+    requestedCapabilities: readiness.capabilities.map((c) => c.name),
+    ...(readiness.requirements !== undefined ? { requirements: readiness.requirements } : {}),
+    ...(readiness.requirements?.modelsByEngine !== undefined ? { targetModelsByEngine: readiness.requirements.modelsByEngine } : {}),
   };
 }
 
 export class ProductionEnvironmentService implements EnvironmentService {
   readonly #adapter: EnvironmentEnrollmentBrowserAdapter;
+
+  getBootstrapCommand(enrollmentId: string): string {
+    return buildBootstrapCommand(enrollmentId);
+  }
 
   /**
    * Production never reconciles evidence on the operator's behalf.
@@ -302,13 +331,59 @@ export class ProductionEnvironmentService implements EnvironmentService {
     }
   }
 
-  async approveEnrollment(id: string): Promise<void> {
-    const { enrollment } = await this.#adapter.environmentFacts(id);
-    const permissions: Record<string, boolean> = {};
-    for (const capability of Object.keys(enrollment.capabilityPermissions)) {
-      permissions[capability] = true;
+  async requestEnrollment(input: {
+    environmentInstanceId: string;
+    displayName: string;
+    platform?: string;
+  }): Promise<{
+    enrollment: EnvironmentInstance;
+    claimSecret?: string;
+    claimExpiresAt?: number;
+    bootstrapCommand: string;
+  }> {
+    const result = await this.#adapter.requestEnrollment({
+      environmentInstanceId: input.environmentInstanceId,
+      displayName: input.displayName,
+      platform: input.platform ?? 'macos',
+    });
+    const facts = await this.#adapter.environmentFacts(result.enrollment.id);
+    return {
+      enrollment: composeInstance(facts, Date.now()),
+      ...(result.claim !== undefined
+        ? { claimSecret: result.claim.secret, claimExpiresAt: result.claim.expiresAt }
+        : {}),
+      bootstrapCommand: this.getBootstrapCommand(result.enrollment.id),
+    };
+  }
+
+  async regenerateClaimSecret(id: string): Promise<{
+    claimSecret: string;
+    claimExpiresAt: number;
+  }> {
+    const result = await this.#adapter.regenerateClaimSecret(id);
+    return {
+      claimSecret: result.claim.secret,
+      claimExpiresAt: result.claim.expiresAt,
+    };
+  }
+
+  async cancelEnrollment(id: string, reason?: string): Promise<void> {
+    await this.#adapter.cancelEnrollment(id, reason);
+  }
+
+  async approveEnrollment(
+    id: string,
+    permissions: Record<string, boolean>,
+    modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
+    if (permissions === undefined || permissions === null || typeof permissions !== 'object' || Array.isArray(permissions)) {
+      throw new Error('Human-selected capability permissions are required for approval');
     }
-    await this.#adapter.approveEnrollment(id, permissions);
+    const resolvedPermissions: Record<string, boolean> = {};
+    for (const [key, val] of Object.entries(permissions)) {
+      resolvedPermissions[key] = val === true;
+    }
+    await this.#adapter.approveEnrollment(id, resolvedPermissions, modelAuthorizations);
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

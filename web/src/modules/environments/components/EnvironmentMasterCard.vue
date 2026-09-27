@@ -29,6 +29,7 @@ const platformIcon = computed(() => {
 });
 
 const trafficLightLabel = computed(() => {
+  if (props.env.enrollmentStatus === 'pending') return 'ACTION REQUIRED';
   if (props.env.trafficLight === 'green') return 'READY';
   if (props.env.trafficLight === 'yellow') return 'ATTENTION';
   return 'ACTION REQUIRED';
@@ -100,7 +101,7 @@ const connectionAgeLabel = computed(() => {
         </div>
 
         <StatusDot
-          :status="env.trafficLight"
+          :status="env.enrollmentStatus === 'pending' ? 'red' : env.trafficLight"
           size="sm"
           :title="trafficLightLabel"
           :aria-label="trafficLightLabel"
@@ -142,18 +143,20 @@ const connectionAgeLabel = computed(() => {
       </span>
     </Card>
 
-    <!-- Quick Probe Action Button -->
-    <Button
-      variant="ghost"
-      size="xs"
-      class="quick-probe-btn absolute right-3 bottom-2.5 z-10 text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-      title="Request quick live probe"
-      aria-label="Request quick live probe"
-      :disabled="disabled"
-      @click.stop="canControl && emit('probe', env.id)"
-    >
-      <Icon name="lightning" :size="12" />
-      <span>Probe</span>
-    </Button>
+    <!-- Quick Actions -->
+    <div class="card-quick-actions absolute right-3 bottom-2.5 z-10 flex items-center gap-1.5">
+      <Button
+        variant="ghost"
+        size="xs"
+        class="quick-probe-btn text-[10px] h-6 px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+        title="Request quick live probe"
+        aria-label="Request quick live probe"
+        :disabled="disabled"
+        @click.stop="canControl && emit('probe', env.id)"
+      >
+        <Icon name="lightning" :size="12" />
+        <span>Probe</span>
+      </Button>
+    </div>
   </div>
 </template>

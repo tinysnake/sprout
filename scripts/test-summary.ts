@@ -114,7 +114,8 @@ if (timedOut) {
         path.unshift(ancestor.name);
         parent = ancestor.parentId;
       }
-      candidates.push({ file: displayPath(event.file ?? event.entryFile ?? '(unknown file)'), line: event.line, name: path.join(' > ') });
+      const entryLine = event.line;
+      candidates.push({ file: displayPath(event.file ?? event.entryFile ?? '(unknown file)'), ...(entryLine === undefined ? {} : { line: entryLine }), name: path.join(' > ') });
     }
   }
   const logPath = process.env.SPROUT_TEST_TIMEOUT_LOG ?? join(process.cwd(), 'test-timeout.jsonl');

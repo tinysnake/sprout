@@ -131,6 +131,15 @@ export class OperatorSessionService {
     return session !== undefined && session.revokedAt === undefined && !sessionHasExpired(session, now) && equalDigest(digest(csrfToken), session.csrfHash);
   }
 
+  /** Rotate and return a CSRF proof for the session authenticated by the HTTP-only cookie. */
+  async refreshRequestForgeryToken(sessionId: string): Promise<string | undefined> {
+    const now = this.#clock();
+    await this.#store.revokeExpiredSessions(now);
+    const csrfToken = this.#token();
+    if (!(await this.#store.replaceCsrfHash(sessionId, digest(csrfToken), now))) return undefined;
+    return csrfToken;
+  }
+
   async listSessions(currentSessionId: string): Promise<readonly BrowserSessionView[]> {
     await this.#store.revokeExpiredSessions(this.#clock());
     return (await this.#store.listSessions())

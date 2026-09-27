@@ -28,6 +28,12 @@ const projectRoot = join(here, '..');
 
 const configuration = parseHostConfiguration(process.env, { projectRoot });
 
+if (configuration.allowInsecureWorkerConnections) {
+  process.stderr.write(
+    'WARNING: SPROUT_ALLOW_INSECURE_WORKER_CONNECTIONS is enabled. Worker identity keys and capability grants cross the network unencrypted; use only on trusted private networks.\n',
+  );
+}
+
 let runtime;
 try {
   runtime = await createSproutRuntime({ configuration, projectRoot });
@@ -46,7 +52,7 @@ try {
   throw error;
 }
 
-const { port: boundPort } = await runtime.api.listen(configuration.port);
+const { port: boundPort } = await runtime.api.listen(configuration.port, configuration.bindHost);
 
 /**
  * Reconcile leftover durable state after a restart, before serving.
