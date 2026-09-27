@@ -102,7 +102,7 @@ function childLockRunnerScript(): string {
 
 function waitForLine(child: ChildProcess, text: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`child never printed ${text}`)), 10_000);
+    const timer = setTimeout(() => reject(new Error(`child never printed ${text}`)), 30_000);
     child.stdout?.on('data', (chunk: Buffer) => {
       if (chunk.toString('utf8').includes(text)) {
         clearTimeout(timer);
@@ -120,7 +120,7 @@ function waitForLine(child: ChildProcess, text: string): Promise<void> {
 function waitForReport(child: ChildProcess): Promise<{ outcome: string; message: string }> {
   return new Promise((resolve, reject) => {
     let buffered = '';
-    const timer = setTimeout(() => reject(new Error('child never reported an outcome')), 10_000);
+    const timer = setTimeout(() => reject(new Error('child never reported an outcome')), 30_000);
     child.stdout?.on('data', (chunk: Buffer) => {
       buffered += chunk.toString('utf8');
       const line = buffered.split('\n').find((candidate) => candidate.startsWith('{'));

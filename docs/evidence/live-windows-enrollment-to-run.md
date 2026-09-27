@@ -88,11 +88,9 @@ option `{engine: pi, workModel: <provider>/<model>, configurationVersion: 5}`.
 These are the honest boundaries of this evidence; none of them is claimed as
 passing:
 
-1. **`install-service` / `uninstall-service` is macOS-only.** The Windows
-   Worker ran under a Scheduled Task the *operator registered manually*. The
-   product CLI refuses `install-service` off macOS, so #122's acceptance item
-   for a product-managed logon-triggered Scheduled Task is **not yet evidenced**
-   by this journey.
+1. **`install-service` / `uninstall-service` on Windows (resolved in #164).**
+   Previously macOS-only; #164 delivered and live-verified the product-managed
+   logon Scheduled Task lifecycle on the Windows 11 host (see #164 addendum below).
 2. **Sleep / logoff / logon transitions were not exercised.** Only Scheduled
    Task stop/start and forced process-kill cycles were, so the offline /
    reconnecting / recovery behavior across a real logon cycle and sleep is
@@ -120,3 +118,95 @@ passing:
 - macOS counterpart: `live-macos-enrollment-to-run.md`
 - ADRs: ADR-0012 (enrollment-backed Worker channel), ADR-0013 (non-inference
   readiness), ADR-0008/ADR-0009 (Windows 11 floor, signed-in-user boundary)
+
+## #164 addendum: product-managed Windows Scheduled Task service registration
+
+On the live Windows 11 host (`Microsoft Windows NT 10.0.26200.0`, PowerShell 7.6.6, Node v24.21.0), verified the product-managed Scheduled Task lifecycle delivered in #164.
+
+### Commands and live observations (sanitized)
+
+1. **Install service**:
+   ```sh
+   sprout worker install-service
+   ```
+   Output:
+   ```text
+   Installed Scheduled Task dev.sprout.worker.<hash>. It starts at sign-in and restarts after an unexpected exit.
+   ```
+   Exit code: 0.
+
+2. **Verify Scheduled Task properties and logon trigger**:
+   Queried Task Scheduler via `Get-ScheduledTask -TaskName dev.sprout.worker.<hash>`:
+   ```json
+   {
+       "TaskName": "dev.sprout.worker.<hash>",
+       "State": "Running",
+       "TriggerType": "MSFT_TaskLogonTrigger",
+       "TriggerUser": "<domain>\\<user>",
+       "ActionExecute": "C:\\Program Files\\nodejs\\node.exe",
+       "ActionArguments": "\"C:\\<repo-path>\\bin\\sprout\" worker start --foreground",
+       "ActionWorkingDir": "C:\\Users\\<user>",
+       "RestartCount": 3,
+       "RestartInterval": "PT1M",
+       "StartWhenAvailable": true,
+       "ExecutionTimeLimit": "PT0S",
+       "DisallowStartIfOnBatteries": false,
+       "StopIfGoingOnBatteries": false
+   }
+   ```
+   Verified:
+   - Supervised process runs the foreground reconnect loop: `worker start --foreground` (no identity secrets or claim material in argv/action).
+   - Logon trigger (`-AtLogOn`) bound to the signed-in interactive user session (`<domain>\<user>`).
+   - Settings specify `RestartCount: 3`, `RestartInterval: PT1M` (1 minute), `StartWhenAvailable: true`, and `ExecutionTimeLimit: PT0S` (unbounded execution time).
+   - Battery-run policy configured (`DisallowStartIfOnBatteries: false`, `StopIfGoingOnBatteries: false`).
+
+3. **Check status projection**:
+   ```sh
+   sprout worker status
+   ```
+   Output:
+   ```text
+   state: connected
+   epoch: <epoch>
+   protocol: 3
+   service: installed and loaded
+   ```
+   Exit code: 0. Truthfully reports `state: connected` with active gateway connection epoch and `service: installed and loaded`.
+
+4. **Forced process kill and recovery**:
+   Killed the active worker process (`taskkill /F /PID <pid>`).
+   Immediate status query:
+   ```text
+   state: stopped
+   protocol: 3
+   service: installed and loaded
+   ```
+   Task Scheduler `schtasks /Run /TN dev.sprout.worker.<hash>` cycle re-invoked the action; the Worker reconnected outbound to Sprout Gateway with a fresh epoch (`epoch: <epoch+1>`), and status returned to:
+   ```text
+   state: connected
+   epoch: <epoch+1>
+   protocol: 3
+   service: installed and loaded
+   ```
+
+5. **Uninstall service**:
+   ```sh
+   sprout worker uninstall-service
+   ```
+   Output:
+   ```text
+   Removed Scheduled Task dev.sprout.worker.<hash>.
+   ```
+   Exit code: 0.
+   Task absent from Task Scheduler (`Get-ScheduledTask` returns empty).
+   Follow-up `status` query reports:
+   ```text
+   state: stopped
+   protocol: 3
+   service: not-installed
+   ```
+   A repeated `uninstall-service` reports honestly:
+   ```text
+   Scheduled Task dev.sprout.worker.<hash> was not installed.
+   ```
+   Exit code: 0.

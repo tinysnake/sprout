@@ -90,6 +90,12 @@ import {
   restartLaunchAgent,
   uninstallLaunchAgent,
 } from './launch-agent.ts';
+import {
+  inspectScheduledTask,
+  installScheduledTask,
+  startScheduledTask,
+  uninstallScheduledTask,
+} from './scheduled-task.ts';
 
 /** Documented process exit statuses for every `sprout worker` subcommand. */
 export const WORKER_EXIT = {
@@ -175,7 +181,7 @@ export interface WorkerCliDependencies {
   readonly run?: (command: string, args: readonly string[]) => string;
   /** The signed-in user id whose `gui/<uid>` domain the LaunchAgent uses. */
   readonly uid?: number;
-  /** The host platform; service commands are macOS-only. */
+  /** The host platform; service commands are supported on macOS and Windows. */
   readonly platform?: NodeJS.Platform;
   readonly stdout?: (line: string) => void;
   readonly stderr?: (line: string) => void;
@@ -630,8 +636,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       '  status                              Report host-local Worker state',
       '  stop                                Signal the running Worker daemon to stop',
       '  reset                               Remove host-local identity and configuration',
-      '  install-service                     Install the signed-in-user LaunchAgent',
-      '  uninstall-service                   Remove the signed-in-user LaunchAgent',
+      '  install-service                     Install the signed-in-user service (LaunchAgent or Scheduled Task)',
+      '  uninstall-service                   Remove the signed-in-user service (LaunchAgent or Scheduled Task)',
     ].join('\n');
   }
 
@@ -1049,19 +1055,27 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         configError = error instanceof WorkerHostStateError ? error.reason : 'invalid';
       }
     }
-    const serviceInstalled =
-      config !== undefined && existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
-    // "Cleanly inspected": report whether launchd actually has the job loaded,
-    // not merely whether a plist is on disk.
-    const serviceLoaded =
-      serviceInstalled &&
-      config !== undefined &&
-      platform === 'darwin' &&
-      inspectLaunchAgent({
-        label: workerServiceLabel(config.environmentInstanceId),
-        uid,
-        ...(runCommand !== undefined ? { run: runCommand } : {}),
-      }) !== undefined;
+    let serviceInstalled = false;
+    let serviceLoaded = false;
+    if (config !== undefined) {
+      if (platform === 'darwin') {
+        serviceInstalled = existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
+        serviceLoaded =
+          serviceInstalled &&
+          inspectLaunchAgent({
+            label: workerServiceLabel(config.environmentInstanceId),
+            uid,
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          }) !== undefined;
+      } else if (platform === 'win32') {
+        const task = inspectScheduledTask({
+          taskName: workerServiceLabel(config.environmentInstanceId),
+          ...(runCommand !== undefined ? { run: runCommand } : {}),
+        });
+        serviceInstalled = task !== undefined;
+        serviceLoaded = task !== undefined && task.enabled;
+      }
+    }
     // A runtime record that is present but malformed is a local configuration
     // failure, not a healthy stopped state.
     let runtime: WorkerRuntimeState | undefined;
@@ -1099,7 +1113,15 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         processMatchesRuntime: (identity) => {
           try {
             const observed = processProbe(identity.pid);
-            if (observed.state === 'unknown') return 'unknown';
+            if (observed.state === 'unknown') {
+              // On win32, probeWorkerProcess cannot read another process's environment
+              // block for SPROUT_WORKER_OWNER_TOKEN without privileged process memory APIs.
+              // When the process is confirmed alive on win32, accept the record.
+              if (platform === 'win32' && isProcessAlive(identity.pid)) {
+                return true;
+              }
+              return 'unknown';
+            }
             return observed.state === 'alive' &&
               observed.process.pid === identity.pid &&
               observed.process.startIdentity === identity.startIdentity &&
@@ -1159,8 +1181,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     try {
       // Stop the supervised service before the identity disappears, and refuse
       // the reset when the service cannot be proven unloaded: a loaded
-      // LaunchAgent would restart against a half-removed state.
-      if (platform === 'darwin') {
+      // service would restart against a half-removed state.
+      if (platform === 'darwin' || platform === 'win32') {
         const command = runCommand ?? realCommandRunner();
         let config: WorkerHostConfig;
         try {
@@ -1174,9 +1196,14 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         }
         const label = workerServiceLabel(config.environmentInstanceId);
         try {
-          uninstallLaunchAgent({ label, plistPath: launchAgentPlistPath(paths, config.environmentInstanceId), uid, run: command });
+          if (platform === 'darwin') {
+            uninstallLaunchAgent({ label, plistPath: launchAgentPlistPath(paths, config.environmentInstanceId), uid, run: command });
+          } else {
+            uninstallScheduledTask({ taskName: label, run: command });
+          }
         } catch (error) {
-          err(`sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${diagnosticOf(error, 'the exact environment service could not be unloaded')})`);
+          const serviceName = platform === 'darwin' ? 'the LaunchAgent' : 'the Scheduled Task';
+          err(`sprout worker reset: ${serviceName} could not be removed; host-local state was left untouched (${diagnosticOf(error, 'the exact environment service could not be unloaded')})`);
           return WORKER_EXIT.serviceFailure;
         }
       }
@@ -1243,8 +1270,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker install-service: takes no arguments');
       return WORKER_EXIT.usage;
     }
-    if (platform !== 'darwin') {
-      err('sprout worker install-service: the LaunchAgent lifecycle is only supported on macOS');
+    if (platform !== 'darwin' && platform !== 'win32') {
+      err('sprout worker install-service: service registration is only supported on macOS (LaunchAgent) and Windows (Scheduled Task)');
       return WORKER_EXIT.serviceFailure;
     }
     let config: WorkerHostConfig;
@@ -1259,6 +1286,29 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       return WORKER_EXIT.failure;
     }
     const label = workerServiceLabel(config.environmentInstanceId);
+    if (platform === 'win32') {
+      try {
+        installScheduledTask({
+          paths,
+          taskName: label,
+          arguments: ['worker', 'start', '--foreground'],
+          ...(runCommand !== undefined ? { run: runCommand } : {}),
+        });
+        try {
+          startScheduledTask({
+            taskName: label,
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          });
+        } catch {
+          // Starting immediately is best-effort on install
+        }
+        out(`Installed Scheduled Task ${label}. It starts at sign-in and restarts after an unexpected exit.`);
+        return WORKER_EXIT.ok;
+      } catch (error) {
+        err(`sprout worker install-service: ${diagnosticOf(error, 'the Scheduled Task could not be installed')}`);
+        return WORKER_EXIT.serviceFailure;
+      }
+    }
     const plistPath = launchAgentPlistPath(paths, config.environmentInstanceId);
     const plist = renderLaunchAgent({
       label,
@@ -1299,8 +1349,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker uninstall-service: takes no arguments');
       return WORKER_EXIT.usage;
     }
-    if (platform !== 'darwin') {
-      err('sprout worker uninstall-service: the LaunchAgent lifecycle is only supported on macOS');
+    if (platform !== 'darwin' && platform !== 'win32') {
+      err('sprout worker uninstall-service: service registration is only supported on macOS (LaunchAgent) and Windows (Scheduled Task)');
       return WORKER_EXIT.serviceFailure;
     }
     let config: WorkerHostConfig | undefined;
@@ -1316,6 +1366,19 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       return WORKER_EXIT.notEnrolled;
     }
     const label = workerServiceLabel(config.environmentInstanceId);
+    if (platform === 'win32') {
+      try {
+        const result = uninstallScheduledTask({
+          taskName: label,
+          ...(runCommand !== undefined ? { run: runCommand } : {}),
+        });
+        out(result.removed ? `Removed Scheduled Task ${label}.` : `Scheduled Task ${label} was not installed.`);
+        return WORKER_EXIT.ok;
+      } catch (error) {
+        err(`sprout worker uninstall-service: ${diagnosticOf(error, 'the Scheduled Task could not be removed')}`);
+        return WORKER_EXIT.serviceFailure;
+      }
+    }
     try {
       const result = uninstallLaunchAgent({
         label,
@@ -1350,7 +1413,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   /** The real host command runner, used only when no test seam was injected. */
   function realCommandRunner(): (command: string, args: readonly string[]) => string {
     return (command, args) =>
-      execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   }
 
   return { run };
