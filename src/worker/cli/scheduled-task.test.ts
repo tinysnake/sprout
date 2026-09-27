@@ -6,10 +6,13 @@ import {
   inspectScheduledTask,
   installScheduledTask,
   renderScheduledTaskScript,
+  renderScheduledTaskUninstallScript,
+  renderScheduledTaskInspectScript,
   resolveScheduledTaskAction,
   startScheduledTask,
   stopScheduledTask,
   uninstallScheduledTask,
+  ScheduledTaskInspectError,
   ScheduledTaskUninstallError,
   WORKER_TASK_RESTART_COUNT,
   WORKER_TASK_RESTART_INTERVAL_MINUTES,
@@ -127,6 +130,21 @@ test('startScheduledTask and stopScheduledTask invoke powershell.exe with correc
   assert.ok(calls.some((c) => c.includes("Stop-ScheduledTask -TaskName 'dev.sprout.worker.test'")));
 });
 
+test('renderScheduledTaskUninstallScript sets ErrorAction Stop and verifies absence', () => {
+  const script = renderScheduledTaskUninstallScript('dev.sprout.worker.1234567890abcdef');
+  assert.match(script, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(script, /Unregister-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef' -Confirm:\$false -ErrorAction Stop/);
+  assert.match(script, /\$remaining = Get-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef' -ErrorAction SilentlyContinue/);
+  assert.match(script, /if \(\$remaining\) { throw/);
+});
+
+test('renderScheduledTaskInspectScript sets ErrorAction Stop and emits NOT_INSTALLED for absent task', () => {
+  const script = renderScheduledTaskInspectScript('dev.sprout.worker.1234567890abcdef');
+  assert.match(script, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(script, /Get-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef'/);
+  assert.match(script, /if \(!\$t\) { Write-Output 'NOT_INSTALLED'; exit 0 }/);
+});
+
 test('inspectScheduledTask returns task details when task is found', () => {
   const run = (_command: string, _args: readonly string[]): string => {
     return JSON.stringify({
@@ -146,17 +164,31 @@ test('inspectScheduledTask returns task details when task is found', () => {
   });
 });
 
-test('inspectScheduledTask returns undefined when task is absent or command throws', () => {
+test('inspectScheduledTask returns undefined when task is confirmed absent', () => {
+  const run = (): string => 'NOT_INSTALLED\n';
+  assert.equal(inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run }), undefined);
+});
+
+test('inspectScheduledTask fails closed with ScheduledTaskInspectError on inspection errors', () => {
   const throwingRun = (): string => {
-    throw new Error('exit status 1');
+    throw new Error('exit status 1: access denied');
   };
-  assert.equal(inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: throwingRun }), undefined);
+  assert.throws(
+    () => inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: throwingRun }),
+    (error) => error instanceof ScheduledTaskInspectError && error.message.includes('access denied'),
+  );
 
   const emptyRun = (): string => '';
-  assert.equal(inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: emptyRun }), undefined);
+  assert.throws(
+    () => inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: emptyRun }),
+    (error) => error instanceof ScheduledTaskInspectError,
+  );
 
   const malformedRun = (): string => 'not-json';
-  assert.equal(inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: malformedRun }), undefined);
+  assert.throws(
+    () => inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: malformedRun }),
+    (error) => error instanceof ScheduledTaskInspectError,
+  );
 });
 
 test('uninstallScheduledTask removes task and reports true when present', () => {
@@ -177,7 +209,7 @@ test('uninstallScheduledTask reports false when task was not installed', () => {
   assert.equal(result.removed, false);
 });
 
-test('uninstallScheduledTask fails closed when unregister command fails', () => {
+test('uninstallScheduledTask fails closed when unregister command fails or outputs non-terminating error', () => {
   const throwingRun = (): string => {
     throw new Error('Access denied');
   };
@@ -189,6 +221,12 @@ test('uninstallScheduledTask fails closed when unregister command fails', () => 
   const unexpectedOutputRun = (): string => 'UNEXPECTED_OUTPUT';
   assert.throws(
     () => uninstallScheduledTask({ taskName: 'dev.sprout.worker.test', run: unexpectedOutputRun }),
+    (error) => error instanceof ScheduledTaskUninstallError && error.reason === 'unregister-failed',
+  );
+
+  const nonTerminatingErrorWithRemovedRun = (): string => 'Unregister-ScheduledTask : Access is denied\nREMOVED\n';
+  assert.throws(
+    () => uninstallScheduledTask({ taskName: 'dev.sprout.worker.test', run: nonTerminatingErrorWithRemovedRun }),
     (error) => error instanceof ScheduledTaskUninstallError && error.reason === 'unregister-failed',
   );
 });

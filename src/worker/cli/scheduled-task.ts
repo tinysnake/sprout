@@ -165,6 +165,31 @@ export class ScheduledTaskUninstallError extends Error {
   }
 }
 
+export function renderScheduledTaskUninstallScript(taskName: string): string {
+  const escaped = escapePowershellString(taskName);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$t = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
+    "if (!$t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
+    `try { Stop-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue } catch {}`,
+    `Unregister-ScheduledTask -TaskName ${escaped} -Confirm:$false -ErrorAction Stop`,
+    `$remaining = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
+    "if ($remaining) { throw 'the Scheduled Task could not be removed: task still exists after Unregister-ScheduledTask' }",
+    "Write-Output 'REMOVED'",
+  ].join('; ');
+}
+
+export function renderScheduledTaskInspectScript(taskName: string): string {
+  const escaped = escapePowershellString(taskName);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$t = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
+    "if (!$t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
+    `$i = Get-ScheduledTaskInfo -TaskName ${escaped} -ErrorAction SilentlyContinue`,
+    `[PSCustomObject]@{ TaskName = $t.TaskName; State = $t.State.ToString(); Enabled = ($t.Settings.Enabled -and ($t.State -ne 'Disabled')); LastTaskResult = if ($i) { $i.LastTaskResult } else { $null } } | ConvertTo-Json -Compress`,
+  ].join('; ');
+}
+
 /**
  * Remove the Scheduled Task from Windows Task Scheduler.
  */
@@ -173,13 +198,7 @@ export function uninstallScheduledTask(options: {
   readonly run?: CommandRunner;
 }): { readonly removed: boolean } {
   const run = options.run ?? defaultRun;
-  const script = [
-    `$t = Get-ScheduledTask -TaskName ${escapePowershellString(options.taskName)} -ErrorAction SilentlyContinue`,
-    "if (!$t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
-    `Stop-ScheduledTask -TaskName ${escapePowershellString(options.taskName)} -ErrorAction SilentlyContinue`,
-    `Unregister-ScheduledTask -TaskName ${escapePowershellString(options.taskName)} -Confirm:$false`,
-    "Write-Output 'REMOVED'",
-  ].join('; ');
+  const script = renderScheduledTaskUninstallScript(options.taskName);
 
   let output: string;
   try {
@@ -202,10 +221,10 @@ export function uninstallScheduledTask(options: {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  if (lines.includes('NOT_INSTALLED')) {
+  if (lines.length === 1 && lines[0] === 'NOT_INSTALLED') {
     return { removed: false };
   }
-  if (lines.includes('REMOVED')) {
+  if (lines.length === 1 && lines[0] === 'REMOVED') {
     return { removed: true };
   }
   throw new ScheduledTaskUninstallError(
@@ -221,18 +240,29 @@ export interface ScheduledTaskInspection {
   readonly lastTaskResult?: number;
 }
 
+/** Thrown by `inspectScheduledTask` when the task inspection fails. */
+export class ScheduledTaskInspectError extends Error {
+  override readonly name = 'ScheduledTaskInspectError';
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
 /**
- * Inspect the registered Scheduled Task, returning undefined when not registered.
+ * Inspect the registered Scheduled Task, returning undefined when confirmed absent.
+ * Throws ScheduledTaskInspectError when inspection encounters an error.
  */
 export function inspectScheduledTask(options: {
   readonly taskName: string;
   readonly run?: CommandRunner;
 }): ScheduledTaskInspection | undefined {
   const run = options.run ?? defaultRun;
-  const script = `$t = Get-ScheduledTask -TaskName ${escapePowershellString(options.taskName)} -ErrorAction SilentlyContinue; if (!$t) { exit 1 }; $i = Get-ScheduledTaskInfo -TaskName ${escapePowershellString(options.taskName)} -ErrorAction SilentlyContinue; [PSCustomObject]@{ TaskName = $t.TaskName; State = $t.State.ToString(); Enabled = ($t.Settings.Enabled -and ($t.State -ne 'Disabled')); LastTaskResult = if ($i) { $i.LastTaskResult } else { $null } } | ConvertTo-Json -Compress`;
+  const script = renderScheduledTaskInspectScript(options.taskName);
 
+  let raw: string;
   try {
-    const raw = run('powershell.exe', [
+    raw = run('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
       '-ExecutionPolicy',
@@ -240,14 +270,31 @@ export function inspectScheduledTask(options: {
       '-Command',
       script,
     ]).trim();
-    if (!raw) return undefined;
-    const parsed = JSON.parse(raw) as {
+  } catch (error) {
+    throw new ScheduledTaskInspectError(
+      `the Scheduled Task could not be inspected: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 1 && lines[0] === 'NOT_INSTALLED') {
+    return undefined;
+  }
+
+  try {
+    const jsonText = lines.find((line) => line.startsWith('{')) ?? raw;
+    const parsed = JSON.parse(jsonText) as {
       TaskName?: string;
       State?: string;
       Enabled?: boolean;
       LastTaskResult?: number | null;
     };
-    if (typeof parsed.TaskName !== 'string') return undefined;
+    if (typeof parsed.TaskName !== 'string') {
+      throw new Error(`missing or invalid TaskName in inspection payload: ${raw}`);
+    }
     const state =
       parsed.State === 'Ready' || parsed.State === 'Running' || parsed.State === 'Disabled'
         ? parsed.State
@@ -260,8 +307,10 @@ export function inspectScheduledTask(options: {
         ? { lastTaskResult: parsed.LastTaskResult }
         : {}),
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw new ScheduledTaskInspectError(
+      `the Scheduled Task inspection output could not be parsed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 

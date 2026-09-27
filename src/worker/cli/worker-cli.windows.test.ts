@@ -228,6 +228,20 @@ test('sprout worker uninstall-service fails closed when removal fails', async ()
   }
 });
 
+test('sprout worker uninstall-service fails closed when output has non-terminating error alongside REMOVED (F2)', async () => {
+  const h = windowsHarness({
+    run: () => 'Unregister-ScheduledTask : Access is denied\nREMOVED\n',
+  });
+  try {
+    h.seedConfig();
+    const status = await h.cli.run(['uninstall-service']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.err.join('\n'), /the Scheduled Task could not be removed/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('sprout worker uninstall-service refuses arguments', async () => {
   const h = windowsHarness();
   try {
@@ -301,17 +315,81 @@ test('sprout worker status reports installed but not loaded when task is disable
   }
 });
 
-test('sprout worker status reports not-installed when task is not registered', async () => {
+test('sprout worker status reports not-installed when task is confirmed absent', async () => {
   const h = windowsHarness({
-    run: () => {
-      throw new Error('exit code 1');
-    },
+    run: () => 'NOT_INSTALLED\n',
   });
   try {
     h.seedConfig();
     const status = await h.cli.run(['status']);
     assert.equal(status, WORKER_EXIT.ok);
     assert.match(h.out.join('\n'), /service: not-installed/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker status reports service: failed and exits serviceFailure when task inspection fails', async () => {
+  const h = windowsHarness({
+    run: () => {
+      throw new Error('PowerShell CIM failure: Access denied');
+    },
+  });
+  try {
+    h.seedConfig();
+    const status = await h.cli.run(['status']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.out.join('\n'), /service: failed/);
+    assert.match(h.out.join('\n'), /detail: the Scheduled Task could not be inspected/);
+    assert.doesNotMatch(h.out.join('\n'), /service: not-installed/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker status fails closed when process ownership evidence is unavailable (F1)', async () => {
+  const h = windowsHarness({
+    processProbe: () => ({ state: 'unknown' as const, process: undefined as unknown as WorkerProcessIdentity }),
+  });
+  try {
+    h.seedConfig();
+    writeRuntimeState(h.paths, {
+      pid: process.pid,
+      process: { pid: process.pid, startIdentity: 'test-process-start', ownerToken: h.cliCurrentToken },
+      state: 'connected',
+      epoch: 1,
+      at: 1_000,
+    });
+    const status = await h.cli.run(['status']);
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(h.out.join('\n'), /state: local-configuration-failure/);
+    assert.match(h.out.join('\n'), /the Worker process ownership evidence is unavailable; start and reset are fenced/);
+    assert.doesNotMatch(h.out.join('\n'), /state: connected/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker status does not project reused PID as connected or reconnecting (F1)', async () => {
+  const h = windowsHarness({
+    processProbe: (pid) => ({
+      state: 'alive' as const,
+      process: { pid, startIdentity: 'foreign-start-identity', ownerToken: 'foreign-token'.repeat(3).slice(0, 43) },
+    }),
+  });
+  try {
+    h.seedConfig();
+    writeRuntimeState(h.paths, {
+      pid: process.pid,
+      process: { pid: process.pid, startIdentity: 'test-process-start', ownerToken: h.cliCurrentToken },
+      state: 'connected',
+      epoch: 1,
+      at: 1_000,
+    });
+    const status = await h.cli.run(['status']);
+    assert.equal(status, WORKER_EXIT.ok);
+    assert.match(h.out.join('\n'), /state: stopped/);
+    assert.doesNotMatch(h.out.join('\n'), /state: connected/);
   } finally {
     h.cleanup();
   }

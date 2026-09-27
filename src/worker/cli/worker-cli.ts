@@ -111,7 +111,7 @@ export const WORKER_EXIT = {
   refused: 4,
   /** The identity is proven but a Human has not approved it yet. */
   awaitingApproval: 5,
-  /** The LaunchAgent could not be installed, removed, or inspected. */
+  /** The LaunchAgent or Scheduled Task could not be installed, removed, or inspected. */
   serviceFailure: 6,
   /** Another Worker for this environment is already running. */
   alreadyRunning: 7,
@@ -1057,6 +1057,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     let serviceInstalled = false;
     let serviceLoaded = false;
+    let serviceInspectionError: string | undefined;
     if (config !== undefined) {
       if (platform === 'darwin') {
         serviceInstalled = existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
@@ -1068,12 +1069,16 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
             ...(runCommand !== undefined ? { run: runCommand } : {}),
           }) !== undefined;
       } else if (platform === 'win32') {
-        const task = inspectScheduledTask({
-          taskName: workerServiceLabel(config.environmentInstanceId),
-          ...(runCommand !== undefined ? { run: runCommand } : {}),
-        });
-        serviceInstalled = task !== undefined;
-        serviceLoaded = task !== undefined && task.enabled;
+        try {
+          const task = inspectScheduledTask({
+            taskName: workerServiceLabel(config.environmentInstanceId),
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          });
+          serviceInstalled = task !== undefined;
+          serviceLoaded = task !== undefined && task.enabled;
+        } catch (error) {
+          serviceInspectionError = error instanceof Error ? error.message : String(error);
+        }
       }
     }
     // A runtime record that is present but malformed is a local configuration
@@ -1113,15 +1118,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         processMatchesRuntime: (identity) => {
           try {
             const observed = processProbe(identity.pid);
-            if (observed.state === 'unknown') {
-              // On win32, probeWorkerProcess cannot read another process's environment
-              // block for SPROUT_WORKER_OWNER_TOKEN without privileged process memory APIs.
-              // When the process is confirmed alive on win32, accept the record.
-              if (platform === 'win32' && isProcessAlive(identity.pid)) {
-                return true;
-              }
-              return 'unknown';
-            }
+            if (observed.state === 'unknown') return 'unknown';
             return observed.state === 'alive' &&
               observed.process.pid === identity.pid &&
               observed.process.startIdentity === identity.startIdentity &&
@@ -1136,14 +1133,22 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     out(`state: ${projected.state}`);
     if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
-    out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
-    if (projected.detail !== undefined) out(`detail: ${projected.detail}`);
+    if (serviceInspectionError !== undefined) {
+      out('service: failed');
+    } else {
+      out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
+    }
+    const detail = projected.detail ?? (serviceInspectionError !== undefined ? `the Scheduled Task could not be inspected (${serviceInspectionError})` : undefined);
+    if (detail !== undefined) out(`detail: ${detail}`);
     switch (projected.state) {
       case 'not-enrolled':
         return WORKER_EXIT.notEnrolled;
       case 'local-configuration-failure':
         return WORKER_EXIT.failure;
       default:
+        if (serviceInspectionError !== undefined) {
+          return WORKER_EXIT.serviceFailure;
+        }
         return WORKER_EXIT.ok;
     }
   }

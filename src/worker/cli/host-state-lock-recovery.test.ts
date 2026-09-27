@@ -72,6 +72,7 @@ function spawnChildLockRunner(
         SPROUT_CLI_PATH: paths.executablePath,
         SPROUT_TEST_REPO_ROOT: new URL('../../..', import.meta.url).pathname,
         SPROUT_WORKER_OWNER_TOKEN: (args.includes('hold') ? 'h' : 'i').repeat(43),
+        ...(args.includes('hold') ? { SPROUT_WORKER_HOLD: 'true' } : {}),
       },
     },
   );
@@ -91,7 +92,7 @@ function childLockRunnerScript(): string {
     '  setTimeout(() => {',
     '    lock.release();',
     '    process.exit(0);',
-    '  }, 300);',
+    "  }, process.env.SPROUT_WORKER_HOLD === 'true' ? 3000 : 300);",
     '} catch (error) {',
     "  process.stdout.write(JSON.stringify({ outcome: error.name, message: error.message }) + '\\n');",
     '  process.exit(0);',
