@@ -27,6 +27,7 @@ export interface EnrollmentView {
   readonly identityDigest: string;
   readonly protocolVersion?: string;
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly capabilityRequests?: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
@@ -243,6 +244,11 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     readonly claim: { readonly secret: string; readonly expiresAt: number };
   }>;
   setCapabilityPermission(id: string, capability: string, allowed: boolean): Promise<EnrollmentView>;
+  amendCapabilityRequests(
+    id: string,
+    capabilityRequests: readonly string[],
+    reason?: string,
+  ): Promise<EnrollmentView>;
   readiness(id: string): Promise<{ readonly readiness: EnvironmentReadinessView; readonly probes: readonly ProbeResultView[];
     readonly connectionAttempt?: { readonly outcome: 'incompatible'; readonly reason: string; readonly at: number } }>;
   /** Ask the authenticated Worker to execute a probe; the browser supplies no facts. */
@@ -313,7 +319,13 @@ export function createEnvironmentEnrollmentBrowserAdapter(
       return response.enrollment;
     },
     async requestEnrollment(input) {
-      return transport.request('/api/environments/enrollments', jsonCommand(input));
+      return transport.request(
+        '/api/environments/enrollments',
+        jsonCommand({
+          ...input,
+          capabilityRequests: input.capabilityRequests ?? ['agent-run'],
+        }),
+      );
     },
     async requestChallenge(id) {
       const response = await transport.request<{ readonly challenge: WorkerIdentityChallengeView }>(
@@ -369,6 +381,16 @@ export function createEnvironmentEnrollmentBrowserAdapter(
       const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
         `/api/environments/enrollments/${encodeURIComponent(id)}/permissions`,
         jsonCommand({ capability, allowed }),
+      );
+      return response.enrollment;
+    },
+    async amendCapabilityRequests(id, capabilityRequests, reason) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/capability-requests`,
+        jsonCommand({
+          capabilityRequests,
+          ...(reason !== undefined ? { reason } : {}),
+        }),
       );
       return response.enrollment;
     },

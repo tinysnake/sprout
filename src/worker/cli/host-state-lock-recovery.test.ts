@@ -91,7 +91,7 @@ function childLockRunnerScript(): string {
     '  setTimeout(() => {',
     '    lock.release();',
     '    process.exit(0);',
-    '  }, 300);',
+    '  }, 1500);',
     '} catch (error) {',
     "  process.stdout.write(JSON.stringify({ outcome: error.name, message: error.message }) + '\\n');",
     '  process.exit(0);',

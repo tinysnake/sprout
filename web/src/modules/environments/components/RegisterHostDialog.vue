@@ -249,12 +249,59 @@ async function loadExisting(id: string) {
 }
 
 function updatePermissionsFromEnv(env: EnvironmentInstance) {
-  const perms: Record<string, boolean> = {};
+  const perms: Record<string, boolean> = { ...selectedPermissions.value };
   const caps = env.requestedCapabilities ?? Object.keys(env.capabilityPermissions);
   for (const cap of caps) {
-    perms[cap] = env.capabilityPermissions[cap] ?? false;
+    if (perms[cap] === undefined) {
+      perms[cap] = env.capabilityPermissions[cap] ?? false;
+    }
   }
   selectedPermissions.value = perms;
+}
+
+const newCapabilityName = ref('');
+const isAmendingCapabilities = ref(false);
+
+async function handleAmendAddCapability() {
+  const cap = newCapabilityName.value.trim();
+  if (!cap || !activeEnv.value || !activeService.value) return;
+  const current = requestedCapabilitiesList.value;
+  if (current.includes(cap)) {
+    newCapabilityName.value = '';
+    return;
+  }
+  isAmendingCapabilities.value = true;
+  stateNotice.value = '';
+  try {
+    const updated = [...current, cap];
+    await activeService.value.amendCapabilityRequests(
+      activeEnv.value.id,
+      updated,
+      `Operator added capability request: ${cap}`,
+    );
+    const refreshed = await activeService.value.getEnvironment(activeEnv.value.id);
+    if (refreshed) {
+      activeEnv.value = { ...refreshed };
+      updatePermissionsFromEnv(activeEnv.value);
+    } else {
+      activeEnv.value = {
+        ...activeEnv.value,
+        requestedCapabilities: updated,
+        capabilityPermissions: {
+          ...activeEnv.value.capabilityPermissions,
+          [cap]: false,
+        },
+      };
+      updatePermissionsFromEnv(activeEnv.value);
+    }
+    newCapabilityName.value = '';
+    announcer.announce(`Added capability request: ${cap}`);
+  } catch (err: any) {
+    stateNotice.value = err?.message || 'Failed to amend capability requests';
+    announcer.announce(`Failed to amend capability requests: ${stateNotice.value}`);
+  } finally {
+    isAmendingCapabilities.value = false;
+  }
 }
 
 async function handleCreatePending() {
@@ -274,6 +321,7 @@ async function handleCreatePending() {
       displayName: displayName.value.trim(),
       environmentInstanceId: environmentInstanceId.value.trim() || `env-${Date.now().toString(36)}`,
       platform: platform.value,
+      capabilityRequests: ['agent-run'],
     });
     activeEnv.value = result.enrollment;
     bootstrapCommand.value = result.bootstrapCommand;
@@ -538,6 +586,22 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <div>
+            <label class="block text-xs font-semibold text-[var(--text-primary)] mb-1">
+              Default Capability Requests
+            </label>
+            <div class="p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <Icon name="terminal" :size="16" />
+                <span class="text-xs font-medium text-[var(--text-primary)]">agent-run</span>
+              </div>
+              <Badge variant="neutral" class="text-[10px]">Catalog Required</Badge>
+            </div>
+            <p class="text-[10px] text-[var(--text-muted)] mt-1">
+              Default capability requested for execution catalog eligibility upon Human approval.
+            </p>
+          </div>
+
           <div v-if="formError" class="p-3 rounded bg-[var(--red-action-bg)] border border-[var(--red-action-border)] text-xs text-[var(--red-action)]">
             {{ formError }}
           </div>
@@ -799,7 +863,11 @@ onUnmounted(() => {
             Approval records only the Human-selected permissions and never creates engine login, Project access, or model readiness by implication.
           </p>
 
-          <div class="space-y-2 p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)]">
+          <div v-if="requestedCapabilitiesList.length === 0" class="p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] text-xs text-[var(--text-muted)]">
+            No capabilities requested. Add requests below before approval to enable execution.
+          </div>
+
+          <div v-else class="space-y-2 p-3 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)]">
             <div
               v-for="cap in requestedCapabilitiesList"
               :key="cap"
@@ -814,6 +882,28 @@ onUnmounted(() => {
                 class="min-h-[24px] min-w-[24px]"
               />
             </div>
+          </div>
+
+          <!-- Amend Capability Requests UI (#159) -->
+          <div class="flex items-center gap-2 pt-1">
+            <Input
+              id="input-amend-capability"
+              v-model="newCapabilityName"
+              placeholder="Add capability request (e.g. agent-run)"
+              class="text-xs flex-1 min-h-[36px]"
+              :disabled="isAmendingCapabilities"
+              @keydown.enter.prevent="handleAmendAddCapability"
+            />
+            <Button
+              id="btn-amend-capability"
+              size="xs"
+              variant="secondary"
+              class="min-h-[36px] px-3 shrink-0"
+              :disabled="!newCapabilityName.trim() || isAmendingCapabilities"
+              @click="handleAmendAddCapability"
+            >
+              Add Request
+            </Button>
           </div>
         </div>
 
