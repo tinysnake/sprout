@@ -96,6 +96,9 @@ On completing work, add this comment to its ticket:
 ### Outcome
 What now works or what was learned.
 
+### Triage
+On a rework — an attempt following an acceptance failure on this ticket — state before changing anything: what you judge the actual problem to be, and why the previous attempt did not resolve it, based on every earlier work record and acceptance failure. Omit this section entirely on the ticket's first attempt.
+
 ### Evidence
 - Tests, commands, observed behaviour, screenshots, or source links
 
@@ -113,6 +116,18 @@ What now works or what was learned.
 ```
 
 The record reports evidence; it does not redefine acceptance after implementation.
+
+The `### Triage` section is what keeps a rework from treating each acceptance failure as a fresh symptom. A rework that satisfies its findings without saying why the previous attempt failed has not shown it understood the problem, and the next acceptance is likely to fail the same way. This is the ticket-level counterpart to the escalation-exhaustion diagnosis in step 8: it is the worker's own reading of the history, not a separate diagnostic pass, and it neither amends acceptance nor creates tickets.
+
+### Vocabulary
+
+These terms are used by step 8 and by the coding pipeline that runs this loop automatically; they are process language, not Sprout product language, so they are defined here rather than in `CONTEXT.md`.
+
+- **Rework triage** — the short section a rework's Work record must carry: what the worker judges the actual problem to be, and why the previous attempt did not resolve it, written after reading the prior work records and acceptance failures and before changing anything. It is the worker's own reading, not step 8's diagnosis.
+- **Diagnosis** — the bounded root-cause analysis of a ticket that keeps failing acceptance: evidence for each applicable cause, then exactly one outcome.
+- **Remediation** — the map, spec, or ticket set a diagnosis publishes when the real cause is larger than the ticket. It becomes a blocker of the paused ticket.
+- **Paused ticket** — a ticket whose remediation must be completed first. It keeps its history and is neither closed nor re-opened while paused.
+- **Amended acceptance** — the `## Acceptance` a diagnosis rewrites when the remedy is an over-strict or mis-scoped criterion. The amended list is what the next accept step verifies against; the original is preserved in the ticket's history.
 
 ### Verification commands
 
@@ -167,9 +182,11 @@ Completion criterion: exactly one worker owns the ticket, or the map explicitly 
 
 Work only within the ticket outcome and constraints. If evidence invalidates the ticket, stop and record the deviation or new fog instead of expanding scope silently.
 
+On a **rework** — an attempt after this ticket already failed acceptance — triage first: read every earlier work record on this ticket and every acceptance failure, including the exact unmet criterion, and state in the Work record what you judge the actual problem to be and why the previous attempt did not resolve it. Do this before making changes. Do not begin by working through the failures as a list of symptoms; that is what lets a fix satisfy its own criterion while leaving the shared cause in place. If the history does not cohere — a failure that keeps repeating, or one that contradicts an earlier attempt — report that rather than guessing.
+
 Run the acceptance checks, post the work record, and leave the issue open for acceptance.
 
-Completion criterion: every acceptance item points to evidence, and every deviation or newly discovered uncertainty is explicit.
+Completion criterion: every acceptance item points to evidence, and every deviation or newly discovered uncertainty is explicit. On a rework, the Work record's `### Triage` section states the judged problem and the evidence for that judgement.
 
 ### 6. Accept
 
@@ -192,9 +209,35 @@ Run evaluation again when:
 - an acceptance failure reveals a design problem;
 - `docs/goal.md` changes.
 
+When a single ticket keeps failing acceptance past its repairs, do not just re-evaluate the map: diagnose that ticket (step 8) before assigning more work to it.
+
 Close the map only when its exit criteria are evidenced. Link that evidence to `docs/roadmap.md` and determine whether the current outcome is evidenced or needs another map. When an outcome is complete, recompute the outcome frontier and create a map for the next selected outcome.
 
 After the current medium-term goal is evidenced, return to `docs/goal.md` and replace it with the next product horizon and supporting outcome graph. If the long-term success signals are all evidenced, report that result instead of inventing more work.
+
+### 8. Diagnose a ticket that will not pass
+
+A ticket that fails acceptance repeatedly is not making progress, however many times it is repaired. When its repairs have climbed as far as the available capability goes and it still fails, stop repairing and diagnose: the question is no longer "how do we satisfy this acceptance" but "why does this acceptance keep failing".
+
+This is the automatic coding-pipeline path (Dev Pipeline's escalation-exhaustion diagnosis); when working the loop by hand, treat the same signals — a ticket whose rework has run out of stronger workers, or whose budget is spent — as the trigger.
+
+The diagnosis reads the whole ticket history, not the latest attempt: every work record, every acceptance failure and its exact unmet criterion, and every deviation or new fog it produced. It attributes the repeated failure to whichever of these actually applies, with evidence:
+
+1. the work was not good enough, or genuinely defective;
+2. the acceptance or its verification is too strict, or tests the wrong thing;
+3. the acceptance asks for more than this ticket's stated goal;
+4. the surrounding design, not the change, is what makes every attempt fail;
+5. the evidence does not settle it and a human must decide.
+
+Then it chooses one outcome, and only one:
+
+- **fix on this ticket** — the diagnosis is smaller than the ticket. Record the ordered plan on the ticket, amend its `## Acceptance` directly when that is the remedy, and return to step 5. Tell the next accept step which acceptance is in force. A ticket whose acceptance was narrowed is verified against the amended acceptance, not the original.
+- **build something first** — the diagnosis is larger than the ticket. Create the remediation as a map, a spec, or an explicit ticket set, link it as a blocker of this ticket (`Blocked by:`), record the pause on the ticket, and work the remediation first. The paused ticket keeps its history; it is not closed and not re-opened. When the remediation is resolved, resume the ticket.
+- **a human decides** — record the question and leave the ticket for a human.
+
+A diagnosis is bounded: one per ticket. A repair that follows a diagnosis and then fails again goes to a human rather than back to another diagnosis.
+
+Completion criterion: the ticket carries an attribution with evidence and exactly one outcome; a fix-on-ticket plan is recorded (with any acceptance amendment) and the ticket returned to step 5; a build-first remediation exists as its own tracker item and is a blocker of the paused ticket; a human-decides ticket is left with a precise question and no work outstanding.
 
 ## Selection principle
 
