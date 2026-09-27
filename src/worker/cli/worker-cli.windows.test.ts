@@ -242,6 +242,39 @@ test('sprout worker uninstall-service fails closed when output has non-terminati
   }
 });
 
+test('sprout worker uninstall-service fails closed when the removal verification query errors (F2)', async () => {
+  // The hardened script exits non-zero when the post-unregister absence
+  // verification query fails; it never prints REMOVED from a suppressed error.
+  const h = windowsHarness({
+    run: () => {
+      throw new Error('Get-ScheduledTask verification failed: Access is denied');
+    },
+  });
+  try {
+    h.seedConfig();
+    const status = await h.cli.run(['uninstall-service']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.err.join('\n'), /the Scheduled Task could not be removed/);
+    assert.doesNotMatch(h.out.join('\n'), /Removed Scheduled Task/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker uninstall-service fails closed when verification yields no removal proof (F2)', async () => {
+  const h = windowsHarness({
+    run: () => '\n',
+  });
+  try {
+    h.seedConfig();
+    const status = await h.cli.run(['uninstall-service']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.err.join('\n'), /the Scheduled Task could not be removed/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('sprout worker uninstall-service refuses arguments', async () => {
   const h = windowsHarness();
   try {
@@ -341,6 +374,26 @@ test('sprout worker status reports service: failed and exits serviceFailure when
     assert.equal(status, WORKER_EXIT.serviceFailure);
     assert.match(h.out.join('\n'), /service: failed/);
     assert.match(h.out.join('\n'), /detail: the Scheduled Task could not be inspected/);
+    assert.doesNotMatch(h.out.join('\n'), /service: not-installed/);
+    // F4: the raw exception text never reaches WorkerStatus.detail.
+    assert.doesNotMatch(h.out.join('\n'), /PowerShell CIM failure/);
+    assert.doesNotMatch(h.out.join('\n'), /Access is denied/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sprout worker status reports service: failed on noisy inspection output (F3)', async () => {
+  const h = windowsHarness({
+    run: () =>
+      'WARNING: the task registry is being rebuilt\n{"TaskName":"dev.sprout.worker.synthetic","State":"Ready","Enabled":true,"LastTaskResult":0}\n',
+  });
+  try {
+    h.seedConfig();
+    const status = await h.cli.run(['status']);
+    assert.equal(status, WORKER_EXIT.serviceFailure);
+    assert.match(h.out.join('\n'), /service: failed/);
+    assert.doesNotMatch(h.out.join('\n'), /service: installed/);
     assert.doesNotMatch(h.out.join('\n'), /service: not-installed/);
   } finally {
     h.cleanup();

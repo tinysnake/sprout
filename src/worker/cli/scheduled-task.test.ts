@@ -130,19 +130,26 @@ test('startScheduledTask and stopScheduledTask invoke powershell.exe with correc
   assert.ok(calls.some((c) => c.includes("Stop-ScheduledTask -TaskName 'dev.sprout.worker.test'")));
 });
 
-test('renderScheduledTaskUninstallScript sets ErrorAction Stop and verifies absence', () => {
+test('renderScheduledTaskUninstallScript fails closed on query, unregister, and verification errors', () => {
   const script = renderScheduledTaskUninstallScript('dev.sprout.worker.1234567890abcdef');
   assert.match(script, /\$ErrorActionPreference = 'Stop'/);
   assert.match(script, /Unregister-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef' -Confirm:\$false -ErrorAction Stop/);
-  assert.match(script, /\$remaining = Get-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef' -ErrorAction SilentlyContinue/);
-  assert.match(script, /if \(\$remaining\) { throw/);
+  // The authoritative absence and verification queries must never suppress errors.
+  assert.doesNotMatch(script, /Get-ScheduledTask[^;]*-ErrorAction SilentlyContinue/);
+  assert.match(script, /Get-ScheduledTask -ErrorAction Stop/);
+  assert.match(script, /if \(\$null -eq \$t\) { Write-Output 'NOT_INSTALLED'; exit 0 }/);
+  assert.match(script, /Get-ScheduledTask verification failed/);
+  assert.match(script, /exit 1/);
 });
 
-test('renderScheduledTaskInspectScript sets ErrorAction Stop and emits NOT_INSTALLED for absent task', () => {
+test('renderScheduledTaskInspectScript fails closed on query and info errors', () => {
   const script = renderScheduledTaskInspectScript('dev.sprout.worker.1234567890abcdef');
   assert.match(script, /\$ErrorActionPreference = 'Stop'/);
-  assert.match(script, /Get-ScheduledTask -TaskName 'dev\.sprout\.worker\.1234567890abcdef'/);
-  assert.match(script, /if \(!\$t\) { Write-Output 'NOT_INSTALLED'; exit 0 }/);
+  assert.match(script, /Get-ScheduledTask -ErrorAction Stop/);
+  assert.match(script, /Get-ScheduledTaskInfo -TaskName 'dev\.sprout\.worker\.1234567890abcdef' -ErrorAction Stop/);
+  assert.doesNotMatch(script, /SilentlyContinue/);
+  assert.match(script, /if \(\$null -eq \$t\) { Write-Output 'NOT_INSTALLED'; exit 0 }/);
+  assert.match(script, /exit 1/);
 });
 
 test('inspectScheduledTask returns task details when task is found', () => {
@@ -188,6 +195,43 @@ test('inspectScheduledTask fails closed with ScheduledTaskInspectError on inspec
   assert.throws(
     () => inspectScheduledTask({ taskName: 'dev.sprout.worker.absent', run: malformedRun }),
     (error) => error instanceof ScheduledTaskInspectError,
+  );
+});
+
+test('inspectScheduledTask rejects noisy output that surrounds a JSON payload (F3)', () => {
+  const noisyRun = (): string =>
+    'WARNING: the task registry is being rebuilt\n{"TaskName":"dev.sprout.worker.test","State":"Ready","Enabled":true,"LastTaskResult":0}\n';
+  assert.throws(
+    () => inspectScheduledTask({ taskName: 'dev.sprout.worker.test', run: noisyRun }),
+    (error) => error instanceof ScheduledTaskInspectError,
+  );
+});
+
+test('inspectScheduledTask rejects empty output from a suppressed query error (F3)', () => {
+  const noOutputRun = (): string => '\n';
+  assert.throws(
+    () => inspectScheduledTask({ taskName: 'dev.sprout.worker.test', run: noOutputRun }),
+    (error) => error instanceof ScheduledTaskInspectError,
+  );
+});
+
+test('uninstallScheduledTask fails closed on an absence-query error (F2)', () => {
+  // A query error suppressed by SilentlyContinue used to produce empty output
+  // and a benign NOT_INSTALLED; the hardened script exits non-zero instead.
+  const throwingRun = (): string => {
+    throw new Error('Get-ScheduledTask failed: access denied');
+  };
+  assert.throws(
+    () => uninstallScheduledTask({ taskName: 'dev.sprout.worker.test', run: throwingRun }),
+    (error) => error instanceof ScheduledTaskUninstallError && error.reason === 'unregister-failed',
+  );
+});
+
+test('uninstallScheduledTask fails closed when verification yields no removal proof (F2)', () => {
+  const emptyRun = (): string => '\n';
+  assert.throws(
+    () => uninstallScheduledTask({ taskName: 'dev.sprout.worker.test', run: emptyRun }),
+    (error) => error instanceof ScheduledTaskUninstallError && error.reason === 'unregister-failed',
   );
 });
 

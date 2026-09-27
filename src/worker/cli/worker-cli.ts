@@ -1057,7 +1057,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
     let serviceInstalled = false;
     let serviceLoaded = false;
-    let serviceInspectionError: string | undefined;
+    let serviceInspectionFailed = false;
+    let serviceInspectionError: unknown;
     if (config !== undefined) {
       if (platform === 'darwin') {
         serviceInstalled = existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
@@ -1077,7 +1078,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           serviceInstalled = task !== undefined;
           serviceLoaded = task !== undefined && task.enabled;
         } catch (error) {
-          serviceInspectionError = error instanceof Error ? error.message : String(error);
+          serviceInspectionFailed = true;
+          serviceInspectionError = error;
         }
       }
     }
@@ -1133,12 +1135,19 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     out(`state: ${projected.state}`);
     if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
-    if (serviceInspectionError !== undefined) {
+    if (serviceInspectionFailed) {
       out('service: failed');
     } else {
       out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
     }
-    const detail = projected.detail ?? (serviceInspectionError !== undefined ? `the Scheduled Task could not be inspected (${serviceInspectionError})` : undefined);
+    // The raw exception text can carry host paths, host names, or command
+    // output, so it never crosses the CLI boundary; only the bounded fallback
+    // from the shared diagnostic allowlist is emitted.
+    const detail =
+      projected.detail ??
+      (serviceInspectionFailed
+        ? diagnosticOf(serviceInspectionError, 'the Scheduled Task could not be inspected')
+        : undefined);
     if (detail !== undefined) out(`detail: ${detail}`);
     switch (projected.state) {
       case 'not-enrolled':
@@ -1146,7 +1155,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       case 'local-configuration-failure':
         return WORKER_EXIT.failure;
       default:
-        if (serviceInspectionError !== undefined) {
+        if (serviceInspectionFailed) {
           return WORKER_EXIT.serviceFailure;
         }
         return WORKER_EXIT.ok;

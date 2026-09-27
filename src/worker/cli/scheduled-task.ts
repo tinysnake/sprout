@@ -165,28 +165,47 @@ export class ScheduledTaskUninstallError extends Error {
   }
 }
 
+/**
+ * Render the PowerShell script that removes the Scheduled Task.
+ *
+ * Every authoritative step runs under `$ErrorActionPreference = 'Stop'` and an
+ * explicit `exit 1`, so a query, unregister, or verification error is propagated
+ * as a non-zero exit instead of being suppressed into a benign result. The
+ * absence markers `NOT_INSTALLED` and `REMOVED` are emitted only after a
+ * successful query positively confirms absence (or verified removal).
+ */
 export function renderScheduledTaskUninstallScript(taskName: string): string {
   const escaped = escapePowershellString(taskName);
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$t = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
-    "if (!$t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
-    `try { Stop-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue } catch {}`,
-    `Unregister-ScheduledTask -TaskName ${escaped} -Confirm:$false -ErrorAction Stop`,
-    `$remaining = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
-    "if ($remaining) { throw 'the Scheduled Task could not be removed: task still exists after Unregister-ScheduledTask' }",
+    "try { $tasks = @(Get-ScheduledTask -ErrorAction Stop) } catch { [Console]::Error.WriteLine('Get-ScheduledTask failed: ' + $_.Exception.Message); exit 1 }",
+    `$t = $tasks | Where-Object { $_.TaskName -eq ${escaped} } | Select-Object -First 1`,
+    "if ($null -eq $t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
+    `try { Stop-ScheduledTask -TaskName ${escaped} -ErrorAction Stop } catch {}`,
+    `try { Unregister-ScheduledTask -TaskName ${escaped} -Confirm:$false -ErrorAction Stop } catch { [Console]::Error.WriteLine('Unregister-ScheduledTask failed: ' + $_.Exception.Message); exit 1 }`,
+    "try { $remaining = @(Get-ScheduledTask -ErrorAction Stop) } catch { [Console]::Error.WriteLine('Get-ScheduledTask verification failed: ' + $_.Exception.Message); exit 1 }",
+    `$still = $remaining | Where-Object { $_.TaskName -eq ${escaped} } | Select-Object -First 1`,
+    "if ($null -ne $still) { [Console]::Error.WriteLine('the Scheduled Task could not be removed: task still exists after Unregister-ScheduledTask'); exit 1 }",
     "Write-Output 'REMOVED'",
   ].join('; ');
 }
 
+/**
+ * Render the PowerShell script that inspects the Scheduled Task.
+ *
+ * The enumeration query runs with `-ErrorAction Stop`; any query or info error
+ * exits non-zero so the JS side can never mistake an inspection failure for a
+ * confirmed-absent task (`NOT_INSTALLED` is emitted only for a benign absence).
+ */
 export function renderScheduledTaskInspectScript(taskName: string): string {
   const escaped = escapePowershellString(taskName);
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$t = Get-ScheduledTask -TaskName ${escaped} -ErrorAction SilentlyContinue`,
-    "if (!$t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
-    `$i = Get-ScheduledTaskInfo -TaskName ${escaped} -ErrorAction SilentlyContinue`,
-    `[PSCustomObject]@{ TaskName = $t.TaskName; State = $t.State.ToString(); Enabled = ($t.Settings.Enabled -and ($t.State -ne 'Disabled')); LastTaskResult = if ($i) { $i.LastTaskResult } else { $null } } | ConvertTo-Json -Compress`,
+    "try { $tasks = @(Get-ScheduledTask -ErrorAction Stop) } catch { [Console]::Error.WriteLine('Get-ScheduledTask failed: ' + $_.Exception.Message); exit 1 }",
+    `$t = $tasks | Where-Object { $_.TaskName -eq ${escaped} } | Select-Object -First 1`,
+    "if ($null -eq $t) { Write-Output 'NOT_INSTALLED'; exit 0 }",
+    `try { $i = Get-ScheduledTaskInfo -TaskName ${escaped} -ErrorAction Stop } catch { [Console]::Error.WriteLine('Get-ScheduledTaskInfo failed: ' + $_.Exception.Message); exit 1 }`,
+    `[PSCustomObject]@{ TaskName = $t.TaskName; State = $t.State.ToString(); Enabled = ($t.Settings.Enabled -and ($t.State -ne 'Disabled')); LastTaskResult = $i.LastTaskResult } | ConvertTo-Json -Compress`,
   ].join('; ');
 }
 
@@ -283,9 +302,17 @@ export function inspectScheduledTask(options: {
   if (lines.length === 1 && lines[0] === 'NOT_INSTALLED') {
     return undefined;
   }
+  // The successful payload is exactly one compact JSON object. Anything else
+  // (noise lines, a warning wrapped around a JSON line, empty output) is an
+  // inspection error, never a benign absence.
+  if (lines.length !== 1 || lines[0]!.startsWith('{') === false) {
+    throw new ScheduledTaskInspectError(
+      `the Scheduled Task inspection output could not be parsed: ${raw}`,
+    );
+  }
 
   try {
-    const jsonText = lines.find((line) => line.startsWith('{')) ?? raw;
+    const jsonText = lines[0]!;
     const parsed = JSON.parse(jsonText) as {
       TaskName?: string;
       State?: string;
