@@ -88,6 +88,7 @@ function childLockRunnerScript(): string {
     'try {',
     '  const lock = acquireWorkerLock(paths, currentWorkerProcess(process.env.SPROUT_WORKER_OWNER_TOKEN));',
     "  process.stdout.write('acquired\\n');",
+    '  // The contender is spawned only after the holder prints "acquired"; under parallel load its process start can exceed 300ms, so keep the lock held across that startup or it wins instead of raising DuplicateWorkerProcessError.',
     '  setTimeout(() => {',
     '    lock.release();',
     '    process.exit(0);',

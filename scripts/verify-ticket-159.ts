@@ -3,7 +3,7 @@
  * Web-created enrollments carry default capabilityRequests (['agent-run']),
  * support Human request amendment before approval, and reach catalog eligibility.
  *
- * Runs against the HTTP server and real SQLite store on port 41435.
+ * Runs against an ephemeral HTTP server and real SQLite store.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,7 +33,6 @@ import { projectCatalogEntry, admissionRefusal, ADMISSION_CAPABILITY } from '../
 import type { EnvironmentDefinition, EnvironmentInstance } from '../src/environment/model.ts';
 import { createReadinessAuthorityTestSeam } from '../src/environment/readiness-authority.test-support.ts';
 
-const PORT = 41435;
 const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
 
 const definition: EnvironmentDefinition = {
@@ -53,10 +52,10 @@ async function main() {
   let failures = 0;
   const check = (desc: string, ok: boolean, detail = '') => {
     if (ok) {
-      console.log(`PASS: ${desc}`);
+      console.log(`[local-synthetic] PASS: ${desc}`);
     } else {
       failures += 1;
-      console.error(`FAIL: ${desc}${detail ? ` (${detail})` : ''}`);
+      console.error(`[local-synthetic] FAIL: ${desc}${detail ? ` (${detail})` : ''}`);
     }
   };
 
@@ -140,9 +139,9 @@ async function main() {
     ],
   });
 
-  await api.listen(PORT, '127.0.0.1');
+  const { port } = await api.listen(0, '127.0.0.1');
 
-  const base = `http://127.0.0.1:${PORT}`;
+  const base = `http://127.0.0.1:${port}`;
 
   try {
     // 1. Web Creation: Client posts to /api/environments/enrollments WITHOUT capabilityRequests
@@ -340,10 +339,10 @@ async function main() {
   }
 
   if (failures > 0) {
-    console.error(`Verification completed with ${failures} failure(s).`);
+    console.error(`[local-synthetic] Verification completed with ${failures} failure(s).`);
     process.exit(1);
   } else {
-    console.log('Verification completed successfully: all checks PASSED.');
+    console.log('[local-synthetic] Verification completed successfully: all checks PASSED.');
   }
 }
 
