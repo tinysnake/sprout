@@ -388,6 +388,7 @@ export interface EnrollmentView {
   readonly identityDigest: string;
   readonly protocolVersion?: string;
   readonly capabilityPermissions: Readonly<Record<string, boolean>>;
+  readonly capabilityRequests?: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly decisions: readonly EnrollmentDecisionView[];
@@ -425,6 +426,7 @@ export function toEnrollmentView(enrollment: EnvironmentEnrollment): EnrollmentV
       ? { protocolVersion: safe.worker.protocolVersion }
       : {}),
     capabilityPermissions: safe.capabilityPermissions,
+    capabilityRequests: safe.worker.capabilityRequests,
     createdAt: safe.createdAt,
     updatedAt: safe.updatedAt,
     ...(safe.claim !== undefined

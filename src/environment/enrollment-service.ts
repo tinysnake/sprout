@@ -1,5 +1,6 @@
 import {
   normalizeEnrollment,
+  amendCapabilityRequests,
   approveEnrollment,
   cancelEnrollment,
   createPendingEnrollment,
@@ -691,6 +692,26 @@ export class EnvironmentEnrollmentService {
     const updated = await this.#mutateWithCas(
       enrollmentId,
       (current) => setCapabilityPermission(current, capability, allowed, at),
+    );
+    this.#announce(updated);
+    return updated;
+  }
+
+  /**
+   * Amend requested capabilities on a pending enrollment (#159).
+   *
+   * Records a durable Human decision and preserves 'Never inherit a grant':
+   * newly added capabilities initialize to false (denied) until explicitly approved.
+   */
+  async amendCapabilityRequests(
+    enrollmentId: string,
+    capabilityRequests: readonly string[],
+    reason?: string,
+  ): Promise<EnvironmentEnrollment> {
+    const at = this.#clock();
+    const updated = await this.#mutateWithCas(
+      enrollmentId,
+      (current) => amendCapabilityRequests(current, capabilityRequests, at, reason),
     );
     this.#announce(updated);
     return updated;

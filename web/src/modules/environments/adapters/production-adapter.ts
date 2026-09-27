@@ -255,7 +255,7 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
     identityDigest: enrollment.identityDigest,
     claim: enrollment.claim,
     decisions: enrollment.decisions,
-    requestedCapabilities: readiness.capabilities.map((c) => c.name),
+    requestedCapabilities: enrollment.capabilityRequests ?? readiness.capabilities.map((c) => c.name),
     ...(readiness.requirements !== undefined ? { requirements: readiness.requirements } : {}),
     ...(readiness.requirements?.modelsByEngine !== undefined ? { targetModelsByEngine: readiness.requirements.modelsByEngine } : {}),
   };
@@ -335,6 +335,7 @@ export class ProductionEnvironmentService implements EnvironmentService {
     environmentInstanceId: string;
     displayName: string;
     platform?: string;
+    capabilityRequests?: readonly string[];
   }): Promise<{
     enrollment: EnvironmentInstance;
     claimSecret?: string;
@@ -345,6 +346,7 @@ export class ProductionEnvironmentService implements EnvironmentService {
       environmentInstanceId: input.environmentInstanceId,
       displayName: input.displayName,
       platform: input.platform ?? 'macos',
+      capabilityRequests: input.capabilityRequests ?? ['agent-run'],
     });
     const facts = await this.#adapter.environmentFacts(result.enrollment.id);
     return {
@@ -384,6 +386,14 @@ export class ProductionEnvironmentService implements EnvironmentService {
       resolvedPermissions[key] = val === true;
     }
     await this.#adapter.approveEnrollment(id, resolvedPermissions, modelAuthorizations);
+  }
+
+  async amendCapabilityRequests(
+    id: string,
+    capabilityRequests: readonly string[],
+    reason?: string,
+  ): Promise<void> {
+    await this.#adapter.amendCapabilityRequests(id, capabilityRequests, reason);
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

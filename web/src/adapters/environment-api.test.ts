@@ -199,3 +199,42 @@ test('regenerateClaimSecret and cancelEnrollment dispatch through typed POST rou
     ],
   );
 });
+
+test('#159: requestEnrollment defaults capabilityRequests and amendCapabilityRequests posts to capability-requests', async () => {
+  const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/capability-requests')) {
+      return {
+        enrollment: {
+          id: 'e1',
+          status: 'pending',
+          capabilityRequests: ['agent-run', 'extra-cap'],
+          capabilityPermissions: { 'agent-run': false, 'extra-cap': false },
+        },
+      };
+    }
+    return { enrollment: { id: 'e1', status: 'pending' }, bootstrap: { instructions: [] } };
+  });
+  const adapter = createEnvironmentEnrollmentBrowserAdapter(transport);
+
+  // Request enrollment without explicit capabilityRequests — defaults to ['agent-run']
+  await adapter.requestEnrollment({
+    environmentInstanceId: 'mac-mini-1',
+    displayName: 'Default Mac',
+    platform: 'macos',
+  });
+
+  const firstBody = JSON.parse(calls[0]?.init?.body as string);
+  assert.deepEqual(firstBody.capabilityRequests, ['agent-run']);
+
+  // Amend capability requests
+  const amended = await adapter.amendCapabilityRequests('e1', ['agent-run', 'extra-cap'], 'Added extra capability');
+  assert.equal(amended.id, 'e1');
+  assert.deepEqual(amended.capabilityRequests, ['agent-run', 'extra-cap']);
+
+  const secondCall = calls[1];
+  assert.equal(secondCall?.init?.method, 'POST');
+  assert.equal(secondCall?.path, '/api/environments/enrollments/e1/capability-requests');
+  const secondBody = JSON.parse(secondCall?.init?.body as string);
+  assert.deepEqual(secondBody.capabilityRequests, ['agent-run', 'extra-cap']);
+  assert.equal(secondBody.reason, 'Added extra capability');
+});

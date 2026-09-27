@@ -375,6 +375,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
     environmentInstanceId: string;
     displayName: string;
     platform?: string;
+    capabilityRequests?: readonly string[];
   }): Promise<{
     enrollment: EnvironmentInstance;
     claimSecret?: string;
@@ -384,6 +385,11 @@ export class FixtureEnvironmentService implements EnvironmentService {
     const id = `enroll-${Date.now().toString(36)}`;
     const now = Date.now();
     const expiresAt = now + 15 * 60 * 1000;
+    const requestedCapabilities = input.capabilityRequests ?? ['agent-run'];
+    const capabilityPermissions: Record<string, boolean> = {};
+    for (const cap of requestedCapabilities) {
+      capabilityPermissions[cap] = false;
+    }
     const newEnv: EnvironmentInstance = {
       id,
       displayName: input.displayName,
@@ -397,12 +403,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
       protocolVersion: 'v2.1',
       protocolCompatibility: 'unknown',
       workSafety: 'clear',
-      capabilityPermissions: {
-        fileReadWrite: false,
-        processExecution: false,
-        networkAccess: false,
-        guiAutomation: false,
-      },
+      capabilityPermissions,
       engineReadiness: {
         codex: 'unknown',
         pi: 'unknown',
@@ -424,7 +425,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
           reason: 'Pending enrollment created in Web; awaiting Worker proof and Human approval.',
         },
       ],
-      requestedCapabilities: ['fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'],
+      requestedCapabilities,
     };
     this.instances.push(newEnv);
     return {
@@ -492,6 +493,34 @@ export class FixtureEnvironmentService implements EnvironmentService {
     env.capabilityPermissions = Object.fromEntries(
       Object.keys(env.capabilityPermissions).map((capability) => [capability, permissions[capability] === true]),
     );
+  }
+
+  async amendCapabilityRequests(
+    id: string,
+    capabilityRequests: readonly string[],
+    reason?: string,
+  ): Promise<void> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    if (env.enrollmentStatus !== 'pending') {
+      throw new Error('Only a pending enrollment can have its capability requests amended.');
+    }
+    const sanitized = [...new Set(capabilityRequests)];
+    const perms: Record<string, boolean> = {};
+    for (const cap of sanitized) {
+      perms[cap] = env.capabilityPermissions[cap] ?? false;
+    }
+    env.requestedCapabilities = sanitized;
+    env.capabilityPermissions = perms;
+    env.decisions = [
+      ...(env.decisions ?? []),
+      {
+        kind: 'capability-requests-amended',
+        actor: 'operator',
+        at: Date.now(),
+        reason: reason ?? 'Human amended capability requests on the pending enrollment.',
+      },
+    ];
   }
 
   async triggerProbe(id: string): Promise<ProbeRecord> {

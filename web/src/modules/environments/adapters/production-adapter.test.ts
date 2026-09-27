@@ -421,3 +421,50 @@ test('#138: approveEnrollment forwards explicit model authorizations', async () 
 
   assert.deepEqual(submittedAuthorizations, { codex: ['gpt-5-codex'] });
 });
+
+test('#159: requestEnrollment defaults capabilityRequests and amendCapabilityRequests forwards to wire', async () => {
+  const facts = enrollmentFacts();
+  let requestedInput: any = undefined;
+  let amendedArgs: any = undefined;
+  const calls: string[] = [];
+  const wire = adapter(facts, calls);
+  wire.requestEnrollment = async (input) => {
+    requestedInput = input;
+    return {
+      enrollment: facts.enrollment,
+      bootstrap: { instructions: ['Install sprout worker'] },
+      claim: { secret: 'secret-claim-xyz', expiresAt: 50000 },
+    };
+  };
+  wire.amendCapabilityRequests = async (id, requests, reason) => {
+    amendedArgs = { id, requests, reason };
+    return facts.enrollment;
+  };
+
+  const service = new ProductionEnvironmentService(wire);
+
+  // Default requestEnrollment passes ['agent-run']
+  await service.requestEnrollment({
+    displayName: 'New Mac',
+    environmentInstanceId: 'inst-default',
+    platform: 'macos',
+  });
+  assert.deepEqual(requestedInput.capabilityRequests, ['agent-run']);
+
+  // Custom capabilityRequests are honored
+  await service.requestEnrollment({
+    displayName: 'Custom Mac',
+    environmentInstanceId: 'inst-custom',
+    platform: 'macos',
+    capabilityRequests: ['agent-run', 'extra-cap'],
+  });
+  assert.deepEqual(requestedInput.capabilityRequests, ['agent-run', 'extra-cap']);
+
+  // amendCapabilityRequests forwards to wire
+  await service.amendCapabilityRequests('enroll-1', ['agent-run', 'new-cap'], 'Added new-cap');
+  assert.deepEqual(amendedArgs, {
+    id: 'enroll-1',
+    requests: ['agent-run', 'new-cap'],
+    reason: 'Added new-cap',
+  });
+});

@@ -444,3 +444,84 @@ test('no route response exposes a public key, private key, credential, hostname,
     await runtime.api.close();
   }
 });
+
+
+test('#159: POST /api/environments/enrollments defaults capabilityRequests to agent-run and supports capability-requests amendment', async () => {
+  const runtime = await enrollmentApi();
+  try {
+    // 1. Create enrollment without capabilityRequests — must default to ['agent-run']
+    const createRes = await command(runtime.base, '/api/environments/enrollments', runtime, {
+      environmentInstanceId: 'mac-mini-1',
+      displayName: 'Default Mac',
+      platform: 'macos',
+    });
+    assert.equal(createRes.status, 201);
+    const createData = ((await createRes.json()) as { enrollment: any; claim?: { secret: string } });
+    const created = createData.enrollment;
+    assert.deepEqual(created.capabilityRequests, ['agent-run']);
+    assert.deepEqual(created.capabilityPermissions, { 'agent-run': false });
+    assert.ok(createData.claim?.secret);
+
+    // 2. Amend capability requests on the pending enrollment
+    const amendRes = await command(
+      runtime.base,
+      `/api/environments/enrollments/${created.id}/capability-requests`,
+      runtime,
+      {
+        capabilityRequests: ['agent-run', 'custom-inspection'],
+        reason: 'Operator requested inspection capability',
+      },
+    );
+    assert.equal(amendRes.status, 200);
+    const amended = ((await amendRes.json()) as { enrollment: any }).enrollment;
+    assert.deepEqual(amended.capabilityRequests, ['agent-run', 'custom-inspection']);
+    assert.deepEqual(amended.capabilityPermissions, {
+      'agent-run': false,
+      'custom-inspection': false,
+    });
+    assert.equal(amended.decisions.at(-1)?.kind, 'capability-requests-amended');
+    assert.match(amended.decisions.at(-1)?.reason ?? '', /Operator requested inspection capability/);
+
+    // 3. Malformed payload is rejected with 400
+    const badPayload = await command(
+      runtime.base,
+      `/api/environments/enrollments/${created.id}/capability-requests`,
+      runtime,
+      { capabilityRequests: 'not-an-array' },
+    );
+    assert.equal(badPayload.status, 400);
+
+    // 4. Host claims enrollment, Worker connects, human approves with agent-run granted
+    await runtime.enrollments.claimEnrollment(created.id, createData.claim!.secret);
+    const identity = workerIdentityFixture();
+    await command(runtime.base, `/api/environments/enrollments/${created.id}/connect`, runtime, {
+      proof: await proveWorker(runtime, identity),
+      connection: { state: 'online' },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2.1' },
+      engines: [],
+    });
+
+    const approveRes = await command(
+      runtime.base,
+      `/api/environments/enrollments/${created.id}/approve`,
+      runtime,
+      { capabilityPermissions: { 'agent-run': true } },
+    );
+    assert.equal(approveRes.status, 200);
+    const approved = ((await approveRes.json()) as { enrollment: any }).enrollment;
+    assert.equal(approved.status, 'approved');
+    assert.equal(approved.capabilityPermissions['agent-run'], true);
+    assert.equal(approved.capabilityPermissions['custom-inspection'], false);
+
+    // 5. Amending capability requests on an approved enrollment is refused (409)
+    const amendApproved = await command(
+      runtime.base,
+      `/api/environments/enrollments/${created.id}/capability-requests`,
+      runtime,
+      { capabilityRequests: ['agent-run'] },
+    );
+    assert.equal(amendApproved.status, 409);
+  } finally {
+    await runtime.api.close();
+  }
+});

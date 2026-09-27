@@ -1641,3 +1641,171 @@ test('Ticket #141 (b): stale cancel click in ceremony surfaces typed 409 refusal
     await cleanup();
   }
 });
+
+test('Ticket #159: Web-created enrollment carries default agent-run request, supports amendment, and preserves explicit approval', async () => {
+  const { dom, vite, cleanup } = await setupDom();
+  try {
+    const { createApp, ref, h } = await import('vue');
+    const { default: RegisterHostDialog } = (await vite.ssrLoadModule(
+      '/src/modules/environments/components/RegisterHostDialog.vue',
+    )) as { default: any };
+
+    let requestedEnrollmentInput: any = null;
+    let amendedCapabilitiesArgs: any = null;
+    let approvedPermissions: any = null;
+
+    const currentEnv: any = {
+      id: 'enroll-ticket-159',
+      displayName: 'Test Machine',
+      platform: 'macos',
+      enrollmentStatus: 'pending',
+      trafficLight: 'yellow',
+      trafficLightReason: 'Waiting for worker proof',
+      connectionState: 'never_connected',
+      connectionAgeSec: 0,
+      lastConfirmedTime: 'never',
+      protocolVersion: 'v2.1',
+      protocolCompatibility: 'compatible',
+      workSafety: 'clear',
+      capabilityPermissions: { 'agent-run': false },
+      requestedCapabilities: ['agent-run'],
+      engineReadiness: { codex: 'ready' },
+      probeHistory: [],
+      boundWorkspaces: [],
+      identityDigest: '',
+      claim: { issuedAt: Date.now(), expiresAt: Date.now() + 60000 },
+      decisions: [],
+    };
+
+    const mockService = {
+      supportsEvidenceReconciliation: false,
+      listEnvironments: async () => [{ ...currentEnv }],
+      getEnvironment: async () => ({ ...currentEnv, requestedCapabilities: [...currentEnv.requestedCapabilities] }),
+      getBootstrapCommand: () => 'sprout worker enroll ws://core:41000 enroll-ticket-159',
+      requestEnrollment: async (input: any) => {
+        requestedEnrollmentInput = input;
+        return {
+          enrollment: currentEnv,
+          bootstrapCommand: 'sprout worker enroll ws://core:41000 enroll-ticket-159',
+          claimSecret: 'claim-sec-159',
+          claimExpiresAt: Date.now() + 60000,
+        };
+      },
+      regenerateClaimSecret: async () => ({} as any),
+      cancelEnrollment: async () => {},
+      approveEnrollment: async (_id: string, perms: any) => {
+        approvedPermissions = perms;
+        currentEnv.enrollmentStatus = 'approved';
+      },
+      amendCapabilityRequests: async (id: string, requests: string[], reason?: string) => {
+        amendedCapabilitiesArgs = { id, requests, reason };
+        currentEnv.requestedCapabilities = requests;
+        for (const r of requests) {
+          if (currentEnv.capabilityPermissions[r] === undefined) {
+            currentEnv.capabilityPermissions[r] = false;
+          }
+        }
+      },
+      triggerProbe: async () => ({} as any),
+      togglePermission: async () => {},
+      unbindWorkspace: async () => {},
+      reconcileEvidence: async () => {},
+      resumeRecovery: async () => {},
+      discardRecovery: async () => {},
+      forceRelease: async () => {},
+      archiveEnvironment: async () => {},
+      restoreEnvironment: async () => {},
+      unenrollEnvironment: async () => {},
+    };
+
+    const doc = dom.window.document;
+    const container = doc.createElement('div');
+    doc.body.appendChild(container);
+
+    const isOpen = ref(true);
+
+    const app = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value,
+        service: mockService,
+      }),
+    });
+    app.mount(container);
+    await new Promise((r) => setTimeout(r, 80));
+
+    // 1. Initial Phase: Verify creation sends default capabilityRequests: ['agent-run']
+    const nameInput = doc.getElementById('register-host-name') as HTMLInputElement;
+    assert.ok(nameInput, 'Host name input found');
+    nameInput.value = 'New Agent Host';
+    nameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+
+    const beginBtn = doc.getElementById('btn-submit-registration') as HTMLButtonElement;
+    assert.ok(beginBtn, 'Begin Registration button found');
+    beginBtn.click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    assert.ok(requestedEnrollmentInput, 'requestEnrollment was called');
+    assert.deepEqual(requestedEnrollmentInput.capabilityRequests, ['agent-run'], 'creation requests agent-run by default');
+
+    // 2. Transition to review phase (host proves identity)
+    currentEnv.identityDigest = 'digest-proven-159';
+    // Reopen with initialEnrollmentId to enter review phase directly
+    app.unmount();
+    container.remove();
+
+    const reviewContainer = doc.createElement('div');
+    doc.body.appendChild(reviewContainer);
+
+    const reviewApp = createApp({
+      setup: () => () => h(RegisterHostDialog, {
+        open: isOpen.value,
+        service: mockService,
+        initialEnrollmentId: currentEnv.id,
+      }),
+    });
+    reviewApp.mount(reviewContainer);
+    await new Promise((r) => setTimeout(r, 120));
+
+    // 3. Verify agent-run capability checkbox is rendered and starts UNCHECKED (Never inherit a grant)
+    const agentRunCheckbox = doc.getElementById('perm-agent-run') as HTMLButtonElement | null;
+    assert.ok(agentRunCheckbox, 'perm-agent-run checkbox found in review phase');
+
+    // 4. Operator amends capability requests by adding 'custom-audit'
+    const amendInput = doc.getElementById('input-amend-capability') as HTMLInputElement | null;
+    const amendBtn = doc.getElementById('btn-amend-capability') as HTMLButtonElement | null;
+    assert.ok(amendInput, 'amend capability input found');
+    assert.ok(amendBtn, 'amend capability button found');
+
+    amendInput.value = 'custom-audit';
+    amendInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(amendBtn.disabled, false, 'amend capability button is enabled after typing');
+    amendBtn.click();
+    await new Promise((r) => setTimeout(r, 120));
+
+    assert.ok(amendedCapabilitiesArgs, 'amendCapabilityRequests was called on service');
+    assert.deepEqual(amendedCapabilitiesArgs.requests, ['agent-run', 'custom-audit']);
+
+    const customAuditCheckbox = doc.getElementById('perm-custom-audit') as HTMLButtonElement | null;
+    assert.ok(customAuditCheckbox, 'perm-custom-audit checkbox rendered after amendment');
+
+    // 5. Human explicitly checks agent-run, leaves custom-audit unchecked
+    agentRunCheckbox.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    // 6. Human clicks Approve
+    const approveBtn = doc.getElementById('btn-approve-enrollment') as HTMLButtonElement;
+    assert.ok(approveBtn, 'btn-approve-enrollment button found');
+    approveBtn.click();
+    await new Promise((r) => setTimeout(r, 100));
+
+    assert.ok(approvedPermissions, 'approveEnrollment was called');
+    assert.equal(approvedPermissions['agent-run'], true, 'agent-run was explicitly approved');
+    assert.equal(approvedPermissions['custom-audit'], false, 'unselected custom-audit was not granted');
+
+    reviewApp.unmount();
+    reviewContainer.remove();
+  } finally {
+    await cleanup();
+  }
+});
