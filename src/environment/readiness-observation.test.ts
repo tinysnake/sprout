@@ -38,6 +38,38 @@ async function issued(store: EnvironmentReadinessStore, result: unknown,
 
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  test(`${backend}: qualified Pi model requirements survive observation validation`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-pi-model-scope-'));
+    const store = backend === 'memory'
+      ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => {
+      if (store instanceof SqliteEnvironmentReadinessStore) store.close();
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 1 });
+    const requirements = readinessRequirements([{ engine: 'pi', workModel: 'deepseek/deepseek-flash' }]);
+    const revision = requirements.revisionsByEngine?.pi;
+    const result = {
+      protocolVersion: '3',
+      observedAt: 100,
+      engines: [{ engine: 'pi', installed: true as const, readiness: 'ready' as const,
+        modelAvailability: 'unknown' as const, models: [], authenticated: true,
+        modelIdPresent: true, targetModels: ['deepseek/deepseek-flash'],
+        ...(revision !== undefined ? { requirementRevision: revision } : {}) }],
+      probe: { at: 100, latencyMs: 5, protocolOk: true, enginesOk: true, source: 'worker' as const,
+        version: '0.87.1', summary: 'ready' },
+    };
+    const observation = await issued(store, result, {
+      environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 3 }, at: 100,
+      verifyAuthority: readinessAuthorityTestSeam.verify, requirements,
+    });
+    assert.ok(observation);
+    const pair = readReadinessObservation('env-1', observation, authority);
+    assert.ok(pair);
+    assert.equal(pair.readiness.engines[0]?.modelIdPresent, true);
+    assert.deepEqual(pair.requirements?.modelsByEngine?.pi, ['deepseek/deepseek-flash']);
+  });
   test(`#138 ${backend}: authorization is independent of Worker observations and revocation preserves only historical authorization`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-auth-evidence-'));
     const store = backend === 'memory' ? new InMemoryEnvironmentReadinessStore() :
