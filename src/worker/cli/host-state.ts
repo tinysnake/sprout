@@ -84,6 +84,7 @@ export type WorkerConnectionState =
   | 'stopped'
   | 'connecting'
   | 'connected'
+  | 'reconnecting'
   | 'pending-approval'
   | 'incompatible'
   | 'revoked';
@@ -457,7 +458,7 @@ function isWorkerProcessIdentity(value: unknown): value is WorkerProcessIdentity
 }
 
 function isConnectionState(value: string): value is WorkerConnectionState {
-  return ['stopped', 'connecting', 'connected', 'pending-approval', 'incompatible', 'revoked'].includes(value);
+  return ['stopped', 'connecting', 'connected', 'reconnecting', 'pending-approval', 'incompatible', 'revoked'].includes(value);
 }
 
 /** Remove the runtime state record. */

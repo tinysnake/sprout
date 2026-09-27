@@ -159,7 +159,7 @@ test('the real CLI enrolls, persists host state, reconnects, and serves the neut
         await worker.shutdown();
       },
     });
-    const startStatus = await startCli.run(['start']);
+    const startStatus = await startCli.run(['start', '--foreground']);
     assert.equal(startStatus, WORKER_EXIT.ok, err.join('\n'));
     assert.deepEqual(observed, {
       environmentInstanceId: 'mac-mini-e3',

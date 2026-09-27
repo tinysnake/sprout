@@ -73,9 +73,9 @@ test('the packaged start re-execs with an inspectable host-local process binding
     writeFileSync(join(state, 'identity.pem'), generateWorkerIdentity().privateKey);
     chmodSync(join(state, 'config.json'), 0o600);
     chmodSync(join(state, 'identity.pem'), 0o600);
-    const result = spawnSync(sproutExecutable, ['worker', 'start'], {
+    const result = spawnSync(sproutExecutable, ['worker', 'start', '--foreground'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents') },
+      env: { ...process.env, HOME: root, SPROUT_WORKER_HOME: state, SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'), SPROUT_WORKER_RECONNECT_MAX_MS: '2000' },
     });
     assert.equal(result.status, 1, result.stderr);
     assert.doesNotMatch(result.stderr, /could not establish a host-local Worker process identity/);
@@ -105,7 +105,7 @@ test('the packaged start produces a POSIX C start identity regardless of caller 
     writeFileSync(join(state, 'identity.pem'), generateWorkerIdentity().privateKey);
     chmodSync(join(state, 'config.json'), 0o600);
     chmodSync(join(state, 'identity.pem'), 0o600);
-    const result = spawnSync(sproutExecutable, ['worker', 'start'], {
+    const result = spawnSync(sproutExecutable, ['worker', 'start', '--foreground'], {
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -114,6 +114,7 @@ test('the packaged start produces a POSIX C start identity regardless of caller 
         SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'),
         LANG: 'zh_CN.UTF-8',
         LC_TIME: 'zh_CN.UTF-8',
+        SPROUT_WORKER_RECONNECT_MAX_MS: '2000',
       },
     });
     assert.equal(result.status, 1, result.stderr);
@@ -188,7 +189,7 @@ test('the rendered LaunchAgent is a valid property list according to plutil', { 
       renderLaunchAgent({
         label: workerServiceLabel('env-synthetic'),
         executablePath: sproutExecutable,
-        arguments: ['worker', 'start'],
+        arguments: ['worker', 'start', '--foreground'],
         logPath: join(root, 'worker.log'),
         environment: { HOME: root, PATH: '/usr/bin:/bin' },
       }),
@@ -205,7 +206,7 @@ test('the rendered LaunchAgent is a valid property list according to plutil', { 
     assert.equal(json['RunAtLoad'], true);
     assert.deepEqual(json['KeepAlive'], { SuccessfulExit: false });
     assert.equal(json['ThrottleInterval'], 10);
-    assert.deepEqual(json['ProgramArguments'], [sproutExecutable, 'worker', 'start']);
+    assert.deepEqual(json['ProgramArguments'], [sproutExecutable, 'worker', 'start', '--foreground']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

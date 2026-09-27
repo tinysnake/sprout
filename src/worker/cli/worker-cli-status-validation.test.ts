@@ -525,7 +525,7 @@ test('start reclaims lock and reconnects after genuine process death of previous
       epoch: 1,
     });
 
-    const status = await cli.run(['start']);
+    const status = await cli.run(['start', '--foreground']);
     assert.equal(status, WORKER_EXIT.ok);
     assert.equal(connectCalled, true, 'start must reconnect when previous holder is dead');
     assert.match(h.out.join('\n'), /Connected to Sprout as enrollment enroll-synthetic \(epoch 2\)/);

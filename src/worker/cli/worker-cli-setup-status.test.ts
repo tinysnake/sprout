@@ -187,9 +187,10 @@ test('install-service renders and installs a LaunchAgent; uninstall-service remo
       h.paths.launchAgentsDirectory,
       `${workerServiceLabel('env-synthetic')}.plist`,
     );
-    // The plist is written with owner-only permissions and names `worker start`.
+    // The plist is written with owner-only permissions and runs the
+    // foreground attempt, so launchd supervises the reconnect loop itself.
     assert.equal(statSync(plistPath).mode & 0o777, 0o600);
-    assert.match(readFileSync(plistPath, 'utf8'), /worker<\/string>/);
+    assert.match(readFileSync(plistPath, 'utf8'), /worker<\/string>\s*<string>start<\/string>\s*<string>--foreground<\/string>/);
     assert.equal(await cli.run(['uninstall-service']), WORKER_EXIT.ok);
     assert.equal(existsSync(plistPath), false);
     assert.ok(calls.some((call) => call.startsWith('launchctl bootout')));

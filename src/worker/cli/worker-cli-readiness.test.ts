@@ -516,10 +516,13 @@ test('createWorkerCli start serves foreground with registered readiness probe (#
   writePrivateFile(paths.identityPath, generateWorkerIdentity().privateKey);
 
   try {
-    // Run start without dependencies.serve; it will run serveForeground
-    const startPromise = cli.run(['start'], {
+    // Run start --foreground without dependencies.serve; it will run
+    // serveForeground. A short reconnect window turns the post-probe channel
+    // close into a bounded exit instead of an unbounded daemon retry.
+    const startPromise = cli.run(['start', '--foreground'], {
       PATH: '',
       SPROUT_CODEX_BIN: '/synthetic/codex',
+      SPROUT_WORKER_RECONNECT_MAX_MS: '300',
     });
 
     // Probe the foreground worker over clientTransport
@@ -532,9 +535,12 @@ test('createWorkerCli start serves foreground with registered readiness probe (#
     const codex = probeEngines.find((e) => e.engine === 'codex');
     assert.equal(codex?.version, '0.154.0');
 
-    // Close the connection stream so serveForeground exits cleanly
+    // Close the channel: serveForeground records the loss and the reconnect
+    // loop exits when the bounded window expires.
     connection.close();
-    assert.equal(await startPromise, WORKER_EXIT.ok);
+    const status = await startPromise;
+    assert.equal(status, WORKER_EXIT.failure);
+    assert.match(err.join('\n'), /unreachable for the whole reconnect window/);
   } finally {
     clientTransport.close();
     rmSync(root, { recursive: true, force: true });
