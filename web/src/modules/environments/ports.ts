@@ -19,6 +19,7 @@ export interface EnvironmentService {
     environmentInstanceId: string;
     displayName: string;
     platform?: string;
+    capabilityRequests?: readonly string[];
   }): Promise<{
     enrollment: EnvironmentInstance;
     claimSecret?: string | undefined;
@@ -34,6 +35,11 @@ export interface EnvironmentService {
     id: string,
     permissions: Record<string, boolean>,
     modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void>;
+  amendCapabilityRequests(
+    id: string,
+    capabilityRequests: readonly string[],
+    reason?: string,
   ): Promise<void>;
   triggerProbe(id: string): Promise<ProbeRecord>;
   togglePermission(id: string, cap: CapabilityKey): Promise<void>;

@@ -18,11 +18,15 @@
  * driven by `EnvironmentWorker` exactly as any carrier's stream is.
  */
 
-import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
 
-import { generateWorkerIdentity, signWorkerChallenge, validateWorkerIdentityPrivateKey } from '../environment/worker-proof.ts';
+import {
+  generateWorkerIdentity,
+  signWorkerChallenge,
+  validateWorkerIdentityPrivateKey,
+  workerPublicKey,
+} from '../environment/worker-proof.ts';
 import { isLoopbackAddress } from '../environment/worker-transport.ts';
 import type { WorkerEnrollmentTarget } from '../host-config.ts';
 import { defaultPrivateFileSecurityDependencies, privateFileRestriction, writePrivateFile, type PrivateFileSecurityDependencies } from './host-files.ts';
@@ -133,12 +137,7 @@ export function loadOrCreateWorkerIdentity(
   return { privateKey, generated: false };
 }
 
-/** Derive the SPKI public key for a host-local private key. */
-export function workerPublicKey(privateKeyPem: string): string {
-  return createPublicKey(createPrivateKey(privateKeyPem))
-    .export({ type: 'spki', format: 'pem' })
-    .toString();
-}
+export { workerPublicKey };
 
 /**
  * The URL this Worker dials, given its target host.
@@ -169,7 +168,11 @@ export async function connectWorkerEnrollment(
   const { WebSocket, createWebSocketStream } = await import('ws');
   const socket = new WebSocket(workerEnrollmentUrl(options.target));
   const stream = await new Promise<WorkerDuplex>((resolve, reject) => {
-    socket.on('open', () => resolve(createWebSocketStream(socket) as unknown as WorkerDuplex));
+    socket.on('open', () => {
+      const duplex = createWebSocketStream(socket) as unknown as WorkerDuplex;
+      socket.on('close', () => duplex.destroy());
+      resolve(duplex);
+    });
     socket.on('error', (error: Error) => reject(error));
   });  options.log?.(
     identity.generated
@@ -230,7 +233,10 @@ export async function connectWorkerEnrollment(
           environmentInstanceId: frame.environmentInstanceId,
           epoch: frame.epoch,
           connectionId: frame.connectionId,
-          close: () => socket.close(),
+          close: () => {
+            socket.terminate();
+            stream.destroy();
+          },
         };
       }
       // `worker/pending` is terminal for this attempt but not a refusal: the

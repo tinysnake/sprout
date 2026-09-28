@@ -33,7 +33,9 @@ import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
+import type { EngineAdapter } from '../../engine/port.ts';
 import { EnvironmentWorker, type EnvironmentWorkerOptions } from '../server.ts';
+import { WorkerRecoveryJournal } from '../recovery-journal.ts';
 import {
   WORKER_PROTOCOL_VERSION,
   type WorkerEngineReadinessFact,
@@ -70,6 +72,7 @@ import {
   removeFileIfPresent,
   removeHostState,
   stableSlug,
+  workerRecoveryJournalPath,
   workerServiceLabel,
   writeConfig,
   writeRuntimeState,
@@ -90,6 +93,12 @@ import {
   restartLaunchAgent,
   uninstallLaunchAgent,
 } from './launch-agent.ts';
+import {
+  inspectScheduledTask,
+  installScheduledTask,
+  startScheduledTask,
+  uninstallScheduledTask,
+} from './scheduled-task.ts';
 
 /** Documented process exit statuses for every `sprout worker` subcommand. */
 export const WORKER_EXIT = {
@@ -105,7 +114,7 @@ export const WORKER_EXIT = {
   refused: 4,
   /** The identity is proven but a Human has not approved it yet. */
   awaitingApproval: 5,
-  /** The LaunchAgent could not be installed, removed, or inspected. */
+  /** The LaunchAgent or Scheduled Task could not be installed, removed, or inspected. */
   serviceFailure: 6,
   /** Another Worker for this environment is already running. */
   alreadyRunning: 7,
@@ -175,7 +184,7 @@ export interface WorkerCliDependencies {
   readonly run?: (command: string, args: readonly string[]) => string;
   /** The signed-in user id whose `gui/<uid>` domain the LaunchAgent uses. */
   readonly uid?: number;
-  /** The host platform; service commands are macOS-only. */
+  /** The host platform; service commands are supported on macOS and Windows. */
   readonly platform?: NodeJS.Platform;
   readonly stdout?: (line: string) => void;
   readonly stderr?: (line: string) => void;
@@ -186,6 +195,12 @@ export interface WorkerCliDependencies {
   readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
   /** Seam for non-inference readiness probe options; test callers may supply custom runners or clocks. */
   readonly readinessProbeOptions?: ReadinessProbeOptions;
+  /** Optional abort signal to trigger graceful worker shutdown; used by tests. */
+  readonly signal?: AbortSignal;
+  /** Injectable engines for host-local Worker operation; tests may substitute hermetic adapters. */
+  readonly engines?: ReadonlyMap<string, EngineAdapter>;
+  /** Injectable readiness provider; tests may state verified facts without spawning CLI checks. */
+  readonly readiness?: () => WorkerReadinessFacts;
   /** The reconnect backoff sleep; injectable so tests run without real delays. */
   readonly sleep?: (ms: number) => Promise<void>;
   /**
@@ -200,6 +215,7 @@ export interface WorkerCliDependencies {
     connection: WorkerEnrollmentConnection;
     environmentInstanceId: string;
     engineIds: readonly string[];
+    identityKeyPath?: string;
   }) => Promise<'shutdown' | 'channel-closed' | void>;
 }
 
@@ -394,6 +410,9 @@ export interface CreateForegroundWorkerOptionsInput {
   readonly readinessProbeOptions?: ReadinessProbeOptions | undefined;
   /** Locate engine binaries on the host; tests may substitute a hermetic resolver. */
   readonly locate?: ((command: string, options: { readonly preferWindowsExecutable: boolean }) => string | undefined) | undefined;
+  readonly recoveryJournal?: WorkerRecoveryJournal | undefined;
+  readonly engines?: ReadonlyMap<string, EngineAdapter> | undefined;
+  readonly readiness?: (() => WorkerReadinessFacts) | undefined;
 }
 
 /**
@@ -419,7 +438,7 @@ export async function createForegroundWorkerOptions(
   const baseFacts = hostEngineFacts(configuration);
   const facts = input.locate !== undefined ? { ...baseFacts, locate: input.locate } : baseFacts;
   const engineConfigurations = describeEnvironmentWorkerEngines(facts);
-  const engines = createEnvironmentWorkerEngines(facts);
+  const engines = input.engines ?? createEnvironmentWorkerEngines(facts);
 
   const probeOptions: ReadinessProbeOptions = {
     ...(environment !== undefined ? { env: environment } : {}),
@@ -497,8 +516,9 @@ export async function createForegroundWorkerOptions(
     input: inputStream,
     output: outputStream,
     ...(input.onLog !== undefined ? { onLog: input.onLog } : {}),
+    ...(input.recoveryJournal !== undefined ? { recoveryJournal: input.recoveryJournal } : {}),
     workspaceRoot: configuration.workspaceRoot,
-    readiness: () => workerReadiness,
+    readiness: input.readiness ?? (() => workerReadiness),
     readinessProbe: (params) => runProbe(params),
   };
 }
@@ -630,12 +650,15 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       '  status                              Report host-local Worker state',
       '  stop                                Signal the running Worker daemon to stop',
       '  reset                               Remove host-local identity and configuration',
-      '  install-service                     Install the signed-in-user LaunchAgent',
-      '  uninstall-service                   Remove the signed-in-user LaunchAgent',
+      '  install-service                     Install the signed-in-user service (LaunchAgent or Scheduled Task)',
+      '  uninstall-service                   Remove the signed-in-user service (LaunchAgent or Scheduled Task)',
     ].join('\n');
   }
 
   function resolveEngineIds(environment: NodeJS.ProcessEnv): readonly string[] {
+    if (dependencies.engines !== undefined) {
+      return [...dependencies.engines.keys()];
+    }
     const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
     return [...createEnvironmentWorkerEngines(hostEngineFacts(configuration)).keys()];
   }
@@ -872,7 +895,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       // A stop can arrive while the loop is still retrying. Record a clean
       // stop and release the lock instead of leaving a stale lock directory
       // and a `reconnecting` record for the next start to recover.
-      let stopRequested = false;
+      let stopRequested = dependencies.signal?.aborted ?? false;
       let wakeBackoff: (() => void) | undefined;
       const onSignal = (): void => {
         stopRequested = true;
@@ -880,13 +903,16 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       };
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      dependencies.signal?.addEventListener('abort', onSignal, { once: true });
       detachSignals = () => {
         process.removeListener('SIGINT', onSignal);
         process.removeListener('SIGTERM', onSignal);
+        dependencies.signal?.removeEventListener('abort', onSignal);
       };
       // The backoff races the injected sleep against the wake-up from a stop,
       // so `stop` does not wait out the current retry delay.
       const backoff = async (ms: number): Promise<void> => {
+        if (stopRequested) return;
         let wake: () => void = () => {};
         const woken = new Promise<void>((resolve) => { wake = resolve; });
         wakeBackoff = wake;
@@ -959,15 +985,32 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           let reason: 'shutdown' | 'channel-closed';
           try {
             if (dependencies.serve !== undefined) {
-              reason = (await dependencies.serve({ connection, environmentInstanceId: config.environmentInstanceId, engineIds })) ?? 'shutdown';
+              reason = (await dependencies.serve({
+                connection,
+                environmentInstanceId: config.environmentInstanceId,
+                engineIds,
+                identityKeyPath: identityPath,
+              })) ?? 'shutdown';
             } else {
-              reason = await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
+              reason = await serveForeground(
+                connection,
+                config.environmentInstanceId,
+                engineIds,
+                environment,
+                identityPath,
+              );
             }
           } finally {
             lockHeld = true;
           }
-          if (reason === 'shutdown') {
-            recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now() });
+          if (stopRequested || reason === 'shutdown') {
+            recordState(paths, {
+              pid: process.pid,
+              process: processIdentity,
+              state: 'stopped',
+              at: now(),
+              ...(stopRequested ? { detail: 'the Worker was stopped by the operator' } : {}),
+            });
             lock.release();
             return WORKER_EXIT.ok;
           }
@@ -1002,31 +1045,48 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     environmentInstanceId: string,
     engineIds: readonly string[],
     environment: NodeJS.ProcessEnv,
+    identityKeyPath: string,
   ): Promise<'shutdown' | 'channel-closed'> {
+    const recoveryJournal = new WorkerRecoveryJournal(workerRecoveryJournalPath(identityKeyPath), connection.epoch);
     const options = await createForegroundWorkerOptions({
       stream: connection.stream,
       environmentInstanceId,
       engineIds,
       environment,
+      recoveryJournal,
+      ...(dependencies.engines !== undefined ? { engines: dependencies.engines } : {}),
+      ...(dependencies.readiness !== undefined ? { readiness: dependencies.readiness } : {}),
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
       readinessProbeOptions: dependencies.readinessProbeOptions,
     });
     const worker = new EnvironmentWorker(options);
     return new Promise<'shutdown' | 'channel-closed'>((resolve) => {
       let reason: 'shutdown' | 'channel-closed' = 'channel-closed';
+      let resolved = false;
       const cleanUpAndResolve = (): void => {
+        if (resolved) return;
+        resolved = true;
         process.removeListener('SIGINT', stop);
         process.removeListener('SIGTERM', stop);
+        dependencies.signal?.removeEventListener('abort', stop);
         resolve(reason);
       };
       const stop = (): void => {
         reason = 'shutdown';
+        connection.close();
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       };
+      if (dependencies.signal?.aborted) {
+        stop();
+      } else {
+        dependencies.signal?.addEventListener('abort', stop, { once: true });
+      }
       connection.stream.on('close', () => {
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       });
-      connection.stream.on('error', () => cleanUpAndResolve());
+      connection.stream.on('error', () => {
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      });
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     });
@@ -1049,19 +1109,34 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         configError = error instanceof WorkerHostStateError ? error.reason : 'invalid';
       }
     }
-    const serviceInstalled =
-      config !== undefined && existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
-    // "Cleanly inspected": report whether launchd actually has the job loaded,
-    // not merely whether a plist is on disk.
-    const serviceLoaded =
-      serviceInstalled &&
-      config !== undefined &&
-      platform === 'darwin' &&
-      inspectLaunchAgent({
-        label: workerServiceLabel(config.environmentInstanceId),
-        uid,
-        ...(runCommand !== undefined ? { run: runCommand } : {}),
-      }) !== undefined;
+    let serviceInstalled = false;
+    let serviceLoaded = false;
+    let serviceInspectionFailed = false;
+    let serviceInspectionError: unknown;
+    if (config !== undefined) {
+      if (platform === 'darwin') {
+        serviceInstalled = existsSync(launchAgentPlistPath(paths, config.environmentInstanceId));
+        serviceLoaded =
+          serviceInstalled &&
+          inspectLaunchAgent({
+            label: workerServiceLabel(config.environmentInstanceId),
+            uid,
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          }) !== undefined;
+      } else if (platform === 'win32') {
+        try {
+          const task = inspectScheduledTask({
+            taskName: workerServiceLabel(config.environmentInstanceId),
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          });
+          serviceInstalled = task !== undefined;
+          serviceLoaded = task !== undefined && task.enabled;
+        } catch (error) {
+          serviceInspectionFailed = true;
+          serviceInspectionError = error;
+        }
+      }
+    }
     // A runtime record that is present but malformed is a local configuration
     // failure, not a healthy stopped state.
     let runtime: WorkerRuntimeState | undefined;
@@ -1114,14 +1189,29 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     out(`state: ${projected.state}`);
     if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);
     if (projected.protocolVersion !== undefined) out(`protocol: ${projected.protocolVersion}`);
-    out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
-    if (projected.detail !== undefined) out(`detail: ${projected.detail}`);
+    if (serviceInspectionFailed) {
+      out('service: failed');
+    } else {
+      out(`service: ${serviceInstalled ? (serviceLoaded ? 'installed and loaded' : 'installed but not loaded') : 'not-installed'}`);
+    }
+    // The raw exception text can carry host paths, host names, or command
+    // output, so it never crosses the CLI boundary; only the bounded fallback
+    // from the shared diagnostic allowlist is emitted.
+    const detail =
+      projected.detail ??
+      (serviceInspectionFailed
+        ? diagnosticOf(serviceInspectionError, 'the Scheduled Task could not be inspected')
+        : undefined);
+    if (detail !== undefined) out(`detail: ${detail}`);
     switch (projected.state) {
       case 'not-enrolled':
         return WORKER_EXIT.notEnrolled;
       case 'local-configuration-failure':
         return WORKER_EXIT.failure;
       default:
+        if (serviceInspectionFailed) {
+          return WORKER_EXIT.serviceFailure;
+        }
         return WORKER_EXIT.ok;
     }
   }
@@ -1159,8 +1249,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     try {
       // Stop the supervised service before the identity disappears, and refuse
       // the reset when the service cannot be proven unloaded: a loaded
-      // LaunchAgent would restart against a half-removed state.
-      if (platform === 'darwin') {
+      // service would restart against a half-removed state.
+      if (platform === 'darwin' || platform === 'win32') {
         const command = runCommand ?? realCommandRunner();
         let config: WorkerHostConfig;
         try {
@@ -1174,9 +1264,14 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         }
         const label = workerServiceLabel(config.environmentInstanceId);
         try {
-          uninstallLaunchAgent({ label, plistPath: launchAgentPlistPath(paths, config.environmentInstanceId), uid, run: command });
+          if (platform === 'darwin') {
+            uninstallLaunchAgent({ label, plistPath: launchAgentPlistPath(paths, config.environmentInstanceId), uid, run: command });
+          } else {
+            uninstallScheduledTask({ taskName: label, run: command });
+          }
         } catch (error) {
-          err(`sprout worker reset: the LaunchAgent could not be removed; host-local state was left untouched (${diagnosticOf(error, 'the exact environment service could not be unloaded')})`);
+          const serviceName = platform === 'darwin' ? 'the LaunchAgent' : 'the Scheduled Task';
+          err(`sprout worker reset: ${serviceName} could not be removed; host-local state was left untouched (${diagnosticOf(error, 'the exact environment service could not be unloaded')})`);
           return WORKER_EXIT.serviceFailure;
         }
       }
@@ -1243,8 +1338,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker install-service: takes no arguments');
       return WORKER_EXIT.usage;
     }
-    if (platform !== 'darwin') {
-      err('sprout worker install-service: the LaunchAgent lifecycle is only supported on macOS');
+    if (platform !== 'darwin' && platform !== 'win32') {
+      err('sprout worker install-service: service registration is only supported on macOS (LaunchAgent) and Windows (Scheduled Task)');
       return WORKER_EXIT.serviceFailure;
     }
     let config: WorkerHostConfig;
@@ -1259,6 +1354,29 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       return WORKER_EXIT.failure;
     }
     const label = workerServiceLabel(config.environmentInstanceId);
+    if (platform === 'win32') {
+      try {
+        installScheduledTask({
+          paths,
+          taskName: label,
+          arguments: ['worker', 'start', '--foreground'],
+          ...(runCommand !== undefined ? { run: runCommand } : {}),
+        });
+        try {
+          startScheduledTask({
+            taskName: label,
+            ...(runCommand !== undefined ? { run: runCommand } : {}),
+          });
+        } catch {
+          // Starting immediately is best-effort on install
+        }
+        out(`Installed Scheduled Task ${label}. It starts at sign-in and restarts after an unexpected exit.`);
+        return WORKER_EXIT.ok;
+      } catch (error) {
+        err(`sprout worker install-service: ${diagnosticOf(error, 'the Scheduled Task could not be installed')}`);
+        return WORKER_EXIT.serviceFailure;
+      }
+    }
     const plistPath = launchAgentPlistPath(paths, config.environmentInstanceId);
     const plist = renderLaunchAgent({
       label,
@@ -1299,8 +1417,8 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       err('sprout worker uninstall-service: takes no arguments');
       return WORKER_EXIT.usage;
     }
-    if (platform !== 'darwin') {
-      err('sprout worker uninstall-service: the LaunchAgent lifecycle is only supported on macOS');
+    if (platform !== 'darwin' && platform !== 'win32') {
+      err('sprout worker uninstall-service: service registration is only supported on macOS (LaunchAgent) and Windows (Scheduled Task)');
       return WORKER_EXIT.serviceFailure;
     }
     let config: WorkerHostConfig | undefined;
@@ -1316,6 +1434,19 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       return WORKER_EXIT.notEnrolled;
     }
     const label = workerServiceLabel(config.environmentInstanceId);
+    if (platform === 'win32') {
+      try {
+        const result = uninstallScheduledTask({
+          taskName: label,
+          ...(runCommand !== undefined ? { run: runCommand } : {}),
+        });
+        out(result.removed ? `Removed Scheduled Task ${label}.` : `Scheduled Task ${label} was not installed.`);
+        return WORKER_EXIT.ok;
+      } catch (error) {
+        err(`sprout worker uninstall-service: ${diagnosticOf(error, 'the Scheduled Task could not be removed')}`);
+        return WORKER_EXIT.serviceFailure;
+      }
+    }
     try {
       const result = uninstallLaunchAgent({
         label,
@@ -1350,7 +1481,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   /** The real host command runner, used only when no test seam was injected. */
   function realCommandRunner(): (command: string, args: readonly string[]) => string {
     return (command, args) =>
-      execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   }
 
   return { run };

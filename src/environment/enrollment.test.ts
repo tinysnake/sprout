@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  amendCapabilityRequests,
   approveEnrollment,
   cancelEnrollment,
   createPendingEnrollment,
@@ -343,4 +344,66 @@ test('#138: Human approval records model authorizations, revocation clears them'
   // Reset also clears model authorizations
   const reset = resetEnrollment(approved, 4_000, 'Reset environment');
   assert.deepEqual(reset.modelAuthorizations, []);
+});
+
+test('#159: amendCapabilityRequests updates requests, records decision, and never auto-grants', () => {
+  const enrollment = pending({ capabilityRequests: ['agent-run'] });
+  assert.deepEqual(enrollment.worker.capabilityRequests, ['agent-run']);
+  assert.deepEqual(enrollment.capabilityPermissions, { 'agent-run': false });
+
+  // Amend capability requests to include a new capability
+  const amended = amendCapabilityRequests(
+    enrollment,
+    ['agent-run', 'process-execution'],
+    1_500,
+    'Operator requested process-execution',
+  );
+
+  assert.equal(amended.status, 'pending');
+  assert.deepEqual(amended.worker.capabilityRequests, ['agent-run', 'process-execution']);
+  // Newly added capability starts denied (false) — no auto-grant (ADR-0008)
+  assert.deepEqual(amended.capabilityPermissions, {
+    'agent-run': false,
+    'process-execution': false,
+  });
+  assert.equal(amended.decisions.at(-1)?.kind, 'capability-requests-amended');
+  assert.equal(amended.decisions.at(-1)?.actor, 'operator');
+  assert.match(amended.decisions.at(-1)?.reason ?? '', /Operator requested process-execution/);
+  assert.equal(amended.revision, enrollment.revision + 1);
+
+  // Subsequent approval permits explicit grant of the newly amended capability
+  const approved = approveEnrollment(amended, {
+    capabilityPermissions: { 'agent-run': true, 'process-execution': true },
+    at: 2_000,
+    actor: 'operator',
+  });
+  assert.equal(approved.status, 'approved');
+  assert.equal(approved.capabilityPermissions['agent-run'], true);
+  assert.equal(approved.capabilityPermissions['process-execution'], true);
+
+  // Amending on non-pending or revoked enrollment is refused
+  assert.throws(
+    () => amendCapabilityRequests(approved, ['agent-run'], 2_500),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'not-pending',
+  );
+
+  const revoked = revokeEnrollment(approved, 3_000, 'Revoked');
+  assert.throws(
+    () => amendCapabilityRequests(revoked, ['agent-run'], 3_500),
+    (error: unknown) => error instanceof EnrollmentError && error.code === 'revoked-enrollment',
+  );
+});
+
+test('#159: amendCapabilityRequests sanitizes capability names and deduplicates', () => {
+  const enrollment = pending({ capabilityRequests: [] });
+  const amended = amendCapabilityRequests(
+    enrollment,
+    ['agent-run', 'agent-run', '  custom-cap  '],
+    1_500,
+  );
+  assert.deepEqual(amended.worker.capabilityRequests, ['agent-run', 'custom-cap']);
+  assert.deepEqual(amended.capabilityPermissions, {
+    'agent-run': false,
+    'custom-cap': false,
+  });
 });

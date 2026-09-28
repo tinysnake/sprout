@@ -94,10 +94,13 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
             error: 'environmentInstanceId, displayName, and platform are required',
           });
         }
-        const capabilityRequests = stringArray(body, 'capabilityRequests');
-        if (capabilityRequests === undefined) {
+        const rawCapabilityRequests = stringArray(body, 'capabilityRequests');
+        if (rawCapabilityRequests === undefined) {
           return json(context, 400, { error: 'capabilityRequests must be an array of strings' });
         }
+        // Default capabilityRequests to ['agent-run'] when omitted (#159)
+        const capabilityRequests =
+          body['capabilityRequests'] === undefined ? ['agent-run'] : rawCapabilityRequests;
         const engines = parseEngineFacts(body['engines']);
         if (engines === 'invalid') {
           return json(context, 400, { error: 'engines must be an array of engine facts' });
@@ -338,6 +341,32 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
         try {
           const updated = await enrollments.setCapabilityPermission(segments[3] ?? '', capability, allowed);
+          return json(context, 200, { enrollment: toEnrollmentView(updated) });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
+      // POST /api/environments/enrollments/:id/capability-requests — amend capability requests (#159).
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'capability-requests'
+      ) {
+        const body = await context.readBody();
+        const capabilityRequests = stringArray(body, 'capabilityRequests');
+        if (capabilityRequests === undefined) {
+          return json(context, 400, { error: 'capabilityRequests must be an array of strings' });
+        }
+        try {
+          const updated = await enrollments.amendCapabilityRequests(
+            segments[3] ?? '',
+            capabilityRequests,
+            stringField(body, 'reason'),
+          );
           return json(context, 200, { enrollment: toEnrollmentView(updated) });
         } catch (error) {
           return enrollmentFailure(context, error);

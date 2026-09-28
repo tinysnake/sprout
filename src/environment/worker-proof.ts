@@ -190,6 +190,13 @@ export function generateWorkerIdentity(): { readonly publicKey: string; readonly
   };
 }
 
+/** Derive the SPKI public key for a host-local private key. */
+export function workerPublicKey(privateKeyPem: string): string {
+  return createPublicKey(createPrivateKey(privateKeyPem))
+    .export({ type: 'spki', format: 'pem' })
+    .toString();
+}
+
 /** Validate the exact host identity key format before it is reused. */
 export function validateWorkerIdentityPrivateKey(privateKeyPem: string): void {
   try {

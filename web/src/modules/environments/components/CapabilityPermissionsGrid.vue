@@ -13,6 +13,7 @@ const emit = defineEmits<{
 }>();
 
 function capabilityLabel(cap: string): string {
+  if (cap === 'agent-run') return 'Agent Run';
   if (cap === 'fileReadWrite') return 'File R/W';
   if (cap === 'processExecution') return 'Process Exec';
   if (cap === 'networkAccess') return 'Network';
@@ -27,7 +28,7 @@ function capabilityLabel(cap: string): string {
  * Refused, because an ungranted permission grants nothing.
  */
 const capabilityRows = computed(() => {
-  const canonical = ['fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'].filter(
+  const canonical = ['agent-run', 'fileReadWrite', 'processExecution', 'networkAccess', 'guiAutomation'].filter(
     (cap) => cap in props.permissions,
   );
   const declared = Object.keys(props.permissions).filter((cap) => !canonical.includes(cap));

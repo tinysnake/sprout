@@ -88,11 +88,9 @@ option `{engine: pi, workModel: <provider>/<model>, configurationVersion: 5}`.
 These are the honest boundaries of this evidence; none of them is claimed as
 passing:
 
-1. **`install-service` / `uninstall-service` is macOS-only.** The Windows
-   Worker ran under a Scheduled Task the *operator registered manually*. The
-   product CLI refuses `install-service` off macOS, so #122's acceptance item
-   for a product-managed logon-triggered Scheduled Task is **not yet evidenced**
-   by this journey.
+1. **`install-service` / `uninstall-service` on Windows (resolved in #164).**
+   Previously macOS-only; #164 delivered and live-verified the product-managed
+   logon Scheduled Task lifecycle on the Windows 11 host (see #164 addendum below).
 2. **Sleep / logoff / logon transitions were not exercised.** Only Scheduled
    Task stop/start and forced process-kill cycles were, so the offline /
    reconnecting / recovery behavior across a real logon cycle and sleep is
@@ -120,3 +118,207 @@ passing:
 - macOS counterpart: `live-macos-enrollment-to-run.md`
 - ADRs: ADR-0012 (enrollment-backed Worker channel), ADR-0013 (non-inference
   readiness), ADR-0008/ADR-0009 (Windows 11 floor, signed-in-user boundary)
+
+## #164 addendum: product-managed Windows Scheduled Task service registration
+
+On the live Windows 11 host (`Microsoft Windows NT 10.0.26200.0`, PowerShell 7.6.6, Node v24.21.0), verified the product-managed Scheduled Task lifecycle delivered in #164.
+
+### Commands and live observations (sanitized)
+
+1. **Install service**:
+   ```sh
+   sprout worker install-service
+   ```
+   Output:
+   ```text
+   Installed Scheduled Task dev.sprout.worker.<hash>. It starts at sign-in and restarts after an unexpected exit.
+   ```
+   Exit code: 0.
+
+2. **Verify Scheduled Task properties and logon trigger**:
+   Queried Task Scheduler via `Get-ScheduledTask -TaskName dev.sprout.worker.<hash>`:
+   ```json
+   {
+       "TaskName": "dev.sprout.worker.<hash>",
+       "State": "Running",
+       "TriggerType": "MSFT_TaskLogonTrigger",
+       "TriggerUser": "<domain>\\<user>",
+       "ActionExecute": "C:\\Program Files\\nodejs\\node.exe",
+       "ActionArguments": "\"C:\\<repo-path>\\bin\\sprout\" worker start --foreground",
+       "ActionWorkingDir": "C:\\Users\\<user>",
+       "RestartCount": 3,
+       "RestartInterval": "PT1M",
+       "StartWhenAvailable": true,
+       "ExecutionTimeLimit": "PT0S",
+       "DisallowStartIfOnBatteries": false,
+       "StopIfGoingOnBatteries": false
+   }
+   ```
+   Verified:
+   - Supervised process runs the foreground reconnect loop: `worker start --foreground` (no identity secrets or claim material in argv/action).
+   - Logon trigger (`-AtLogOn`) bound to the signed-in interactive user session (`<domain>\<user>`).
+   - Settings specify `RestartCount: 3`, `RestartInterval: PT1M` (1 minute), `StartWhenAvailable: true`, and `ExecutionTimeLimit: PT0S` (unbounded execution time).
+   - Battery-run policy configured (`DisallowStartIfOnBatteries: false`, `StopIfGoingOnBatteries: false`).
+
+3. **Check status projection**:
+   ```sh
+   sprout worker status
+   ```
+   Output:
+   ```text
+   state: connected
+   epoch: <epoch>
+   protocol: 3
+   service: installed and loaded
+   ```
+   Exit code: 0. Truthfully reports `state: connected` with active gateway connection epoch and `service: installed and loaded`.
+
+4. **Forced process kill and recovery**:
+   Killed the active worker process (`taskkill /F /PID <pid>`).
+   Immediate status query:
+   ```text
+   state: stopped
+   protocol: 3
+   service: installed and loaded
+   ```
+   Task Scheduler `schtasks /Run /TN dev.sprout.worker.<hash>` cycle re-invoked the action; the Worker reconnected outbound to Sprout Gateway with a fresh epoch (`epoch: <epoch+1>`), and status returned to:
+   ```text
+   state: connected
+   epoch: <epoch+1>
+   protocol: 3
+   service: installed and loaded
+   ```
+
+5. **Uninstall service**:
+   ```sh
+   sprout worker uninstall-service
+   ```
+   Output:
+   ```text
+   Removed Scheduled Task dev.sprout.worker.<hash>.
+   ```
+   Exit code: 0.
+   Task absent from Task Scheduler (`Get-ScheduledTask` returns empty).
+   Follow-up `status` query reports:
+   ```text
+   state: stopped
+   protocol: 3
+   service: not-installed
+   ```
+   A repeated `uninstall-service` reports honestly:
+   ```text
+   Scheduled Task dev.sprout.worker.<hash> was not installed.
+   ```
+   Exit code: 0.
+
+## Session-lifecycle and parity addendum (rounds 2–3: #159, #164, #165, #166, #167, #168)
+
+This addendum records the live evidence that closed the original journey's
+session-lifecycle limitations. Integration merges: `9042530a` (#159),
+`bb33978e` (#166), `766d3858` (#167); full suite `1549 passed / 0 failed` with
+`npm run typecheck` clean at the integration head. The deployed build on
+`<windows-host>` was verified by content hash of the changed modules.
+
+### Sleep — true S4 hibernation
+
+- Early suspension attempts bounced within seconds (device wake-armed); a real
+  S4 sleep via `shutdown /h` produced a sustained unreachability window of
+  roughly ten minutes against probes, with paired kernel sleep/resume events
+  (resume markers `42`/`107`, wake-timer restoration, and a clock-resync
+  `Kernel-General` entry on resume).
+- An in-flight run froze for **86 seconds** across the S4 boundary
+  (journal iterations `…:42` → `…:08+86s`) and then continued to completion —
+  **no replay, no duplicate turns**; the lease stayed `active` with no
+  reassignment (no sweeper ran, so nothing unsafe could occur).
+- The Worker channel survived the S4 cycle on the same socket and epoch. The
+  core showed stale-`online` during the freeze: the gateway has **no
+  heartbeat/keepalive**, so silence alone never flips the connection state —
+  recorded as a known behavior, not claimed as passing.
+
+### Scheduled Task restart and forced kill
+
+- At a 1-second sampling cadence: `schtasks /End` → `never-connected`/red
+  within 1–2 s (fail-closed `stopped` local state per #166); `schtasks /Run` →
+  `online`/green within 1–4 s; a forced `taskkill /F` produced the same
+  fail-closed transition, task `Ready` (no auto-restart), and reconnection
+  within seconds of the next `/Run`. Epochs advanced across every reconnect.
+- Observed task results: `0x4` (`refused`), `0x40010004`
+  (`SCHED_S_TASK_TERMINATED`, session end), `0x41301` (`SCHED_S_TASK_RUNNING`
+  while alive). No exit `13` occurred after #167's connector fix.
+
+### Recovery journal: defect #167 and its live proof
+
+- Before the fix, recovery `recovery-mu…` stayed `phase: recovery` /
+  `evidenceSynchronized: false` for over twelve hours (channel-lost cause,
+  interrupted decisions repeating) because the product foreground serve path
+  never built the `WorkerRecoveryJournal`.
+- On the first reconnect with the fixed build: `phase: resolved`,
+  `evidenceSynchronized: true`, `unresolvedFacts: []`, turn settlement and
+  engine-session stop observed, `workSafety` back to `held`, readiness
+  `online`/`green`. This is the pre-/post-fix contrast that closes #122's
+  retained-evidence reconciliation parity item.
+
+### Supersession and remote close: defect #168 and its live proof
+
+- A same-identity competing connection was accepted at a newer epoch; the
+  gateway closed the product channel, and the product Worker **recorded
+  `reconnecting` and re-dialed to a new epoch** instead of dying: a 400 ms
+  local-status poll captured `connected → reconnecting (~2 s) → connected
+  (new epoch)` twice, with the competing connection closed `{"closed":true}`
+  by the newer epoch each time; the task remained running throughout
+  (`0x41301`).
+- The pre-fix non-settling behavior reproduces deterministically: with only
+  the connector change reverted to the pre-#167 content, the focused recovery
+  suite fails with `timed out waiting for retained Worker settlement…` /
+  `timed out waiting for idle Task recovery reached resolved phase`; with the
+  fix in place the full suite is `1549/0`. (The revert was restored
+  immediately; the worktree was left clean.)
+
+### Logoff → logon cycle
+
+- `logoff` ended the interactive session hosting the Worker: the process was
+  gone within a second, the core flipped `online` → `never-connected`/red
+  ("Lease recovery is required") within 1 s, `workSafety` entered
+  `recovery`, and the task reported `0x40010004` then `Ready`. No lease
+  reassignment occurred during the outage.
+- A fresh interactive logon fired the task's `MSFT_TaskLogonTrigger`: the task
+  entered `Running`, the Worker connected at a **new epoch**, and the core
+  returned to `online`/`green` with `workSafety: held` and every recovery
+  record `resolved` — the logon-opened recovery auto-resolved.
+
+### Revocation finale (macOS parity)
+
+- `POST …/revoke` returned `status: revoked`; the local CLI reported
+  `state: revoked` with `the Worker enrollment was refused` (task result
+  `0x4`); the core readiness reported `never-connected`/red with
+  `Enrollment is revoked; a fresh reset and Human approval are required.`
+  — byte-for-byte parity with `live-macos-enrollment-to-run.md`.
+- The protection record opened at revocation remained `recovery` with the
+  lease held: after revocation nothing may reconnect, so the state stays
+  protected until a fresh reset and Human approval, and no automatic
+  reassignment is possible. State, identity, and config under
+  `%USERPROFILE%\.sprout\worker\` were preserved.
+
+### Runs across the cycles
+
+- Two real runs bracketing the sleep/restart cycles completed and settled
+  (`run-mu…` with 60 journal lines across the 6-second sleep attempt, and
+  40 lines across the 86-second S4 freeze), single-attempt, **no replay**.
+
+### Updated limitations
+
+1. `install-service`/`uninstall-service`: **resolved in #164** (see that
+   addendum; the original limitation above is retained as history).
+2. Sleep / logoff / logon: **resolved by this addendum** (both exercised
+   live, with no unsafe lease reassignment and no automatic run replay).
+3. Capability/model authorization: **resolved by #159 plus the shipped
+   claim/approve flow** — round 2 rotated the session through reset → claim →
+   approve with model authorizations over the product surfaces only, with no
+   runtime JSON edit.
+4. **#162 remains open** (stale catalog projection and terminal-Task recovery
+   deadlock were resolved out of band on the review instance).
+5. The single-host limit stands: one Windows 11 host, one review instance.
+6. New honest notes: no gateway heartbeat (stale-`online` under silence);
+   the first sleep attempts bounce on wake-armed devices; the local runtime
+   record is not rewritten when a session kill ends the process, so
+   core-side state is authoritative for that window.
