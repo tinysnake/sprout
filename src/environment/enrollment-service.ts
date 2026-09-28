@@ -628,6 +628,10 @@ export class EnvironmentEnrollmentService {
     // Record the full current decision set, exactly as approval does: the
     // readiness document carries one complete authorization snapshot per engine,
     // so a partial write would drop the grants for other models or engines.
+    // Re-read first: a revoke/reset can land after the CAS write, and a revoked
+    // enrollment must never receive fresh entitlement evidence.
+    const durable = await this.#requireEnrollment(enrollment.id);
+    if (durable.status !== 'approved') return durable;
     const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
     await this.#readiness.recordModelAuthorizations(
       enrollment.environmentInstanceId,
