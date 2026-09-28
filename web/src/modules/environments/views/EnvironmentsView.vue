@@ -200,6 +200,14 @@ async function handleTogglePermission(cap: any) {
   await runControl((service) => service.togglePermission(env.id, cap));
 }
 
+/**
+ * Record the Human's post-approval model authorization (#172), so an Agent that
+ * gained a work model after approval can become available without a reset.
+ */
+async function handleAuthorizeModels(payload: { id: string; modelAuthorizations: Record<string, readonly string[]> }) {
+  await runControl((service) => service.authorizeModelEnrollments(payload.id, payload.modelAuthorizations));
+}
+
 async function handleUnbindWorkspace(payload: { projectId: string; envId: string }) {
   await runControl((service) => service.unbindWorkspace(payload.projectId, payload.envId));
 }
@@ -445,6 +453,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :can-reconcile="canReconcileEvidence"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
+              @authorize-models="handleAuthorizeModels"
               @unbind-workspace="handleUnbindWorkspace"
               @reconcile="handleReconcile"
               @resume="handleResume"
@@ -472,6 +481,7 @@ const canReconcileEvidence = computed(() => activeService.value?.supportsEvidenc
               :can-reconcile="canReconcileEvidence"
               @probe="handleProbe"
               @toggle-permission="handleTogglePermission"
+              @authorize-models="handleAuthorizeModels"
               @unbind-workspace="handleUnbindWorkspace"
               @reconcile="handleReconcile"
               @resume="handleResume"
