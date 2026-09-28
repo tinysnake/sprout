@@ -22,6 +22,30 @@ import type { TaskContextMaterialization } from '../worker/protocol.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
 
+/** Why one Task recovery request cannot apply (#171). */
+export type TaskRecoveryRefusalCode =
+  | 'not-awaiting-recovery'
+  | 'ending-requires-discard'
+  | 'lease-cannot-resume';
+
+/**
+ * A recovery request that cannot apply, named so the API can surface it.
+ *
+ * These refusals carry only product-owned text and domain ids — never host
+ * paths or secrets — so an authenticated browser session may see the exact
+ * reason instead of the protected generic failure (#171). Operational
+ * failures (context recycle, durable writes) stay masked.
+ */
+export class TaskRecoveryRefusal extends Error {
+  readonly code: TaskRecoveryRefusalCode;
+
+  constructor(code: TaskRecoveryRefusalCode, message: string) {
+    super(message);
+    this.name = 'TaskRecoveryRefusal';
+    this.code = code;
+  }
+}
+
 /** A test process may throw this immediately after a durable commit. */
 export class DurableWriteCrash extends Error {}
 
@@ -261,10 +285,10 @@ export class TaskEnvironmentLifecycle {
   async recover(taskId: string, action: TaskRecoveryAction): Promise<Task> {
     const task = await this.#require(taskId);
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
-    if (task.environmentLifecycleState !== 'recovery') throw new Error(`task ${taskId} is not awaiting recovery`);
+    if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     if (action === 'discard') return this.#recycleThenRelease(task, 'discarded');
-    if (task.recoveryState === 'ending') throw new Error(`task ${taskId} was ending; discard completes its cleanup`);
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new Error(`task ${taskId} lease cannot resume`);
+    if (task.recoveryState === 'ending') throw new TaskRecoveryRefusal('ending-requires-discard', `task ${taskId} was ending; discard completes its cleanup`);
+    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
         await this.#prepare(task, task.assignedAgentId!);

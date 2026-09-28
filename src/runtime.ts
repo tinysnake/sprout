@@ -1196,9 +1196,19 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
           const records = (await recovery.listForEnvironment(acceptance.enrollment.environmentInstanceId))
             .filter((record) => record.phase !== 'resolved');
+          // #171: a digest this enrollment durably invalidated by an identity
+          // rotation can never return to prove anything, so it must not fence
+          // its record out of the reconnect pass forever; the connecting
+          // identity is the Human-approved successor on the same enrollment.
+          // Any other identity mismatch still fences the whole pass before a
+          // single piece of evidence moves.
+          const rotatedIdentity = (record: import('./environment/recovery.ts').EnvironmentRecoveryRecord): boolean =>
+            record.workerIdentityDigest !== undefined &&
+            acceptance.enrollment.invalidatedIdentityDigests.includes(record.workerIdentityDigest);
           if (records.some((record) => (record.enrollmentId !== undefined && record.enrollmentId !== acceptance.enrollment.id) ||
               (record.workerIdentityDigest !== undefined &&
-               record.workerIdentityDigest !== acceptance.enrollment.worker.identityDigest))) return;
+               record.workerIdentityDigest !== acceptance.enrollment.worker.identityDigest &&
+               !rotatedIdentity(record)))) return;
           for (const turn of snapshot.turns) {
             if (!current()) return;
             const receipt = await durableStores.recovery.receiveWorkerTurn(acceptance.enrollment.id, turn);
@@ -1231,6 +1241,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
                 environmentInstanceId: acceptance.enrollment.environmentInstanceId,
                 identityVerified: true, protocolCompatible: true, permissionsAllowed: true,
                 hadActiveRun: true,
+                identityRotated: rotatedIdentity(record),
               });
               observedRecoveries.add(record.leaseId);
             }
