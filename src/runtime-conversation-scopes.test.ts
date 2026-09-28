@@ -132,3 +132,54 @@ test('an ended Project membership cascades to Working group participation and su
     await second.close();
   }
 });
+
+test('restart reconciliation leaves no orphan Project-channel row from an interrupted creation', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-conversation-orphan-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, 'sprout.db');
+
+  // First process: the bridge records the Project channel during the
+  // authority's prepare phase and the process dies before the Project save —
+  // neither commit nor rollback runs, so the durable channel row outlives its
+  // Project (the crash window of #95 F2). A Working group in the configured
+  // Project stays behind as the history reconciliation must never delete.
+  const first = await createRuntime({
+    configuration: hostConfiguration({ databasePath }),
+    projectRoot: '/synthetic/project-root',
+  });
+  await first.conversationScopes.prepareProjectChannel({ id: 'project-interrupted' });
+  const group = await first.conversationScopes.createWorkingGroup({
+    projectId: PROJECT_ID,
+    displayName: 'Survivor loop',
+    creator: { memberId: 'operator', kind: 'human' },
+    memberIds: ['scout'],
+  });
+  await first.close();
+
+  // Restart: reconcile removes exactly the abandoned preparation before
+  // anything is served, while the configured Project's channel and the
+  // Working group record survive untouched (ADR-0008: no lifecycle fact is
+  // ever deleted).
+  const second = await createRuntime({
+    configuration: hostConfiguration({ databasePath }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    await second.reconcile();
+    assert.equal(
+      await second.conversationScopes.getScope(projectChannelScopeId('project-interrupted')),
+      undefined,
+      'the orphaned channel row from the interrupted preparation is gone',
+    );
+    assert.equal(
+      (await second.conversationScopes.getScope(projectChannelScopeId(PROJECT_ID)))?.kind,
+      'project',
+      'a channel whose Project exists is kept',
+    );
+    const kept = await second.conversationScopes.getWorkingGroup(group.id);
+    assert.ok(kept && isWorkingGroup(kept), 'Working group history is never removed');
+    assert.equal(kept.memberships.length, 2);
+  } finally {
+    await second.close();
+  }
+});

@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SqliteConversationScopeStore } from './sqlite-store.ts';
 import { ConversationScopeService } from './service.ts';
 import {
+  ConversationScopeError,
   directConversationScopeId,
   projectChannelScopeId,
   workingGroupStatus,
@@ -120,6 +121,50 @@ test('a save upserts by identity so a repeated channel or direct open stays one 
     const all = await store.listForProject('project-alpha');
     assert.equal(all.length, 1, 'a repeated save of one id is one row');
     assert.equal((await store.get(channel.id))?.createdAt, 1, 'the last write wins');
+  });
+});
+
+test('a conditional update refuses a row that changed since its read, and removal is fenced to Project channels', async () => {
+  await withTempStore(async ({ store }) => {
+    const scopes = service(store);
+    const group = await scopes.createWorkingGroup({
+      projectId: 'project-alpha',
+      displayName: 'Serialized loop',
+      creator: { memberId: 'operator', kind: 'human' },
+      memberIds: ['scout'],
+    });
+
+    // The conditional write (`… WHERE document = ?`): a competing write that
+    // commits between the update's read and its write — simulated here by a
+    // save landing inside the mutation — makes the update refuse with
+    // `stale-scope-write` instead of overwriting the accepted change (F1).
+    await assert.rejects(
+      store.update(group.id, (current) => {
+        assert.ok(current !== undefined && current.kind === 'working-group');
+        void store.save({ ...current, updatedAt: 9_999 });
+        return {
+          ...current,
+          lifecycle: [
+            ...current.lifecycle,
+            { action: 'disband', at: 6_000, actorMemberId: 'operator', reason: 'stale twin' },
+          ],
+        };
+      }),
+      (error: unknown) =>
+        error instanceof ConversationScopeError && error.code === 'stale-scope-write',
+    );
+    const after = (await store.get(group.id)) as WorkingGroupScope;
+    assert.equal(after.updatedAt, 9_999, 'the competing write stands');
+    assert.deepEqual(after.lifecycle, [], 'the refused lifecycle event never landed on the row');
+
+    // Removal fence: a Working group carrying history is never removable,
+    // while a Project-channel row is — and a missing row is a no-op.
+    await assert.rejects(store.removeProjectChannel(group.id), /Project-channel/);
+    assert.ok(await store.get(group.id), 'the refused removal left the group intact');
+    const channel = await scopes.ensureProjectChannel('project-alpha');
+    await store.removeProjectChannel(channel.id);
+    assert.equal(await store.get(channel.id), undefined);
+    await store.removeProjectChannel(channel.id);
   });
 });
 

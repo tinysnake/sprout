@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { ConversationScope } from './model.ts';
+import { ConversationScopeError, type ConversationScope } from './model.ts';
 import type { ConversationScopeStore } from './store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
@@ -14,10 +14,16 @@ import { migrateOrInitializeDatabase } from '../store/schema.ts';
  * whole and must never be rewritten piecemeal. The document holds only
  * sanitized display name, goal, rules, member ids, actor ids, reasons, and
  * timestamps — so no credential, provider or account identity, hostname,
- * address, or absolute path has a column here. Lifecycle changes never delete:
- * disbanding and ended membership are statuses and recorded facts (ADR-0008);
- * `remove` exists solely to roll back a prepared Project-channel row whose
- * Project failed to persist.
+ * address, or absolute path has a column here.
+ *
+ * A rewrite goes through `update`: the row read, the synchronous mutation,
+ * and the conditional write (`… WHERE id = ? AND document = ?`) form one
+ * critical section that never yields, and the condition refuses a row that
+ * changed since the read instead of overwriting it (`stale-scope-write`).
+ * Lifecycle changes never delete: disbanding and ended membership are statuses
+ * and recorded facts (ADR-0008); `removeProjectChannel` exists solely to roll
+ * back or reap a prepared Project-channel row whose Project never persisted,
+ * and storage fences it to rows of kind `project`.
  */
 export class SqliteConversationScopeStore implements ConversationScopeStore {
   readonly #db: DatabaseSync;
@@ -93,11 +99,68 @@ export class SqliteConversationScopeStore implements ConversationScopeStore {
     return rows.map((row) => JSON.parse(row.document) as ConversationScope);
   }
 
-  async remove(scopeId: string): Promise<void> {
-    this.#db.prepare('DELETE FROM conversation_scopes WHERE id = ?').run(scopeId);
+  async update(
+    scopeId: string,
+    mutate: (current: ConversationScope | undefined) => ConversationScope | undefined,
+  ): Promise<ConversationScope | undefined> {
+    // Critical section: read, synchronous mutation, conditional write. Nothing
+    // here may await: the single-threaded event loop must get no chance to
+    // interleave another command between the read and the write, which is what
+    // serializes lifecycle edits in this process. The `WHERE document = ?`
+    // condition then refuses a row changed by any other writer (another
+    // connection) instead of overwriting it.
+    const row = this.#db
+      .prepare('SELECT document FROM conversation_scopes WHERE id = ?')
+      .get(scopeId) as { readonly document: string } | undefined;
+    const prior = row?.document;
+    const next = mutate(prior === undefined ? undefined : (JSON.parse(prior) as ConversationScope));
+    if (next === undefined) return undefined;
+    const document = JSON.stringify(next);
+    if (prior === undefined) {
+      const inserted = this.#db
+        .prepare(
+          `INSERT INTO conversation_scopes (id, project_id, kind, document, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO NOTHING`,
+        )
+        .run(scopeId, next.projectId, next.kind, document, next.updatedAt);
+      if (Number(inserted.changes) !== 1) throw staleScopeWrite(scopeId);
+    } else {
+      const updated = this.#db
+        .prepare(
+          `UPDATE conversation_scopes
+             SET document = ?, updated_at = ?
+           WHERE id = ? AND document = ?`,
+        )
+        .run(document, next.updatedAt, scopeId, prior);
+      if (Number(updated.changes) !== 1) throw staleScopeWrite(scopeId);
+    }
+    return next;
+  }
+
+  async removeProjectChannel(scopeId: string): Promise<void> {
+    const row = this.#db
+      .prepare('SELECT kind FROM conversation_scopes WHERE id = ?')
+      .get(scopeId) as { readonly kind: string } | undefined;
+    if (row === undefined) return;
+    if (row.kind !== 'project') {
+      throw new Error(
+        `refusing to remove ${scopeId}: only a Project-channel row is removable, never a ${row.kind} record`,
+      );
+    }
+    this.#db
+      .prepare('DELETE FROM conversation_scopes WHERE id = ? AND kind = ?')
+      .run(scopeId, 'project');
   }
 
   close(): void {
     if (this.#ownsDb) this.#db.close();
   }
+}
+
+function staleScopeWrite(scopeId: string): ConversationScopeError {
+  return new ConversationScopeError(
+    'stale-scope-write',
+    `conversation scope ${scopeId} changed while the command was running; the stale write was refused`,
+  );
 }

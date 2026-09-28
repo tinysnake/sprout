@@ -27,7 +27,12 @@
  * destructive. Every disband and restore appends an attributed lifecycle
  * event (actor, time, reason) instead of overwriting scalar fields, so prior
  * transitions stay auditable (ADR-0008: every effective edit records its
- * actor, time, and changed facts).
+ * actor, time, and changed facts). Every rewrite of a recorded group — a
+ * lifecycle transition, a content version, a membership change — commits
+ * through the store's serialized conditional update, so an accepted change
+ * can never be overwritten by an interleaved command and a command computed
+ * against a stale snapshot is refused instead of succeeding (ADR-0008 audit
+ * clause).
  *
  * Context: `scopeContext` returns the governing Project and Working group
  * goal/rules versions verbatim, side by side. Sprout does not merge them,
@@ -107,6 +112,9 @@ export interface ConversationProjectPort {
  * Project persistence it belongs to fails, so a failed Project creation
  * leaves no orphan scope row behind (ADR-0008's atomic Project-creation
  * invariant). Preparations that found an existing channel roll back nothing.
+ * The preparation stays marked in flight until commit or rollback runs, so
+ * restart reconciliation reaps only preparations the process abandoned —
+ * never one whose Project persistence is still running here.
  */
 export interface PreparedProjectChannel {
   readonly commit: () => void;
@@ -160,6 +168,18 @@ export class ConversationScopeService {
   readonly #projects: ConversationProjectPort;
   readonly #clock: () => number;
   readonly #createId: () => string;
+  /**
+   * Channel preparations whose Project persistence has not settled in this
+   * process: prepare returned and neither commit nor rollback ran yet.
+   *
+   * Restart reconciliation must not reap a preparation that is still running
+   * (the bridge writes the channel before the Project save, so the row
+   * legitimately has no Project behind it for that window). The set is
+   * process memory: a fresh process holds only the rows an interrupted
+   * preparation abandoned — exactly the incomplete ones reconciliation may
+   * remove.
+   */
+  readonly #preparing = new Set<string>();
 
   constructor(options: ConversationScopeServiceOptions) {
     this.#store = options.store;
@@ -183,23 +203,36 @@ export class ConversationScopeService {
   async prepareProjectChannel(project: { readonly id: string }): Promise<PreparedProjectChannel> {
     const id = projectChannelScopeId(project.id);
     const existing = await this.#store.get(id);
+    this.#preparing.add(id);
     if (existing !== undefined && existing.kind === 'project') {
-      return { commit: () => undefined, rollback: async () => undefined };
+      return {
+        commit: () => this.#preparing.delete(id),
+        rollback: () => this.#settlePreparation(id, false),
+      };
     }
     const now = this.#clock();
-    await this.#store.save({
-      id,
-      kind: 'project',
-      projectId: project.id,
-      createdAt: now,
-      updatedAt: now,
-    });
+    try {
+      await this.#store.save({
+        id,
+        kind: 'project',
+        projectId: project.id,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } catch (error) {
+      this.#preparing.delete(id);
+      throw error;
+    }
     return {
-      commit: () => undefined,
-      rollback: async () => {
-        await this.#store.remove(id);
-      },
+      commit: () => this.#preparing.delete(id),
+      rollback: () => this.#settlePreparation(id, true),
     };
+  }
+
+  /** Release one preparation; only a row this preparation created is removed. */
+  async #settlePreparation(scopeId: string, removeRow: boolean): Promise<void> {
+    this.#preparing.delete(scopeId);
+    if (removeRow) await this.#store.removeProjectChannel(scopeId);
   }
 
   /** The Project's one Project channel, creating it on first touch. */
@@ -368,33 +401,37 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    this.#assertActiveGroup(group);
-    const now = this.#clock();
-    const current = currentWorkingGroupContent(group);
-    const next: WorkingGroupScope = {
-      ...group,
-      content: {
-        currentVersion: group.content.currentVersion + 1,
-        versions: [
-          ...group.content.versions,
-          {
-            version: group.content.currentVersion + 1,
-            at: now,
-            actorMemberId: actor.memberId,
-            reason: sanitizeWorkingGroupReason(input.reason),
-            displayName:
-              input.displayName === undefined
-                ? current.displayName
-                : sanitizeWorkingGroupDisplayName(input.displayName),
-            goal: input.goal === undefined ? current.goal : sanitizeWorkingGroupGoal(input.goal),
-            rules: input.rules === undefined ? current.rules : sanitizeWorkingGroupRules(input.rules),
-          },
-        ],
-      },
-      updatedAt: now,
-    };
-    await this.#store.save(next);
-    return next;
+    // Precondition, version numbering, and content all resolve against the
+    // row at commit time (#commitGroup): an interleaved edit can neither
+    // duplicate a version number nor survive as a stale overwrite.
+    return this.#commitGroup(groupId, (fresh) => {
+      this.#assertActiveGroup(fresh);
+      const now = this.#clock();
+      const current = currentWorkingGroupContent(fresh);
+      const version = fresh.content.currentVersion + 1;
+      return {
+        ...fresh,
+        content: {
+          currentVersion: version,
+          versions: [
+            ...fresh.content.versions,
+            {
+              version,
+              at: now,
+              actorMemberId: actor.memberId,
+              reason: sanitizeWorkingGroupReason(input.reason),
+              displayName:
+                input.displayName === undefined
+                  ? current.displayName
+                  : sanitizeWorkingGroupDisplayName(input.displayName),
+              goal: input.goal === undefined ? current.goal : sanitizeWorkingGroupGoal(input.goal),
+              rules: input.rules === undefined ? current.rules : sanitizeWorkingGroupRules(input.rules),
+            },
+          ],
+        },
+        updatedAt: now,
+      };
+    });
   }
 
   /** Add one current Project member to the Working group. */
@@ -407,41 +444,41 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    this.#assertActiveGroup(group);
-    const member = facts.members.find((entry) => entry.memberId === memberId);
-    if (member === undefined || member.endedAt !== undefined) {
-      throw new ConversationScopeError(
-        'member-not-current',
-        `${memberId} is not a current member of ${facts.projectId}`,
-      );
-    }
-    if (activeWorkingGroupMembers(group).some((entry) => entry.memberId === memberId)) {
-      throw new ConversationScopeError('already-a-member', `${memberId} is already a member of ${group.id}`);
-    }
-    const now = this.#clock();
-    const next: WorkingGroupScope = {
-      ...group,
-      memberships: [
-        ...group.memberships,
-        {
-          memberId,
-          memberKind: member.memberKind,
-          addedAt: now,
-          addedBy: actor.memberId,
-          ...(input.reason !== undefined
-            ? {
-                addedReason: sanitizeWorkingGroupReason(
-                  input.reason,
-                  'The Working group membership was added; its history is preserved.',
-                ),
-              }
-            : {}),
-        },
-      ],
-      updatedAt: now,
-    };
-    await this.#store.save(next);
-    return next;
+    return this.#commitGroup(groupId, (fresh) => {
+      this.#assertActiveGroup(fresh);
+      const member = facts.members.find((entry) => entry.memberId === memberId);
+      if (member === undefined || member.endedAt !== undefined) {
+        throw new ConversationScopeError(
+          'member-not-current',
+          `${memberId} is not a current member of ${facts.projectId}`,
+        );
+      }
+      if (activeWorkingGroupMembers(fresh).some((entry) => entry.memberId === memberId)) {
+        throw new ConversationScopeError('already-a-member', `${memberId} is already a member of ${fresh.id}`);
+      }
+      const now = this.#clock();
+      return {
+        ...fresh,
+        memberships: [
+          ...fresh.memberships,
+          {
+            memberId,
+            memberKind: member.memberKind,
+            addedAt: now,
+            addedBy: actor.memberId,
+            ...(input.reason !== undefined
+              ? {
+                  addedReason: sanitizeWorkingGroupReason(
+                    input.reason,
+                    'The Working group membership was added; its history is preserved.',
+                  ),
+                }
+              : {}),
+          },
+        ],
+        updatedAt: now,
+      };
+    });
   }
 
   /**
@@ -459,34 +496,34 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    this.#assertActiveGroup(group);
-    const entry = activeWorkingGroupMembers(group).find((member) => member.memberId === memberId);
-    if (entry === undefined) {
-      throw new ConversationScopeError(
-        'membership-not-active',
-        `${memberId} has no active participation in ${group.id}`,
-      );
-    }
-    const now = this.#clock();
-    const next: WorkingGroupScope = {
-      ...group,
-      memberships: group.memberships.map((member) =>
-        member === entry
-          ? {
-              ...member,
-              endedAt: now,
-              endedBy: actor.memberId,
-              endedReason: sanitizeWorkingGroupReason(
-                input.reason,
-                'The Working group participation ended; its history is preserved.',
-              ),
-            }
-          : member,
-      ),
-      updatedAt: now,
-    };
-    await this.#store.save(next);
-    return next;
+    return this.#commitGroup(groupId, (fresh) => {
+      this.#assertActiveGroup(fresh);
+      const entry = activeWorkingGroupMembers(fresh).find((member) => member.memberId === memberId);
+      if (entry === undefined) {
+        throw new ConversationScopeError(
+          'membership-not-active',
+          `${memberId} has no active participation in ${fresh.id}`,
+        );
+      }
+      const now = this.#clock();
+      return {
+        ...fresh,
+        memberships: fresh.memberships.map((member) =>
+          member === entry
+            ? {
+                ...member,
+                endedAt: now,
+                endedBy: actor.memberId,
+                endedReason: sanitizeWorkingGroupReason(
+                  input.reason,
+                  'The Working group participation ended; its history is preserved.',
+                ),
+              }
+            : member,
+        ),
+        updatedAt: now,
+      };
+    });
   }
 
   /**
@@ -495,8 +532,11 @@ export class ConversationScopeService {
    * The channel becomes read-only; configuration, membership changes, content
    * versions, and the group's identity all remain durable for audit and
    * possible restore. The transition appends one attributed lifecycle event
-   * (actor, time, reason), so a later restore or re-disband never erases it.
-   * Only the creator or the Human may disband.
+   * (actor, time, reason), so a later restore or re-disband never erases it,
+   * and it is validated against the row at commit time: a concurrent
+   * transition that already committed makes this stale disband refuse rather
+   * than append onto superseded history. Only the creator or the Human may
+   * disband.
    */
   async disbandWorkingGroup(
     groupId: string,
@@ -506,23 +546,23 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    this.#assertActiveGroup(group);
-    const now = this.#clock();
-    const next: WorkingGroupScope = {
-      ...group,
-      lifecycle: [
-        ...group.lifecycle,
-        {
-          action: 'disband',
-          at: now,
-          actorMemberId: actor.memberId,
-          reason: sanitizeWorkingGroupReason(input.reason, DEFAULT_WORKING_GROUP_DISBAND_REASON),
-        },
-      ],
-      updatedAt: now,
-    };
-    await this.#store.save(next);
-    return next;
+    return this.#commitGroup(groupId, (fresh) => {
+      this.#assertActiveGroup(fresh);
+      const now = this.#clock();
+      return {
+        ...fresh,
+        lifecycle: [
+          ...fresh.lifecycle,
+          {
+            action: 'disband',
+            at: now,
+            actorMemberId: actor.memberId,
+            reason: sanitizeWorkingGroupReason(input.reason, DEFAULT_WORKING_GROUP_DISBAND_REASON),
+          },
+        ],
+        updatedAt: now,
+      };
+    });
   }
 
   /**
@@ -533,7 +573,9 @@ export class ConversationScopeService {
    * participation must name a current Project member. A member recorded but
    * absent from the Project makes restore refuse rather than reopen an
    * ineligible group. The transition appends one attributed lifecycle event,
-   * leaving every prior disband and restore fact auditable.
+   * leaving every prior disband and restore fact auditable; the status and
+   * eligibility checks run against the row at commit time, so a stale restore
+   * cannot succeed beside an already-committed transition.
    */
   async restoreWorkingGroup(
     groupId: string,
@@ -543,38 +585,38 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    if (workingGroupStatus(group) !== 'disbanded') {
-      throw new ConversationScopeError('not-disbanded', `working group ${group.id} is not disbanded`);
-    }
-    const ineligible = activeWorkingGroupMembers(group).find((member) => {
-      const memberFacts = facts.members.find((entry) => entry.memberId === member.memberId);
-      return memberFacts === undefined || memberFacts.endedAt !== undefined;
+    return this.#commitGroup(groupId, (fresh) => {
+      if (workingGroupStatus(fresh) !== 'disbanded') {
+        throw new ConversationScopeError('not-disbanded', `working group ${fresh.id} is not disbanded`);
+      }
+      const ineligible = activeWorkingGroupMembers(fresh).find((member) => {
+        const memberFacts = facts.members.find((entry) => entry.memberId === member.memberId);
+        return memberFacts === undefined || memberFacts.endedAt !== undefined;
+      });
+      if (ineligible !== undefined) {
+        throw new ConversationScopeError(
+          'members-not-eligible',
+          `${ineligible.memberId} is no longer eligible for ${fresh.id}; restore is refused until the membership is current`,
+        );
+      }
+      const now = this.#clock();
+      return {
+        ...fresh,
+        lifecycle: [
+          ...fresh.lifecycle,
+          {
+            action: 'restore',
+            at: now,
+            actorMemberId: actor.memberId,
+            reason: sanitizeWorkingGroupReason(
+              input.reason,
+              'The Human or creator restored this Working group; its prior facts are preserved.',
+            ),
+          },
+        ],
+        updatedAt: now,
+      };
     });
-    if (ineligible !== undefined) {
-      throw new ConversationScopeError(
-        'members-not-eligible',
-        `${ineligible.memberId} is no longer eligible for ${group.id}; restore is refused until the membership is current`,
-      );
-    }
-    const now = this.#clock();
-    const next: WorkingGroupScope = {
-      ...group,
-      lifecycle: [
-        ...group.lifecycle,
-        {
-          action: 'restore',
-          at: now,
-          actorMemberId: actor.memberId,
-          reason: sanitizeWorkingGroupReason(
-            input.reason,
-            'The Human or creator restored this Working group; its prior facts are preserved.',
-          ),
-        },
-      ],
-      updatedAt: now,
-    };
-    await this.#store.save(next);
-    return next;
   }
 
   /**
@@ -594,33 +636,40 @@ export class ConversationScopeService {
     let ended = 0;
     for (const scope of await this.#store.listForProject(projectId)) {
       if (!isWorkingGroup(scope)) continue;
-      const closings = scope.memberships.filter((entry) => {
-        if (entry.endedAt !== undefined) return false;
-        const member = facts.members.find((candidate) => candidate.memberId === entry.memberId);
-        return member !== undefined && member.endedAt !== undefined;
-      });
-      if (closings.length === 0) continue;
-      const now = this.#clock();
-      const next: WorkingGroupScope = {
-        ...scope,
-        memberships: scope.memberships.map((entry) => {
-          if (entry.endedAt !== undefined) return entry;
+      // The cascade is a recorded edit like any other: it runs as one
+      // serialized conditional update per group, so it can never overwrite a
+      // lifecycle transition or membership change committed concurrently.
+      let closed = 0;
+      const next = await this.#store.update(scope.id, (current) => {
+        if (current === undefined || !isWorkingGroup(current)) return undefined;
+        const closings = current.memberships.filter((entry) => {
+          if (entry.endedAt !== undefined) return false;
           const member = facts.members.find((candidate) => candidate.memberId === entry.memberId);
-          if (member === undefined || member.endedAt === undefined) return entry;
-          return {
-            ...entry,
-            endedAt: member.endedAt,
-            endedBy: PROJECT_MEMBERSHIP_ENDED_BY,
-            endedReason: sanitizeWorkingGroupReason(
-              member.endedReason,
-              DEFAULT_PROJECT_MEMBERSHIP_END_REASON,
-            ),
-          };
-        }),
-        updatedAt: now,
-      };
-      await this.#store.save(next);
-      ended += closings.length;
+          return member !== undefined && member.endedAt !== undefined;
+        });
+        if (closings.length === 0) return undefined;
+        const now = this.#clock();
+        closed = closings.length;
+        return {
+          ...current,
+          memberships: current.memberships.map((entry) => {
+            if (entry.endedAt !== undefined) return entry;
+            const member = facts.members.find((candidate) => candidate.memberId === entry.memberId);
+            if (member === undefined || member.endedAt === undefined) return entry;
+            return {
+              ...entry,
+              endedAt: member.endedAt,
+              endedBy: PROJECT_MEMBERSHIP_ENDED_BY,
+              endedReason: sanitizeWorkingGroupReason(
+                member.endedReason,
+                DEFAULT_PROJECT_MEMBERSHIP_END_REASON,
+              ),
+            };
+          }),
+          updatedAt: now,
+        };
+      });
+      if (next !== undefined) ended += closed;
     }
     return ended;
   }
@@ -640,6 +689,34 @@ export class ConversationScopeService {
       ended += await this.syncProjectMembershipEnds(projectId);
     }
     return ended;
+  }
+
+  /**
+   * Remove Project-channel preparations an interrupted process abandoned.
+   *
+   * A Project creation records its channel during the authority's prepare
+   * phase, before the Project save. A *returned* failure rolls that row back,
+   * but process termination inside the window bypasses the rollback, and
+   * startup only ensured channels for Projects that exist — it never removed
+   * the leftover row. Restart reconciliation runs this pass: a channel row
+   * whose Project no longer resolves through the facts port is an incomplete
+   * preparation and is removed, while every channel whose Project exists (the
+   * AC1 invariant) and every non-channel scope — a Working group carries
+   * lifecycle and membership history, which is never deleted (ADR-0008) — is
+   * kept. A preparation still in flight in this process is not abandoned and
+   * is never reaped.
+   *
+   * Returns how many incomplete preparations were removed.
+   */
+  async removeOrphanProjectChannels(): Promise<number> {
+    let removed = 0;
+    for (const scope of await this.#store.list()) {
+      if (scope.kind !== 'project' || this.#preparing.has(scope.id)) continue;
+      if ((await this.#projects.projectFacts(scope.projectId)) !== undefined) continue;
+      await this.#store.removeProjectChannel(scope.id);
+      removed += 1;
+    }
+    return removed;
   }
 
   /**
@@ -806,6 +883,37 @@ export class ConversationScopeService {
       throw new ConversationScopeError('unknown-working-group', `unknown working group: ${groupId}`);
     }
     return synced;
+  }
+
+  /**
+   * Run one Working group edit as one serialized conditional update.
+   *
+   * The mutation receives the row as it is when the command commits — never
+   * the earlier `#loadGroup` snapshot — so its precondition (an active group,
+   * a free membership slot, an open participation) is validated against the
+   * freshest recorded facts. A concurrent command that already committed
+   * makes a stale command refuse with its normal typed error instead of
+   * appending onto superseded history; and because the store performs the
+   * read–mutate–write as one uninterruptible section, an accepted change can
+   * never be overwritten by an interleaved command (F1, ADR-0008: every
+   * accepted transition stays durable and attributable).
+   */
+  async #commitGroup(
+    groupId: string,
+    mutate: (fresh: WorkingGroupScope) => WorkingGroupScope,
+  ): Promise<WorkingGroupScope> {
+    let applied: WorkingGroupScope | undefined;
+    await this.#store.update(groupId, (current) => {
+      if (current === undefined || !isWorkingGroup(current)) {
+        throw new ConversationScopeError('unknown-working-group', `unknown working group: ${groupId}`);
+      }
+      applied = mutate(current);
+      return applied;
+    });
+    if (applied === undefined) {
+      throw new ConversationScopeError('unknown-working-group', `unknown working group: ${groupId}`);
+    }
+    return applied;
   }
 
   #assertProjectEditable(facts: ConversationProjectFacts): void {

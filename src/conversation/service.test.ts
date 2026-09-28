@@ -11,6 +11,7 @@ import {
 } from './store.ts';
 import {
   ConversationScopeError,
+  currentWorkingGroupContent,
   isWorkingGroup,
   projectChannelScopeId,
   workingGroupStatus,
@@ -38,6 +39,12 @@ interface Fixture {
   readonly facts: Map<string, ConversationProjectFacts>;
   /** Advance the injected clock so timestamps are observable. */
   tick(ms?: number): number;
+  /**
+   * Reopen the capability over the same durable store and Project facts, as
+   * a process restart would: process-memory state (such as in-flight
+   * preparations) does not survive it.
+   */
+  restart(): ConversationScopeService;
 }
 
 function member(
@@ -74,12 +81,14 @@ function fixture(
   };
   const store = new InMemoryConversationScopeStore();
   let now = 1_000;
-  const scopes = new ConversationScopeService({
-    store,
-    projects: port,
-    clock: () => now,
-    createId: () => `g${now}`,
-  });
+  const build = (): ConversationScopeService =>
+    new ConversationScopeService({
+      store,
+      projects: port,
+      clock: () => now,
+      createId: () => `g${now}`,
+    });
+  const scopes = build();
   return {
     store,
     scopes,
@@ -88,6 +97,7 @@ function fixture(
       now += ms;
       return now;
     },
+    restart: build,
   };
 }
 
@@ -709,4 +719,168 @@ test('unknown scopes and Projects fail closed with typed errors', async () => {
     memberId: 'operator',
     kind: 'human',
   });
+});
+
+// --- F1 (#95 rework 2): concurrent lifecycle commands cannot overwrite an accepted transition ---
+
+function fulfilled<T>(results: readonly PromiseSettledResult<T>[]): PromiseFulfilledResult<T>[] {
+  return results.filter((entry): entry is PromiseFulfilledResult<T> => entry.status === 'fulfilled');
+}
+
+function refused<T>(results: readonly PromiseSettledResult<T>[], code: string): number {
+  const rejections = results.filter(
+    (entry): entry is PromiseRejectedResult => entry.status === 'rejected',
+  );
+  for (const rejection of rejections) {
+    assert.ok(
+      rejection.reason instanceof ConversationScopeError,
+      `expected ConversationScopeError, got ${String(rejection.reason)}`,
+    );
+    assert.equal(rejection.reason.code, code);
+  }
+  return rejections.length;
+}
+
+test('concurrent lifecycle commands are serialized: exactly one transition wins and the accepted one stays durable', async () => {
+  const f = fixture();
+  // Creator (scout) and Human (operator) are both authorized managers, so
+  // neither race below can lose on authority — only on staleness.
+  const group = await createGroup(f, { creator: scout, memberIds: ['operator'] });
+  f.tick();
+
+  // Two authorized disbands race past the same prior status. Exactly one may
+  // succeed; the other must refuse against the committed row instead of also
+  // returning success from the same stale snapshot — and the durable record
+  // must hold exactly the event of the command that won (F1, ADR-0008).
+  const disbands = await Promise.allSettled([
+    f.scopes.disbandWorkingGroup(group.id, human, { reason: 'operator pause' }),
+    f.scopes.disbandWorkingGroup(group.id, human, { reason: 'duplicate pause' }),
+  ]);
+  assert.equal(fulfilled(disbands).length, 1, 'the stale disband must not succeed');
+  assert.equal(refused(disbands, 'working-group-disbanded'), 1, 'the loser is a typed refusal, not a silent success');
+  const acceptedDisband = fulfilled(disbands)[0]!.value;
+  let stored = await f.store.get(group.id);
+  assert.ok(stored !== undefined && isWorkingGroup(stored));
+  assert.deepEqual(
+    stored.lifecycle,
+    acceptedDisband.lifecycle,
+    'the accepted event — actor, time, reason — is exactly what is durable; the stale twin never landed',
+  );
+  assert.equal(workingGroupStatus(stored), 'disbanded');
+
+  // The same race on restore: one committed transition, one typed refusal,
+  // the disband fact still auditable underneath.
+  const restores = await Promise.allSettled([
+    f.scopes.restoreWorkingGroup(group.id, human, { reason: 'operator resume' }),
+    f.scopes.restoreWorkingGroup(group.id, scout, { reason: 'creator resume' }),
+  ]);
+  assert.equal(fulfilled(restores).length, 1, 'the stale restore must not succeed');
+  assert.equal(refused(restores, 'not-disbanded'), 1);
+  const acceptedRestore = fulfilled(restores)[0]!.value;
+  stored = await f.store.get(group.id);
+  assert.ok(stored !== undefined && isWorkingGroup(stored));
+  assert.deepEqual(
+    stored.lifecycle,
+    acceptedRestore.lifecycle,
+    'the accepted restore appends without overwriting the accepted disband',
+  );
+  assert.equal(stored.lifecycle.length, 2, 'one disband plus one restore — no event lost to the race');
+  assert.equal(workingGroupStatus(stored), 'active');
+});
+
+test('interleaved content, membership, and lifecycle edits never lose an accepted change', async () => {
+  const f = fixture();
+  const group = await createGroup(f, { creator: human, memberIds: ['scout'] });
+  f.tick();
+
+  // Three commands interleave against one snapshot. Every command that *is
+  // accepted* (returns success) must be durable in the final record: a
+  // last-write-wins store silently drops the two that a later snapshot
+  // overwrote even though both returned success.
+  const results = await Promise.allSettled([
+    f.scopes.updateWorkingGroup(group.id, human, { goal: 'Retargeted.', reason: 'pivot' }),
+    f.scopes.disbandWorkingGroup(group.id, human, { reason: 'pause for review' }),
+    f.scopes.addWorkingGroupMember(group.id, human, 'scribe', { reason: 'needs the reviewer' }),
+  ]);
+  assert.ok(fulfilled(results).length >= 1, 'the first command to commit is always accepted');
+  const stored = await f.store.get(group.id);
+  assert.ok(stored !== undefined && isWorkingGroup(stored));
+
+  const [updated, disbanded, added] = results;
+  if (updated?.status === 'fulfilled') {
+    assert.equal(
+      stored.content.currentVersion,
+      updated.value.content.currentVersion,
+      'the accepted content version survives the interleaving',
+    );
+    assert.equal(currentWorkingGroupContent(stored).goal, 'Retargeted.');
+  }
+  if (disbanded?.status === 'fulfilled') {
+    assert.deepEqual(stored.lifecycle, disbanded.value.lifecycle, 'the accepted disband survives');
+    assert.equal(workingGroupStatus(stored), 'disbanded');
+  } else {
+    assert.equal(disbanded?.status, 'rejected');
+    refused([disbanded!], 'working-group-disbanded');
+  }
+  if (added?.status === 'fulfilled') {
+    const acceptedEntry = added.value.memberships.find(
+      (entry) => entry.memberId === 'scribe' && entry.endedAt === undefined,
+    );
+    const storedEntry = stored.memberships.find(
+      (entry) => entry.memberId === 'scribe' && entry.endedAt === undefined,
+    );
+    assert.ok(acceptedEntry !== undefined, 'the accepted add returned its membership');
+    assert.deepEqual(storedEntry, acceptedEntry, 'the accepted membership survives the interleaving');
+  } else {
+    assert.equal(added?.status, 'rejected');
+    refused([added!], 'working-group-disbanded');
+  }
+});
+
+// --- F2 (#95 rework 2): an interrupted channel preparation is reconciled away at restart ---
+
+test('restart reconciliation removes an abandoned channel preparation and keeps every live scope', async () => {
+  const f = fixture();
+  const alphaChannel = await f.scopes.ensureProjectChannel('project-alpha');
+  const alphaGroup = await createGroup(f, { creator: human, memberIds: ['scout'] });
+  f.tick();
+  const betaChannel = await f.scopes.ensureProjectChannel('project-beta');
+  const betaGroup = await createGroup(f, { projectId: 'project-beta', displayName: 'Beta loop' });
+
+  // The crash window: preparation wrote the channel row, then the process
+  // died before the Project save — neither commit nor rollback ever runs.
+  const crashedId = projectChannelScopeId('project-crashed');
+  await f.scopes.prepareProjectChannel({ id: 'project-crashed' });
+  assert.equal((await f.store.get(crashedId))?.kind, 'project', 'the interrupted preparation left its row');
+
+  // While its Project persistence is still in flight in *this* process the
+  // row is a live preparation, not an abandoned one: reconciliation reaps it
+  // only after the process that owned it is gone.
+  assert.equal(await f.scopes.removeOrphanProjectChannels(), 0, 'an in-flight preparation is never reaped');
+  assert.equal((await f.store.get(crashedId))?.kind, 'project');
+
+  // A Working group's Project disappears from the facts (host-configured
+  // projection drift): history is never deletion material, but its channel —
+  // a kind-`project` row with no Project behind it — is an orphan by rule.
+  f.facts.delete('project-beta');
+
+  // Restart: a fresh capability over the same durable store, exactly as a
+  // new process would open it.
+  const restarted = f.restart();
+  assert.equal(await restarted.removeOrphanProjectChannels(), 2, 'both abandoned preparations are removed');
+  assert.equal(await f.store.get(crashedId), undefined, 'no orphan channel row survives the restart');
+  assert.equal(await f.store.get(betaChannel.id), undefined, 'a channel whose Project is gone is incomplete');
+
+  // Everything live survives untouched: the Project that exists keeps its
+  // channel, and both Working group records keep creator, content, and
+  // membership history (ADR-0008: lifecycle facts are never deleted).
+  assert.equal((await f.store.get(alphaChannel.id))?.kind, 'project', 'the live channel is kept');
+  const keptAlpha = await f.store.get(alphaGroup.id);
+  assert.ok(keptAlpha !== undefined && isWorkingGroup(keptAlpha));
+  assert.equal(keptAlpha.creatorId, 'operator');
+  assert.equal(keptAlpha.content.currentVersion, 1);
+  assert.equal(keptAlpha.memberships.length, 2);
+  const keptBeta = await f.store.get(betaGroup.id);
+  assert.ok(keptBeta !== undefined && isWorkingGroup(keptBeta), 'a Working group is never a removal candidate');
+  assert.equal(keptBeta.memberships.length, 1);
 });

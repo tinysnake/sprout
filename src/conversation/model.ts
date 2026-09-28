@@ -191,7 +191,8 @@ export type ConversationScopeErrorCode =
   | 'archived-project-is-read-only'
   | 'working-group-disbanded'
   | 'not-disbanded'
-  | 'members-not-eligible';
+  | 'members-not-eligible'
+  | 'stale-scope-write';
 
 export class ConversationScopeError extends Error {
   readonly code: ConversationScopeErrorCode;

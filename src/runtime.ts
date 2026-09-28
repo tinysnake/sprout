@@ -713,7 +713,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // Project channel, idempotently (ADR-0008: the channel is an invariant of
     // the Project, not template content).
     for (const authority of await openedStores.projectAuthorities.list()) {
-      await conversationScopes.prepareProjectChannel(authority);
+      // Hydration settles the preparation immediately: the Project already
+      // exists, so this is the ensure side, never an in-flight creation.
+      (await conversationScopes.prepareProjectChannel(authority)).commit();
     }
     for (const configured of projects.list()) {
       await conversationScopes.ensureProjectChannel(configured.id);
@@ -1691,6 +1693,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.
         await refreshEnvironmentCatalog();
+        // A process that died between the Project-channel prepare and the
+        // Project save leaves a channel row with no Project behind it — the
+        // rollback cannot run on termination. Restart reconciliation removes
+        // exactly those abandoned preparations before anything is served;
+        // every channel whose Project exists and every Working group record
+        // (history is never deleted, ADR-0008) survives, and a preparation
+        // still in flight in this process is never reaped (#95).
+        await conversationScopes.removeOrphanProjectChannels();
         // Working group participation ends cascade from an ended Project
         // membership (#95); materializing them here means a process that died
         // between the end and its first scope read converges at startup. The
