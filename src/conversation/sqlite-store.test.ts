@@ -10,6 +10,7 @@ import { ConversationScopeService } from './service.ts';
 import {
   directConversationScopeId,
   projectChannelScopeId,
+  workingGroupStatus,
   type ConversationScope,
   type DirectConversationScope,
   type ProjectChannelScope,
@@ -147,8 +148,12 @@ test('scopes, history, and lifecycle survive a restart reopen', async () => {
       const reopenedChannel = (await second.get(channel.id)) as ProjectChannelScope;
       assert.equal(reopenedChannel.kind, 'project');
       const reopened = (await second.get(group.id)) as WorkingGroupScope;
-      assert.equal(reopened.status, 'disbanded', 'the disband status is durable');
-      assert.equal(reopened.disbandedReason, 'paused the effort');
+      assert.equal(workingGroupStatus(reopened), 'disbanded', 'the disband status survives the reopen');
+      assert.deepEqual(
+        reopened.lifecycle,
+        [{ action: 'disband', at: 5_000, actorMemberId: 'operator', reason: 'paused the effort' }],
+        'the attributed lifecycle history is durable',
+      );
       assert.equal(reopened.content.versions[0]?.goal, 'Restart-proof.');
       assert.equal(reopened.memberships.length, 2);
 
@@ -161,7 +166,7 @@ test('scopes, history, and lifecycle survive a restart reopen', async () => {
         memberId: 'operator',
         kind: 'human',
       });
-      assert.equal(restored.status, 'active');
+      assert.equal(workingGroupStatus(restored), 'active');
       assert.equal(restored.createdAt, 5_000, 'identity and creation time are not rewritten by restore');
     } finally {
       second.close();

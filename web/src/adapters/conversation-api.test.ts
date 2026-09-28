@@ -86,6 +86,10 @@ const group: WorkingGroupScopeView = {
     { memberId: 'operator', memberKind: 'human', addedAt: 1_000, addedBy: 'operator' },
     { memberId: 'agent-scout', memberKind: 'agent', addedAt: 1_000, addedBy: 'operator', endedAt: 3_000, endedBy: 'operator' },
   ],
+  lifecycle: [
+    { action: 'disband', at: 1_500, actorMemberId: 'operator', reason: 'wrapped up' },
+    { action: 'restore', at: 1_800, actorMemberId: 'operator', reason: 'back online' },
+  ],
   createdAt: 1_000,
   updatedAt: 2_000,
 };
@@ -143,7 +147,7 @@ test('commands are POST JSON bodies on exactly the documented routes', async () 
   await adapter.addWorkingGroupMember('wg-1', { memberId: 'agent-scribe', reason: 'reviewer' });
   await adapter.endWorkingGroupMember('wg-1', 'agent-scribe', { reason: 'done' });
   await adapter.disbandWorkingGroup('wg-1', { reason: 'wrapped up' });
-  await adapter.restoreWorkingGroup('wg-1');
+  await adapter.restoreWorkingGroup('wg-1', { reason: 'back online' });
 
   assert.deepEqual(
     calls.map((call) => ({ path: call.path, method: call.init?.method ?? 'GET' })),
@@ -167,6 +171,8 @@ test('commands are POST JSON bodies on exactly the documented routes', async () 
   });
   const editBody = JSON.parse(String(calls[2]?.init?.body)) as Record<string, unknown>;
   assert.deepEqual(editBody, { goal: null, reason: 'clear' }, 'null clears the goal on the wire');
+  const restoreBody = JSON.parse(String(calls[6]?.init?.body)) as Record<string, unknown>;
+  assert.deepEqual(restoreBody, { reason: 'back online' }, 'a restore carries its attributed reason');
   assert.equal(calls[0]?.init?.headers?.['content-type'], 'application/json');
 });
 

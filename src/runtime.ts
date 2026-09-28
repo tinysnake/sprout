@@ -726,16 +726,31 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // archive commits as removal from every M1 route and wake lookup. The
       // conversation scope bridge records the Project's one Project channel
       // during the same preparation, so a Project creation and its invariant
-      // channel become durable together (#95, ADR-0008). A channel whose
-      // Project never persists is inert — every scope read requires the
-      // Project's facts first — and a retried creation finds it idempotently.
+      // channel become durable together (#95, ADR-0008). If the Project fails
+      // to persist, the prepared rollback removes the channel row this
+      // preparation created — and only that row — so a failed creation leaves
+      // no orphan scope record; a retried creation finds the channel
+      // idempotently.
       bridge: {
         async prepare(project) {
-          const releaseScope = await conversationScopes.prepareProjectChannel(project);
-          const publishRegistry = await projects.prepare(project);
-          return () => {
-            publishRegistry();
-            releaseScope();
+          const channel = await conversationScopes.prepareProjectChannel(project);
+          let publishRegistry: () => void;
+          try {
+            publishRegistry = (await projects.prepare(project)).commit;
+          } catch (error) {
+            try {
+              await channel.rollback();
+            } catch {
+              // The preparation failure stays the reported error.
+            }
+            throw error;
+          }
+          return {
+            commit: () => {
+              publishRegistry();
+              channel.commit();
+            },
+            rollback: () => channel.rollback(),
           };
         },
       },

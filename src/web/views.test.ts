@@ -468,7 +468,6 @@ test('conversation scope views expose the discriminated wire contract without se
     kind: 'working-group',
     projectId: 'project-sprout',
     creatorId: 'operator',
-    status: 'disbanded',
     content: {
       currentVersion: 1,
       versions: [
@@ -495,15 +494,26 @@ test('conversation scope views expose the discriminated wire contract without se
         endedReason: 'The membership ended.',
       },
     ],
+    lifecycle: [
+      { action: 'disband', at: 3_000, actorMemberId: 'operator', reason: 'done for now' },
+      { action: 'restore', at: 4_000, actorMemberId: 'operator', reason: 'resume' },
+      { action: 'disband', at: 5_000, actorMemberId: 'operator', reason: 'pause again' },
+    ],
     createdAt: 1_000,
-    updatedAt: 2_000,
-    disbandedAt: 3_000,
-    disbandedReason: 'done for now',
+    updatedAt: 5_000,
   });
   assert.equal(group.kind, 'working-group');
   if (group.kind !== 'working-group') assert.fail('working-group view kind');
-  assert.equal(group.status, 'disbanded');
-  assert.equal(group.disbandedAt, 3_000);
+  assert.equal(group.status, 'disbanded', 'status derives from the last lifecycle event');
+  assert.deepEqual(
+    group.lifecycle,
+    [
+      { action: 'disband', at: 3_000, actorMemberId: 'operator', reason: 'done for now' },
+      { action: 'restore', at: 4_000, actorMemberId: 'operator', reason: 'resume' },
+      { action: 'disband', at: 5_000, actorMemberId: 'operator', reason: 'pause again' },
+    ],
+    'every transition — restore reasons included — reaches the wire with its actor',
+  );
   assert.equal(group.content.versions[0]?.displayName, 'Core Mechanics');
   assert.equal(group.memberships[1]?.endedBy, 'project-membership');
   // The wire shape is exactly the documented fields: no store, no SQL, no host fact.
@@ -511,10 +521,9 @@ test('conversation scope views expose the discriminated wire contract without se
     'content',
     'createdAt',
     'creatorId',
-    'disbandedAt',
-    'disbandedReason',
     'id',
     'kind',
+    'lifecycle',
     'memberships',
     'projectId',
     'status',
@@ -528,7 +537,14 @@ test('the scope read projection re-applies the privacy boundary before anything 
     kind: 'working-group',
     projectId: 'project-sprout',
     creatorId: 'operator',
-    status: 'active',
+    lifecycle: [
+      {
+        action: 'disband',
+        at: 3_000,
+        actorMemberId: 'operator',
+        reason: 'key sk-abcdefghijklmnopqrstuvwx exposed in a reason',
+      },
+    ],
     content: {
       currentVersion: 1,
       versions: [

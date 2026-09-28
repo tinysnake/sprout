@@ -11,7 +11,8 @@ import type { BrowserTransport, BrowserTransportState } from '../transport/brows
  * cannot drift into two different contracts.
  *
  * Privacy: every field below is portable state — stable identity, kind,
- * participants, versioned goal/rules content, and membership history. No
+ * participants, versioned goal/rules content, membership history, and the
+ * attributed disband/restore lifecycle history. No
  * credential, provider or account identity, hostname, address, absolute path,
  * or raw command can appear in these shapes, and the adapter never accepts one
  * as input.
@@ -55,6 +56,13 @@ export interface WorkingGroupContentVersionView {
   readonly rules: readonly string[];
 }
 
+export interface WorkingGroupLifecycleView {
+  readonly action: 'disband' | 'restore';
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+}
+
 export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly kind: 'working-group';
   readonly creatorId: string;
@@ -64,9 +72,8 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
     readonly versions: readonly WorkingGroupContentVersionView[];
   };
   readonly memberships: readonly WorkingGroupMembershipView[];
-  readonly disbandedAt?: number;
-  readonly disbandedReason?: string;
-  readonly restoredAt?: number;
+  /** Append-only disband/restore history: actor, time, and reason per transition. */
+  readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
 export type ConversationScopeView =
@@ -159,7 +166,7 @@ export interface ConversationBrowserAdapter {
   /** Disband: the channel becomes read-only; nothing is deleted. */
   disbandWorkingGroup(id: string, input?: { readonly reason?: string }): Promise<WorkingGroupScopeView>;
   /** Restore a disbanded Working group when its members are still eligible. */
-  restoreWorkingGroup(id: string): Promise<WorkingGroupScopeView>;
+  restoreWorkingGroup(id: string, input?: { readonly reason?: string }): Promise<WorkingGroupScopeView>;
   /** One scope projected for the Human: record, read-only state, governing context. */
   inspectScope(scopeId: string): Promise<ScopeInspectionView>;
 }
@@ -238,10 +245,10 @@ export function createConversationBrowserAdapter(
       );
       return response.workingGroup;
     },
-    async restoreWorkingGroup(id) {
+    async restoreWorkingGroup(id, input) {
       const response = await transport.request<{ readonly workingGroup: WorkingGroupScopeView }>(
         `/api/working-groups/${encodeURIComponent(id)}/restore`,
-        jsonCommand({}),
+        jsonCommand(input ?? {}),
       );
       return response.workingGroup;
     },

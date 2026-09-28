@@ -49,8 +49,21 @@ interface ScopeRuntime {
   readonly scopeStore: InMemoryConversationScopeStore;
 }
 
-async function scopeApi(): Promise<ScopeRuntime> {
+async function scopeApi(
+  options: { readonly failFirstAuthoritySave?: boolean } = {},
+): Promise<ScopeRuntime> {
   const authorityStore = new InMemoryProjectAuthorityStore();
+  if (options.failFirstAuthoritySave) {
+    const save = authorityStore.save.bind(authorityStore);
+    let failed = false;
+    authorityStore.save = async (project) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('simulated persistence failure');
+      }
+      await save(project);
+    };
+  }
   const scopeStore = new InMemoryConversationScopeStore();
   // The composed Project facts port, mirroring the runtime's projection: the
   // durable #92 authority record's lifecycle, versioned content, and membership.
@@ -144,6 +157,12 @@ interface ScopeView {
   readonly projectId?: string;
   readonly participants?: readonly string[];
   readonly status?: string;
+  readonly lifecycle?: readonly {
+    readonly action: 'disband' | 'restore';
+    readonly at: number;
+    readonly actorMemberId: string;
+    readonly reason: string;
+  }[];
   readonly memberships?: readonly {
     readonly memberId: string;
     readonly endedAt?: number;
@@ -190,6 +209,29 @@ test('creating a Project records its one Project channel, and listing keeps exac
       scopes: ScopeView[];
     };
     assert.deepEqual(again.scopes.map((scope) => scope.id), listed.scopes.map((scope) => scope.id));
+  } finally {
+    await runtime.api.close();
+  }
+});
+
+test('a failed Project persistence rolls back its prepared channel row and a retry finds none orphaned', async () => {
+  const runtime = await scopeApi({ failFirstAuthoritySave: true });
+  try {
+    const failed = await command(runtime, '/api/projects', { id: 'project-orphan', displayName: 'Orphan risk' });
+    assert.equal(failed.status, 500, 'the failed persistence surfaces as a server error');
+    assert.equal(
+      await runtime.scopeStore.get(projectChannelScopeId('project-orphan')),
+      undefined,
+      'no orphan scope row survives the failed Project creation',
+    );
+
+    // The retried creation persists and records exactly its one channel.
+    const retried = await command(runtime, '/api/projects', { id: 'project-orphan', displayName: 'Orphan risk' });
+    assert.equal(retried.status, 201);
+    assert.equal(
+      (await runtime.scopeStore.get(projectChannelScopeId('project-orphan')))?.kind,
+      'project',
+    );
   } finally {
     await runtime.api.close();
   }
@@ -308,6 +350,20 @@ test('the Working group lifecycle over HTTP follows ADR-0008', async () => {
       reason: 'done for now',
     });
     assert.equal(disbanded.status, 200);
+    const disbandedView = ((await disbanded.json()) as { workingGroup: ScopeView }).workingGroup;
+    assert.equal(disbandedView.status, 'disbanded');
+    assert.deepEqual(
+      disbandedView.lifecycle,
+      [
+        {
+          action: 'disband',
+          at: 10_000,
+          actorMemberId: 'operator',
+          reason: 'done for now',
+        },
+      ],
+      'the disband reaches the browser durably attributed to the acting Human',
+    );
 
     // Read-only after disband, observable over HTTP through the inspection route.
     const readOnlyEdit = await command(runtime, `/api/working-groups/${group.id}/content`, { goal: 'x' });
@@ -326,14 +382,31 @@ test('the Working group lifecycle over HTTP follows ADR-0008', async () => {
       writable: false,
       reason: 'working-group-disbanded',
     });
+    assert.deepEqual(
+      inspection.scope.lifecycle,
+      disbandedView.lifecycle,
+      'the inspection route serves the same attributed lifecycle history',
+    );
     // The governing versions remain available, side by side, never merged.
     // Project content versions: create (1) + two membership adds (3).
     assert.equal(inspection.context.project.contentVersion, 3);
     assert.equal(inspection.context.workingGroup?.contentVersion, 2);
     assert.equal(inspection.context.workingGroup?.goal, 'Revised.');
 
-    const restored = await command(runtime, `/api/working-groups/${group.id}/restore`, {});
+    const restored = await command(runtime, `/api/working-groups/${group.id}/restore`, {
+      reason: 'resumed',
+    });
     assert.equal(restored.status, 200);
+    const restoredView = ((await restored.json()) as { workingGroup: ScopeView }).workingGroup;
+    assert.equal(restoredView.status, 'active');
+    assert.deepEqual(
+      restoredView.lifecycle,
+      [
+        { action: 'disband', at: 10_000, actorMemberId: 'operator', reason: 'done for now' },
+        { action: 'restore', at: 10_000, actorMemberId: 'operator', reason: 'resumed' },
+      ],
+      'the restore appends its own attributed fact; the prior disband stays auditable',
+    );
     const writable = await (await get(runtime, `/api/scopes/${group.id}`)).json() as {
       state: { writable: boolean };
     };

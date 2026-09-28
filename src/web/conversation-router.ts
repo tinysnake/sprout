@@ -288,13 +288,19 @@ export function createConversationRouter(options: ConversationRouterOptions): Ap
       }
 
       // POST /api/working-groups/:id/restore — restore one disbanded Working
-      // group when its current members are still eligible.
+      // group when its current members are still eligible. The transition
+      // appends an attributed lifecycle event (actor, time, reason), like
+      // disband, so every transition stays auditable.
       if (method === 'POST' && segments.length === 4 && isWorkingGroupRoute && segments[3] === 'restore') {
+        const body = await context.readBody();
+        const reason = stringField(body, 'reason');
         try {
           const group = await scopes.getWorkingGroup(segments[2] ?? '');
           if (group === undefined) return json(context, 404, { error: 'unknown working group' });
           const actor = await humanActor(group.projectId);
-          const updated = await scopes.restoreWorkingGroup(group.id, actor);
+          const updated = await scopes.restoreWorkingGroup(group.id, actor, {
+            ...(reason !== undefined ? { reason } : {}),
+          });
           return json(context, 200, { workingGroup: toConversationScopeView(updated) });
         } catch (error) {
           return conversationFailure(context, error);

@@ -128,26 +128,43 @@ export interface WorkingGroupContentVersion {
 }
 
 /**
- * A durable Working group: identity, channel (the record itself), creator,
- * lifecycle, version-attributed content, and membership history.
+ * One durable lifecycle transition of a Working group.
  *
- * Disbanded is a status, never a delete: its channel becomes read-only and all
- * facts remain available for audit and possible restore (ADR-0008).
+ * Every disband and restore appends one entry instead of overwriting scalar
+ * fields, so each transition stays durably attributable (who, when, why) and
+ * every prior transition remains auditable — the same append-only attribution
+ * rule content versions and memberships already follow (ADR-0008: "Every
+ * effective edit records its actor, time, and changed version or facts").
+ */
+export interface WorkingGroupLifecycleEvent {
+  readonly action: 'disband' | 'restore';
+  readonly at: number;
+  /** The member on whose authority the transition ran (creator or Human). */
+  readonly actorMemberId: string;
+  /** The sanitized operator reason recorded at the transition. */
+  readonly reason: string;
+}
+
+/**
+ * A durable Working group: identity, channel (the record itself), creator,
+ * lifecycle history, version-attributed content, and membership history.
+ *
+ * Disbanded is a derived status over the append-only lifecycle history, never
+ * a delete: its channel becomes read-only and all facts — every prior
+ * transition included — remain available for audit and possible restore
+ * (ADR-0008).
  */
 export interface WorkingGroupScope extends ConversationScopeBase {
   readonly kind: 'working-group';
   readonly creatorId: string;
-  readonly status: 'active' | 'disbanded';
   readonly content: {
     readonly currentVersion: number;
     readonly versions: readonly WorkingGroupContentVersion[];
   };
   /** Current and historical participations; never rewritten in place. */
   readonly memberships: readonly WorkingGroupMembership[];
-  readonly disbandedAt?: number;
-  readonly disbandedReason?: string;
-  readonly restoredAt?: number;
-  readonly restoredReason?: string;
+  /** Append-only disband/restore history; empty for a group never transitioned. */
+  readonly lifecycle: readonly WorkingGroupLifecycleEvent[];
 }
 
 /** One durable conversation scope. */
@@ -298,6 +315,21 @@ export function sanitizeWorkingGroupReason(
   fallback: string = DEFAULT_WORKING_GROUP_EDIT_REASON,
 ): string {
   return sanitizeOperatorText(value, { fallback, maxLength: MAX_REASON });
+}
+
+/**
+ * The Working group's current lifecycle status, derived from its history.
+ *
+ * The last transition decides: an empty history is a fresh `active` group, a
+ * trailing `disband` renders it `disbanded`, a trailing `restore` renders it
+ * `active`. Deriving keeps the status from ever diverging from the recorded
+ * facts.
+ */
+export function workingGroupStatus(
+  group: WorkingGroupScope,
+): 'active' | 'disbanded' {
+  const last = group.lifecycle[group.lifecycle.length - 1];
+  return last !== undefined && last.action === 'disband' ? 'disbanded' : 'active';
 }
 
 /** The Working group's latest content version. */

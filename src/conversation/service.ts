@@ -24,7 +24,10 @@
  * eligibility; an ended Project membership ends that member's current
  * participation in every Working group without erasing history. Read-only is
  * always derived (archived Project, disbanded group, ended membership), never
- * destructive.
+ * destructive. Every disband and restore appends an attributed lifecycle
+ * event (actor, time, reason) instead of overwriting scalar fields, so prior
+ * transitions stay auditable (ADR-0008: every effective edit records its
+ * actor, time, and changed facts).
  *
  * Context: `scopeContext` returns the governing Project and Working group
  * goal/rules versions verbatim, side by side. Sprout does not merge them,
@@ -43,6 +46,7 @@ import {
   directConversationScopeId,
   isWorkingGroup,
   projectChannelScopeId,
+  workingGroupStatus,
   sanitizeWorkingGroupDisplayName,
   sanitizeWorkingGroupGoal,
   sanitizeWorkingGroupReason,
@@ -92,6 +96,21 @@ export interface ConversationProjectFacts {
  */
 export interface ConversationProjectPort {
   projectFacts(projectId: string): Promise<ConversationProjectFacts | undefined>;
+}
+
+/**
+ * One prepared Project-channel write: the durable row a Project creation
+ * records during the authority's prepare phase.
+ *
+ * `commit` is infallible (the row is already durable). `rollback` removes
+ * exactly the row this preparation created — and only that row — when the
+ * Project persistence it belongs to fails, so a failed Project creation
+ * leaves no orphan scope row behind (ADR-0008's atomic Project-creation
+ * invariant). Preparations that found an existing channel roll back nothing.
+ */
+export interface PreparedProjectChannel {
+  readonly commit: () => void;
+  readonly rollback: () => Promise<void>;
 }
 
 export interface ConversationScopeServiceOptions {
@@ -156,13 +175,31 @@ export class ConversationScopeService {
    * creation records its one Project channel in the same prepared flow: a
    * failed channel write refuses the Project change before persistence, and
    * the returned commit publishes nothing in-memory (the durable write already
-   * happened). A channel whose Project never persists is inert — every scope
-   * read requires the Project's facts first — and a retried creation finds it
-   * idempotently.
+   * happened). If the Project itself then fails to persist, the returned
+   * rollback removes the channel row this call created so no orphan scope row
+   * survives a failed Project creation; a channel that already existed is
+   * never removed, and a retried creation finds it idempotently.
    */
-  async prepareProjectChannel(project: { readonly id: string }): Promise<() => void> {
-    await this.#ensureChannel(project.id);
-    return () => undefined;
+  async prepareProjectChannel(project: { readonly id: string }): Promise<PreparedProjectChannel> {
+    const id = projectChannelScopeId(project.id);
+    const existing = await this.#store.get(id);
+    if (existing !== undefined && existing.kind === 'project') {
+      return { commit: () => undefined, rollback: async () => undefined };
+    }
+    const now = this.#clock();
+    await this.#store.save({
+      id,
+      kind: 'project',
+      projectId: project.id,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return {
+      commit: () => undefined,
+      rollback: async () => {
+        await this.#store.remove(id);
+      },
+    };
   }
 
   /** The Project's one Project channel, creating it on first touch. */
@@ -293,7 +330,7 @@ export class ConversationScopeService {
       kind: 'working-group',
       projectId: facts.projectId,
       creatorId: creator.memberId,
-      status: 'active',
+      lifecycle: [],
       content: {
         currentVersion: 1,
         versions: [
@@ -457,7 +494,9 @@ export class ConversationScopeService {
    *
    * The channel becomes read-only; configuration, membership changes, content
    * versions, and the group's identity all remain durable for audit and
-   * possible restore. Only the creator or the Human may disband.
+   * possible restore. The transition appends one attributed lifecycle event
+   * (actor, time, reason), so a later restore or re-disband never erases it.
+   * Only the creator or the Human may disband.
    */
   async disbandWorkingGroup(
     groupId: string,
@@ -471,9 +510,15 @@ export class ConversationScopeService {
     const now = this.#clock();
     const next: WorkingGroupScope = {
       ...group,
-      status: 'disbanded',
-      disbandedAt: now,
-      disbandedReason: sanitizeWorkingGroupReason(input.reason, DEFAULT_WORKING_GROUP_DISBAND_REASON),
+      lifecycle: [
+        ...group.lifecycle,
+        {
+          action: 'disband',
+          at: now,
+          actorMemberId: actor.memberId,
+          reason: sanitizeWorkingGroupReason(input.reason, DEFAULT_WORKING_GROUP_DISBAND_REASON),
+        },
+      ],
       updatedAt: now,
     };
     await this.#store.save(next);
@@ -487,7 +532,8 @@ export class ConversationScopeService {
    * after participation ends have been materialized, every remaining active
    * participation must name a current Project member. A member recorded but
    * absent from the Project makes restore refuse rather than reopen an
-   * ineligible group.
+   * ineligible group. The transition appends one attributed lifecycle event,
+   * leaving every prior disband and restore fact auditable.
    */
   async restoreWorkingGroup(
     groupId: string,
@@ -497,7 +543,7 @@ export class ConversationScopeService {
     const group = await this.#loadGroup(groupId);
     const facts = await this.#facts(group.projectId);
     this.#assertManageAuthority(group, actor, facts);
-    if (group.status !== 'disbanded') {
+    if (workingGroupStatus(group) !== 'disbanded') {
       throw new ConversationScopeError('not-disbanded', `working group ${group.id} is not disbanded`);
     }
     const ineligible = activeWorkingGroupMembers(group).find((member) => {
@@ -513,12 +559,18 @@ export class ConversationScopeService {
     const now = this.#clock();
     const next: WorkingGroupScope = {
       ...group,
-      status: 'active',
-      restoredAt: now,
-      restoredReason: sanitizeWorkingGroupReason(
-        input.reason,
-        'The Human or creator restored this Working group; its prior facts are preserved.',
-      ),
+      lifecycle: [
+        ...group.lifecycle,
+        {
+          action: 'restore',
+          at: now,
+          actorMemberId: actor.memberId,
+          reason: sanitizeWorkingGroupReason(
+            input.reason,
+            'The Human or creator restored this Working group; its prior facts are preserved.',
+          ),
+        },
+      ],
       updatedAt: now,
     };
     await this.#store.save(next);
@@ -639,7 +691,7 @@ export class ConversationScopeService {
 
     await this.syncProjectMembershipEnds(facts.projectId);
     const group = (await this.#store.get(scopeId)) as WorkingGroupScope;
-    if (group.status === 'disbanded') {
+    if (workingGroupStatus(group) === 'disbanded') {
       return { scopeId, writable: false, reason: 'working-group-disbanded' };
     }
     if (actor === undefined) return { scopeId, writable: false, reason: 'not-a-member' };
@@ -766,7 +818,7 @@ export class ConversationScopeService {
   }
 
   #assertActiveGroup(group: WorkingGroupScope): void {
-    if (group.status === 'disbanded') {
+    if (workingGroupStatus(group) === 'disbanded') {
       throw new ConversationScopeError(
         'working-group-disbanded',
         `working group ${group.id} is disbanded and read-only; restore it first`,

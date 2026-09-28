@@ -11,11 +11,13 @@
  * versions belong to the scope as a whole and must never be rewritten
  * piecemeal.
  *
- * There is deliberately no delete: disbanding and ended membership are
- * statuses and recorded facts (ADR-0008), so the only removal this seam
- * supports is a caller dropping the store itself. A save upserts by id, which
- * is what makes the deterministic Project-channel and direct-conversation
- * identities idempotent under a repeated open or a restart.
+ * There is deliberately no lifecycle delete: disbanding and ended membership
+ * are statuses and recorded facts (ADR-0008). A save upserts by id, which is
+ * what makes the deterministic Project-channel and direct-conversation
+ * identities idempotent under a repeated open or a restart. The one removal
+ * this seam supports is `remove`, used only to roll back a Project channel
+ * row that a failed Project persistence just prepared — it erases a
+ * never-published orphan, never a lifecycle fact.
  */
 
 import type { ConversationScope } from './model.ts';
@@ -27,6 +29,15 @@ export interface ConversationScopeStore {
   listForProject(projectId: string): Promise<readonly ConversationScope[]>;
   /** Every durable scope; for reconciliation and observability. */
   list(): Promise<readonly ConversationScope[]>;
+  /**
+   * Remove one scope row by identity.
+   *
+   * Reserved for preparation rollback: the Project-channel invariant is
+   * recorded during the Project authority's prepare phase, and a Project
+   * persistence failure removes the row that preparation created. No
+   * lifecycle or history path may call it (ADR-0008: non-destructive).
+   */
+  remove(scopeId: string): Promise<void>;
 }
 
 /** In-memory adapter: the contract, with a write trace tests can assert on. */
@@ -54,5 +65,9 @@ export class InMemoryConversationScopeStore implements ConversationScopeStore {
     return [...this.#scopes.values()].sort(
       (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id),
     );
+  }
+
+  async remove(scopeId: string): Promise<void> {
+    this.#scopes.delete(scopeId);
   }
 }

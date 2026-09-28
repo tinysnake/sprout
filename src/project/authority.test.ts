@@ -483,3 +483,70 @@ test('a bridge prepare failure leaves no durable Project behind', async () => {
   );
   assert.equal(await store.get('project-uncommitted'), undefined);
 });
+
+test('a failed persistence runs the prepared rollback and never the commit', async () => {
+  const store = new InMemoryProjectAuthorityStore();
+  let failNextSave = true;
+  const save = store.save.bind(store);
+  store.save = async (project) => {
+    if (failNextSave) {
+      failNextSave = false;
+      throw new Error('disk full');
+    }
+    await save(project);
+  };
+  const events: string[] = [];
+  const projects = new ProjectService({
+    store,
+    bridge: {
+      prepare() {
+        return {
+          commit: () => {
+            events.push('commit');
+          },
+          rollback: () => {
+            events.push('rollback');
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => projects.create({ id: 'project-rollback', displayName: 'Rollback' }),
+    /disk full/,
+  );
+  assert.deepEqual(events, ['rollback'], 'rollback ran after the failed save; the commit did not');
+  assert.equal(await store.get('project-rollback'), undefined, 'no partial Project is durable');
+
+  // The retried creation persists and publishes exactly once.
+  const created = await projects.create({ id: 'project-rollback', displayName: 'Rollback' });
+  assert.equal(created.id, 'project-rollback');
+  assert.deepEqual(events, ['rollback', 'commit']);
+});
+
+test('a failing rollback never masks the persistence error', async () => {
+  const store = new InMemoryProjectAuthorityStore();
+  store.save = async () => {
+    throw new Error('disk full');
+  };
+  const projects = new ProjectService({
+    store,
+    bridge: {
+      prepare() {
+        return {
+          commit: () => undefined,
+          rollback: () => {
+            throw new Error('rollback broken');
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => projects.create({ id: 'project-broken-rollback', displayName: 'Broken rollback' }),
+    /disk full/,
+  );
+  assert.equal(await store.get('project-broken-rollback'), undefined);
+});

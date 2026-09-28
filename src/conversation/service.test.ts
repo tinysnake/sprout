@@ -13,6 +13,7 @@ import {
   ConversationScopeError,
   isWorkingGroup,
   projectChannelScopeId,
+  workingGroupStatus,
   type ConversationActor,
   type WorkingGroupScope,
 } from './model.ts';
@@ -137,9 +138,9 @@ test('every Project has exactly one Project channel, idempotent across reads and
   assert.equal(again.id, first.id, 'a repeated ensure returns the same channel');
   // The bridge path (used during Project persistence) is idempotent too.
   const prepared = await f.scopes.prepareProjectChannel({ id: 'project-alpha' });
-  prepared();
+  prepared.commit();
   const preparedAgain = await f.scopes.prepareProjectChannel({ id: 'project-alpha' });
-  preparedAgain();
+  preparedAgain.commit();
   const channels = f.store.writes.filter((scope) => scope.kind === 'project');
   assert.equal(channels.length, 1, 'one durable write creates the one channel');
 
@@ -152,6 +153,26 @@ test('every Project has exactly one Project channel, idempotent across reads and
     [first.id],
     'listing never reveals a second channel for one Project',
   );
+});
+
+test('a failed Project persistence rolls back exactly the channel row its preparation created', async () => {
+  const f = fixture();
+  const id = projectChannelScopeId('project-alpha');
+
+  // The prepare phase writes the channel before the Project is persisted; a
+  // failed Project save must not leave an orphan scope row behind.
+  const prepared = await f.scopes.prepareProjectChannel({ id: 'project-alpha' });
+  assert.equal((await f.store.get(id))?.kind, 'project', 'the row exists during preparation');
+  await prepared.rollback();
+  assert.equal(await f.store.get(id), undefined, 'rollback removes the prepared row');
+
+  // A channel that already existed before preparation is never removed: the
+  // rollback only erases what that preparation itself created.
+  const ensured = await f.scopes.ensureProjectChannel('project-alpha');
+  const preparedAgain = await f.scopes.prepareProjectChannel({ id: 'project-alpha' });
+  await preparedAgain.rollback();
+  assert.equal((await f.store.get(ensured.id))?.kind, 'project', 'a pre-existing channel survives');
+  preparedAgain.commit();
 });
 
 test('direct-message identity is distinct per Project and repeated opens yield one conversation', async () => {
@@ -243,7 +264,8 @@ test('Working group creation is one atomic record with the channel, creator firs
   );
   assert.equal(group.memberships[0]?.addedBy, 'scout');
   assert.equal(group.content.currentVersion, 1);
-  assert.equal(group.status, 'active');
+  assert.equal(workingGroupStatus(group), 'active');
+  assert.deepEqual(group.lifecycle, [], 'a fresh group has an empty lifecycle history');
 
   // No member outside the Project may be included — not by request, not by creator.
   const writesBefore = f.store.writes.length;
@@ -382,8 +404,12 @@ test('disband renders the Working group read-only while configuration and histor
   });
   f.tick();
   const disbanded = await f.scopes.disbandWorkingGroup(group.id, human, { reason: 'done' });
-  assert.equal(disbanded.status, 'disbanded');
-  assert.equal(disbanded.disbandedReason, 'done');
+  assert.equal(workingGroupStatus(disbanded), 'disbanded');
+  assert.deepEqual(
+    disbanded.lifecycle,
+    [{ action: 'disband', at: 2_000, actorMemberId: 'operator', reason: 'done' }],
+    'the disband is durably attributed to the acting member',
+  );
   // Nothing is deleted: configuration, content versions, and membership
   // history are still on the record the store holds.
   const stored = await f.store.get(group.id);
@@ -403,12 +429,61 @@ test('disband renders the Working group read-only while configuration and histor
   await rejects(f.scopes.disbandWorkingGroup(group.id, human), 'working-group-disbanded');
 
   f.tick();
-  const restored = await f.scopes.restoreWorkingGroup(group.id, human);
-  assert.equal(restored.status, 'active');
-  assert.ok(restored.restoredAt !== undefined);
+  const restored = await f.scopes.restoreWorkingGroup(group.id, human, { reason: 'back' });
+  assert.equal(workingGroupStatus(restored), 'active');
+  assert.deepEqual(
+    restored.lifecycle,
+    [
+      { action: 'disband', at: 2_000, actorMemberId: 'operator', reason: 'done' },
+      { action: 'restore', at: 3_000, actorMemberId: 'operator', reason: 'back' },
+    ],
+    'restore appends its own attributed fact without erasing the disband',
+  );
   const writable = await f.scopes.scopeState(group.id, 'operator');
   assert.equal(writable.writable, true);
   await rejects(f.scopes.restoreWorkingGroup(group.id, human), 'not-disbanded');
+});
+
+// --- F1 (#95 rework): every lifecycle transition stays attributable and auditable ---
+
+test('repeated disband and restore cycles keep every prior transition fact auditable', async () => {
+  const f = fixture();
+  const group = await createGroup(f, { creator: scout, memberIds: ['operator'] });
+
+  f.tick();
+  await f.scopes.disbandWorkingGroup(group.id, human, { reason: 'first pause' });
+  f.tick();
+  await f.scopes.restoreWorkingGroup(group.id, human, { reason: 'first resume' });
+  f.tick();
+  // A second actor: the creator (scout) manages its own group as well.
+  await f.scopes.disbandWorkingGroup(group.id, scout, { reason: 'second pause' });
+  f.tick();
+  await f.scopes.restoreWorkingGroup(group.id, human, { reason: 'second resume' });
+
+  const stored = await f.store.get(group.id);
+  assert.ok(stored !== undefined && isWorkingGroup(stored));
+  assert.deepEqual(
+    stored.lifecycle,
+    [
+      { action: 'disband', at: 2_000, actorMemberId: 'operator', reason: 'first pause' },
+      { action: 'restore', at: 3_000, actorMemberId: 'operator', reason: 'first resume' },
+      { action: 'disband', at: 4_000, actorMemberId: 'scout', reason: 'second pause' },
+      { action: 'restore', at: 5_000, actorMemberId: 'operator', reason: 'second resume' },
+    ],
+    'no transition overwrites an earlier one; each keeps its actor, time, and reason',
+  );
+  assert.equal(workingGroupStatus(stored), 'active', 'the last transition decides the derived status');
+
+  // The stored record — not just the last return value — proves auditability
+  // after another disband: the earlier four facts are still all present.
+  f.tick();
+  await f.scopes.disbandWorkingGroup(group.id, human, { reason: 'third pause' });
+  const afterFinal = await f.store.get(group.id);
+  assert.ok(afterFinal !== undefined && isWorkingGroup(afterFinal));
+  assert.equal(afterFinal.lifecycle.length, 5);
+  assert.equal(afterFinal.lifecycle[1]?.reason, 'first resume');
+  assert.equal(afterFinal.lifecycle[3]?.actorMemberId, 'operator');
+  assert.equal(workingGroupStatus(afterFinal), 'disbanded');
 });
 
 function currentGoal(group: WorkingGroupScope): string {
@@ -440,7 +515,7 @@ test('restore rechecks eligibility: an absent member refuses restore, an ended m
     ),
   });
   const restored = await f.scopes.restoreWorkingGroup(group.id, human);
-  assert.equal(restored.status, 'active');
+  assert.equal(workingGroupStatus(restored), 'active');
   assert.deepEqual(
     restored.memberships.filter((entry) => entry.endedAt === undefined).map((entry) => entry.memberId),
     ['operator', 'scout'],

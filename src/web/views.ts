@@ -52,6 +52,7 @@ import {
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
+import { workingGroupStatus } from '../conversation/model.ts';
 import type {
   ConversationScope,
   ScopeContext,
@@ -1197,6 +1198,13 @@ export interface WorkingGroupContentVersionView {
   readonly rules: readonly string[];
 }
 
+export interface WorkingGroupLifecycleView {
+  readonly action: 'disband' | 'restore';
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+}
+
 export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly kind: 'working-group';
   readonly creatorId: string;
@@ -1207,9 +1215,8 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   };
   /** Current and historical participations; never rewritten in place. */
   readonly memberships: readonly WorkingGroupMembershipView[];
-  readonly disbandedAt?: number;
-  readonly disbandedReason?: string;
-  readonly restoredAt?: number;
+  /** Append-only disband/restore history: actor, time, and reason per transition. */
+  readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
 export type ConversationScopeView =
@@ -1280,6 +1287,26 @@ function toWorkingGroupMembershipView(membership: {
   };
 }
 
+function toWorkingGroupLifecycleView(event: {
+  readonly action: 'disband' | 'restore';
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+}): WorkingGroupLifecycleView {
+  return {
+    action: event.action === 'disband' ? 'disband' : 'restore',
+    at: event.at,
+    actorMemberId: sanitizeIdentifier(event.actorMemberId, {
+      fallback: 'unknown-member',
+      kind: 'generic',
+    }),
+    reason: sanitizeOperatorText(event.reason, {
+      fallback: 'The lifecycle transition reason was withheld as sensitive.',
+      maxLength: 320,
+    }),
+  };
+}
+
 function toWorkingGroupContentView(group: WorkingGroupScope): WorkingGroupScopeView['content'] {
   return {
     currentVersion: group.content.currentVersion,
@@ -1330,19 +1357,10 @@ export function toConversationScopeView(scope: ConversationScope): ConversationS
     ...base,
     kind: 'working-group',
     creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
-    status: scope.status === 'disbanded' ? 'disbanded' : 'active',
+    status: workingGroupStatus(scope) === 'disbanded' ? 'disbanded' : 'active',
     content: toWorkingGroupContentView(scope),
     memberships: scope.memberships.map(toWorkingGroupMembershipView),
-    ...(scope.disbandedAt !== undefined ? { disbandedAt: scope.disbandedAt } : {}),
-    ...(scope.disbandedReason !== undefined
-      ? {
-          disbandedReason: sanitizeOperatorText(scope.disbandedReason, {
-            fallback: 'The disband reason was withheld as sensitive.',
-            maxLength: 320,
-          }),
-        }
-      : {}),
-    ...(scope.restoredAt !== undefined ? { restoredAt: scope.restoredAt } : {}),
+    lifecycle: scope.lifecycle.map(toWorkingGroupLifecycleView),
   };
 }
 

@@ -10,7 +10,7 @@ import {
   hostConfiguration,
   PROJECT_ID,
 } from './runtime-test-harness.ts';
-import { projectChannelScopeId, isWorkingGroup } from './conversation/model.ts';
+import { projectChannelScopeId, isWorkingGroup, workingGroupStatus } from './conversation/model.ts';
 
 /**
  * Runtime composition evidence for conversation scopes and Working groups
@@ -58,7 +58,7 @@ test('Working group creation wakes no Agent and creates no run, message, Task, o
       memberIds: ['scout'],
       goal: 'Touch nothing.',
     });
-    assert.equal(group.status, 'active');
+    assert.equal(workingGroupStatus(group), 'active');
 
     // The creation's only durable effect is the one scope record: no Message,
     // no wake request, no run, no Task, no lease (ADR-0008).

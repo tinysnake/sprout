@@ -14,8 +14,10 @@ import { migrateOrInitializeDatabase } from '../store/schema.ts';
  * whole and must never be rewritten piecemeal. The document holds only
  * sanitized display name, goal, rules, member ids, actor ids, reasons, and
  * timestamps — so no credential, provider or account identity, hostname,
- * address, or absolute path has a column here. There is no delete: disbanding
- * and ended membership are statuses and recorded facts (ADR-0008).
+ * address, or absolute path has a column here. Lifecycle changes never delete:
+ * disbanding and ended membership are statuses and recorded facts (ADR-0008);
+ * `remove` exists solely to roll back a prepared Project-channel row whose
+ * Project failed to persist.
  */
 export class SqliteConversationScopeStore implements ConversationScopeStore {
   readonly #db: DatabaseSync;
@@ -89,6 +91,10 @@ export class SqliteConversationScopeStore implements ConversationScopeStore {
       )
       .all() as unknown as readonly { readonly document: string }[];
     return rows.map((row) => JSON.parse(row.document) as ConversationScope);
+  }
+
+  async remove(scopeId: string): Promise<void> {
+    this.#db.prepare('DELETE FROM conversation_scopes WHERE id = ?').run(scopeId);
   }
 
   close(): void {
