@@ -250,3 +250,15 @@ Choose next work by this order:
 5. Add optimization and breadth only after the path is evidenced.
 
 This ordering is judgement, not a numeric priority score. Record the reason in the map so the next evaluation can challenge it.
+
+## Stage gates and non-blocking findings
+
+When a map has an explicitly approved early-use milestone before its full outcome, name both milestones and their acceptance evidence in the map. Early-use evidence does not close the full outcome or silently satisfy a later ticket's acceptance. Amend affected ticket acceptance and dependency edges explicitly before assigning work under the new plan.
+
+Classify each finding by **impact on the next real operator journey**, not by the presence of a bug or a severity label alone:
+
+- **Blocking**: a broken required journey; a credible breach of privacy, authentication, Human authority, or other trust boundaries; possible loss, duplication, or unsafe reassignment of unfinished work; an unobservable or misleading failure that prevents safe correction; or a regression that defeats the milestone's stated evidence. Stop and fix or narrow the milestone transparently. An uncertain impact in these categories is blocking until investigated.
+- **Non-blocking defect or risk**: an edge case outside the milestone's required journey with bounded, known impact, no credible path to the blocking categories, and a usable workaround or explicit limitation. Open a linked issue with reproduction or evidence, affected scope, impact, workaround/limitation, and a proposed revisit trigger. It does not block unrelated frontier work or the early-use milestone merely because the issue is open.
+- **Deferred breadth or polish**: a capability, state matrix, visual refinement, or broader platform check not promised by the early-use milestone. Keep its original full-outcome ticket or create a bounded follow-up; do not describe it as implemented or evidenced.
+
+At acceptance, record the classification and links in the work record or acceptance comment. Reassess a non-blocking finding if it occurs on the real journey, recurs, compounds with another issue, loses its workaround, or changes impact. Do not mark an unmet original acceptance criterion as passed: amend the criterion before work proceeds, split out a follow-up, or leave the ticket open. The full outcome still requires its own checks and Human acceptance.

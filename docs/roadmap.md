@@ -185,23 +185,21 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 
 ## Current M2 frontier
 
-[Map #44](https://github.com/tinysnake/sprout/issues/44) completed the product-
-direction frontier. [Map #70](https://github.com/tinysnake/sprout/issues/70)
-now hardens the M1 and Production Web foundations before those decisions are
-turned into buildable specifications and Tickets.
+### Early-use checkpoint: Sprout develops Sprout
 
-Map #70 is deliberately pre-specification work. It may reorganize M1 code only
-while preserving observable behaviour, and it validates the Vue/Tailwind Web
-foundation with one Shell plus Manage / Environments structural slice. It does
-not implement new M2 backend capability or migrate every prototype view.
+Before claiming the complete M2 Local Operator MVP, run a bounded, Human-authorized Sprout-on-Sprout change through the production collaboration path: configure a Project and Agent on an enrolled Environment, propose or receive work, approve Task begin as the operator, run and observe the Agent, correct or stop it if needed, inspect the change and evidence, and accept or reject the result. A restart or disconnect must not silently release unfinished work. Use the smallest real production controls needed for this journey; deterministic addressed communication is sufficient. Wake-model batching, comprehensive page state matrices, cross-page polish, and full Usage/Costs views are not prerequisites for this checkpoint.
 
-The outcome frontier contains M2-O1 and M2-O5: product-managed collaboration
-setup unlocks the Human-authorized work, routing, and self-hosted-operation paths,
-while truthful usage observability can advance independently from the evidenced
-M1 telemetry baseline. Production slices should remain end to end and may stage
-shared persistence or API seams only when each slice has observable acceptance.
-M2-O6 follows the production capabilities it unifies, and M2-O7 remains the final
-dogfooding and owner-readiness outcome.
+This checkpoint is **not** evidence that M2-O1 through M2-O7 or #77 are complete. The full M2 checks above still apply. A bounded non-blocking edge case may be tracked as an issue while this journey continues, using `docs/agents/development-loop.md`'s stage-gate classification. Privacy, Human authority, recoverability, and truthful state remain hard gates. Re-evaluate the M2 outcome frontier after the real journey rather than treating this checkpoint as a fixed implementation waterfall.
+
+Maps #44 and #70 settled product direction and the production foundation. Spec
+[#77](https://github.com/tinysnake/sprout/issues/77) tracks the remaining M2
+capabilities and pages. [Map #113](https://github.com/tinysnake/sprout/issues/113)
+closed the enrollment-to-run gap on macOS and Windows. The next path is the
+early-use checkpoint above, not a backend-first waterfall. M2-O1's remaining
+Project and conversation setup and M2-O2's Human-authorized Task control are
+nearest to that path; deterministic communication from M2-O3 is sufficient for
+the first real change. M2-O5 can advance independently, but full usage reporting
+does not block the checkpoint. M2-O6 and M2-O7 retain their full M2 checks.
 
 ## Prototype-to-implementation boundary
 
