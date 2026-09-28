@@ -13,6 +13,9 @@ import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { ProjectService } from '../project/authority-service.ts';
 import { InMemoryProjectAuthorityStore } from '../project/authority-store.ts';
+import { ProjectAccessService } from '../project/access-service.ts';
+import { InMemoryProjectAccessStore } from '../project/access-store.ts';
+import { ProjectCreationService } from '../project/creation-service.ts';
 import { createRunApi } from './api.ts';
 import { createProjectRouter } from './project-router.ts';
 
@@ -39,6 +42,7 @@ interface ProjectRuntime {
   readonly cookie: string;
   readonly csrf: string;
   readonly projects: ProjectService;
+  readonly access: ProjectAccessService;
 }
 
 async function projectApi(): Promise<ProjectRuntime> {
@@ -66,13 +70,41 @@ async function projectApi(): Promise<ProjectRuntime> {
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
   const credential = randomBytes(32).toString('base64url');
   await auth.initializeOrRecover(credential);
+  const projectStore = new InMemoryProjectAuthorityStore();
+  const accessStore = new InMemoryProjectAccessStore();
   const projects = new ProjectService({
-    store: new InMemoryProjectAuthorityStore(),
+    store: projectStore,
     clock: () => 10_000,
     // The composed global Agent authority (F5): a membership must name a real
     // portable Agent; an invented id is refused.
     agentAuthority: {
       agentIsActive: (agentId) => ['agent-scout', 'agent-dup', 'agent-leaky'].includes(agentId),
+    },
+  });
+  const access = new ProjectAccessService({
+    store: accessStore,
+    projects,
+    environments: { environmentIsAccessible: () => true },
+    worker: {
+      async validate(input) {
+        return {
+          workspaceId: 'a'.repeat(40),
+          kind: input.selection.kind,
+          ...(input.selection.path !== undefined ? { path: input.selection.path } : {}),
+        };
+      },
+    },
+  });
+  const creation = new ProjectCreationService({
+    projects,
+    access,
+    store: {
+      // This no-failure in-memory boundary exercises route composition. The
+      // SQLite transaction and rollback contract is covered separately.
+      async create(project, accesses) {
+        await projectStore.save(project);
+        for (const entry of accesses) await accessStore.save(entry);
+      },
     },
   });
   const api = createRunApi({
@@ -81,7 +113,7 @@ async function projectApi(): Promise<ProjectRuntime> {
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
     auth,
-    routers: [createProjectRouter({ projects })],
+    routers: [createProjectRouter({ projects, access, creation })],
   });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
@@ -93,7 +125,7 @@ async function projectApi(): Promise<ProjectRuntime> {
   assert.equal(response.status, 201);
   const cookie = (response.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
   const { csrfToken } = (await response.json()) as { csrfToken: string };
-  return { api, base, cookie, csrf: csrfToken, projects };
+  return { api, base, cookie, csrf: csrfToken, projects, access };
 }
 
 function get(runtime: ProjectRuntime, path: string): Promise<Response> {
@@ -158,6 +190,29 @@ test('a Project is created from a name plus the Human membership, and the snapsh
   }
 });
 
+test('one Project request carries selected memberships and Environment workspace bindings', async () => {
+  const runtime = await projectApi();
+  try {
+    const created = await command(runtime, '/api/projects', {
+      id: 'project-aggregate-web',
+      displayName: 'Resource-ready Project',
+      agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Review'] }],
+      environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
+    });
+    assert.equal(created.status, 201);
+    const { project } = (await created.json()) as {
+      project: { readonly id: string; readonly content: { readonly versions: readonly { readonly memberships: readonly { readonly memberId: string }[] }[] } };
+    };
+    assert.equal(project.id, 'project-aggregate-web');
+    assert.equal(project.content.versions[0]?.memberships.some((member) => member.memberId === 'agent-scout'), true);
+    const access = await runtime.access.get(project.id, 'env-ready');
+    assert.equal(access?.status, 'active');
+    assert.equal(access?.current?.kind, 'default');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
 test('identity edits and membership changes preserve Project and content history', async () => {
   const runtime = await projectApi();
   try {
@@ -165,6 +220,7 @@ test('identity edits and membership changes preserve Project and content history
     const edited = await command(runtime, '/api/projects/project-flow/content', {
       displayName: 'Flow Renamed',
       goal: 'Revised',
+      completionGuidance: 'Require a reproducible validation result.',
       wakePolicy: 'wake-model-assisted',
       routingIntervalMs: 45_000,
       reason: 'Replan',
@@ -192,6 +248,8 @@ test('identity edits and membership changes preserve Project and content history
           versions: {
             version: number;
             reason: string;
+            completionGuidance: string;
+            routingIntervalMs: number;
             memberships: {
               memberId: string;
               responsibilities: string[];
@@ -205,6 +263,8 @@ test('identity edits and membership changes preserve Project and content history
     };
     assert.equal(project.displayName, 'Flow Renamed');
     assert.equal(project.content.currentVersion, 5);
+    assert.equal(project.content.versions[1]?.completionGuidance, 'Require a reproducible validation result.');
+    assert.equal(project.content.versions[1]?.routingIntervalMs, 45_000);
     const editedMembership = project.content.versions[3]?.memberships.find((entry) => entry.memberId === 'agent-scout');
     assert.deepEqual(editedMembership?.responsibilities, ['Review changes']);
     assert.equal(editedMembership?.collaborationInstructions, 'Explain review findings.');

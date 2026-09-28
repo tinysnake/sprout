@@ -133,17 +133,31 @@ test('creation and content edits send POST JSON command bodies', async () => {
     id: 'project-sprout',
     displayName: 'Sprout',
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
+    routingIntervalMs: 45_000,
+    environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
   });
-  await adapter.updateProjectContent('project-sprout', { goal: null, rules: ['New rule'] });
+  await adapter.updateProjectContent('project-sprout', {
+    goal: null,
+    completionGuidance: 'Require proof.',
+    rules: ['New rule'],
+    routingIntervalMs: 45_000,
+  });
   const [create, edit] = calls;
   assert.equal(create?.init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(create?.init?.body)), {
     id: 'project-sprout',
     displayName: 'Sprout',
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
+    routingIntervalMs: 45_000,
+    environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
   });
   assert.equal(edit?.init?.method, 'POST');
-  assert.deepEqual(JSON.parse(String(edit?.init?.body)), { goal: null, rules: ['New rule'] });
+  assert.deepEqual(JSON.parse(String(edit?.init?.body)), {
+    goal: null,
+    completionGuidance: 'Require proof.',
+    rules: ['New rule'],
+    routingIntervalMs: 45_000,
+  });
 });
 
 test('identity and membership edits use durable Project routes', async () => {

@@ -33,6 +33,7 @@ export interface ProjectContentVersionView {
   readonly at: number;
   readonly reason: string;
   readonly goal: string;
+  readonly completionGuidance: string;
   readonly rules: readonly string[];
   readonly wakePolicy: string;
   readonly routingIntervalMs: number;
@@ -81,6 +82,11 @@ export interface AgentMembershipInput {
   readonly collaborationInstructions?: string;
 }
 
+export interface ProjectEnvironmentCreationInput {
+  readonly environmentInstanceId: string;
+  readonly workspace: WorkspaceSelectionInput;
+}
+
 export interface ProjectBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
@@ -96,6 +102,7 @@ export interface ProjectBrowserAdapter {
     readonly wakePolicy?: string;
     readonly routingIntervalMs?: number;
     readonly agentMemberships?: readonly AgentMembershipInput[];
+    readonly environmentAssignments?: readonly ProjectEnvironmentCreationInput[];
     readonly reason?: string;
   }): Promise<ProjectAuthorityView>;
   /** Append one content version; earlier versions are never rewritten. */
@@ -103,6 +110,7 @@ export interface ProjectBrowserAdapter {
     /** Optional display identity edit; stable Project id remains unchanged. */
     readonly displayName?: string;
     readonly goal?: string | null;
+    readonly completionGuidance?: string;
     readonly rules?: readonly string[];
     readonly wakePolicy?: string;
     readonly routingIntervalMs?: number;

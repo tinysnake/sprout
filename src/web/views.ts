@@ -931,6 +931,7 @@ export interface ProjectContentVersionView {
   readonly at: number;
   readonly reason: string;
   readonly goal: string;
+  readonly completionGuidance: string;
   readonly rules: readonly string[];
   readonly wakePolicy: string;
   readonly routingIntervalMs: number;
@@ -1021,6 +1022,7 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
           maxLength: 320,
         }),
         goal: sanitizeProjectText(version.goal),
+        completionGuidance: sanitizeProjectText(version.completionGuidance),
         rules: version.rules.map((rule) => sanitizeProjectText(rule)),
         wakePolicy: version.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
         routingIntervalMs: version.routingIntervalMs,

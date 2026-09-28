@@ -41,6 +41,8 @@ import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
 import type { ProjectAccessStore } from './project/access-store.ts';
+import type { ProjectCreationStore } from './project/creation-store.ts';
+import { ProjectCreationService } from './project/creation-service.ts';
 import { sanitizeWorkspacePath } from './project/access.ts';
 import {
   ProjectService,
@@ -153,6 +155,8 @@ export interface RuntimeStores {
   readonly projectAuthorities: ProjectAuthorityStore;
   /** The durable Project Environment access and workspace bindings (#93). */
   readonly projectAccess: ProjectAccessStore;
+  /** Atomic insert boundary for first Project + Environment/workspace setup. */
+  readonly projectCreation?: ProjectCreationStore;
   close(): void;
 }
 
@@ -748,6 +752,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workSafety: projectAccessSafety,
       bridge: projects,
     });
+    const projectCreationService = stores.projectCreation === undefined
+      ? undefined
+      : new ProjectCreationService({
+          projects: projectService,
+          access: projectAccessService,
+          store: stores.projectCreation,
+        });
     const pool = new EnvironmentPool({
       definitions: configuredCarrierPresent ? [configuredDefinition] : [],
       instances: configuredCarrierPresent ? [configuredInstance] : [],
@@ -1448,6 +1459,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           projects: projectService,
           legacyProjects: projects,
           access: projectAccessService,
+          ...(projectCreationService !== undefined ? { creation: projectCreationService } : {}),
         }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness

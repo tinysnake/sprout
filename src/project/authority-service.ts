@@ -147,6 +147,8 @@ export interface UpdateProjectContentInput {
   readonly displayName?: string;
   /** `undefined` keeps the current goal; a string (possibly empty) replaces it. */
   readonly goal?: string;
+  /** `undefined` keeps current completion guidance; an empty string clears it. */
+  readonly completionGuidance?: string;
   /** `undefined` keeps the current rules; an array (possibly empty) replaces them. */
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
@@ -219,6 +221,13 @@ export class ProjectService {
    * Project can do; they never invalidate its identity.
    */
   async create(input: CreateProjectInput): Promise<ProjectAuthority> {
+    const project = await this.prepareCreate(input);
+    await this.commitPreparedCreate(project, () => this.#store.save(project));
+    return project;
+  }
+
+  /** Build and validate a new Project without making it durable or visible. */
+  async prepareCreate(input: CreateProjectInput): Promise<ProjectAuthority> {
     const now = this.#clock();
     const id = input.id !== undefined ? sanitizeProjectId(input.id) : this.#createId();
     if (id === undefined) {
@@ -264,6 +273,7 @@ export class ProjectService {
       goal: input.goal === undefined
         ? sanitizeProjectGoal(this.#template.goalGuidance)
         : sanitizeProjectGoal(input.goal),
+      completionGuidance: sanitizeProjectGoal(this.#template.completionGuidance),
       rules: input.rules === undefined
         ? sanitizeProjectRules(this.#template.suggestedRules)
         : sanitizeProjectRules(input.rules),
@@ -289,8 +299,24 @@ export class ProjectService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.#persist(project);
     return project;
+  }
+
+  /**
+   * Persist a prepared Project through a caller-owned atomic boundary, then
+   * publish its runtime projection. Resource-complete creation supplies one
+   * transaction that writes Project identity and workspace bindings together.
+   */
+  async commitPreparedCreate(
+    project: ProjectAuthority,
+    persist: () => Promise<void>,
+    publishRelated?: () => void,
+  ): Promise<void> {
+    const commit = await this.#bridge?.prepare(project);
+    await this.#onChanged?.(project);
+    await persist();
+    commit?.();
+    publishRelated?.();
   }
 
   /** One deep copy of the template source, attributed and frozen apart. */
@@ -348,6 +374,9 @@ export class ProjectService {
             at: now,
             reason: sanitizeEditReason(input.reason),
             goal: input.goal === undefined ? current.goal : sanitizeProjectGoal(input.goal),
+            completionGuidance: input.completionGuidance === undefined
+              ? current.completionGuidance
+              : sanitizeProjectGoal(input.completionGuidance),
             rules: input.rules === undefined ? current.rules : sanitizeProjectRules(input.rules),
             wakePolicy: input.wakePolicy === undefined ? current.wakePolicy : sanitizeWakePolicy(input.wakePolicy),
             routingIntervalMs: input.routingIntervalMs === undefined
@@ -602,6 +631,7 @@ export class ProjectService {
             at,
             reason,
             goal: current.goal,
+            completionGuidance: current.completionGuidance,
             rules: current.rules,
             wakePolicy: overrides.wakePolicy ?? current.wakePolicy,
             routingIntervalMs: current.routingIntervalMs,

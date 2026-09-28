@@ -600,10 +600,18 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     const policySelect = editDialog.querySelector('.project-wake-policy') as HTMLSelectElement;
     policySelect.value = 'wake-model-assisted';
     policySelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    const guidance = editDialog.querySelector('.project-completion-guidance-input') as HTMLTextAreaElement;
+    guidance.value = 'Accept only when the validation evidence is reproducible.';
+    guidance.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    const interval = editDialog.querySelector('.project-routing-interval-input') as HTMLInputElement;
+    interval.value = '75';
+    interval.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     [...editDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Save Project'))?.click();
     await settle();
     assert.match(doc.body.textContent ?? '', /Renamed Work Project/);
     assert.match(doc.body.textContent ?? '', /Wake-model-assisted/);
+    assert.match(doc.body.textContent ?? '', /Accept only when the validation evidence is reproducible/);
+    assert.match(doc.body.textContent ?? '', /75s bounded window/);
 
     const archiveButton = [...doc.querySelectorAll('.project-contract-card button')].find((button) => button.textContent?.includes('Archive Project')) as HTMLButtonElement;
     archiveButton.click();
@@ -622,6 +630,91 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     assert.match(doc.body.textContent ?? '', /Workspace binding history/);
     app.unmount();
   } finally {
+    await cleanup();
+  }
+});
+
+test('Project creation submits selected memberships and default workspaces as one authority command', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const base = new projectsModule.FixtureProjectService(options.agentService, options.environmentService, []);
+    const submissions: Parameters<typeof base.createProject>[0][] = [];
+    let laterMembershipWrites = 0;
+    let laterWorkspaceWrites = 0;
+    const service = new Proxy(base, {
+      get(target, property) {
+        if (property === 'createProject') {
+          return async (input: Parameters<typeof base.createProject>[0]) => {
+            submissions.push(input);
+            return target.createProject(input);
+          };
+        }
+        if (property === 'addProjectMembership') return (...args: Parameters<typeof base.addProjectMembership>) => {
+          laterMembershipWrites += 1;
+          return target.addProjectMembership(...args);
+        };
+        if (property === 'grantProjectAccess') return (...args: Parameters<typeof base.grantProjectAccess>) => {
+          laterWorkspaceWrites += 1;
+          return target.grantProjectAccess(...args);
+        };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const doc = dom.window.document;
+    doc.body.innerHTML = '<div id="app"></div>';
+    dom.window.history.replaceState(null, '', '/app/project/overview');
+    const mounted = createSproutApp({ routerBase: '/app/', projectService: service });
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(doc.getElementById('app')!);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+
+    (doc.querySelector('.new-project-btn') as HTMLButtonElement).click();
+    await settle();
+    const dialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const name = dialog.querySelector('.project-name-input') as HTMLInputElement;
+    name.value = 'Ready at creation';
+    name.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    for (const value of ['programmer', 'env-ready']) {
+      const checkbox = [...dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) => input.value === value);
+      assert.ok(checkbox, `creation option ${value} is available`);
+      checkbox.checked = true;
+      checkbox.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    }
+    await settle();
+    const workspaceKind = dialog.querySelector('.project-create-workspace-kind') as HTMLSelectElement;
+    workspaceKind.value = 'relative';
+    workspaceKind.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    const workspacePath = dialog.querySelector('.project-create-workspace-path') as HTMLInputElement;
+    workspacePath.value = 'repos/selected-project';
+    workspacePath.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle();
+    const submit = [...dialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Create Project')) as HTMLButtonElement;
+    assert.ok(submit, 'creation dialog exposes its submit action');
+    assert.equal(submit.disabled, false, `creation submit is enabled: ${doc.body.textContent}`);
+    submit.click();
+    await settle();
+
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(submissions[0]?.agentMemberships, [{ agentId: 'programmer' }]);
+    assert.deepEqual(submissions[0]?.environmentAssignments, [{
+      environmentInstanceId: 'env-ready',
+      workspace: { kind: 'relative', path: 'repos/selected-project' },
+    }]);
+    assert.equal(laterMembershipWrites, 0);
+    assert.equal(laterWorkspaceWrites, 0);
+    assert.match(doc.body.textContent ?? '', /Task-begin prerequisites met/);
+    assert.match(doc.body.textContent ?? '', /repos\/selected-project/);
+  } finally {
+    app?.unmount();
     await cleanup();
   }
 });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { ProjectAuthorityView, ProjectMembershipView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
+import type { ProjectAuthorityView, ProjectEnvironmentCreationInput, ProjectMembershipView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
 import { BrowserRequestError } from '../../../transport/browser-transport.js';
 import { useAnnouncer } from '../../../primitives/announcer.js';
 import { useShellConnection } from '../../../shell/use-shell-connection.js';
@@ -34,6 +34,9 @@ const boundary = createProjectControlBoundary({
 const controlsDisabled = computed(() => !boundary.canControl());
 
 const projects = ref<ProjectAuthorityView[]>([]);
+const creationOptions = ref<{ agents: ProjectOverviewData['agents']; environments: ProjectOverviewData['environments'] }>();
+const creationOptionsError = ref('');
+const isLoadingCreationOptions = ref(true);
 const overview = ref<ProjectOverviewData>();
 const selectedProjectId = ref('');
 const isLoadingProjects = ref(true);
@@ -51,7 +54,13 @@ const formError = ref('');
 const projectName = ref('');
 const projectGoal = ref('');
 const projectRules = ref('');
+const projectCompletionGuidance = ref('');
 const wakePolicy = ref('explicit-only');
+const routingIntervalSeconds = ref(30);
+const selectedCreateAgentIds = ref<string[]>([]);
+const selectedCreateEnvironmentIds = ref<string[]>([]);
+const creationWorkspaceKinds = ref<Record<string, 'default' | 'relative'>>({});
+const creationWorkspacePaths = ref<Record<string, string>>({});
 const selectedAgentId = ref('');
 const responsibilities = ref('');
 const collaborationInstructions = ref('');
@@ -74,6 +83,8 @@ const activeAgentMemberships = computed(() => memberships.value.filter((member) 
 ));
 const activeAgents = computed(() => overview.value?.agents.filter((agent) => agent.status === 'active') ?? []);
 const activeEnvironments = computed(() => overview.value?.environments.filter((environment) => environment.enrollmentStatus === 'approved') ?? []);
+const createableAgents = computed(() => creationOptions.value?.agents.filter((agent) => agent.status === 'active') ?? []);
+const createableEnvironments = computed(() => creationOptions.value?.environments.filter((environment) => environment.enrollmentStatus === 'approved') ?? []);
 const unassignedAgents = computed(() => activeAgents.value.filter((agent) => !memberships.value.some((member) => member.memberId === agent.id && member.endedAt === undefined)));
 const unassignedEnvironments = computed(() => activeEnvironments.value.filter((environment) => !currentAccess.value.some((entry) => entry.environmentInstanceId === environment.id)));
 const projectArchived = computed(() => currentProject.value?.status === 'archived');
@@ -169,7 +180,25 @@ async function loadIndex(preferredId = selectedProjectId.value) {
   }
 }
 
-onMounted(() => { void loadIndex(); });
+onMounted(() => { void loadIndex(); void loadCreationOptions(); });
+
+async function loadCreationOptions() {
+  const currentService = service.value;
+  if (!currentService) {
+    isLoadingCreationOptions.value = false;
+    return;
+  }
+  isLoadingCreationOptions.value = true;
+  creationOptionsError.value = '';
+  try {
+    creationOptions.value = await currentService.loadCreationOptions();
+  } catch {
+    creationOptions.value = undefined;
+    creationOptionsError.value = 'Available Agent and Environment choices could not be loaded. Project creation remains available without selected resources.';
+  } finally {
+    isLoadingCreationOptions.value = false;
+  }
+}
 
 watch(() => route.query.project, (value) => {
   const id = typeof value === 'string' ? value : '';
@@ -225,12 +254,20 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     projectName.value = '';
     projectGoal.value = '';
     projectRules.value = '';
+    projectCompletionGuidance.value = '';
     wakePolicy.value = 'explicit-only';
+    routingIntervalSeconds.value = 30;
+    selectedCreateAgentIds.value = [];
+    selectedCreateEnvironmentIds.value = [];
+    creationWorkspaceKinds.value = {};
+    creationWorkspacePaths.value = {};
   } else if (kind === 'edit' && project && content) {
     projectName.value = project.displayName;
     projectGoal.value = content.goal;
     projectRules.value = content.rules.join('\n');
+    projectCompletionGuidance.value = content.completionGuidance;
     wakePolicy.value = content.wakePolicy;
+    routingIntervalSeconds.value = content.routingIntervalMs / 1000;
   } else if (kind === 'add-member') {
     selectedAgentId.value = unassignedAgents.value[0]?.id ?? '';
     responsibilities.value = '';
@@ -252,12 +289,47 @@ function parseRules(value: string): string[] {
   return value.split('\n').map((entry) => entry.trim()).filter(Boolean);
 }
 
+function setCreationWorkspaceKind(environmentId: string, value: string) {
+  if (value === 'default' || value === 'relative') {
+    creationWorkspaceKinds.value = { ...creationWorkspaceKinds.value, [environmentId]: value };
+  }
+}
+
+function setCreationWorkspacePath(environmentId: string, value: string) {
+  creationWorkspacePaths.value = { ...creationWorkspacePaths.value, [environmentId]: value };
+}
+
+function relativeWorkspaceSelection(value: string): WorkspaceSelectionInput | undefined {
+  const path = value.trim().replace(/\\/g, '/');
+  if (!path || path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+    return undefined;
+  }
+  return { kind: 'relative', path };
+}
+
 async function submitProject() {
   const name = projectName.value.trim();
   if (!name) { formError.value = 'Project display name is required.'; return; }
+  const intervalMs = Math.round(routingIntervalSeconds.value * 1000);
+  if (!Number.isFinite(intervalMs) || intervalMs < 1_000 || intervalMs > 3_600_000) {
+    formError.value = 'Routing interval must be between 1 and 3600 seconds.';
+    return;
+  }
   if (dialog.value === 'create') {
     const goal = projectGoal.value.trim();
     const rules = parseRules(projectRules.value);
+    const environmentAssignments: ProjectEnvironmentCreationInput[] = [];
+    for (const environmentInstanceId of selectedCreateEnvironmentIds.value) {
+      const kind = creationWorkspaceKinds.value[environmentInstanceId] ?? 'default';
+      const workspace = kind === 'default'
+        ? { kind: 'default' as const }
+        : relativeWorkspaceSelection(creationWorkspacePaths.value[environmentInstanceId] ?? '');
+      if (workspace === undefined) {
+        formError.value = `Enter a normalized workspace location relative to the Worker root for ${environmentFor(environmentInstanceId)?.displayName ?? 'the selected Environment'}.`;
+        return;
+      }
+      environmentAssignments.push({ environmentInstanceId, workspace });
+    }
     submitting.value = true;
     formError.value = '';
     try {
@@ -266,6 +338,9 @@ async function submitProject() {
         ...(goal ? { goal } : {}),
         ...(rules.length > 0 ? { rules } : {}),
         wakePolicy: wakePolicy.value,
+        routingIntervalMs: intervalMs,
+        agentMemberships: selectedCreateAgentIds.value.map((agentId) => ({ agentId })),
+        environmentAssignments,
       }));
       dialog.value = null;
       selectedProjectId.value = created.id;
@@ -283,8 +358,10 @@ async function submitProject() {
   const saved = await runControl((authority) => authority.updateProjectContent(currentProject.value!.id, {
     displayName: name,
     goal: projectGoal.value.trim() || null,
+    completionGuidance: projectCompletionGuidance.value.trim(),
     rules: parseRules(projectRules.value),
     wakePolicy: wakePolicy.value,
+    routingIntervalMs: intervalMs,
   }), 'Project identity and contract updated as a new version.');
   if (saved) dialog.value = null;
 }
@@ -302,12 +379,12 @@ async function submitMembership() {
 
 function selectedWorkspace(): WorkspaceSelectionInput | undefined {
   if (workspaceKind.value === 'default') return { kind: 'default' };
-  const path = workspacePath.value.trim().replace(/\\/g, '/');
-  if (!path || path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+  const selection = relativeWorkspaceSelection(workspacePath.value);
+  if (selection === undefined) {
     formError.value = 'Enter a normalized path relative to the Worker workspace root, or choose the default workspace.';
     return undefined;
   }
-  return { kind: 'relative', path };
+  return selection;
 }
 
 async function submitWorkspace() {
@@ -422,7 +499,7 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
               </div>
               <div>
                 <h3 class="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Completion &amp; Validation Guidance</h3>
-                <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-[var(--text-secondary)]">{{ currentProject.template.completionGuidance || 'No additional completion guidance.' }}</p>
+                <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-[var(--text-secondary)]">{{ currentContent.completionGuidance || 'No additional completion guidance.' }}</p>
               </div>
               <div class="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border-subtle)] pt-3 md:col-span-2">
                 <div class="min-w-0">
@@ -502,14 +579,36 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'create' || dialog === 'edit'" :open="true" :title="dialog === 'create' ? 'Create New Project' : `Edit Project Contract (${currentProject?.displayName ?? ''})`" description="Projects are portable identity records. Goals and resources may be absent; template defaults remain editable." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <div v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-2 text-[var(--text-secondary)]">Derived from the immutable <strong>General collaboration</strong> template. Agent membership and Environment workspaces can be added later.</div>
+        <div v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-2 text-[var(--text-secondary)]">Derived from the immutable <strong>General collaboration</strong> template. Selected Agents and Environment workspaces are submitted together with the Project.</div>
         <label class="flex flex-col gap-1 font-semibold">Project Display Name *<input v-model="projectName" maxlength="120" required class="project-name-input min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Project Goal <textarea v-model="projectGoal" rows="3" class="project-goal-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Project Rules <span class="font-normal text-[var(--text-muted)]">One rule per line; this may be empty.</span><textarea v-model="projectRules" rows="4" class="project-rules-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Wake Routing Policy<select v-model="wakePolicy" class="project-wake-policy min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option value="explicit-only">Explicit-only</option><option value="wake-model-assisted">Wake-model-assisted</option></select></label>
+        <label class="flex flex-col gap-1 font-semibold">Routing Interval (seconds)<input v-model.number="routingIntervalSeconds" type="number" min="1" max="3600" step="0.1" class="project-routing-interval-input min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /><span class="font-normal text-[var(--text-muted)]">Used as the bounded wake window when wake-model-assisted routing is selected.</span></label>
+        <label v-if="dialog === 'edit'" class="flex flex-col gap-1 font-semibold">Completion Guidance<textarea v-model="projectCompletionGuidance" rows="3" class="project-completion-guidance-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
+        <fieldset v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] p-3">
+          <legend class="px-1 font-bold">Project Agents</legend>
+          <p v-if="isLoadingCreationOptions" class="py-2 text-[var(--text-muted)]" aria-busy="true">Loading active Agents…</p>
+          <p v-else-if="creationOptionsError" class="py-2 text-[var(--text-secondary)]">{{ creationOptionsError }}</p>
+          <p v-else-if="createableAgents.length === 0" class="py-2 text-[var(--text-secondary)]">No active Agent is available. You can add one later.</p>
+          <label v-for="agent in createableAgents" :key="agent.id" class="flex min-h-[44px] items-center gap-2 py-1 text-[var(--text-primary)]"><input v-model="selectedCreateAgentIds" type="checkbox" :value="agent.id" class="min-h-5 min-w-5" /><span>{{ agent.displayName }}</span></label>
+        </fieldset>
+        <fieldset v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] p-3">
+          <legend class="px-1 font-bold">Environment Workspaces</legend>
+          <p class="pb-1 text-[var(--text-muted)]">Choose the default workspace or a Worker-root-relative location for each Environment. All bindings are recorded with the Project.</p>
+          <p v-if="isLoadingCreationOptions" class="py-2 text-[var(--text-muted)]" aria-busy="true">Loading approved Environments…</p>
+          <p v-else-if="createableEnvironments.length === 0" class="py-2 text-[var(--text-secondary)]">No approved Environment is available. You can assign one later.</p>
+          <div v-for="environment in createableEnvironments" :key="environment.id" class="py-1">
+            <label class="flex min-h-[44px] items-center gap-2 text-[var(--text-primary)]"><input v-model="selectedCreateEnvironmentIds" type="checkbox" :value="environment.id" class="min-h-5 min-w-5" /><span>{{ environment.displayName }} <span class="text-[var(--text-muted)]">{{ environment.platform }}</span></span></label>
+            <div v-if="selectedCreateEnvironmentIds.includes(environment.id)" class="ml-7 flex flex-col gap-2 pb-2">
+              <label class="flex flex-col gap-1 font-semibold">Workspace for {{ environment.displayName }}<select :aria-label="`Workspace for ${environment.displayName}`" class="project-create-workspace-kind min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" :value="creationWorkspaceKinds[environment.id] ?? 'default'" @change="setCreationWorkspaceKind(environment.id, ($event.target as HTMLSelectElement).value)"><option value="default">Worker-managed default</option><option value="relative">Existing relative location</option></select></label>
+              <label v-if="creationWorkspaceKinds[environment.id] === 'relative'" class="flex flex-col gap-1 font-semibold">Relative Workspace Directory<input :aria-label="`Relative workspace directory for ${environment.displayName}`" class="project-create-workspace-path min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 font-mono text-[var(--text-primary)]" autocomplete="off" placeholder="repos/project" :value="creationWorkspacePaths[environment.id] ?? ''" @input="setCreationWorkspacePath(environment.id, ($event.target as HTMLInputElement).value)" /><span class="font-normal text-[var(--text-muted)]">Relative to the host-configured Worker workspace root. Absolute paths are refused.</span></label>
+            </div>
+          </div>
+        </fieldset>
         <p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p>
       </div>
-      <template #footer><Button variant="secondary" size="md" class="cancel-new-project-btn" :disabled="submitting" @click="closeDialog">Cancel</Button><Button variant="primary" size="md" class="min-h-[44px]" :disabled="submitting || !projectName.trim() || controlsDisabled" @click="submitProject">{{ dialog === 'create' ? 'Create Project' : 'Save Project' }}</Button></template>
+      <template #footer><Button variant="secondary" size="md" class="cancel-new-project-btn" :disabled="submitting" @click="closeDialog">Cancel</Button><Button variant="primary" size="md" class="min-h-[44px]" :disabled="submitting || (dialog === 'create' && isLoadingCreationOptions) || !projectName.trim() || controlsDisabled" @click="submitProject">{{ dialog === 'create' ? 'Create Project' : 'Save Project' }}</Button></template>
     </Dialog>
 
     <Dialog v-if="dialog === 'add-member' || dialog === 'edit-member'" :open="true" :title="dialog === 'add-member' ? 'Add Global Agent to Project' : 'Edit Project Membership'" description="Membership-specific responsibilities and collaboration instructions are versioned Project content." @update:open="closeDialog">

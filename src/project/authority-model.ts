@@ -78,7 +78,7 @@ export interface ProjectMembership {
 /**
  * One append-only version of a Project's editable content.
  *
- * The version is what makes goal, rules, wake policy, routing interval,
+ * The version is what makes goal, rules, completion guidance, wake policy, routing interval,
  * memberships, responsibilities, and collaboration instructions attributable
  * for later work: an old version is never rewritten, so a past run's or Task's
  * contract version always resolves to the content it was admitted under — the
@@ -91,6 +91,8 @@ export interface ProjectContentVersion {
   readonly reason: string;
   /** The sanitized shared goal (may be empty: goal is optional). */
   readonly goal: string;
+  /** Editable Project completion guidance copied from the template at creation. */
+  readonly completionGuidance: string;
   readonly rules: readonly string[];
   readonly wakePolicy: WakePolicy;
   readonly routingIntervalMs: number;

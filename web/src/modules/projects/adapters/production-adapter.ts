@@ -17,6 +17,14 @@ export class ProductionProjectService implements ProjectManagementService {
     return this.#ports.projects.listProjects();
   }
 
+  async loadCreationOptions() {
+    const [agents, environments] = await Promise.all([
+      this.#ports.agents.listAgents(),
+      this.#ports.environments.listEnvironments(),
+    ]);
+    return { agents, environments };
+  }
+
   async loadOverview(projectId: string): Promise<ProjectOverviewData> {
     const [project, agents, environments, access] = await Promise.all([
       this.#ports.projects.getProject(projectId),

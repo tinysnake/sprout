@@ -29,6 +29,7 @@ function projectFixture(
     at: createdAt,
     reason: 'Created from the General collaboration template.',
     goal: 'Coordinate durable, Human-supervised work toward a shared goal.',
+    completionGuidance: 'A Human validates checkable evidence before accepting completion.',
     rules: ['Keep Project identity portable.', 'Preserve workspace history.'],
     wakePolicy: 'explicit-only',
     routingIntervalMs: 30_000,
@@ -123,6 +124,14 @@ export class FixtureProjectService implements ProjectManagementService {
     return copy(this.#projects);
   }
 
+  async loadCreationOptions() {
+    const [agents, environments] = await Promise.all([
+      this.#agents.listAgents(),
+      this.#environments.listEnvironments(),
+    ]);
+    return { agents, environments };
+  }
+
   async loadOverview(projectId: string): Promise<ProjectOverviewData> {
     const project = this.#requireProject(projectId);
     const [agents, environments] = await Promise.all([
@@ -168,16 +177,34 @@ export class FixtureProjectService implements ProjectManagementService {
     const initialVersion = {
       ...first,
       goal: input.goal ?? first.goal,
+      completionGuidance: first.completionGuidance,
       rules: input.rules ?? first.rules,
       wakePolicy: input.wakePolicy ?? first.wakePolicy,
+      routingIntervalMs: input.routingIntervalMs ?? first.routingIntervalMs,
     };
     project.content = { currentVersion: 1, versions: [initialVersion] };
     project.goal = initialVersion.goal;
+    const initialAccess = (input.environmentAssignments ?? []).map((assignment) => {
+      const at = nextTime();
+      const current = bindingFor(assignment.workspace, at, `${project.id}-${assignment.environmentInstanceId}`);
+      return {
+        projectId: project.id,
+        environmentInstanceId: assignment.environmentInstanceId,
+        status: 'active' as const,
+        startedAt: at,
+        updatedAt: at,
+        current,
+        history: [current],
+      };
+    });
+    if (initialAccess.length > 0) {
+      this.#access.set(project.id, initialAccess);
+    }
     this.#projects.unshift(project);
     return copy(project);
   }
 
-  async updateProjectContent(id: string, input: { displayName?: string; goal: string | null; rules: readonly string[]; wakePolicy: string }): Promise<ProjectAuthorityView> {
+  async updateProjectContent(id: string, input: { displayName?: string; goal: string | null; completionGuidance: string; rules: readonly string[]; wakePolicy: string; routingIntervalMs: number }): Promise<ProjectAuthorityView> {
     const project = this.#requireEditable(id);
     const current = this.#currentContent(project);
     const next = {
@@ -186,8 +213,10 @@ export class FixtureProjectService implements ProjectManagementService {
       at: nextTime(),
       reason: 'Project content updated.',
       goal: input.goal ?? '',
+      completionGuidance: input.completionGuidance,
       rules: [...input.rules],
       wakePolicy: input.wakePolicy,
+      routingIntervalMs: input.routingIntervalMs,
     };
     project.content = { currentVersion: next.version, versions: [...project.content.versions, next] };
     if (input.displayName !== undefined) project.displayName = input.displayName;

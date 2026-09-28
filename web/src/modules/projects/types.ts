@@ -8,6 +8,7 @@ import type {
   ProjectAuthorityView,
   ProjectBrowserAdapter,
   ProjectEnvironmentAccessView,
+  ProjectEnvironmentCreationInput,
   WorkspaceSelectionInput,
 } from '../../adapters/project-api.js';
 
@@ -33,19 +34,29 @@ export interface CreateProjectInput {
   readonly goal?: string;
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
+  readonly routingIntervalMs?: number;
   readonly agentMemberships?: readonly AgentMembershipInput[];
+  readonly environmentAssignments?: readonly ProjectEnvironmentCreationInput[];
+}
+
+export interface ProjectCreationOptions {
+  readonly agents: readonly AgentInstance[];
+  readonly environments: readonly EnvironmentInstance[];
 }
 
 /** The Project page's one typed authority seam. */
 export interface ProjectManagementService {
   listProjects(): Promise<readonly ProjectAuthorityView[]>;
+  loadCreationOptions(): Promise<ProjectCreationOptions>;
   loadOverview(projectId: string): Promise<ProjectOverviewData>;
   createProject(input: CreateProjectInput): Promise<ProjectAuthorityView>;
   updateProjectContent(id: string, input: {
     readonly displayName?: string;
     readonly goal: string | null;
+    readonly completionGuidance: string;
     readonly rules: readonly string[];
     readonly wakePolicy: string;
+    readonly routingIntervalMs: number;
   }): Promise<ProjectAuthorityView>;
   addProjectMembership(id: string, input: AgentMembershipInput): Promise<ProjectAuthorityView>;
   updateProjectMembership(id: string, memberId: string, input: {

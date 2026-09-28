@@ -112,6 +112,7 @@ test('creating a Project copies the template as an editable snapshot, not a link
   const projects = service();
   const project = await projects.create({ id: 'project-snap', displayName: 'Snapshot' });
   const copied = currentProjectContent(project);
+  assert.equal(copied.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
 
   // The snapshot records the template's full editable starting content
   // (F2): goal guidance, suggested rules, role slots, wake policy, and
@@ -131,8 +132,15 @@ test('creating a Project copies the template as an editable snapshot, not a link
 
   // The copy is editable: a later edit appends a Project content version and
   // leaves the template source untouched.
-  const edited = await projects.updateContent('project-snap', { goal: 'A different goal' });
+  const edited = await projects.updateContent('project-snap', {
+    goal: 'A different goal',
+    completionGuidance: 'Require a reproducible validation result.',
+    routingIntervalMs: 75_000,
+  });
   assert.equal(currentProjectContent(edited).goal, 'A different goal');
+  assert.equal(currentProjectContent(edited).completionGuidance, 'Require a reproducible validation result.');
+  assert.equal(currentProjectContent(edited).routingIntervalMs, 75_000);
+  assert.equal(copied.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
   assert.equal(GENERAL_COLLABORATION_TEMPLATE.goalGuidance.length > 0, true);
   assert.equal(copied.version, 1);
   assert.equal(edited.content.currentVersion, 2);
