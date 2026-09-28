@@ -91,6 +91,14 @@ export interface RecoveryHolderActions {
 export interface VerifiedWorkerReconnect {
   readonly enrollmentId: string;
   readonly workerIdentityDigest?: string;
+  /**
+   * Attested by the enrollment authority (#171): the record's bound identity
+   * was formally invalidated by an enrollment identity rotation (reset), and
+   * this connection presents the Human-approved successor identity on the same
+   * enrollment. Rotation is never inferred from a digest mismatch — only the
+   * enrollment authority can attest it.
+   */
+  readonly identityRotated?: boolean;
   readonly environmentInstanceId: string;
   /** Always `true`: this service refuses a reconnect that was not authenticated. */
   readonly identityVerified: boolean;
@@ -301,8 +309,22 @@ export class EnvironmentRecoveryService {
         'The reconnecting Worker does not serve the Environment this recovery record protects.',
       );
     }
-    if ((record.enrollmentId !== undefined && reconnect.enrollmentId !== record.enrollmentId) ||
-        (record.workerIdentityDigest !== undefined && reconnect.workerIdentityDigest !== record.workerIdentityDigest)) {
+    if (record.enrollmentId !== undefined && reconnect.enrollmentId !== record.enrollmentId) {
+      throw new EnvironmentRecoveryError('identity-not-verified', 'Recovery requires the original enrolled Worker identity.');
+    }
+    // #171: a formally rotated identity on the SAME enrollment can never return
+    // to prove anything — the predecessor key is durably invalidated by the
+    // enrollment reset, so demanding it would pin a no-run record unresolvably.
+    // The enrollment authority attests the rotation (`identityRotated`); an
+    // unexplained digest mismatch is still refused exactly as before.
+    const identityRotated =
+      reconnect.identityRotated === true &&
+      record.workerIdentityDigest !== undefined &&
+      reconnect.workerIdentityDigest !== undefined &&
+      reconnect.workerIdentityDigest !== record.workerIdentityDigest;
+    if (record.workerIdentityDigest !== undefined &&
+        reconnect.workerIdentityDigest !== record.workerIdentityDigest &&
+        !identityRotated) {
       throw new EnvironmentRecoveryError('identity-not-verified', 'Recovery requires the original enrolled Worker identity.');
     }
     if (!reconnect.protocolCompatible) {
@@ -334,7 +356,9 @@ export class EnvironmentRecoveryService {
           kind: 'reconnect-observed',
           actor: 'worker',
           at,
-          reason: 'The enrolled Worker reconnected and was re-authenticated; evidence synchronization is required before any decision.',
+          reason: identityRotated
+            ? 'The superseded Worker identity was formally rotated; the Human-approved successor reconnected and was re-authenticated; evidence synchronization is required before any decision.'
+            : 'The enrolled Worker reconnected and was re-authenticated; evidence synchronization is required before any decision.',
         },
       ],
     };

@@ -996,6 +996,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // fabricated dual-engine failure (ADR-0008).
       requiredEngines: [engineId],
       onMutation: onEnrollmentMutation,
+      // A committed probe observation republishes the catalog eligibility
+      // projection before the write reports success (#162), so a green instance
+      // resolves for the next `begin` without waiting for a connection or
+      // acceptance event. The hook runs only after the durable commit, and the
+      // service swallows projection failures, so a committed observation can
+      // never be failed by the catalog. The closure is invoked long after this
+      // options object is constructed, once the refresh exists below.
+      onObservationCommitted: () => refreshEnvironmentCatalog(),
       resolveRequirements: currentRequirements,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
@@ -1150,10 +1158,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
       // Invalidate an in-flight source snapshot before publishing the accepted
-      // epoch synchronously. Only a later refresh may replace this projection.
+      // epoch synchronously, then schedule the store-backed refresh that may
+      // replace this projection. The bump above aborts any refresh already in
+      // flight, so without a scheduled successor this event would republish
+      // only the pre-bump snapshot and strand a concurrent probe-commit
+      // republish until some later event (#162).
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
       publishCatalogMembership();
+      void refreshEnvironmentCatalog().catch(() => undefined);
       // The Worker's own readiness is observed over the accepted inbound channel
       // (never by dialing one), so the catalog can reach eligibility once the
       // required facts are established. The short defer lets the Worker consume
@@ -1183,9 +1196,19 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
           const records = (await recovery.listForEnvironment(acceptance.enrollment.environmentInstanceId))
             .filter((record) => record.phase !== 'resolved');
+          // #171: a digest this enrollment durably invalidated by an identity
+          // rotation can never return to prove anything, so it must not fence
+          // its record out of the reconnect pass forever; the connecting
+          // identity is the Human-approved successor on the same enrollment.
+          // Any other identity mismatch still fences the whole pass before a
+          // single piece of evidence moves.
+          const rotatedIdentity = (record: import('./environment/recovery.ts').EnvironmentRecoveryRecord): boolean =>
+            record.workerIdentityDigest !== undefined &&
+            acceptance.enrollment.invalidatedIdentityDigests.includes(record.workerIdentityDigest);
           if (records.some((record) => (record.enrollmentId !== undefined && record.enrollmentId !== acceptance.enrollment.id) ||
               (record.workerIdentityDigest !== undefined &&
-               record.workerIdentityDigest !== acceptance.enrollment.worker.identityDigest))) return;
+               record.workerIdentityDigest !== acceptance.enrollment.worker.identityDigest &&
+               !rotatedIdentity(record)))) return;
           for (const turn of snapshot.turns) {
             if (!current()) return;
             const receipt = await durableStores.recovery.receiveWorkerTurn(acceptance.enrollment.id, turn);
@@ -1218,6 +1241,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
                 environmentInstanceId: acceptance.enrollment.environmentInstanceId,
                 identityVerified: true, protocolCompatible: true, permissionsAllowed: true,
                 hadActiveRun: true,
+                identityRotated: rotatedIdentity(record),
               });
               observedRecoveries.add(record.leaseId);
             }

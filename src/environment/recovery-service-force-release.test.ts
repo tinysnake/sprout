@@ -25,7 +25,7 @@ import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 
 import type { Task } from '../task/model.ts';
 
-import { EnvironmentRecoveryService } from './recovery-service.ts';
+import { EnvironmentRecoveryError, EnvironmentRecoveryService } from './recovery-service.ts';
 
 import { InMemoryRecoveryStore } from './recovery-store.ts';
 
@@ -305,6 +305,50 @@ test('the recovery record and Force Release outcome survive a real SQLite reopen
   }
 });
 
+
+test('#162: Force Release resolves the recovery record when the owning Task is already terminal', async () => {
+  const built = build();
+  const { leaseId } = await interruptedTask(built);
+
+  // The pre-restart Worker session is gone, so no evidence can synchronize and
+  // every ordinary decision refuses while the record protects the lease.
+  await assert.rejects(
+    built.recovery.release(leaseId, {}),
+    (error: unknown) => error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized',
+  );
+  assert.equal((await built.recovery.forLease(leaseId))?.phase, 'recovery');
+
+  // The Task plane's own recovery route ends the Task without consulting the
+  // Environment recovery record: the Task becomes terminal while the record —
+  // and the instance's Red work-safety state — stays open across restarts.
+  await built.lifecycle.recover('task-1', 'discard');
+  const stranded = await built.store.get('task-1');
+  assert.equal(stranded?.status, 'cancelled');
+  assert.equal(built.pool.getLease(leaseId)?.state, 'released');
+  assert.equal(
+    (await built.recovery.forLease(leaseId))?.phase,
+    'recovery',
+    'the terminal Task left its recovery record open',
+  );
+
+  // Force Release must resolve that record instead of throwing past the Task
+  // lifecycle's emergency-end guard for the already-terminal Task.
+  const outcome = await built.recovery.forceRelease(leaseId, {
+    acknowledgedRisks: true,
+    typedConfirmation: FORCE_RELEASE_CONFIRMATION,
+    reason: 'Synthetic restart stranded the record after the Task was already discarded',
+  });
+  assert.equal(outcome.environmentInstanceId, 'mac-1');
+  assert.equal(outcome.leaseId, leaseId);
+  assert.equal(outcome.holderKind, 'task');
+  assert.equal(await built.recovery.forLease(leaseId), undefined, 'the recovery record resolves');
+  const history = await built.recovery.forceReleaseHistory('mac-1');
+  assert.equal(history.length, 1, 'the permanent Force Release outcome is still recorded');
+  assert.equal(built.pool.getLease(leaseId)?.state, 'released');
+  const resolved = await built.store.get('task-1');
+  assert.equal(resolved?.status, 'cancelled', 'the terminal Task keeps its own history');
+  assert.equal(resolved?.environmentLifecycleState, 'discarded');
+});
 
 test('Force Release sanitizes a sensitive reason and keeps a product-owned record', async () => {
   const built = build();

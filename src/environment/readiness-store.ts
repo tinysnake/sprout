@@ -108,12 +108,22 @@ export function withModelAuthorizations(
       modelAuthorizations: authorizations.filter((a) => a.engine === name),
     };
   });
+  // A model authorization is a Human decision about usable models, not an
+  // observation: attaching authorizations to an existing document must never
+  // rebrand another enrollment's committed facts as this enrollment's
+  // authority (#162). A new enrollment may never inherit another enrollment's
+  // observations merely because its approval happened to run later; only an
+  // unscoped or already-owned document takes the caller's enrollment/epoch.
+  const foreignObservation =
+    existing?.enrollmentId !== undefined &&
+    context?.enrollmentId !== undefined &&
+    existing.enrollmentId !== context.enrollmentId;
   return {
     ...(existing ?? { connection: { state: 'never-connected' }, compatibility: { state: 'unknown' } }),
     engines,
     ...(context?.requirements !== undefined ? { requirements: context.requirements } : {}),
-    ...(context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
-    ...(context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
+    ...(!foreignObservation && context?.enrollmentId !== undefined ? { enrollmentId: context.enrollmentId } : {}),
+    ...(!foreignObservation && context?.connectionEpoch !== undefined ? { connectionEpoch: context.connectionEpoch } : {}),
   };
 }
 

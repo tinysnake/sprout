@@ -46,7 +46,7 @@ switch (command) {
   case 'help':
   case '--help':
   case '-h':
-    process.stdout.write('Usage: sprout <command>\n\nCommands:\n  worker   Manage the macOS Environment Worker\n');
+    process.stdout.write('Usage: sprout <command>\n\nCommands:\n  worker   Manage the Environment Worker for this host\n');
     process.exit(command === undefined ? 2 : 0);
     break;
   default:

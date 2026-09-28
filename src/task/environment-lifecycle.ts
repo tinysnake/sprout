@@ -22,6 +22,30 @@ import type { TaskContextMaterialization } from '../worker/protocol.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
 
+/** Why one Task recovery request cannot apply (#171). */
+export type TaskRecoveryRefusalCode =
+  | 'not-awaiting-recovery'
+  | 'ending-requires-discard'
+  | 'lease-cannot-resume';
+
+/**
+ * A recovery request that cannot apply, named so the API can surface it.
+ *
+ * These refusals carry only product-owned text and domain ids — never host
+ * paths or secrets — so an authenticated browser session may see the exact
+ * reason instead of the protected generic failure (#171). Operational
+ * failures (context recycle, durable writes) stay masked.
+ */
+export class TaskRecoveryRefusal extends Error {
+  readonly code: TaskRecoveryRefusalCode;
+
+  constructor(code: TaskRecoveryRefusalCode, message: string) {
+    super(message);
+    this.name = 'TaskRecoveryRefusal';
+    this.code = code;
+  }
+}
+
 /** A test process may throw this immediately after a durable commit. */
 export class DurableWriteCrash extends Error {}
 
@@ -261,10 +285,10 @@ export class TaskEnvironmentLifecycle {
   async recover(taskId: string, action: TaskRecoveryAction): Promise<Task> {
     const task = await this.#require(taskId);
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
-    if (task.environmentLifecycleState !== 'recovery') throw new Error(`task ${taskId} is not awaiting recovery`);
+    if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     if (action === 'discard') return this.#recycleThenRelease(task, 'discarded');
-    if (task.recoveryState === 'ending') throw new Error(`task ${taskId} was ending; discard completes its cleanup`);
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new Error(`task ${taskId} lease cannot resume`);
+    if (task.recoveryState === 'ending') throw new TaskRecoveryRefusal('ending-requires-discard', `task ${taskId} was ending; discard completes its cleanup`);
+    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
         await this.#prepare(task, task.assignedAgentId!);
@@ -349,11 +373,23 @@ export class TaskEnvironmentLifecycle {
     },
   ): Promise<readonly string[]> {
     const task = await this.#require(taskId);
-    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
-      throw new Error(`task ${taskId} is ${task.status} and cannot be force released`);
-    }
     const affectedRunIds = (await this.#store.listRuns(taskId)).map((link) => link.runId);
     if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
+    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
+      // #162: the Task already ended through its own lifecycle (for example an
+      // operator discarded it from the Task plane while its Environment
+      // recovery record stayed open). A terminal Task must keep its own
+      // history — never be rewritten into another terminal state — and the
+      // emergency end must not throw past the recovery resolution the Force
+      // Release is performing. Releasing the retained lease binding is
+      // idempotent, so only the Task mutation is skipped; the permanent
+      // outcome record and the record resolution stay with the Environment
+      // domain.
+      if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
+        this.#forceReleaseLease(task.environmentLeaseId);
+      }
+      return [...new Set(affectedRunIds)];
+    }
     const forced: Task = omit(
       omit(
         {

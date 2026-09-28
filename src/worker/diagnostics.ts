@@ -1,5 +1,6 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
+import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
 
 /**
  * Product-owned Worker diagnostic categories (ADR-0009).
@@ -40,6 +41,38 @@ export const WORKER_DIAGNOSTICS = {
 } as const;
 
 export type WorkerDiagnostic = typeof WORKER_DIAGNOSTICS[keyof typeof WORKER_DIAGNOSTICS];
+
+/**
+ * The finite set of server refusal reasons that are static, product-owned,
+ * secret-free strings.
+ *
+ * A refusal crosses the CLI boundary only when its reason is exactly one of
+ * these. Any other server-supplied text is treated as untrusted, because it
+ * could echo identity key material, an absolute host path, or a token-bearing
+ * URL; those paths keep the caller-supplied sanitized fallback.
+ */
+const STATIC_REFUSAL_REASONS: readonly string[] = [
+  WORKER_TRANSPORT_REFUSAL_REASON,
+  WORKER_DIAGNOSTICS.enrollmentUnavailable,
+  WORKER_DIAGNOSTICS.enrollmentRevoked,
+  WORKER_DIAGNOSTICS.enrollmentClaimRefused,
+  WORKER_DIAGNOSTICS.identityProofRefused,
+  WORKER_DIAGNOSTICS.enrollmentRefused,
+  WORKER_DIAGNOSTICS.connectionRefused,
+  WORKER_DIAGNOSTICS.protocolIncompatible,
+  'the Worker identity is not approved for work',
+  'a newer Worker connection epoch superseded this connection',
+];
+
+/**
+ * The reason itself when it is a known, static refusal string, else `undefined`.
+ *
+ * This is the allowlist gate for server-supplied refusal text: only strings that
+ * this build authored may leave the process.
+ */
+export function staticRefusalReason(reason: string): string | undefined {
+  return STATIC_REFUSAL_REASONS.includes(reason) ? reason : undefined;
+}
 
 /** Replace an engine-owned failure message before it crosses Worker JSON-RPC. */
 export function sanitizeEngineTurnResult(result: EngineTurnResult): EngineTurnResult {

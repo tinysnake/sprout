@@ -10,6 +10,7 @@ import type { EnvironmentEnrollmentService } from '../environment/enrollment-ser
 import { ReadinessOutcomeError } from '../environment/readiness-workflow.ts';
 import type { EnvironmentRecoveryService } from '../environment/recovery-service.ts';
 import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
+import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import type { WorkerIdentityProof } from '../environment/worker-proof.ts';
 import type { EnvironmentArchivePort } from '../environment/archive.ts';
 import type {
@@ -703,6 +704,11 @@ function recoveryFailure(context: ApiRequestContext, error: unknown): true {
   if (error instanceof EnvironmentRecoveryError) {
     const status = error.code === 'unknown-recovery' || error.code === 'unknown-lease' ? 404 : 409;
     return json(context, status, { error: error.message, code: error.code });
+  }
+  // #171: a Task-plane refusal is product-owned text and domain ids, so the
+  // operator learns why the decision cannot apply instead of a generic failure.
+  if (error instanceof TaskRecoveryRefusal) {
+    return json(context, 409, { error: error.message, code: error.code });
   }
   if (error instanceof EnrollmentError) return enrollmentFailure(context, error);
   return json(context, 500, { error: 'environment recovery could not be completed' });

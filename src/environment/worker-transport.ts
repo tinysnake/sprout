@@ -27,6 +27,14 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return false;
 }
 
+/**
+ * The static, secret-free reason a non-loopback plaintext connection is
+ * refused. It is product-owned text, so the Worker CLI may display it to an
+ * operator to distinguish a transport refusal from an unreachable endpoint.
+ */
+export const WORKER_TRANSPORT_REFUSAL_REASON =
+  'a non-loopback Worker connection must use WSS; plaintext WS is refused before any command is accepted';
+
 export type WorkerTransportKind = 'ws' | 'wss';
 
 /** One Worker connection's transport facts, as observed at the core. */
@@ -56,8 +64,7 @@ export function decideWorkerTransport(facts: WorkerTransportFacts): WorkerTransp
   if (facts.allowInsecurePlaintext === true) return { allowed: true, kind: 'ws' };
   return {
     allowed: false,
-    reason:
-      'a non-loopback Worker connection must use WSS; plaintext WS is refused before any command is accepted',
+    reason: WORKER_TRANSPORT_REFUSAL_REASON,
   };
 }
 

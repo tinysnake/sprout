@@ -11,6 +11,7 @@ import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
+import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import { composeApiRouters, type ApiRouter } from './router.ts';
 import type { WorkerGateway } from '../worker/gateway.ts';
@@ -499,7 +500,16 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const body = await readBody();
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
       try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
-      catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
+      catch (error) {
+        // #171: a recovery refusal is product-owned text and domain ids, so an
+        // authenticated session sees the actionable reason rather than the
+        // generic protected failure. Every other error keeps the privacy mask.
+        if (error instanceof TaskRecoveryRefusal) {
+          sendJson(response, 409, { error: error.message, code: error.code });
+          return;
+        }
+        sendJson(response, 409, { error: responseError(error, auth !== undefined) });
+      }
       return;
     }
 
