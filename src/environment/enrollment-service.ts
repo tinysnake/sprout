@@ -122,6 +122,16 @@ export interface EnvironmentEnrollmentServiceOptions {
    * so callers must not throw from it.
    */
   readonly onMutation?: (enrollment: EnvironmentEnrollment) => void;
+  /**
+   * Awaited after a probe observation commits (#162).
+   *
+   * The dynamic Environment catalog republishes its eligibility projection
+   * from this hook, so a committed probe observation advances admission on its
+   * own instead of depending on a later connection/acceptance event. It runs
+   * only after the durable commit succeeded, and a failure in it is swallowed:
+   * a projection can never fail or roll back a committed observation.
+   */
+  readonly onObservationCommitted?: () => void | Promise<unknown>;
 }
 /** A new pending enrollment request plus the host bootstrap guidance it unlocks. */
 export interface PendingEnrollmentResult {
@@ -161,6 +171,7 @@ export class EnvironmentEnrollmentService {
   readonly #claimSecretFactory: () => string;
   readonly #claimTtlMs: number;
   readonly #onMutation: ((enrollment: EnvironmentEnrollment) => void) | undefined;
+  readonly #onObservationCommitted: (() => void | Promise<unknown>) | undefined;
   readonly #currentConnectionEpoch: (enrollmentId: string) => number | undefined;
   readonly #onAuthorityLost: ((enrollmentId: string) => void) | undefined;
   /** Local lifecycle generation checked at the store mutation boundary. */
@@ -193,6 +204,7 @@ export class EnvironmentEnrollmentService {
     this.#claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
     this.#authority = options.lifecycleAuthority ?? new EnrollmentLifecycleAuthority();
     this.#onMutation = options.onMutation;
+    this.#onObservationCommitted = options.onObservationCommitted;
     this.#resolveRequirements = options.resolveRequirements;
   }
 
@@ -479,6 +491,16 @@ export class EnvironmentEnrollmentService {
       authority,
     );
     if (!recorded) return undefined;
+    // The observation is durable now, so the catalog eligibility projection is
+    // republished before this write reports success: the next environment
+    // resolution sees the committed fact without waiting for a connection or
+    // acceptance event to re-project it (#162). Projection failures are
+    // swallowed like every other observation hook — they never fail a commit.
+    try {
+      await this.#onObservationCommitted?.();
+    } catch {
+      // Observation must never turn a committed readiness write into a failure.
+    }
     return recorded;
   }
 

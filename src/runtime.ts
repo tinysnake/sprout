@@ -996,6 +996,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // fabricated dual-engine failure (ADR-0008).
       requiredEngines: [engineId],
       onMutation: onEnrollmentMutation,
+      // A committed probe observation republishes the catalog eligibility
+      // projection before the write reports success (#162), so a green instance
+      // resolves for the next `begin` without waiting for a connection or
+      // acceptance event. The hook runs only after the durable commit, and the
+      // service swallows projection failures, so a committed observation can
+      // never be failed by the catalog. The closure is invoked long after this
+      // options object is constructed, once the refresh exists below.
+      onObservationCommitted: () => refreshEnvironmentCatalog(),
       resolveRequirements: currentRequirements,
     };
     const enrollments = new EnvironmentEnrollmentService(enrollmentOptions);
@@ -1150,10 +1158,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
       // Invalidate an in-flight source snapshot before publishing the accepted
-      // epoch synchronously. Only a later refresh may replace this projection.
+      // epoch synchronously, then schedule the store-backed refresh that may
+      // replace this projection. The bump above aborts any refresh already in
+      // flight, so without a scheduled successor this event would republish
+      // only the pre-bump snapshot and strand a concurrent probe-commit
+      // republish until some later event (#162).
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
       publishCatalogMembership();
+      void refreshEnvironmentCatalog().catch(() => undefined);
       // The Worker's own readiness is observed over the accepted inbound channel
       // (never by dialing one), so the catalog can reach eligibility once the
       // required facts are established. The short defer lets the Worker consume

@@ -349,11 +349,23 @@ export class TaskEnvironmentLifecycle {
     },
   ): Promise<readonly string[]> {
     const task = await this.#require(taskId);
-    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
-      throw new Error(`task ${taskId} is ${task.status} and cannot be force released`);
-    }
     const affectedRunIds = (await this.#store.listRuns(taskId)).map((link) => link.runId);
     if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
+    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
+      // #162: the Task already ended through its own lifecycle (for example an
+      // operator discarded it from the Task plane while its Environment
+      // recovery record stayed open). A terminal Task must keep its own
+      // history — never be rewritten into another terminal state — and the
+      // emergency end must not throw past the recovery resolution the Force
+      // Release is performing. Releasing the retained lease binding is
+      // idempotent, so only the Task mutation is skipped; the permanent
+      // outcome record and the record resolution stay with the Environment
+      // domain.
+      if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
+        this.#forceReleaseLease(task.environmentLeaseId);
+      }
+      return [...new Set(affectedRunIds)];
+    }
     const forced: Task = omit(
       omit(
         {
