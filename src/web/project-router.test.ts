@@ -158,11 +158,12 @@ test('a Project is created from a name plus the Human membership, and the snapsh
   }
 });
 
-test('content edits, membership add, and membership end each append an attributed version', async () => {
+test('identity edits and membership changes preserve Project and content history', async () => {
   const runtime = await projectApi();
   try {
     await command(runtime, '/api/projects', { id: 'project-flow', displayName: 'Flow' });
     const edited = await command(runtime, '/api/projects/project-flow/content', {
+      displayName: 'Flow Renamed',
       goal: 'Revised',
       wakePolicy: 'wake-model-assisted',
       routingIntervalMs: 45_000,
@@ -174,24 +175,40 @@ test('content edits, membership add, and membership end each append an attribute
       collaborationInstructions: 'Concise.',
     });
     assert.equal(added.status, 200);
+    const updated = await command(runtime, '/api/projects/project-flow/memberships/agent-scout', {
+      responsibilities: ['Review changes'],
+      collaborationInstructions: 'Explain review findings.',
+    });
+    assert.equal(updated.status, 200);
     const ended = await command(runtime, '/api/projects/project-flow/memberships/agent-scout/end', {
       reason: 'Moving on',
     });
     assert.equal(ended.status, 200);
     const { project } = (await ended.json()) as {
       project: {
+        displayName: string;
         content: {
           currentVersion: number;
           versions: {
             version: number;
             reason: string;
-            memberships: { memberId: string; endedAt?: number; endedReason?: string }[];
+            memberships: {
+              memberId: string;
+              responsibilities: string[];
+              collaborationInstructions: string;
+              endedAt?: number;
+              endedReason?: string;
+            }[];
           }[];
         };
       };
     };
-    assert.equal(project.content.currentVersion, 4);
-    const endedVersion = project.content.versions[3];
+    assert.equal(project.displayName, 'Flow Renamed');
+    assert.equal(project.content.currentVersion, 5);
+    const editedMembership = project.content.versions[3]?.memberships.find((entry) => entry.memberId === 'agent-scout');
+    assert.deepEqual(editedMembership?.responsibilities, ['Review changes']);
+    assert.equal(editedMembership?.collaborationInstructions, 'Explain review findings.');
+    const endedVersion = project.content.versions[4];
     const membership = endedVersion?.memberships.find((entry) => entry.memberId === 'agent-scout');
     assert.ok(membership?.endedAt);
     assert.equal(membership?.endedReason, 'Moving on');

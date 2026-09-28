@@ -104,10 +104,14 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   const agentsModule = (await vite.ssrLoadModule(
     '/src/modules/agents/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+  const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+  const environmentService = new module.FixtureEnvironmentService();
+  const agentService = new agentsModule.FixtureAgentService();
   return {
     routerBase: '/app/',
-    environmentService: new module.FixtureEnvironmentService(),
-    agentService: new agentsModule.FixtureAgentService(),
+    environmentService,
+    agentService,
+    projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
   };
 }
 
@@ -438,6 +442,241 @@ test('Production Web: phone drill-down navigation provides full-width detail and
     assert.equal(router.currentRoute.value.path, '/manage/environments', 'Navigated back to master list');
 
     app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Overview loads authority states and completes create-to-ready-to-archive safely', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const projectsViewSource = await readFile(new URL('../modules/projects/views/ProjectsView.vue', import.meta.url), 'utf8');
+    const appBootstrapSource = await readFile(new URL('./main.ts', import.meta.url), 'utf8');
+    assert.doesNotMatch(projectsViewSource, /FixtureProjectService|fixture-adapter/);
+    assert.doesNotMatch(appBootstrapSource, /FixtureProjectService|fixture-adapter/);
+    const options = await deterministicAppOptions(vite);
+    const appMount = dom.window.document.getElementById('app');
+    assert.ok(appMount);
+    const onlineState = { status: 'online' as const, connection: 'online' as const, loading: false };
+    const { app, router } = createSproutApp({
+      ...options,
+      connectionSource: {
+        state: () => onlineState,
+        subscribeState(listener) { listener(onlineState); return () => undefined; },
+      },
+    });
+    await router.push('/project/overview');
+    await router.isReady();
+    app.mount(appMount);
+    const doc = dom.window.document;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+    const pageState = () => (doc.querySelector('.projects-overview-view [data-state]') as HTMLElement | null)?.dataset.state;
+    await settle();
+
+    const overview = doc.querySelector('.projects-overview-view') as HTMLElement;
+    assert.ok(overview);
+    assert.equal(pageState(), 'ready', 'the selected fixture Project is ready');
+    assert.match(doc.body.textContent ?? '', /Project Contract & Purpose/);
+    assert.match(doc.body.textContent ?? '', /Project Memberships/);
+    assert.match(doc.body.textContent ?? '', /Bound Workspaces & Host Environments/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /(?:\/Users\/|[A-Z]:\\Users\\|192\.168\.|api[_-]?key\s*[:=])/i);
+    Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 390 });
+    assert.match((doc.querySelector('.project-workspaces-card') as HTMLElement).className, /project-workspaces-card/);
+    assert.match((doc.querySelector('.project-memberships-card button') as HTMLButtonElement).className, /min-h-\[44px\]/);
+    Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 1280 });
+    assert.match((doc.querySelector('.project-contract-card') as HTMLElement).className, /xl:col-span-2/);
+
+    // Project selection is retained in the route and an incomplete identity is
+    // never substituted with the ready Project.
+    const selector = doc.querySelector('#project-selector') as HTMLSelectElement;
+    selector.value = 'project-incomplete';
+    selector.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    assert.equal(pageState(), 'incomplete', 'selected resource-incomplete Project is explicit');
+    assert.match(doc.body.textContent ?? '', /Add or restore an active Agent/);
+    assert.match(doc.body.textContent ?? '', /Grant Environment access and assign a Project workspace/);
+
+    // Create identity as a valid incomplete Project, with keyboard-reachable
+    // focus trapped by the accessible dialog and touch-sized controls.
+    const createButton = doc.querySelector('.new-project-btn') as HTMLButtonElement;
+    assert.match(createButton.className, /min-h-\[44px\]/);
+    const infoButton = doc.querySelector('.project-info-btn') as HTMLButtonElement;
+    infoButton.click();
+    await settle();
+    const infoDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    assert.equal(infoDialog.contains(doc.activeElement), true, 'metadata dialog is keyboard reachable');
+    (doc.activeElement as HTMLElement).dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settle();
+    assert.equal(doc.querySelector('[role="dialog"]'), null, 'Escape closes the metadata dialog');
+    createButton.click();
+    await settle();
+    const dialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    assert.ok(dialog);
+    assert.equal(dialog.contains(doc.activeElement), true, 'dialog opening places focus inside the dialog');
+    const nameInput = dialog.querySelector('.project-name-input') as HTMLInputElement;
+    nameInput.value = 'New Work Project';
+    nameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle();
+    const createConfirm = [...dialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Create Project')) as HTMLButtonElement;
+    assert.equal(createConfirm.disabled, false, `new Project submit should be enabled (name field: ${nameInput.value})`);
+    createConfirm.click();
+    await settle();
+    assert.match(doc.body.textContent ?? '', /New Work Project/);
+    assert.equal(pageState(), 'incomplete', 'created identity remains valid while incomplete');
+    assert.equal(new URL(router.currentRoute.value.fullPath, 'http://sprout-operator.test').searchParams.get('project')?.startsWith('project-fixture-'), true);
+
+    // Assign an Environment workspace via the access authority, then add an
+    // Agent membership. The UI only displays the Worker-relative path.
+    (doc.querySelector('.project-workspaces-card button') as HTMLButtonElement).click();
+    await settle();
+    const accessDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const selects = accessDialog.querySelectorAll('select');
+    (selects[0] as HTMLSelectElement).value = 'env-ready';
+    (selects[0] as HTMLSelectElement).dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    (selects[1] as HTMLSelectElement).value = 'relative';
+    (selects[1] as HTMLSelectElement).dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    const pathInput = accessDialog.querySelector('input') as HTMLInputElement;
+    pathInput.value = 'repos/new-work-project';
+    pathInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    [...accessDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Grant Access'))?.click();
+    await settle();
+    assert.match(doc.body.textContent ?? '', /repos\/new-work-project/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /(?:\/Users\/|[A-Z]:\\Users\\)/i);
+
+    (doc.querySelector('.project-memberships-card button') as HTMLButtonElement).click();
+    await settle();
+    const memberDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const memberSelect = memberDialog.querySelector('select') as HTMLSelectElement;
+    memberSelect.value = 'programmer';
+    memberSelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    [...memberDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Add Agent Member'))?.click();
+    await settle();
+    assert.equal(pageState(), 'ready', 'Agent membership and Environment workspace satisfy prerequisites');
+    assert.match(doc.body.textContent ?? '', /Task-begin prerequisites met/);
+
+    (doc.querySelector('[aria-label="Edit Programmer membership"]') as HTMLButtonElement).click();
+    await settle();
+    const memberEdit = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const memberFields = memberEdit.querySelectorAll('input, textarea');
+    (memberFields[0] as HTMLInputElement).value = 'Review changes, own verification';
+    (memberFields[0] as HTMLInputElement).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    (memberFields[1] as HTMLTextAreaElement).value = 'Check each claim against evidence.';
+    (memberFields[1] as HTMLTextAreaElement).dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    [...memberEdit.querySelectorAll('button')].find((button) => button.textContent?.includes('Save Membership'))?.click();
+    await settle();
+    assert.match(doc.body.textContent ?? '', /Check each claim against evidence/);
+
+    (doc.querySelector('[aria-label="End Programmer membership"]') as HTMLButtonElement).click();
+    await settle();
+    const endMembershipDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    [...endMembershipDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('End Membership'))?.click();
+    await settle();
+    assert.equal(pageState(), 'incomplete', 'ended Agent membership removes a begin prerequisite');
+    [...doc.querySelectorAll('.project-memberships-card button')].find((button) => button.textContent?.includes('Restore'))?.click();
+    await settle();
+    assert.equal(pageState(), 'ready', 'restoring membership restores the prerequisite');
+
+    [...doc.querySelectorAll('.project-workspaces-card button')].find((button) => button.textContent?.includes('Change workspace'))?.click();
+    await settle();
+    const workspaceDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const workspacePathField = workspaceDialog.querySelector('input') as HTMLInputElement;
+    workspacePathField.value = 'repos/workspace-v2';
+    workspacePathField.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    [...workspaceDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Change Workspace'))?.click();
+    await settle();
+    assert.match(doc.body.textContent ?? '', /repos\/workspace-v2/);
+    assert.match(doc.body.textContent ?? '', /Workspace binding history \(2\)/);
+
+    // Editing identity/content/wake policy is one versioned write. Archive and
+    // restore preserve the assigned workspace rather than deleting it.
+    [...doc.querySelectorAll('.project-contract-card button')].find((button) => button.textContent?.includes('Edit Project'))?.click();
+    await settle();
+    const editDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const editName = editDialog.querySelector('.project-name-input') as HTMLInputElement;
+    editName.value = 'Renamed Work Project';
+    editName.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    const policySelect = editDialog.querySelector('.project-wake-policy') as HTMLSelectElement;
+    policySelect.value = 'wake-model-assisted';
+    policySelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    [...editDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Save Project'))?.click();
+    await settle();
+    assert.match(doc.body.textContent ?? '', /Renamed Work Project/);
+    assert.match(doc.body.textContent ?? '', /Wake-model-assisted/);
+
+    const archiveButton = [...doc.querySelectorAll('.project-contract-card button')].find((button) => button.textContent?.includes('Archive Project')) as HTMLButtonElement;
+    archiveButton.click();
+    await settle();
+    const archiveDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    [...archiveDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Archive Project'))?.click();
+    await settle();
+    assert.equal(pageState(), 'archived', 'archive state is distinct');
+    assert.match(doc.body.textContent ?? '', /repos\/new-work-project/);
+    [...doc.querySelectorAll('.project-contract-card button')].find((button) => button.textContent?.includes('Restore Project'))?.click();
+    await settle();
+    const restoreDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    [...restoreDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Restore Project'))?.click();
+    await settle();
+    assert.equal(pageState(), 'ready', 'restore re-enables the same resources');
+    assert.match(doc.body.textContent ?? '', /Workspace binding history/);
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Overview distinguishes unavailable, empty, failed, and unconfirmed compatibility states', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const doc = dom.window.document;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    const mountAtProject = async (options: Parameters<typeof createSproutApp>[0] = {}) => {
+      doc.body.innerHTML = '<div id="app"></div>';
+      dom.window.history.replaceState(null, '', '/app/project/overview');
+      const { app, router } = createSproutApp({ routerBase: '/app/', ...options });
+      await router.push('/project/overview');
+      await router.isReady();
+      app.mount(doc.getElementById('app')!);
+      await settle();
+      return app;
+    };
+
+    const unavailable = await mountAtProject();
+    assert.equal((doc.querySelector('.projects-overview-view [data-state]') as HTMLElement).dataset.state, 'unavailable');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Sprout M2 Operator/);
+    unavailable.unmount();
+
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const emptyService = new projectsModule.FixtureProjectService(options.agentService, options.environmentService, []);
+    const empty = await mountAtProject({ ...options, projectService: emptyService });
+    assert.equal((doc.querySelector('.projects-overview-view [data-state]') as HTMLElement).dataset.state, 'empty');
+    assert.match(doc.body.textContent ?? '', /No Projects yet/);
+    empty.unmount();
+
+    class FailedProjectService extends projectsModule.FixtureProjectService {
+      override async listProjects() { throw new Error('private adapter diagnostic'); }
+    }
+    const failedService = new FailedProjectService(options.agentService, options.environmentService, []);
+    const failed = await mountAtProject({ ...options, projectService: failedService });
+    assert.equal((doc.querySelector('.projects-overview-view [data-state]') as HTMLElement).dataset.state, 'failure');
+    assert.match(doc.body.textContent ?? '', /Project authority is unreachable/);
+    assert.doesNotMatch(doc.body.textContent ?? '', /private adapter diagnostic/);
+    failed.unmount();
+
+    class IncompatibleAgentService extends (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts') as typeof import('../modules/agents/adapters/fixture-adapter.ts')).FixtureAgentService {
+      override async compatibilityForEnvironment() {
+        return { environmentAvailable: false, unavailableReason: 'No available work option on this Environment.' };
+      }
+    }
+    const incompatibleAgents = new IncompatibleAgentService();
+    const warningService = new projectsModule.FixtureProjectService(incompatibleAgents, options.environmentService);
+    const warning = await mountAtProject({ ...options, agentService: incompatibleAgents, projectService: warningService });
+    assert.equal((doc.querySelector('.projects-overview-view [data-state]') as HTMLElement).dataset.state, 'warning');
+    assert.match(doc.body.textContent ?? '', /Compatibility needs attention/);
+    warning.unmount();
   } finally {
     await cleanup();
   }

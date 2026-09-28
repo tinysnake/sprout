@@ -98,13 +98,22 @@ async function deterministicAppOptions(vite: ViteDevServer) {
   const module = (await vite.ssrLoadModule(
     '/src/modules/environments/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
-  return { routerBase: '/app/', environmentService: new module.FixtureEnvironmentService() };
+  const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+  const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+  const environmentService = new module.FixtureEnvironmentService();
+  const agentService = new agentsModule.FixtureAgentService();
+  return {
+    routerBase: '/app/',
+    environmentService,
+    agentService,
+    projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+  };
 }
 
 /** Routes the operator can actually reach, with the content each must compose. */
 const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: string; expect: RegExp }[] = [
   { path: '/feed', destination: 'feed', expect: /Operations Feed & Human Attention/ },
-  { path: '/project/overview', destination: 'project', tab: 'overview', expect: /Project Collaboration Agreement/ },
+  { path: '/project/overview', destination: 'project', tab: 'overview', expect: /Project Contract & Purpose/ },
   { path: '/project/tasks', destination: 'project', tab: 'tasks', expect: /Project Tasks & Operating Loop/ },
   { path: '/project/tasks/101', destination: 'project', tab: 'tasks', expect: /Task Operating Stage & Specification/ },
   { path: '/project/chat', destination: 'project', tab: 'chat', expect: /Conversations & Groups/ },

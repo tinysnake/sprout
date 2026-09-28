@@ -17,6 +17,7 @@ import EnvironmentsView from '../modules/environments/views/EnvironmentsView.vue
 import AgentsView from '../modules/agents/views/AgentsView.vue';
 import FeedView from '../views/FeedView.vue';
 import ProjectView from '../views/ProjectView.vue';
+import ProjectsView from '../modules/projects/views/ProjectsView.vue';
 import UsageView from '../views/UsageView.vue';
 import SettingsView from '../views/SettingsView.vue';
 
@@ -39,7 +40,7 @@ export const routes: RouteRecordRaw[] = [
       {
         path: 'overview',
         name: 'project-overview',
-        component: ProjectView,
+        component: ProjectsView,
         meta: { destination: 'project', tab: 'overview' },
       },
       {

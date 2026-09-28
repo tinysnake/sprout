@@ -238,9 +238,11 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         const goalField = body['goal'];
         const routingIntervalMs = body['routingIntervalMs'];
         const reason = stringField(body, 'reason');
+        const displayName = stringField(body, 'displayName');
         const wakePolicy = stringField(body, 'wakePolicy');
         try {
           const project = await projects.updateContent(segments[2] ?? '', {
+            ...(displayName !== undefined ? { displayName } : {}),
             // `goal: null` is an explicit clear; an omitted field keeps the
             // current goal; a string replaces it.
             ...(goalField === null
@@ -251,6 +253,34 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
             ...(rules !== undefined ? { rules } : {}),
             ...(wakePolicy !== undefined ? { wakePolicy } : {}),
             ...(typeof routingIntervalMs === 'number' ? { routingIntervalMs } : {}),
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { project: toProjectAuthorityView(project) });
+        } catch (error) {
+          return projectFailure(context, error);
+        }
+      }
+
+      // POST /api/projects/:id/memberships/:memberId — append a Project
+      // content version with revised responsibilities/instructions.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'memberships'
+      ) {
+        const body = await context.readBody();
+        const responsibilities = parseResponsibilities(body['responsibilities']);
+        if (responsibilities === 'invalid') {
+          return json(context, 400, { error: 'responsibilities must be an array of strings' });
+        }
+        const collaborationInstructions = stringField(body, 'collaborationInstructions');
+        const reason = stringField(body, 'reason');
+        try {
+          const project = await projects.updateMembership(segments[2] ?? '', segments[4] ?? '', {
+            ...(responsibilities !== undefined ? { responsibilities } : {}),
+            ...(collaborationInstructions !== undefined ? { collaborationInstructions } : {}),
             ...(reason !== undefined ? { reason } : {}),
           });
           return json(context, 200, { project: toProjectAuthorityView(project) });

@@ -100,10 +100,18 @@ export interface ProjectBrowserAdapter {
   }): Promise<ProjectAuthorityView>;
   /** Append one content version; earlier versions are never rewritten. */
   updateProjectContent(id: string, input: {
+    /** Optional display identity edit; stable Project id remains unchanged. */
+    readonly displayName?: string;
     readonly goal?: string | null;
     readonly rules?: readonly string[];
     readonly wakePolicy?: string;
     readonly routingIntervalMs?: number;
+    readonly reason?: string;
+  }): Promise<ProjectAuthorityView>;
+  /** Update one active Agent membership as a new content version. */
+  updateProjectMembership(id: string, memberId: string, input: {
+    readonly responsibilities?: readonly string[];
+    readonly collaborationInstructions?: string;
     readonly reason?: string;
   }): Promise<ProjectAuthorityView>;
   /** Add one Agent membership (Human authority, enforced server-side). */
@@ -150,6 +158,13 @@ export function createProjectBrowserAdapter(transport: BrowserTransport): Projec
     async updateProjectContent(id, input) {
       const response = await transport.request<{ readonly project: ProjectAuthorityView }>(
         `/api/projects/${encodeURIComponent(id)}/content`,
+        jsonCommand(input),
+      );
+      return response.project;
+    },
+    async updateProjectMembership(id, memberId, input) {
+      const response = await transport.request<{ readonly project: ProjectAuthorityView }>(
+        `/api/projects/${encodeURIComponent(id)}/memberships/${encodeURIComponent(memberId)}`,
         jsonCommand(input),
       );
       return response.project;

@@ -104,10 +104,14 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   const agentsModule = (await vite.ssrLoadModule(
     '/src/modules/agents/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+  const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+  const environmentService = new module.FixtureEnvironmentService();
+  const agentService = new agentsModule.FixtureAgentService();
   return {
     routerBase: '/app/',
-    environmentService: new module.FixtureEnvironmentService(),
-    agentService: new agentsModule.FixtureAgentService(),
+    environmentService,
+    agentService,
+    projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
   };
 }
 
@@ -332,7 +336,7 @@ test('Production Web: project header and chat info buttons respond with accessib
     newProjBtn.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /Create New Project Workspace/);
+    assert.match(doc.body.textContent ?? '', /Create New Project/);
     const cancelBtn = doc.querySelector('.cancel-new-project-btn') as HTMLButtonElement;
     cancelBtn?.click();
     await new Promise((resolve) => setTimeout(resolve, 80));

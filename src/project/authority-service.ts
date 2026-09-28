@@ -143,6 +143,8 @@ export interface CreateProjectInput {
 }
 
 export interface UpdateProjectContentInput {
+  /** Optional user-facing identity edit; the stable Project id is unchanged. */
+  readonly displayName?: string;
   /** `undefined` keeps the current goal; a string (possibly empty) replaces it. */
   readonly goal?: string;
   /** `undefined` keeps the current rules; an array (possibly empty) replaces them. */
@@ -163,6 +165,12 @@ export interface AddMembershipInput {
 
 export interface EndMembershipInput {
   /** The sanitized operator reason recorded on the ended membership. */
+  readonly reason?: string;
+}
+
+export interface UpdateMembershipInput {
+  readonly responsibilities?: readonly string[];
+  readonly collaborationInstructions?: string;
   readonly reason?: string;
 }
 
@@ -330,6 +338,7 @@ export class ProjectService {
     const current = currentProjectContent(project);
     const next: ProjectAuthority = {
       ...project,
+      ...(input.displayName !== undefined ? { displayName: sanitizeProjectDisplayName(input.displayName) } : {}),
       content: {
         currentVersion: project.content.currentVersion + 1,
         versions: [
@@ -435,6 +444,32 @@ export class ProjectService {
         : entry,
     );
     return this.#appendVersion(project, now, sanitizeEditReason(input.reason), { memberships });
+  }
+
+  /** Append a content version with updated responsibilities for one active Agent. */
+  async updateMembership(
+    projectId: string,
+    memberId: string,
+    input: UpdateMembershipInput,
+  ): Promise<ProjectAuthority> {
+    const project = await this.#require(projectId);
+    this.#assertEditable(project);
+    const current = currentProjectContent(project);
+    const membership = current.memberships.find((entry) => entry.memberId === memberId);
+    if (membership === undefined || membership.endedAt !== undefined) {
+      throw new ProjectAuthorityError('membership-not-active', `${memberId} has no active membership in ${projectId}`);
+    }
+    if (membership.memberKind !== 'agent') {
+      throw new ProjectAuthorityError('human-membership-required', 'the local Human membership cannot be edited');
+    }
+    const sanitized = sanitizeMembershipText({
+      responsibilities: input.responsibilities ?? membership.responsibilities,
+      collaborationInstructions: input.collaborationInstructions ?? membership.collaborationInstructions,
+    });
+    const memberships = current.memberships.map((entry) =>
+      entry.memberId === memberId ? { ...entry, ...sanitized } : entry,
+    );
+    return this.#appendVersion(project, this.#clock(), sanitizeEditReason(input.reason), { memberships });
   }
 
   /**

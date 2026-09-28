@@ -146,6 +146,29 @@ test('creation and content edits send POST JSON command bodies', async () => {
   assert.deepEqual(JSON.parse(String(edit?.init?.body)), { goal: null, rules: ['New rule'] });
 });
 
+test('identity and membership edits use durable Project routes', async () => {
+  const { transport, calls } = recordingTransport(() => ({ project }));
+  const adapter = createProjectBrowserAdapter(transport);
+  await adapter.updateProjectContent('project-sprout', { displayName: 'Sprout Local', reason: 'Clarify scope' });
+  await adapter.updateProjectMembership('project-sprout', 'agent-scout', {
+    responsibilities: ['Investigate'],
+    collaborationInstructions: 'Keep findings concise.',
+  });
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/api/projects/project-sprout/content',
+    '/api/projects/project-sprout/memberships/agent-scout',
+  ]);
+  assert.ok(calls.every((call) => call.init?.method === 'POST'));
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    displayName: 'Sprout Local',
+    reason: 'Clarify scope',
+  });
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+    responsibilities: ['Investigate'],
+    collaborationInstructions: 'Keep findings concise.',
+  });
+});
+
 test('membership, archive, and restore commands hit their dedicated routes', async () => {
   const { transport, calls } = recordingTransport(() => ({ project }));
   const adapter = createProjectBrowserAdapter(transport);
