@@ -34,6 +34,7 @@ const agent: AgentView = {
       },
     ],
   },
+  workOptions: [{ id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' }],
   createdAt: 1_000,
   updatedAt: 2_000,
 };

@@ -148,6 +148,13 @@ export function createAgentRouter(options: AgentRouterOptions): ApiRouter {
       // The preserved M1 route returned `{ id, name, engine }` from the seed
       // registry; this additive route keeps those fields on every row and adds
       // the durable identities, so the existing composer keeps working.
+      // Since #173 each row also carries the current `workOptions` — the same
+      // sanitized projection the detail route emits and the compatibility
+      // route resolves per option — so a consumer can render an Agent's
+      // declared options straight from the list instead of fanning out one
+      // detail/compatibility request per Agent. The projection boundary is
+      // `toAgentView`: portable fields only, never a credential or an
+      // Environment internal.
       if (method === 'GET' && pathname === '/api/agents') {
         const status = statusFilter(context.searchParams.get('status') ?? undefined);
         const listed = (await agents.list())
