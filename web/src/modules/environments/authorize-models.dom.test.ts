@@ -117,9 +117,9 @@ test('EnvironmentDetail: records the Human model-authorization selection in plac
     const existing = doc.getElementById('env-auth-codex-target-model') as HTMLInputElement;
     assert.ok(existing, 'the existing grant is displayed');
     assert.equal(existing.disabled, true, 'an existing grant cannot be unchecked in an add-only panel');
-    assert.match(panel.textContent ?? '', /Existing grants cannot be removed here/);
+    assert.match(panel.textContent ?? '', /existing grants cannot be removed here/);
     existing.click();
-    assert.equal(existing.checked, true, 'attempting to deselect a grant does not present a false revocation');
+    assert.equal(existing.getAttribute('aria-checked'), 'true', 'attempting to deselect a grant does not present a false revocation');
     (late as unknown as { click(): void }).click();
     await new Promise((resolve) => setTimeout(resolve, 30));
 

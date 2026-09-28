@@ -566,6 +566,7 @@ export class EnvironmentEnrollmentService {
       readonly actor?: string;
     },
   ): Promise<ApproveEnrollmentResult> {
+    const generation = this.#authority.generation(enrollmentId);
     const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
     const at = this.#clock();
 
@@ -585,6 +586,7 @@ export class EnvironmentEnrollmentService {
     await this.#readiness.recordModelAuthorizations(enrollment.environmentInstanceId, authorizedFacts, {
       enrollmentId: enrollment.id,
       lifecycleGeneration: this.#authority.generation(enrollment.id),
+      isCurrent: () => this.#authority.generation(enrollment.id) === generation,
       ...(currentEpoch !== undefined ? { connectionEpoch: currentEpoch } : {}),
       ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
@@ -612,6 +614,7 @@ export class EnvironmentEnrollmentService {
       readonly actor?: string;
     },
   ): Promise<EnvironmentEnrollment> {
+    const generation = this.#authority.generation(enrollmentId);
     const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
     const at = this.#clock();
     const rawSelections = rawModelAuthorizationSelections(input.modelAuthorizations);
@@ -628,17 +631,18 @@ export class EnvironmentEnrollmentService {
     // Record the full current decision set, exactly as approval does: the
     // readiness document carries one complete authorization snapshot per engine,
     // so a partial write would drop the grants for other models or engines.
-    // Re-read first: a revoke/reset can land after the CAS write, and a revoked
-    // enrollment must never receive fresh entitlement evidence.
+    // Re-read first, then enforce the captured generation again at the store
+    // mutation boundary: the status read alone cannot fence a later revoke.
     const durable = await this.#requireEnrollment(enrollment.id);
-    if (durable.status !== 'approved') return durable;
+    if (durable.status !== 'approved' || this.#authority.generation(enrollment.id) !== generation) return durable;
     const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
     await this.#readiness.recordModelAuthorizations(
       enrollment.environmentInstanceId,
       enrollment.modelAuthorizations ?? [],
       {
         enrollmentId: enrollment.id,
-        lifecycleGeneration: this.#authority.generation(enrollment.id),
+        lifecycleGeneration: generation,
+        isCurrent: () => this.#authority.generation(enrollment.id) === generation,
         ...(currentEpoch !== undefined ? { connectionEpoch: currentEpoch } : {}),
         ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
         ...(input.actor !== undefined ? { actor: input.actor } : {}),

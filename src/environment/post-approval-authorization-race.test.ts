@@ -16,8 +16,10 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const store: EnvironmentReadinessStore = backend === 'sqlite'
         ? new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') })
         : new InMemoryEnvironmentReadinessStore();
-      const arrived = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
+      let signalArrival!: () => void;
+      let signalRelease!: () => void;
+      const arrived = new Promise<void>((resolve) => { signalArrival = resolve; });
+      const release = new Promise<void>((resolve) => { signalRelease = resolve; });
       let delayNext = false;
       const readiness: EnvironmentReadinessStore = new Proxy(store, {
         get(target, key) {
@@ -25,8 +27,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
             return async (...args: Parameters<EnvironmentReadinessStore['recordModelAuthorizations']>) => {
               if (delayNext && args[1].length > 0) {
                 delayNext = false;
-                arrived.resolve();
-                await release.promise;
+                signalArrival();
+                await release;
               }
               return target.recordModelAuthorizations(...args);
             };
@@ -46,11 +48,11 @@ for (const backend of ['memory', 'sqlite'] as const) {
       await service.approve(id, { capabilityPermissions: {} });
       delayNext = true;
       const authorizing = service.authorizeModels(id, { modelAuthorizations: { codex: ['new-model'] } });
-      await arrived.promise;
+      await arrived;
       try {
         await service[decision](id, 'Human lifecycle decision');
       } finally {
-        release.resolve();
+        signalRelease();
       }
       await authorizing;
       assert.equal((await service.get(id))?.status, decision === 'reset' ? 'pending' : 'revoked');

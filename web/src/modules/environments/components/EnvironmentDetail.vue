@@ -63,6 +63,10 @@ const configuredTargetModels = computed(() => {
 });
 
 const selectedModelAuthorizations = ref<Record<string, boolean>>({});
+const existingModelAuthorizations = computed(() => new Set(
+  Object.entries(displayedEnv.value.engineDetails ?? {}).flatMap(([engine, details]) =>
+    (details.modelAuthorizations ?? []).map((auth) => `${engine}:${auth.model}`)),
+));
 watch(
   () => props.env,
   (env) => {
@@ -176,8 +180,9 @@ const emit = defineEmits<{
         </div>
         <p class="text-[11px] text-[var(--text-secondary)]">
           When an Agent gains a work model after approval, its availability stays unknown until a Human records the
-          model authorization here — no enrollment reset and no re-enrollment ceremony. Unselected models stay blocked;
-          re-saving also re-stamps every model already authorized. Request a readiness probe afterwards so the
+          model authorization here — no enrollment reset and no re-enrollment ceremony. This action only adds grants:
+          existing grants cannot be removed here, and leaving a new model unselected does not authorize it.
+          Re-saving also re-stamps every model already authorized. Request a readiness probe afterwards so the
           Environment re-measures the current requirement revision.
         </p>
         <div v-if="configuredTargetModels.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
@@ -197,6 +202,7 @@ const emit = defineEmits<{
               <Checkbox
                 :id="`env-auth-${target.engine}-${target.model}`"
                 v-model="selectedModelAuthorizations[`${target.engine}:${target.model}`]"
+                :disabled="existingModelAuthorizations.has(`${target.engine}:${target.model}`)"
                 class="min-h-[24px] min-w-[24px]"
                 :aria-label="`Authorize model ${target.model} for ${target.engine}`"
               />
