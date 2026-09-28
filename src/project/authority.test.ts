@@ -108,6 +108,26 @@ test('a Project can be created with only a name; the Human membership and templa
   assert.equal(project.template.completionGuidance.length > 0, true);
 });
 
+test('explicit empty goal and rules at creation clear the template starting content', async () => {
+  const projects = service();
+  const project = await projects.create({
+    id: 'project-cleared',
+    displayName: 'Cleared contract',
+    goal: '',
+    rules: [],
+  });
+  const content = currentProjectContent(project);
+  // Absent fields seed from the template; explicit empty fields are the
+  // operator's clear (ADR-0008: fill or clear goal and rules).
+  assert.equal(content.goal, '');
+  assert.deepEqual(content.rules, []);
+  // The clear is content, not identity: the template snapshot and the rest of
+  // the versioned contract remain attributed copies.
+  assert.equal(content.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
+  assert.equal(project.template.goalGuidance, GENERAL_COLLABORATION_TEMPLATE.goalGuidance);
+  assert.deepEqual(project.template.suggestedRules, [...GENERAL_COLLABORATION_TEMPLATE.suggestedRules]);
+});
+
 test('creating a Project copies the template as an editable snapshot, not a link', async () => {
   const projects = service();
   const project = await projects.create({ id: 'project-snap', displayName: 'Snapshot' });

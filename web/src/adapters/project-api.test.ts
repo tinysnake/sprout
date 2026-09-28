@@ -132,6 +132,10 @@ test('creation and content edits send POST JSON command bodies', async () => {
   await adapter.createProject({
     id: 'project-sprout',
     displayName: 'Sprout',
+    // Explicit empties must survive serialization: an omitted key would make
+    // authority restore template content instead of honoring the clear (F4).
+    goal: '',
+    rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
     routingIntervalMs: 45_000,
     environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
@@ -147,6 +151,8 @@ test('creation and content edits send POST JSON command bodies', async () => {
   assert.deepEqual(JSON.parse(String(create?.init?.body)), {
     id: 'project-sprout',
     displayName: 'Sprout',
+    goal: '',
+    rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
     routingIntervalMs: 45_000,
     environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],

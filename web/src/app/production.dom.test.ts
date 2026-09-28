@@ -524,6 +524,11 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     await settle();
     assert.match(doc.body.textContent ?? '', /New Work Project/);
     assert.equal(pageState(), 'incomplete', 'created identity remains valid while incomplete');
+    // The blank goal/rules fields were submitted as explicit empties, so the
+    // created Project does not silently restore the template's goal guidance
+    // and suggested rules (F4).
+    assert.match(doc.body.textContent ?? '', /No explicit goal defined\./);
+    assert.match(doc.body.textContent ?? '', /Project Rules \(0\)/);
     assert.equal(new URL(router.currentRoute.value.fullPath, 'http://sprout-operator.test').searchParams.get('project')?.startsWith('project-fixture-'), true);
 
     // Assign an Environment workspace via the access authority, then add an
@@ -704,6 +709,10 @@ test('Project creation submits selected memberships and default workspaces as on
     await settle();
 
     assert.equal(submissions.length, 1);
+    // Blank fields are explicit empties in the submission: authority must not
+    // interpret them as absent and restore template content (F4).
+    assert.equal(submissions[0]?.goal, '');
+    assert.deepEqual(submissions[0]?.rules, []);
     assert.deepEqual(submissions[0]?.agentMemberships, [{ agentId: 'programmer' }]);
     assert.deepEqual(submissions[0]?.environmentAssignments, [{
       environmentInstanceId: 'env-ready',

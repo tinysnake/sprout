@@ -335,8 +335,12 @@ async function submitProject() {
     try {
       const created = await boundary.run((authority) => authority.createProject({
         displayName: name,
-        ...(goal ? { goal } : {}),
-        ...(rules.length > 0 ? { rules } : {}),
+        // Goal and rules are always submitted explicitly, blank included:
+        // an omitted field would let authority restore the template's goal
+        // guidance and suggested rules, so the operator could not create a
+        // Project with these fields cleared (F4).
+        goal,
+        rules,
         wakePolicy: wakePolicy.value,
         routingIntervalMs: intervalMs,
         agentMemberships: selectedCreateAgentIds.value.map((agentId) => ({ agentId })),
@@ -579,7 +583,7 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'create' || dialog === 'edit'" :open="true" :title="dialog === 'create' ? 'Create New Project' : `Edit Project Contract (${currentProject?.displayName ?? ''})`" description="Projects are portable identity records. Goals and resources may be absent; template defaults remain editable." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <div v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-2 text-[var(--text-secondary)]">Derived from the immutable <strong>General collaboration</strong> template. Selected Agents and Environment workspaces are submitted together with the Project.</div>
+        <div v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-2 text-[var(--text-secondary)]">Derived from the immutable <strong>General collaboration</strong> template. Goal and rules are saved exactly as entered; leaving them blank creates the Project without them. Selected Agents and Environment workspaces are submitted together with the Project.</div>
         <label class="flex flex-col gap-1 font-semibold">Project Display Name *<input v-model="projectName" maxlength="120" required class="project-name-input min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Project Goal <textarea v-model="projectGoal" rows="3" class="project-goal-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Project Rules <span class="font-normal text-[var(--text-muted)]">One rule per line; this may be empty.</span><textarea v-model="projectRules" rows="4" class="project-rules-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>

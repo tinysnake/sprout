@@ -190,6 +190,41 @@ test('a Project is created from a name plus the Human membership, and the snapsh
   }
 });
 
+test('explicit empty goal and rules survive creation instead of restoring template content', async () => {
+  const runtime = await projectApi();
+  try {
+    const cleared = await command(runtime, '/api/projects', {
+      id: 'project-cleared',
+      displayName: 'Cleared contract',
+      goal: '',
+      rules: [],
+    });
+    assert.equal(cleared.status, 201);
+    const { project } = (await cleared.json()) as {
+      project: { goal: string; content: { versions: { goal: string; rules: string[] }[] } };
+    };
+    // An explicit empty value is an operator clear, not an absent field.
+    assert.equal(project.goal, '');
+    assert.equal(project.content.versions[0]?.goal, '');
+    assert.deepEqual(project.content.versions[0]?.rules, []);
+
+    // The omitted field still means "seed from the template": absent and
+    // empty remain distinct all the way through the HTTP boundary.
+    const seeded = await command(runtime, '/api/projects', {
+      id: 'project-seeded',
+      displayName: 'Seeded contract',
+    });
+    assert.equal(seeded.status, 201);
+    const { project: seededProject } = (await seeded.json()) as {
+      project: { goal: string; content: { versions: { rules: string[] }[] } };
+    };
+    assert.ok(seededProject.goal.length > 0);
+    assert.ok((seededProject.content.versions[0]?.rules.length ?? 0) > 0);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
 test('one Project request carries selected memberships and Environment workspace bindings', async () => {
   const runtime = await projectApi();
   try {
