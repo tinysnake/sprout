@@ -33,7 +33,9 @@ import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
+import type { EngineAdapter } from '../../engine/port.ts';
 import { EnvironmentWorker, type EnvironmentWorkerOptions } from '../server.ts';
+import { WorkerRecoveryJournal } from '../recovery-journal.ts';
 import {
   WORKER_PROTOCOL_VERSION,
   type WorkerEngineReadinessFact,
@@ -192,6 +194,10 @@ export interface WorkerCliDependencies {
   readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
   /** Seam for non-inference readiness probe options; test callers may supply custom runners or clocks. */
   readonly readinessProbeOptions?: ReadinessProbeOptions;
+  /** Injectable engines for host-local Worker operation; tests may substitute hermetic adapters. */
+  readonly engines?: ReadonlyMap<string, EngineAdapter>;
+  /** Injectable readiness provider; tests may state verified facts without spawning CLI checks. */
+  readonly readiness?: () => WorkerReadinessFacts;
   /** The reconnect backoff sleep; injectable so tests run without real delays. */
   readonly sleep?: (ms: number) => Promise<void>;
   /**
@@ -206,6 +212,7 @@ export interface WorkerCliDependencies {
     connection: WorkerEnrollmentConnection;
     environmentInstanceId: string;
     engineIds: readonly string[];
+    identityKeyPath?: string;
   }) => Promise<'shutdown' | 'channel-closed' | void>;
 }
 
@@ -400,6 +407,9 @@ export interface CreateForegroundWorkerOptionsInput {
   readonly readinessProbeOptions?: ReadinessProbeOptions | undefined;
   /** Locate engine binaries on the host; tests may substitute a hermetic resolver. */
   readonly locate?: ((command: string, options: { readonly preferWindowsExecutable: boolean }) => string | undefined) | undefined;
+  readonly recoveryJournal?: WorkerRecoveryJournal | undefined;
+  readonly engines?: ReadonlyMap<string, EngineAdapter> | undefined;
+  readonly readiness?: (() => WorkerReadinessFacts) | undefined;
 }
 
 /**
@@ -425,7 +435,7 @@ export async function createForegroundWorkerOptions(
   const baseFacts = hostEngineFacts(configuration);
   const facts = input.locate !== undefined ? { ...baseFacts, locate: input.locate } : baseFacts;
   const engineConfigurations = describeEnvironmentWorkerEngines(facts);
-  const engines = createEnvironmentWorkerEngines(facts);
+  const engines = input.engines ?? createEnvironmentWorkerEngines(facts);
 
   const probeOptions: ReadinessProbeOptions = {
     ...(environment !== undefined ? { env: environment } : {}),
@@ -503,8 +513,9 @@ export async function createForegroundWorkerOptions(
     input: inputStream,
     output: outputStream,
     ...(input.onLog !== undefined ? { onLog: input.onLog } : {}),
+    ...(input.recoveryJournal !== undefined ? { recoveryJournal: input.recoveryJournal } : {}),
     workspaceRoot: configuration.workspaceRoot,
-    readiness: () => workerReadiness,
+    readiness: input.readiness ?? (() => workerReadiness),
     readinessProbe: (params) => runProbe(params),
   };
 }
@@ -642,6 +653,9 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   }
 
   function resolveEngineIds(environment: NodeJS.ProcessEnv): readonly string[] {
+    if (dependencies.engines !== undefined) {
+      return [...dependencies.engines.keys()];
+    }
     const configuration = parseWorkerConfiguration(environment, { workingDirectory: process.cwd() });
     return [...createEnvironmentWorkerEngines(hostEngineFacts(configuration)).keys()];
   }
@@ -965,9 +979,20 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           let reason: 'shutdown' | 'channel-closed';
           try {
             if (dependencies.serve !== undefined) {
-              reason = (await dependencies.serve({ connection, environmentInstanceId: config.environmentInstanceId, engineIds })) ?? 'shutdown';
+              reason = (await dependencies.serve({
+                connection,
+                environmentInstanceId: config.environmentInstanceId,
+                engineIds,
+                identityKeyPath: identityPath,
+              })) ?? 'shutdown';
             } else {
-              reason = await serveForeground(connection, config.environmentInstanceId, engineIds, environment);
+              reason = await serveForeground(
+                connection,
+                config.environmentInstanceId,
+                engineIds,
+                environment,
+                identityPath,
+              );
             }
           } finally {
             lockHeld = true;
@@ -1008,31 +1033,42 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     environmentInstanceId: string,
     engineIds: readonly string[],
     environment: NodeJS.ProcessEnv,
+    identityKeyPath: string,
   ): Promise<'shutdown' | 'channel-closed'> {
+    const recoveryJournal = new WorkerRecoveryJournal(`${identityKeyPath}.recovery`, connection.epoch);
     const options = await createForegroundWorkerOptions({
       stream: connection.stream,
       environmentInstanceId,
       engineIds,
       environment,
+      recoveryJournal,
+      ...(dependencies.engines !== undefined ? { engines: dependencies.engines } : {}),
+      ...(dependencies.readiness !== undefined ? { readiness: dependencies.readiness } : {}),
       onLog: () => err('[sprout-worker] host-local Worker operation completed'),
       readinessProbeOptions: dependencies.readinessProbeOptions,
     });
     const worker = new EnvironmentWorker(options);
     return new Promise<'shutdown' | 'channel-closed'>((resolve) => {
       let reason: 'shutdown' | 'channel-closed' = 'channel-closed';
+      let resolved = false;
       const cleanUpAndResolve = (): void => {
+        if (resolved) return;
+        resolved = true;
         process.removeListener('SIGINT', stop);
         process.removeListener('SIGTERM', stop);
         resolve(reason);
       };
       const stop = (): void => {
         reason = 'shutdown';
+        connection.close();
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       };
       connection.stream.on('close', () => {
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       });
-      connection.stream.on('error', () => cleanUpAndResolve());
+      connection.stream.on('error', () => {
+        void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
+      });
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     });

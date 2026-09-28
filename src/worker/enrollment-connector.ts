@@ -169,7 +169,11 @@ export async function connectWorkerEnrollment(
   const { WebSocket, createWebSocketStream } = await import('ws');
   const socket = new WebSocket(workerEnrollmentUrl(options.target));
   const stream = await new Promise<WorkerDuplex>((resolve, reject) => {
-    socket.on('open', () => resolve(createWebSocketStream(socket) as unknown as WorkerDuplex));
+    socket.on('open', () => {
+      const duplex = createWebSocketStream(socket) as unknown as WorkerDuplex;
+      socket.on('close', () => duplex.destroy());
+      resolve(duplex);
+    });
     socket.on('error', (error: Error) => reject(error));
   });  options.log?.(
     identity.generated
@@ -230,7 +234,10 @@ export async function connectWorkerEnrollment(
           environmentInstanceId: frame.environmentInstanceId,
           epoch: frame.epoch,
           connectionId: frame.connectionId,
-          close: () => socket.close(),
+          close: () => {
+            socket.terminate();
+            stream.destroy();
+          },
         };
       }
       // `worker/pending` is terminal for this attempt but not a refusal: the
