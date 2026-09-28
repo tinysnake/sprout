@@ -260,8 +260,14 @@ export function lookupCommand(
   let found: string;
   try {
     found = runner(lookup);
-  } catch {
-    return undefined;
+  } catch (error) {
+    // `where.exe` and `command -v` both report "not found" by exiting non-zero;
+    // that is the ordinary absent-engine outcome. A probe that never ran —
+    // ENOENT/EACCES on the probe binary, a signal, or any other spawn failure —
+    // is not absence and must reach the caller instead of being flattened into
+    // "no engine here".
+    if (isExpectedLookupMiss(error)) return undefined;
+    throw error;
   }
   const candidates = found
     .split(/\r?\n/)
@@ -273,6 +279,21 @@ export function lookupCommand(
   // cannot execute it (found live). An .exe or .cmd actually runs.
   const executable = candidates.find((candidate) => /\.(exe|cmd|bat)$/i.test(candidate));
   return executable ?? candidates[0];
+}
+
+/**
+ * True when the probe command actually ran and reported no match.
+ *
+ * `execFileSync` throws for both outcomes: a non-zero exit carries a numeric
+ * `status` (and no spawn error `code`), while a probe that could not be spawned
+ * carries a system `code` such as `ENOENT`/`EACCES` and a null `status`. Only the
+ * former is an ordinary absent engine; the latter is a real failure the caller
+ * must see.
+ */
+function isExpectedLookupMiss(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { status, code } = error as { readonly status?: unknown; readonly code?: unknown };
+  return typeof status === 'number' && code === undefined;
 }
 
 /**

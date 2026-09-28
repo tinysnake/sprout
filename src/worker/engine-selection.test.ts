@@ -209,6 +209,57 @@ test('the Windows probe still prefers a directly runnable executable over an npm
 });
 
 
+test('an engine probe reports a probe-run not-found exit as engine-absent', () => {
+  // What `where.exe` and `command -v` do when nothing matches: the command ran
+  // and exited non-zero, so execFileSync throws with a numeric status and no
+  // spawn-error code.
+  const notFound = Object.assign(new Error('Command failed: /bin/sh -lc command -v agy'), {
+    status: 1,
+    signal: null,
+  });
+  assert.equal(lookupCommand('agy', 'darwin', false, () => { throw notFound; }), undefined);
+  assert.equal(lookupCommand('agy', 'win32', false, () => { throw notFound; }), undefined);
+});
+
+
+test('an engine probe exposes an unexpected spawn failure instead of reporting the engine absent', () => {
+  // A probe that never ran (missing probe binary, access denied, a signal) is a
+  // real failure, not an absent engine.
+  const spawnFailure = Object.assign(new Error('spawnSync where.exe ENOENT'), {
+    code: 'ENOENT',
+    status: null,
+    signal: null,
+  });
+  assert.throws(
+    () => lookupCommand('agy', 'win32', false, () => { throw spawnFailure; }),
+    (error: unknown) => error === spawnFailure,
+  );
+  const accessFailure = Object.assign(new Error('EACCES'), { code: 'EACCES', status: null });
+  assert.throws(
+    () => lookupCommand('agy', 'darwin', false, () => { throw accessFailure; }),
+    (error: unknown) => error === accessFailure,
+  );
+  // A plain throw carries no exit status at all and must also propagate rather
+  // than look like a no-match.
+  const opaque = new Error('probe runner failed unexpectedly');
+  assert.throws(() => lookupCommand('agy', 'darwin', false, () => { throw opaque; }), (error: unknown) => error === opaque);
+});
+
+
+test('an unexpected probe failure reaches engine selection rather than becoming engine-absent', () => {
+  const spawnFailure = Object.assign(new Error('spawnSync /bin/sh ENOENT'), { code: 'ENOENT', status: null });
+  const probeFacts: EngineHostFacts = {
+    configuration: { environmentPlatform: undefined, piSessionDirectory: undefined, engineBinaries: {} },
+    platform: 'darwin',
+    locate: () => { throw spawnFailure; },
+  };
+  assert.throws(
+    () => describeEnvironmentWorkerEngines(probeFacts),
+    (error: unknown) => error === spawnFailure,
+  );
+});
+
+
 test('a real engine probe never lets the child process stderr reach the console', async () => {
   const sentinel = 'SPROUT_ENGINE_PROBE_STDERR_SENTINEL';
   const moduleUrl = new URL('./engine-selection.ts', import.meta.url).href;

@@ -274,12 +274,16 @@ test('a refused enrollment surfaces the static transport-rule reason to the oper
   });
   try {
     assert.equal(await h.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
-    // The operator can now tell a transport refusal from an unreachable
-    // endpoint: the exact, static rule text is printed.
-    assert.ok(
-      h.err.join('\n').includes(WORKER_TRANSPORT_REFUSAL_REASON),
-      'the static transport refusal reason must reach stderr',
-    );
+    // The exact sanitized line: category plus the allowlisted static reason and
+    // nothing else. This is deliberately not a `contains` check. The base build
+    // appended ` :: ${error.message}` (// DEBUG-E8), which already contained the
+    // reason, so `stderr contains the reason` passed before the fix; and a
+    // fallback-only diagnosticOf omits the reason entirely. Anchoring the whole
+    // line fails on both.
+    assert.deepEqual(h.err, [
+      `sprout worker enroll: enrollment could not be completed (${WORKER_TRANSPORT_REFUSAL_REASON})`,
+    ]);
+    assert.equal(h.err.join('\n').includes(' :: '), false, 'the raw-message splice must stay removed');
   } finally {
     h.cleanup();
   }
@@ -298,8 +302,11 @@ test('a refusal with unrecognized server text keeps only the sanitized category'
   });
   try {
     assert.equal(await h.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
+    // An allowlist miss yields exactly the safe fallback — the raw server text is
+    // never appended, even though the fallback string is itself safe. That is
+    // what proves the allowlist, not the fallback's own safety, is the gate.
+    assert.deepEqual(h.err, ['sprout worker enroll: enrollment could not be completed']);
     const printed = h.err.join('\n') + h.out.join('\n');
-    assert.match(printed, /enrollment could not be completed/);
     for (const sentinel of [secret, privatePath, tokenUrl, hostile]) {
       assert.equal(printed.includes(sentinel), false, `untrusted refusal text escaped: ${sentinel}`);
     }
@@ -307,6 +314,33 @@ test('a refusal with unrecognized server text keeps only the sanitized category'
     assert.doesNotMatch(printed, /sk-live-|BEGIN [A-Z ]*PRIVATE KEY|token-abc123/);
   } finally {
     h.cleanup();
+  }
+});
+
+
+test('the refusal allowlist is the gate: a known reason surfaces, an unknown reason does not', async () => {
+  const unknownReason = 'a plausible but unlisted operator-facing reason';
+  const known = harness({
+    connect: async () => {
+      throw new WorkerEnrollmentRefusedError(WORKER_DIAGNOSTICS.enrollmentClaimRefused, 'refused');
+    },
+  });
+  const unknown = harness({
+    connect: async () => {
+      throw new WorkerEnrollmentRefusedError(unknownReason, 'refused');
+    },
+  });
+  try {
+    assert.equal(await known.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
+    assert.deepEqual(known.err, [
+      `sprout worker enroll: enrollment could not be completed (${WORKER_DIAGNOSTICS.enrollmentClaimRefused})`,
+    ]);
+    assert.equal(await unknown.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
+    assert.deepEqual(unknown.err, ['sprout worker enroll: enrollment could not be completed']);
+    assert.equal(unknown.err.join('\n').includes(unknownReason), false);
+  } finally {
+    known.cleanup();
+    unknown.cleanup();
   }
 });
 
