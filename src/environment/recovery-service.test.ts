@@ -21,7 +21,7 @@ import { EnvironmentRecoveryService } from './recovery-service.ts';
 
 import { InMemoryRecoveryStore } from './recovery-store.ts';
 
-import { FORCE_RELEASE_CONFIRMATION } from './recovery.ts';
+import { FORCE_RELEASE_CONFIRMATION, UNRESOLVED_FACT_WORKER_OFFLINE, workSafetyFromRecovery } from './recovery.ts';
 
 
 /**
@@ -119,6 +119,7 @@ function build(options: {
     store: recoveryStore,
     leases: pool,
     holders: {
+      clearIdleTask: (taskId) => lifecycle.clearIdleRecovery(taskId),
       resumeTask: (taskId) => lifecycle.recover(taskId, 'resume').then(() => undefined),
       discardTask: (taskId) => lifecycle.recover(taskId, 'discard').then(() => undefined),
       forceReleaseTask: (input) => lifecycle.forceRelease(input.taskId, input),
@@ -477,4 +478,123 @@ test('Force Release is refused outside recovery, without facts, acknowledgement,
   );
   // Every refusal left the record protected and the lease unreleased.
   assert.equal(built.pool.getLease(leaseId)?.state, 'recovering');
+});
+
+
+/**
+ * Construct the #171 stuck state directly: a Task-held lease protected by a
+ * revocation-opened record with no attached run, pinned to the ORIGINAL Worker
+ * identity that a subsequent enrollment reset has invalidated. The real stuck
+ * record lived on a review instance that is no longer reachable, so the state
+ * is rebuilt here from its observed shape: phase `recovery`, no evidence, no
+ * run, `interruptedRunActive: false`.
+ */
+async function revocationStuckTask(built: Built): Promise<{ readonly leaseId: string }> {
+  await built.store.create(task());
+  const begun = await built.lifecycle.begin('task-1');
+  const leaseId = begun.environmentLeaseId!;
+  await built.store.save({ ...begun, environmentLifecycleState: 'recovery', recoveryState: 'idle', updatedAt: 11 });
+  built.pool.markRecovering(leaseId);
+  await built.recoveryStore.save({
+    id: 'recovery-171-stuck',
+    environmentInstanceId: 'mac-1',
+    enrollmentId: 'enroll-1',
+    workerIdentityDigest: 'digest-rotated-away',
+    leaseId,
+    holderKind: 'task',
+    holderId: 'task-1',
+    taskId: 'task-1',
+    interruptedRunActive: false,
+    cause: 'worker-channel-lost',
+    phase: 'recovery',
+    startedAt: 10,
+    updatedAt: 10,
+    unresolvedFacts: [UNRESOLVED_FACT_WORKER_OFFLINE],
+    decisions: [{
+      kind: 'interrupted',
+      actor: 'system',
+      at: 10,
+      reason: 'The Environment restarted with unfinished work; the lease is protected until its facts agree.',
+    }],
+  });
+  return { leaseId };
+}
+
+
+test('#171 a revocation-opened no-run record resolves for the Human-approved successor identity', async () => {
+  const built = build();
+  const { leaseId } = await revocationStuckTask(built);
+
+  // Diagnosis: today this throws `identity-not-verified`
+  // (recovery-service.ts, observeReconnect's digest gate), the record never
+  // reaches `reconciling`, so synchronizeEvidence would refuse with
+  // `not-reconciling` and every ordinary decision refuses with
+  // `evidence-not-synchronized`. The rotation is attested by the enrollment
+  // authority: the predecessor digest is durably invalidated.
+  const observed = await built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-1',
+    workerIdentityDigest: 'digest-successor',
+    environmentInstanceId: 'mac-1',
+    identityVerified: true,
+    protocolCompatible: true,
+    permissionsAllowed: true,
+    hadActiveRun: false,
+    identityRotated: true,
+  });
+  assert.equal(observed.phase, 'reconciling');
+
+  const resolved = await built.recovery.synchronizeEvidence(leaseId, {
+    hadActiveRun: false,
+    evidence: {
+      retainedEventCount: 0,
+      turnSettlementObserved: true,
+      engineSessionStopped: true,
+      taskContextPrepared: true,
+      taskContextRecycled: false,
+    },
+  });
+  assert.equal(resolved.phase, 'resolved');
+  // The idle Task plane is restored on its retained lease; nothing replays.
+  assert.equal((await built.store.get('task-1'))?.environmentLifecycleState, 'idle');
+  assert.equal(built.pool.getLease(leaseId)?.state, 'active');
+  const workSafety = workSafetyFromRecovery(
+    await built.recovery.listForEnvironment('mac-1'),
+    built.pool.leases().map((lease) => ({ instanceId: lease.instanceId, state: lease.state })),
+    'mac-1',
+  );
+  assert.notEqual(workSafety, 'recovery', 'work safety must leave the recovery state');
+});
+
+
+test('#171 identity rotation is attested, never inferred: unexplained mismatches stay refused', async () => {
+  const built = build();
+  const { leaseId } = await revocationStuckTask(built);
+
+  // A successor digest on the same enrollment without an attested rotation is
+  // still refused — the pre-#171 invariant, pinned as a regression guard.
+  await assert.rejects(built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-1',
+    workerIdentityDigest: 'digest-successor',
+    environmentInstanceId: 'mac-1',
+    identityVerified: true,
+    protocolCompatible: true,
+    permissionsAllowed: true,
+    hadActiveRun: false,
+  }), /original enrolled Worker identity/);
+
+  // Rotation claims never launder a different enrollment's identity in.
+  await assert.rejects(built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-2',
+    workerIdentityDigest: 'digest-successor',
+    environmentInstanceId: 'mac-1',
+    identityVerified: true,
+    protocolCompatible: true,
+    permissionsAllowed: true,
+    hadActiveRun: false,
+    identityRotated: true,
+  }), /original enrolled Worker identity/);
+
+  const unchanged = await built.recovery.forLease(leaseId);
+  assert.equal(unchanged?.phase, 'recovery');
+  assert.equal(unchanged?.evidence, undefined);
 });
