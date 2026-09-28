@@ -130,7 +130,7 @@ Project-scoped direct messages, Project channels, Working group channels, and op
 
 ### M2-O4 — Self-hosted macOS and Windows operation
 
-**Status**: Unproven
+**Status**: Evidenced
 **Depends on**: M2-O1
 
 A technical lead can establish and maintain a local Sprout instance with macOS and Windows Environment Workers, understand their health and compatibility, and recover safely from interruption.
@@ -140,6 +140,8 @@ A technical lead can establish and maintain a local Sprout instance with macOS a
 - The required host-local installation and engine-login steps are explicit, while routine management occurs through Web.
 - Environment identity, connectivity, capability permission, engine availability, and version compatibility are observable.
 - Ordinary restart, disconnect, diagnostics, and work-recovery outcomes preserve durable state and protect unfinished work.
+
+**Implementation evidence**: [Map #113](https://github.com/tinysnake/sprout/issues/113) delivered the enrollment-backed, cross-platform operator path and proved all three checks live: the product-managed signed-in-user service (`install-service`: macOS LaunchAgent / Windows logon-triggered Scheduled Task) with host-local ACL-protected identity and stdin-only claim secrets; Web-driven claim → approve → capability permission → dynamic admission without restarts; readiness/status observability for identity, connectivity, engines, and protocol compatibility; and ordinary restart, disconnect, forced-kill, logoff/logon, sleep, and supersession cycles that fail closed with durable state preserved, leases protected, no automatic run replay, recovery evidence synchronized after reconnect, and revocation matching the recorded macOS behavior. Acceptance: #121 (macOS journey) and #122 (Windows journey), with #165's session-lifecycle runs; sanitized commands, outcomes, and limitations recorded in `docs/evidence/live-macos-enrollment-to-run.md` and `docs/evidence/live-windows-enrollment-to-run.md`.
 
 ### M2-O5 — Truthful usage and monetary-cost observability
 
