@@ -24,7 +24,7 @@
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
-import type { Agent } from '../agent/model.ts';
+import type { Agent, AgentWorkOption } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
@@ -813,12 +813,55 @@ export interface AgentView {
     readonly currentVersion: number;
     readonly versions: readonly AgentConfigurationVersionView[];
   };
+  /**
+   * The current configuration version's ordered work options (#173).
+   *
+   * Projected top-level so the list, the detail, and every Agent mutation
+   * response carry the same option values the compatibility route resolves
+   * per option: a list row is complete on its own, and a consumer no longer
+   * needs one compatibility/detail request per Agent to show an Agent's
+   * declared options. The shape is exactly the one used by the detail source
+   * (`configuration.versions[].options`) and the compatibility source
+   * (`options[].option`): `id`, `engine`, `workModel`, `effort` — portable
+   * fields only, re-sanitized at this read boundary, so no credential, host
+   * fact, or Environment internal can ride the projection.
+   */
+  readonly workOptions: readonly AgentWorkOptionView[];
   readonly createdAt: number;
   readonly updatedAt: number;
 }
 
+/** One ordered work option on the wire; portable fields only (#90, #173). */
+function toWorkOptionView(option: AgentWorkOption): AgentWorkOptionView {
+  return {
+    id: sanitizeIdentifier(option.id, { fallback: `option-${option.engine}`, kind: 'generic' }),
+    engine: sanitizeIdentifier(option.engine, { fallback: 'unknown-engine', kind: 'engine' }),
+    workModel: sanitizeIdentifier(option.workModel, { fallback: 'unknown-model', kind: 'model' }),
+    effort: sanitizeIdentifier(option.effort, { fallback: 'unknown-effort', kind: 'model' }),
+  };
+}
+
 export function toAgentView(agent: Agent): AgentView {
   const displayName = sanitizeOperatorText(agent.displayName, { fallback: 'Agent', maxLength: 120 });
+  const versions = agent.configuration.versions.map((version) => ({
+    version: version.version,
+    at: version.at,
+    reason: sanitizeOperatorText(version.reason, {
+      fallback: 'The Agent configuration was recorded; its detail was withheld as sensitive.',
+    }),
+    options: version.options.map(toWorkOptionView),
+    ...(version.instructions !== undefined
+      ? {
+          instructions: sanitizeOperatorText(version.instructions, {
+            fallback: 'The standing instructions were withheld as sensitive.',
+            maxLength: 4_000,
+          }),
+        }
+      : {}),
+  }));
+  const current =
+    versions.find((version) => version.version === agent.configuration.currentVersion) ??
+    versions[versions.length - 1];
   return {
     id: sanitizeIdentifier(agent.id, { fallback: 'unknown-agent', kind: 'generic' }),
     // The M1 composer renders `name`; the M2 identity carries `displayName`.
@@ -828,28 +871,11 @@ export function toAgentView(agent: Agent): AgentView {
     status: agent.status === 'archived' ? 'archived' : 'active',
     configuration: {
       currentVersion: agent.configuration.currentVersion,
-      versions: agent.configuration.versions.map((version) => ({
-        version: version.version,
-        at: version.at,
-        reason: sanitizeOperatorText(version.reason, {
-          fallback: 'The Agent configuration was recorded; its detail was withheld as sensitive.',
-        }),
-        options: version.options.map((option) => ({
-          id: sanitizeIdentifier(option.id, { fallback: `option-${option.engine}`, kind: 'generic' }),
-          engine: sanitizeIdentifier(option.engine, { fallback: 'unknown-engine', kind: 'engine' }),
-          workModel: sanitizeIdentifier(option.workModel, { fallback: 'unknown-model', kind: 'model' }),
-          effort: sanitizeIdentifier(option.effort, { fallback: 'unknown-effort', kind: 'model' }),
-        })),
-        ...(version.instructions !== undefined
-          ? {
-              instructions: sanitizeOperatorText(version.instructions, {
-                fallback: 'The standing instructions were withheld as sensitive.',
-                maxLength: 4_000,
-              }),
-            }
-          : {}),
-      })),
+      versions,
     },
+    // #173: the current version's options, top-level, derived from the very
+    // sanitized version rows above so the two can never drift apart.
+    workOptions: current?.options ?? [],
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
   };
