@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerRecoveryJournalPath, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
+import { WorkerRecoveryJournal } from '../recovery-journal.ts';
 
 
 /**
@@ -403,18 +405,56 @@ test('runtime state round-trips and clears without a secret', () => {
 });
 
 
-test('reset removes identity, configuration, and runtime state', () => {
+test('reset removes identity, configuration, runtime state, and recovery journal artifacts', () => {
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
     writeConfig(paths, config());
-    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
     writeRuntimeState(paths, { pid: 1, process: processIdentity(1), state: 'stopped', at: 0 });
+
+    const journalPath = workerRecoveryJournalPath(paths.identityPath, id.privateKey);
+    const journal = new WorkerRecoveryJournal(journalPath, 1);
+    journal.begin('sess-1', 'turn-1');
+    const lockPath = `${journalPath}.lock.sqlite`;
+
+    assert.equal(existsSync(journalPath), true);
+    assert.equal(existsSync(lockPath), true);
+
     removeHostState(paths);
     assert.equal(isEnrolled(paths), false);
     assert.equal(existsSync(paths.identityPath), false);
     assert.equal(existsSync(paths.runtimePath), false);
+    assert.equal(existsSync(journalPath), false);
+    assert.equal(existsSync(lockPath), false);
     assert.equal(existsSync(paths.stateDirectory), false);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('workerRecoveryJournalPath scopes journal filename to the identity public key (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const idA = generateWorkerIdentity();
+    const idB = generateWorkerIdentity();
+
+    writePrivateFile(paths.identityPath, idA.privateKey);
+    const pathA1 = workerRecoveryJournalPath(paths.identityPath);
+    const pathA2 = workerRecoveryJournalPath(paths.identityPath, idA.privateKey);
+    assert.equal(pathA1, pathA2, 'path must be deterministic for the same identity');
+    assert.match(pathA1, /\.recovery$/, 'journal file must have .recovery extension');
+
+    writePrivateFile(paths.identityPath, idB.privateKey);
+    const pathB = workerRecoveryJournalPath(paths.identityPath);
+    assert.notEqual(pathA1, pathB, 'two distinct identities must produce distinct journal paths');
+
+    // Fallback for missing or unparseable keys
+    const fallbackPath = workerRecoveryJournalPath('/nonexistent/path/identity.pem');
+    assert.equal(fallbackPath, '/nonexistent/path/identity.pem.recovery');
   } finally {
     cleanup();
   }

@@ -18,11 +18,15 @@
  * driven by `EnvironmentWorker` exactly as any carrier's stream is.
  */
 
-import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { Duplex } from 'node:stream';
 
-import { generateWorkerIdentity, signWorkerChallenge, validateWorkerIdentityPrivateKey } from '../environment/worker-proof.ts';
+import {
+  generateWorkerIdentity,
+  signWorkerChallenge,
+  validateWorkerIdentityPrivateKey,
+  workerPublicKey,
+} from '../environment/worker-proof.ts';
 import { isLoopbackAddress } from '../environment/worker-transport.ts';
 import type { WorkerEnrollmentTarget } from '../host-config.ts';
 import { defaultPrivateFileSecurityDependencies, privateFileRestriction, writePrivateFile, type PrivateFileSecurityDependencies } from './host-files.ts';
@@ -133,12 +137,7 @@ export function loadOrCreateWorkerIdentity(
   return { privateKey, generated: false };
 }
 
-/** Derive the SPKI public key for a host-local private key. */
-export function workerPublicKey(privateKeyPem: string): string {
-  return createPublicKey(createPrivateKey(privateKeyPem))
-    .export({ type: 'spki', format: 'pem' })
-    .toString();
-}
+export { workerPublicKey };
 
 /**
  * The URL this Worker dials, given its target host.

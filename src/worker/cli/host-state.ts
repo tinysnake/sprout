@@ -48,7 +48,7 @@ import {
   type PrivateFileSecurityDependencies,
 } from '../host-files.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
-import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
+import { validateWorkerIdentityPrivateKey, workerPublicKey } from '../../environment/worker-proof.ts';
 
 /** The LaunchAgent label prefix the Worker service uses on macOS. */
 export const WORKER_SERVICE_LABEL_PREFIX = 'dev.sprout.worker';
@@ -223,6 +223,59 @@ export function workerServiceLabel(environmentInstanceId: string): string {
  */
 export function stableSlug(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16);
+}
+
+/**
+ * The host-local recovery journal path for one identity.
+ *
+ * Scoped to the identity's public key so that resetting and re-enrolling with a
+ * new identity in the same state directory never imports a prior identity's
+ * retained turns or fails startup due to a stale epoch (#167).
+ */
+export function workerRecoveryJournalPath(identityKeyPath: string, identityKeyPem?: string): string {
+  try {
+    const key = identityKeyPem ?? (existsSync(identityKeyPath) ? readFileSync(identityKeyPath, 'utf8') : undefined);
+    if (key !== undefined) {
+      const publicKey = workerPublicKey(key);
+      const slug = stableSlug(publicKey);
+      return `${identityKeyPath}.${slug}.recovery`;
+    }
+  } catch {
+    // If the key is invalid or unreadable, fall back to the base sidecar path.
+  }
+  return `${identityKeyPath}.recovery`;
+}
+
+/**
+ * Discover host-local recovery journal and lock files belonging to the Worker.
+ */
+export function hostRecoveryJournalFiles(paths: WorkerHostPaths): readonly string[] {
+  const result: string[] = [];
+  const identityBase = basename(paths.identityPath);
+  try {
+    if (existsSync(paths.stateDirectory)) {
+      const entries = readdirSync(paths.stateDirectory);
+      for (const entry of entries) {
+        if (
+          (entry.startsWith(`${identityBase}.`) && entry.includes('.recovery')) ||
+          entry === `${identityBase}.recovery` ||
+          entry === `${identityBase}.recovery.lock.sqlite`
+        ) {
+          result.push(join(paths.stateDirectory, entry));
+        }
+      }
+    }
+  } catch {
+    // Best-effort directory scan; fall back below.
+  }
+  try {
+    const specific = workerRecoveryJournalPath(paths.identityPath);
+    result.push(specific, `${specific}.lock.sqlite`);
+  } catch {
+    // Fall back below.
+  }
+  result.push(`${paths.identityPath}.recovery`, `${paths.identityPath}.recovery.lock.sqlite`);
+  return [...new Set(result)];
 }
 
 /** Ensure the owner-only state directory exists. */
@@ -1246,7 +1299,14 @@ export function acquireWorkerResetLock(
  * or configuration is still on disk.
  */
 export function removeHostState(paths: WorkerHostPaths, options: { readonly preserveLock?: boolean } = {}): void {
-  const files = [paths.identityPath, paths.configPath, paths.runtimePath, ...(options.preserveLock ? [] : [workerLockPath(paths)])];
+  const recoveryFiles = hostRecoveryJournalFiles(paths);
+  const files = [
+    paths.identityPath,
+    paths.configPath,
+    paths.runtimePath,
+    ...(options.preserveLock ? [] : [workerLockPath(paths)]),
+    ...recoveryFiles,
+  ];
   // Validate all entries before the first unlink. This catches corrupted state
   // such as a directory at a record path without leaving earlier records gone.
   const snapshot = files.flatMap((filePath) => {

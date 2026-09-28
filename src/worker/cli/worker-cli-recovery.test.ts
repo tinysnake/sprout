@@ -9,7 +9,7 @@ import { LineJsonRpcTransport } from '../../engine/jsonrpc.ts';
 import { WORKER_METHODS, WORKER_PROTOCOL_VERSION } from '../protocol.ts';
 import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
 import { createWorkerCli } from './worker-cli.ts';
-import { ensureStateDirectory, workerHostPaths, writePrivateFile } from './host-state.ts';
+import { ensureStateDirectory, workerHostPaths, workerRecoveryJournalPath, writePrivateFile } from './host-state.ts';
 import type { WorkerEnrollmentConnection } from '../enrollment-connector.ts';
 import { ScriptedEngineAdapter } from '../../engine/scripted.ts';
 import {
@@ -19,7 +19,7 @@ import {
   testComposition,
   waitFor,
 } from '../../runtime-test-harness.ts';
-import type { JournalSnapshot } from '../recovery-journal.ts';
+import { WorkerRecoveryJournal, type JournalSnapshot } from '../recovery-journal.ts';
 
 import type { ReadinessCommandRunner } from '../readiness.ts';
 
@@ -117,6 +117,7 @@ test('regression: product path (worker start --foreground) wires WorkerRecoveryJ
   };
 
   const { runner } = mockCommandRunner();
+  const abortController = new AbortController();
   const cli = createWorkerCli({
     paths: () => paths,
     stdout: () => undefined,
@@ -129,6 +130,8 @@ test('regression: product path (worker start --foreground) wires WorkerRecoveryJ
       commandRunner: runner,
       clock: () => 40_000,
     },
+    signal: abortController.signal,
+    sleep: async () => {},
   });
 
   const startPromise = cli.run(['start', '--foreground'], {
@@ -144,10 +147,11 @@ test('regression: product path (worker start --foreground) wires WorkerRecoveryJ
     assert.notEqual(snapshot, null, 'recovery/snapshot must return a non-null journal snapshot on the product path');
     assert.equal(snapshot?.epoch, 7, 'recovery/snapshot epoch must equal the accepted connection epoch');
 
-    // Retained journal file must exist at ${identityPath}.recovery
-    const journalPath = `${paths.identityPath}.recovery`;
+    // Retained journal file must exist at identity-bound path
+    const journalPath = workerRecoveryJournalPath(paths.identityPath);
     assert.ok(existsSync(journalPath), 'recovery journal file must exist on disk');
   } finally {
+    abortController.abort();
     connection.close();
     clientTransport.close();
     await startPromise.catch(() => undefined);
@@ -193,6 +197,7 @@ test('a run executed on the product path journals turn events and settlement int
     }],
   });
 
+  const abortController = new AbortController();
   const cli = createWorkerCli({
     paths: () => paths,
     stdout: () => undefined,
@@ -202,6 +207,7 @@ test('a run executed on the product path journals turn events and settlement int
     currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     engines: new Map([['scripted', slow]]),
     readiness: scriptedStartupReadiness,
+    signal: abortController.signal,
     sleep: () => new Promise<void>(() => {}),
   });
 
@@ -235,7 +241,7 @@ test('a run executed on the product path journals turn events and settlement int
     await waitFor(() => slow.sessions[0]?.prompts.length === 1, 'scripted turn started');
 
     // Retained journal file exists while connected and running
-    const journalPath = `${paths.identityPath}.recovery`;
+    const journalPath = workerRecoveryJournalPath(paths.identityPath);
     assert.ok(existsSync(journalPath), 'recovery journal exists during run');
 
     // Wait for the in-flight turn event to be journaled before channel loss
@@ -269,7 +275,7 @@ test('a run executed on the product path journals turn events and settlement int
     assert.equal(snap.turns[0]?.settlement?.status, 'interrupted', 'settlement was journaled');
     assert.equal(snap.engineStopped, true, 'engine stop was journaled on channel loss fence');
   } finally {
-    process.emit('SIGINT');
+    abortController.abort();
     await startPromise.catch(() => undefined);
     await h.close();
   }
@@ -320,6 +326,7 @@ test('with channel-lost recovery open, Worker reconnect on product path drives c
     ],
   });
 
+  const abortController = new AbortController();
   const cli = createWorkerCli({
     paths: () => paths,
     stdout: () => undefined,
@@ -329,6 +336,7 @@ test('with channel-lost recovery open, Worker reconnect on product path drives c
     currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     engines: new Map([['scripted', slow]]),
     readiness: scriptedStartupReadiness,
+    signal: abortController.signal,
     sleep: async () => {},
   });
 
@@ -398,7 +406,7 @@ test('with channel-lost recovery open, Worker reconnect on product path drives c
     assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'blocked');
     assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
   } finally {
-    process.emit('SIGINT');
+    abortController.abort();
     await startPromise.catch(() => undefined);
     await h.close();
   }
@@ -437,6 +445,7 @@ test('idle Task channel-lost recovery auto-resolves on product path reconnect (#
 
   const adapter = new ScriptedEngineAdapter({ turns: [] });
 
+  const abortController = new AbortController();
   const cli = createWorkerCli({
     paths: () => paths,
     stdout: () => undefined,
@@ -446,6 +455,7 @@ test('idle Task channel-lost recovery auto-resolves on product path reconnect (#
     currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
     engines: new Map([['scripted', adapter]]),
     readiness: scriptedStartupReadiness,
+    signal: abortController.signal,
     sleep: async () => {},
   });
 
@@ -495,8 +505,153 @@ test('idle Task channel-lost recovery auto-resolves on product path reconnect (#
     assert.equal(resolved.phase, 'resolved');
     assert.equal(resolved.evidence !== undefined, true);
   } finally {
-    process.emit('SIGINT');
+    abortController.abort();
     await startPromise.catch(() => undefined);
     await h.close();
+  }
+});
+
+test('regression: reset followed by re-enrollment cannot read or import prior identity recovery journal (#167)', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-reset-re-enroll-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const paths = workerHostPaths({
+    HOME: root,
+    SPROUT_WORKER_HOME: join(root, 'state'),
+    SPROUT_LAUNCH_AGENTS_DIR: join(root, 'LaunchAgents'),
+    SPROUT_CLI_PATH: '/synthetic/bin/sprout',
+  });
+
+  ensureStateDirectory(paths);
+
+  // 1. Initial enrollment with identity A
+  const identityA = generateWorkerIdentity();
+  writePrivateFile(paths.configPath, JSON.stringify({
+    version: 1,
+    enrollmentId: 'enroll-identity-a',
+    environmentInstanceId: 'env-synth-1',
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    endpoint: { host: '127.0.0.1', port: 5174 },
+    identityFileName: 'identity.pem',
+  }));
+  writePrivateFile(paths.identityPath, identityA.privateKey);
+
+  // Identity A journals turn events and context at epoch 5
+  const journalPathA = workerRecoveryJournalPath(paths.identityPath, identityA.privateKey);
+  const journalA = new WorkerRecoveryJournal(journalPathA, 5);
+  journalA.begin('session-a', 'turn-a', 'run-a');
+  journalA.event('turn-a', { type: 'notice', text: 'identity A evidence' });
+  journalA.context('task-a', 'prepared');
+  assert.ok(existsSync(journalPathA), 'Identity A journal must exist');
+  assert.ok(existsSync(`${journalPathA}.lock.sqlite`), 'Identity A lock file must exist');
+
+  // 2. Perform `reset --yes` through the CLI
+  const cliA = createWorkerCli({
+    paths: () => paths,
+    stdout: () => undefined,
+    stderr: () => undefined,
+    platform: 'darwin',
+    uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+  });
+  const resetExit = await cliA.run(['reset', '--yes']);
+  assert.equal(resetExit, 0, 'worker reset must succeed');
+  assert.equal(existsSync(paths.identityPath), false, 'identity.pem must be removed by reset');
+  assert.equal(existsSync(paths.configPath), false, 'config.json must be removed by reset');
+  assert.equal(existsSync(journalPathA), false, 'identity A recovery journal must be removed by reset');
+  assert.equal(existsSync(`${journalPathA}.lock.sqlite`), false, 'identity A recovery lock must be removed by reset');
+
+  // 3. Re-enroll with a DIFFERENT identity B at the same state directory
+  const identityB = generateWorkerIdentity();
+  writePrivateFile(paths.configPath, JSON.stringify({
+    version: 1,
+    enrollmentId: 'enroll-identity-b',
+    environmentInstanceId: 'env-synth-1',
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    endpoint: { host: '127.0.0.1', port: 5174 },
+    identityFileName: 'identity.pem',
+  }));
+  writePrivateFile(paths.identityPath, identityB.privateKey);
+
+  // Even if an orphaned prior journal on disk exists with a higher epoch (epoch 10)
+  // and sensitive turns from Identity A:
+  const orphanedOldJournal = new WorkerRecoveryJournal(journalPathA, 10);
+  orphanedOldJournal.begin('session-a-leak', 'turn-a-leak', 'run-a-leak');
+
+  // 4. Start foreground worker with Identity B at epoch 1 (lower than epoch 10)
+  const toWorker = new PassThrough();
+  const toClient = new PassThrough();
+  const connectionStream = new Duplex({
+    read() {},
+    write(chunk, _encoding, callback) {
+      toClient.write(chunk);
+      callback();
+    },
+    destroy(error, callback) {
+      toWorker.destroy(error ?? undefined);
+      toClient.destroy(error ?? undefined);
+      callback(error);
+    },
+  });
+  toWorker.on('data', (chunk) => connectionStream.push(chunk));
+  toWorker.on('end', () => connectionStream.push(null));
+
+  const clientTransport = new LineJsonRpcTransport({
+    input: toClient,
+    output: toWorker,
+  });
+
+  const connectionB: WorkerEnrollmentConnection = {
+    stream: connectionStream,
+    enrollmentId: 'enroll-identity-b',
+    environmentInstanceId: 'env-synth-1',
+    epoch: 1, // Epoch 1 is lower than the old journal's epoch (10)
+    connectionId: 'c-b-1',
+    close: () => {
+      connectionStream.destroy();
+    },
+  };
+
+  const { runner } = mockCommandRunner();
+  const abortControllerB = new AbortController();
+  const cliB = createWorkerCli({
+    paths: () => paths,
+    stdout: () => undefined,
+    stderr: () => undefined,
+    connect: async () => connectionB,
+    platform: 'darwin',
+    uid: 501,
+    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
+    readinessProbeOptions: {
+      commandRunner: runner,
+      clock: () => 40_000,
+    },
+    signal: abortControllerB.signal,
+    sleep: async () => {},
+  });
+
+  const startPromise = cliB.run(['start', '--foreground'], {
+    PATH: '',
+    SPROUT_CODEX_BIN: '/synthetic/codex',
+    SPROUT_WORKER_RECONNECT_MAX_MS: '300',
+  });
+
+  try {
+    // Identity B's recovery/snapshot must succeed cleanly at epoch 1 (not thrown as stale epoch 10)
+    const snapshot = await clientTransport.request<JournalSnapshot | null>(WORKER_METHODS.recoverySnapshot, {});
+    assert.notEqual(snapshot, null, 'recovery/snapshot must return a non-null journal snapshot');
+    assert.equal(snapshot?.epoch, 1, 'snapshot epoch must match identity B epoch');
+    assert.equal(snapshot?.turns.length, 0, 'snapshot must not import prior identity A turns');
+    assert.deepEqual(snapshot?.taskContexts, {}, 'snapshot must not import prior identity A task contexts');
+
+    // Identity B's journal is scoped to Identity B's public key
+    const journalPathB = workerRecoveryJournalPath(paths.identityPath, identityB.privateKey);
+    assert.notEqual(journalPathB, journalPathA, 'journal paths must differ across identities');
+    assert.ok(existsSync(journalPathB), 'Identity B journal file must exist');
+  } finally {
+    abortControllerB.abort();
+    connectionB.close();
+    clientTransport.close();
+    await startPromise.catch(() => undefined);
   }
 });

@@ -72,6 +72,7 @@ import {
   removeFileIfPresent,
   removeHostState,
   stableSlug,
+  workerRecoveryJournalPath,
   workerServiceLabel,
   writeConfig,
   writeRuntimeState,
@@ -194,6 +195,8 @@ export interface WorkerCliDependencies {
   readonly currentProcess?: (ownerToken: string) => WorkerProcessIdentity;
   /** Seam for non-inference readiness probe options; test callers may supply custom runners or clocks. */
   readonly readinessProbeOptions?: ReadinessProbeOptions;
+  /** Optional abort signal to trigger graceful worker shutdown; used by tests. */
+  readonly signal?: AbortSignal;
   /** Injectable engines for host-local Worker operation; tests may substitute hermetic adapters. */
   readonly engines?: ReadonlyMap<string, EngineAdapter>;
   /** Injectable readiness provider; tests may state verified facts without spawning CLI checks. */
@@ -892,7 +895,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       // A stop can arrive while the loop is still retrying. Record a clean
       // stop and release the lock instead of leaving a stale lock directory
       // and a `reconnecting` record for the next start to recover.
-      let stopRequested = false;
+      let stopRequested = dependencies.signal?.aborted ?? false;
       let wakeBackoff: (() => void) | undefined;
       const onSignal = (): void => {
         stopRequested = true;
@@ -900,13 +903,16 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       };
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      dependencies.signal?.addEventListener('abort', onSignal, { once: true });
       detachSignals = () => {
         process.removeListener('SIGINT', onSignal);
         process.removeListener('SIGTERM', onSignal);
+        dependencies.signal?.removeEventListener('abort', onSignal);
       };
       // The backoff races the injected sleep against the wake-up from a stop,
       // so `stop` does not wait out the current retry delay.
       const backoff = async (ms: number): Promise<void> => {
+        if (stopRequested) return;
         let wake: () => void = () => {};
         const woken = new Promise<void>((resolve) => { wake = resolve; });
         wakeBackoff = wake;
@@ -997,8 +1003,14 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
           } finally {
             lockHeld = true;
           }
-          if (reason === 'shutdown') {
-            recordState(paths, { pid: process.pid, process: processIdentity, state: 'stopped', at: now() });
+          if (stopRequested || reason === 'shutdown') {
+            recordState(paths, {
+              pid: process.pid,
+              process: processIdentity,
+              state: 'stopped',
+              at: now(),
+              ...(stopRequested ? { detail: 'the Worker was stopped by the operator' } : {}),
+            });
             lock.release();
             return WORKER_EXIT.ok;
           }
@@ -1035,7 +1047,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     environment: NodeJS.ProcessEnv,
     identityKeyPath: string,
   ): Promise<'shutdown' | 'channel-closed'> {
-    const recoveryJournal = new WorkerRecoveryJournal(`${identityKeyPath}.recovery`, connection.epoch);
+    const recoveryJournal = new WorkerRecoveryJournal(workerRecoveryJournalPath(identityKeyPath), connection.epoch);
     const options = await createForegroundWorkerOptions({
       stream: connection.stream,
       environmentInstanceId,
@@ -1056,6 +1068,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         resolved = true;
         process.removeListener('SIGINT', stop);
         process.removeListener('SIGTERM', stop);
+        dependencies.signal?.removeEventListener('abort', stop);
         resolve(reason);
       };
       const stop = (): void => {
@@ -1063,6 +1076,11 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         connection.close();
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       };
+      if (dependencies.signal?.aborted) {
+        stop();
+      } else {
+        dependencies.signal?.addEventListener('abort', stop, { once: true });
+      }
       connection.stream.on('close', () => {
         void worker.shutdown().then(cleanUpAndResolve, cleanUpAndResolve);
       });
