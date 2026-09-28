@@ -165,7 +165,7 @@ export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness'> & {
 /** Enrollment lifecycle and read commands, never the observation writer/issuer. */
 export type EnrollmentLifecycle = Pick<EnvironmentEnrollmentService,
   'list' | 'get' | 'requestEnrollment' | 'claimEnrollment' | 'issueChallenge' |
-  'connectWorker' | 'approve' | 'revoke' | 'reset' | 'cancelEnrollment' | 'regenerateClaimSecret' | 'setCapabilityPermission' |
+  'connectWorker' | 'approve' | 'authorizeModels' | 'revoke' | 'reset' | 'cancelEnrollment' | 'regenerateClaimSecret' | 'setCapabilityPermission' |
   'getObservation' | 'getReceipt' | 'listProbes' | 'readiness'>;
 
 /** Inspection of accepted Workers, not their observation authority issuer. */
@@ -1516,6 +1516,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       issueChallenge: (...args) => enrollments.issueChallenge(...args),
       connectWorker: (...args) => enrollments.connectWorker(...args),
       approve: (...args) => enrollments.approve(...args),
+      authorizeModels: (...args) => enrollments.authorizeModels(...args),
       revoke: (...args) => enrollments.revoke(...args),
       reset: (...args) => enrollments.reset(...args),
       cancelEnrollment: (...args) => enrollments.cancelEnrollment(...args),

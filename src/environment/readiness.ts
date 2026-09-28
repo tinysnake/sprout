@@ -262,7 +262,7 @@ export function evaluateEngineOption(
     }
     return {
       state: 'unknown',
-      reason: `Work model "${workModel}" availability is unknown for "${option.engine}" on this Environment.`,
+      reason: `Work model "${workModel}" availability is unknown for "${option.engine}" on this Environment. Record the Human model authorization on the approved enrollment, then request a readiness probe.`,
     };
   }
 
