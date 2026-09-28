@@ -511,8 +511,8 @@ test('idle Task channel-lost recovery auto-resolves on product path reconnect (#
   }
 });
 
-test('regression: reset followed by re-enrollment cannot read or import prior identity recovery journal (#167)', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-reset-re-enroll-'));
+test('regression: re-enrollment cannot read or import a leftover legacy identity recovery journal (#167)', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-re-enroll-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const paths = workerHostPaths({
@@ -524,7 +524,9 @@ test('regression: reset followed by re-enrollment cannot read or import prior id
 
   ensureStateDirectory(paths);
 
-  // 1. Initial enrollment with identity A
+  // 1. Identity A was enrolled earlier. Round-1 code (1ae440a4) reads and writes
+  //    its recovery evidence at the LEGACY sidecar `${identityKeyPath}.recovery`,
+  //    so that is where the leftover journal must be seeded to reproduce the bug.
   const identityA = generateWorkerIdentity();
   writePrivateFile(paths.configPath, JSON.stringify({
     version: 1,
@@ -536,32 +538,17 @@ test('regression: reset followed by re-enrollment cannot read or import prior id
   }));
   writePrivateFile(paths.identityPath, identityA.privateKey);
 
-  // Identity A journals turn events and context at epoch 5
-  const journalPathA = workerRecoveryJournalPath(paths.identityPath, identityA.privateKey);
-  const journalA = new WorkerRecoveryJournal(journalPathA, 5);
-  journalA.begin('session-a', 'turn-a', 'run-a');
-  journalA.event('turn-a', { type: 'notice', text: 'identity A evidence' });
-  journalA.context('task-a', 'prepared');
-  assert.ok(existsSync(journalPathA), 'Identity A journal must exist');
-  assert.ok(existsSync(`${journalPathA}.lock.sqlite`), 'Identity A lock file must exist');
+  const legacyJournalPath = `${paths.identityPath}.recovery`;
+  const legacyJournal = new WorkerRecoveryJournal(legacyJournalPath, 10);
+  legacyJournal.begin('session-a', 'turn-a', 'run-a');
+  legacyJournal.event('turn-a', { type: 'notice', text: 'identity A retained evidence' });
+  legacyJournal.context('task-a', 'prepared');
+  assert.ok(existsSync(legacyJournalPath), 'identity A legacy journal must exist');
+  assert.ok(existsSync(`${legacyJournalPath}.lock.sqlite`), 'identity A legacy lock file must exist');
 
-  // 2. Perform `reset --yes` through the CLI
-  const cliA = createWorkerCli({
-    paths: () => paths,
-    stdout: () => undefined,
-    stderr: () => undefined,
-    platform: 'darwin',
-    uid: 501,
-    currentProcess: (ownerToken) => ({ pid: process.pid, startIdentity: 'test-current-process', ownerToken }),
-  });
-  const resetExit = await cliA.run(['reset', '--yes']);
-  assert.equal(resetExit, 0, 'worker reset must succeed');
-  assert.equal(existsSync(paths.identityPath), false, 'identity.pem must be removed by reset');
-  assert.equal(existsSync(paths.configPath), false, 'config.json must be removed by reset');
-  assert.equal(existsSync(journalPathA), false, 'identity A recovery journal must be removed by reset');
-  assert.equal(existsSync(`${journalPathA}.lock.sqlite`), false, 'identity A recovery lock must be removed by reset');
-
-  // 3. Re-enroll with a DIFFERENT identity B at the same state directory
+  // 2. Re-enroll with a DIFFERENT identity B at the same state directory. The
+  //    legacy journal is left behind exactly as a failed `reset` discovery or a
+  //    migration from round-1 code would leave it.
   const identityB = generateWorkerIdentity();
   writePrivateFile(paths.configPath, JSON.stringify({
     version: 1,
@@ -573,12 +560,7 @@ test('regression: reset followed by re-enrollment cannot read or import prior id
   }));
   writePrivateFile(paths.identityPath, identityB.privateKey);
 
-  // Even if an orphaned prior journal on disk exists with a higher epoch (epoch 10)
-  // and sensitive turns from Identity A:
-  const orphanedOldJournal = new WorkerRecoveryJournal(journalPathA, 10);
-  orphanedOldJournal.begin('session-a-leak', 'turn-a-leak', 'run-a-leak');
-
-  // 4. Start foreground worker with Identity B at epoch 1 (lower than epoch 10)
+  // 3. Start foreground worker with Identity B at epoch 1 (lower than the legacy epoch 10)
   const toWorker = new PassThrough();
   const toClient = new PassThrough();
   const connectionStream = new Duplex({
@@ -637,17 +619,26 @@ test('regression: reset followed by re-enrollment cannot read or import prior id
   });
 
   try {
-    // Identity B's recovery/snapshot must succeed cleanly at epoch 1 (not thrown as stale epoch 10)
-    const snapshot = await clientTransport.request<JournalSnapshot | null>(WORKER_METHODS.recoverySnapshot, {});
+    // Identity B's product-path recovery/snapshot must be clean at epoch 1. On
+    // round-1 code this seed is the journal the product path opens, so the
+    // higher epoch makes journal construction throw (or, if it did not, would
+    // import identity A's retained turns and contexts).
+    const snapshot = await Promise.race([
+      clientTransport.request<JournalSnapshot | null>(WORKER_METHODS.recoverySnapshot, {}),
+      startPromise.then((code) => {
+        throw new Error(`worker start exited before serving recovery/snapshot (code ${String(code)})`);
+      }),
+    ]);
     assert.notEqual(snapshot, null, 'recovery/snapshot must return a non-null journal snapshot');
     assert.equal(snapshot?.epoch, 1, 'snapshot epoch must match identity B epoch');
     assert.equal(snapshot?.turns.length, 0, 'snapshot must not import prior identity A turns');
     assert.deepEqual(snapshot?.taskContexts, {}, 'snapshot must not import prior identity A task contexts');
 
-    // Identity B's journal is scoped to Identity B's public key
+    // Identity B's journal is scoped to Identity B's public key, never the legacy sidecar.
     const journalPathB = workerRecoveryJournalPath(paths.identityPath, identityB.privateKey);
-    assert.notEqual(journalPathB, journalPathA, 'journal paths must differ across identities');
+    assert.notEqual(journalPathB, legacyJournalPath, 'journal paths must differ across identities');
     assert.ok(existsSync(journalPathB), 'Identity B journal file must exist');
+    assert.ok(existsSync(legacyJournalPath), 'the leftover legacy journal is untouched, not adopted');
   } finally {
     abortControllerB.abort();
     connectionB.close();

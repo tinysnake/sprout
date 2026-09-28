@@ -419,8 +419,17 @@ test('reset removes identity, configuration, runtime state, and recovery journal
     journal.begin('sess-1', 'turn-1');
     const lockPath = `${journalPath}.lock.sqlite`;
 
+    // A journal left at the legacy sidecar path by round-1 code must also be
+    // removed, never silently retained across a reset (#167).
+    const legacyJournalPath = `${paths.identityPath}.recovery`;
+    const legacyJournal = new WorkerRecoveryJournal(legacyJournalPath, 2);
+    legacyJournal.begin('sess-legacy', 'turn-legacy');
+    const legacyLockPath = `${legacyJournalPath}.lock.sqlite`;
+
     assert.equal(existsSync(journalPath), true);
     assert.equal(existsSync(lockPath), true);
+    assert.equal(existsSync(legacyJournalPath), true);
+    assert.equal(existsSync(legacyLockPath), true);
 
     removeHostState(paths);
     assert.equal(isEnrolled(paths), false);
@@ -428,7 +437,61 @@ test('reset removes identity, configuration, runtime state, and recovery journal
     assert.equal(existsSync(paths.runtimePath), false);
     assert.equal(existsSync(journalPath), false);
     assert.equal(existsSync(lockPath), false);
+    assert.equal(existsSync(legacyJournalPath), false);
+    assert.equal(existsSync(legacyLockPath), false);
     assert.equal(existsSync(paths.stateDirectory), false);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('reset fails closed before unlinking when the state directory cannot be scanned (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writeConfig(paths, config());
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
+    writeRuntimeState(paths, { pid: 1, process: processIdentity(1), state: 'stopped', at: 0 });
+
+    const scanError: NodeJS.ErrnoException = new Error('permission denied');
+    scanError.code = 'EACCES';
+    assert.throws(
+      () => removeHostState(paths, { readDirectory: () => { throw scanError; } }),
+      (error: unknown) => error instanceof WorkerHostStateError,
+      'a discovery error other than a missing directory must fail the reset',
+    );
+    // Fail closed: nothing was destroyed while journals could not be enumerated.
+    assert.equal(existsSync(paths.identityPath), true, 'identity must survive a failed discovery');
+    assert.equal(existsSync(paths.configPath), true, 'configuration must survive a failed discovery');
+    assert.equal(existsSync(paths.runtimePath), true, 'runtime state must survive a failed discovery');
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('reset does not report success while an undiscovered recovery journal survives (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writeConfig(paths, config());
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
+
+    // A prior identity's key-digest journal that an incomplete scan failed to
+    // report. A non-empty directory after removal must fail the reset instead
+    // of being swallowed as `ENOTEMPTY` success.
+    const orphan = join(paths.stateDirectory, 'identity.pem.0123456789abcdef.recovery');
+    writeFileSync(orphan, '{}');
+
+    assert.throws(
+      () => removeHostState(paths, { readDirectory: () => [] }),
+      (error: unknown) => error instanceof WorkerHostStateError,
+      'a surviving recovery journal must not be reported as a clean reset',
+    );
+    assert.equal(existsSync(orphan), true, 'the surviving journal is reported, not hidden or deleted silently');
   } finally {
     cleanup();
   }
