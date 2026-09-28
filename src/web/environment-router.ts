@@ -251,6 +251,46 @@ export function createEnvironmentRouter(options: EnvironmentRouterOptions): ApiR
         }
       }
 
+      // POST /api/environments/enrollments/:id/model-authorizations — record a
+      // Human model-authorization decision on an already-approved enrollment
+      // (#172). It carries the approval path's authority check, decision audit,
+      // and requirement-revision stamping, and never resets the bound identity.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'environments' &&
+        segments[2] === 'enrollments' &&
+        segments[4] === 'model-authorizations'
+      ) {
+        const body = await context.readBody();
+        if (body['modelAuthorizations'] === undefined) {
+          return json(context, 400, { error: 'modelAuthorizations is required' });
+        }
+        const modelAuthorizations = parseModelAuthorizations(body['modelAuthorizations']);
+        if (modelAuthorizations === 'invalid' || modelAuthorizations === undefined) {
+          return json(context, 400, {
+            error: 'modelAuthorizations must be a record of model string arrays or an array of model authorization objects',
+          });
+        }
+        try {
+          const enrollment = await enrollments.authorizeModels(segments[3] ?? '', { modelAuthorizations });
+          return json(context, 200, {
+            enrollment: toEnrollmentView(enrollment),
+            modelAuthorizations: (enrollment.modelAuthorizations ?? []).map((auth) => ({
+              engine: auth.engine,
+              model: auth.model,
+              source: auth.source,
+              ...(auth.requirementRevision !== undefined ? { requirementRevision: auth.requirementRevision } : {}),
+              authorizedAt: auth.authorizedAt,
+              ...(auth.actor !== undefined ? { actor: auth.actor } : {}),
+            })),
+          });
+        } catch (error) {
+          return enrollmentFailure(context, error);
+        }
+      }
+
       // POST /api/environments/enrollments/:id/revoke
       if (
         method === 'POST' &&

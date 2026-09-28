@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { CapabilityKey, EnvironmentInstance } from '../types.js';
 import StateBanner from '../../../primitives/StateBanner.vue';
 import Button from '../../../primitives/Button.vue';
@@ -8,6 +8,7 @@ import StatusDot from '../../../primitives/StatusDot.vue';
 import StatusPill from '../../../primitives/StatusPill.vue';
 import Badge from '../../../primitives/Badge.vue';
 import Card from '../../../primitives/Card.vue';
+import Checkbox from '../../../primitives/Checkbox.vue';
 import HealthDimensionsGrid from './HealthDimensionsGrid.vue';
 import CapabilityPermissionsGrid from './CapabilityPermissionsGrid.vue';
 import EngineReadinessGrid from './EngineReadinessGrid.vue';
@@ -39,9 +40,63 @@ watch(
   },
 );
 
+/**
+ * Post-approval model authorization (#172).
+ *
+ * The configured target models come from the core-owned requirements, and the
+ * boxes start checked for models the Human already authorized, so re-saving
+ * re-stamps every current grant after a requirement-scope change instead of
+ * silently dropping the ones the operator did not re-select.
+ */
+const configuredTargetModels = computed(() => {
+  const list: { engine: string; model: string }[] = [];
+  const add = (engine: string, model: string) => {
+    if (!list.some((item) => item.engine === engine && item.model === model)) list.push({ engine, model });
+  };
+  for (const [engine, models] of Object.entries(displayedEnv.value.targetModelsByEngine ?? {})) {
+    for (const model of models) add(engine, model);
+  }
+  for (const [engine, models] of Object.entries(displayedEnv.value.requirements?.modelsByEngine ?? {})) {
+    for (const model of models) add(engine, model);
+  }
+  return list;
+});
+
+const selectedModelAuthorizations = ref<Record<string, boolean>>({});
+const existingModelAuthorizations = computed(() => new Set(
+  Object.entries(displayedEnv.value.engineDetails ?? {}).flatMap(([engine, details]) =>
+    (details.modelAuthorizations ?? []).map((auth) => `${engine}:${auth.model}`)),
+));
+watch(
+  () => props.env,
+  (env) => {
+    const next: Record<string, boolean> = {};
+    for (const [engine, details] of Object.entries(env.engineDetails ?? {})) {
+      for (const auth of details.modelAuthorizations ?? []) next[`${engine}:${auth.model}`] = true;
+    }
+    selectedModelAuthorizations.value = next;
+  },
+  { immediate: true },
+);
+
+function handleAuthorizeModels(): void {
+  const modelAuthorizations: Record<string, string[]> = {};
+  for (const target of configuredTargetModels.value) {
+    if (selectedModelAuthorizations.value[`${target.engine}:${target.model}`] === true) {
+      (modelAuthorizations[target.engine] ??= []).push(target.model);
+    }
+  }
+  emit('authorizeModels', { id: displayedEnv.value.id, modelAuthorizations });
+}
+
 const emit = defineEmits<{
   (e: 'probe', id: string): void;
   (e: 'togglePermission', cap: CapabilityKey): void;
+  /**
+   * Record the Human's model-authorization selection on the approved enrollment
+   * (#172). This is the post-approval remedy for an Agent's new work model.
+   */
+  (e: 'authorizeModels', payload: { id: string; modelAuthorizations: Record<string, readonly string[]> }): void;
   (e: 'unbindWorkspace', payload: { projectId: string; envId: string }): void;
   (e: 'reconcile', id: string): void;
   (e: 'resume', taskId: string): void;
@@ -113,6 +168,58 @@ const emit = defineEmits<{
         :readiness="displayedEnv.engineReadiness"
         :details="displayedEnv.engineDetails"
       />
+
+      <!-- 7. Post-approval Human model authorization (#172) -->
+      <div
+        v-if="displayedEnv.enrollmentStatus === 'approved'"
+        class="model-authorization-panel rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 space-y-2"
+      >
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs sm:text-sm font-bold text-[var(--text-primary)]">Model Authorization (Human Entitlement)</h3>
+          <span class="text-[10px] text-[var(--text-muted)]">Human Authorization Required</span>
+        </div>
+        <p class="text-[11px] text-[var(--text-secondary)]">
+          When an Agent gains a work model after approval, its availability stays unknown until a Human records the
+          model authorization here — no enrollment reset and no re-enrollment ceremony. This action only adds grants:
+          existing grants cannot be removed here, and leaving a new model unselected does not authorize it.
+          Re-saving also re-stamps every model already authorized. Request a readiness probe afterwards so the
+          Environment re-measures the current requirement revision.
+        </p>
+        <div v-if="configuredTargetModels.length === 0" class="text-xs text-[var(--text-muted)] italic py-1">
+          No target models are configured for this environment's engines.
+        </div>
+        <template v-else>
+          <div class="space-y-2">
+            <div
+              v-for="target in configuredTargetModels"
+              :key="`${target.engine}:${target.model}`"
+              class="flex items-center justify-between p-2 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)]/50"
+            >
+              <label :for="`env-auth-${target.engine}-${target.model}`" class="flex flex-col cursor-pointer select-none">
+                <span class="text-xs font-medium text-[var(--text-primary)]">{{ target.model }}</span>
+                <span class="text-[10px] text-[var(--text-muted)] uppercase font-semibold">Engine: {{ target.engine }}</span>
+              </label>
+              <Checkbox
+                :id="`env-auth-${target.engine}-${target.model}`"
+                v-model="selectedModelAuthorizations[`${target.engine}:${target.model}`]"
+                :disabled="existingModelAuthorizations.has(`${target.engine}:${target.model}`)"
+                class="min-h-[24px] min-w-[24px]"
+                :aria-label="`Authorize model ${target.model} for ${target.engine}`"
+              />
+            </div>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            class="authorize-models-btn text-xs"
+            :disabled="disabled"
+            @click="handleAuthorizeModels"
+          >
+            <Icon name="key" :size="13" />
+            <span>Record Model Authorization</span>
+          </Button>
+        </template>
+      </div>
     </div>
 
     <!-- 3. Bound Project Workspaces (Workspace Readiness) -->

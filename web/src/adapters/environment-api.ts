@@ -236,6 +236,11 @@ export interface EnvironmentEnrollmentBrowserAdapter {
     capabilityPermissions: Readonly<Record<string, boolean>>,
     modelAuthorizations?: Readonly<Record<string, readonly string[]>> | readonly { readonly engine: string; readonly model: string }[],
   ): Promise<EnrollmentView>;
+  /** Record a Human model authorization on an approved enrollment (#172). */
+  authorizeModelEnrollments(
+    id: string,
+    modelAuthorizations: Readonly<Record<string, readonly string[]>> | readonly { readonly engine: string; readonly model: string }[],
+  ): Promise<EnrollmentView>;
   revokeEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   resetEnrollment(id: string, reason: string): Promise<EnrollmentView>;
   cancelEnrollment(id: string, reason?: string): Promise<EnrollmentView>;
@@ -347,6 +352,13 @@ export function createEnvironmentEnrollmentBrowserAdapter(
           capabilityPermissions,
           ...(modelAuthorizations !== undefined ? { modelAuthorizations } : {}),
         }),
+      );
+      return response.enrollment;
+    },
+    async authorizeModelEnrollments(id, modelAuthorizations) {
+      const response = await transport.request<{ readonly enrollment: EnrollmentView }>(
+        `/api/environments/enrollments/${encodeURIComponent(id)}/model-authorizations`,
+        jsonCommand({ modelAuthorizations }),
       );
       return response.enrollment;
     },

@@ -268,6 +268,7 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
       readonly enrollmentId?: string;
       readonly connectionEpoch?: number;
       readonly lifecycleGeneration?: number;
+      readonly isCurrent?: () => boolean;
       readonly connectionId?: string;
       readonly requirements?: import('./readiness.ts').ReadinessRequirementScope;
       readonly actor?: string;
@@ -275,6 +276,12 @@ export class SqliteEnvironmentReadinessStore implements EnvironmentReadinessStor
   ): Promise<void> {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
+      // No await between this fence and the transaction commit. A lifecycle
+      // bump that wins first must not leave a later entitlement evidence row.
+      if (context?.isCurrent?.() === false) {
+        this.#db.exec('ROLLBACK');
+        return;
+      }
       const row = this.#db
         .prepare('SELECT document, current_observation_id FROM environment_readiness WHERE environment_instance_id = ?')
         .get(instance) as { document: string; current_observation_id: string | null } | undefined;

@@ -2,6 +2,7 @@ import {
   normalizeEnrollment,
   amendCapabilityRequests,
   approveEnrollment,
+  authorizeEnrollmentModels,
   cancelEnrollment,
   createPendingEnrollment,
   reconcileWorkerConnection,
@@ -30,6 +31,7 @@ import type {
   ConnectionFact,
   EngineReadinessFact,
   LeaseSafetyFact,
+  ModelAuthorizationFact,
   ProbeResultFact,
   ProtocolVersionRange,
   ReadinessReceipt,
@@ -564,59 +566,14 @@ export class EnvironmentEnrollmentService {
       readonly actor?: string;
     },
   ): Promise<ApproveEnrollmentResult> {
+    const generation = this.#authority.generation(enrollmentId);
     const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
     const at = this.#clock();
-    const authorizedFacts: import('./readiness.ts').ModelAuthorizationFact[] = [];
 
-    const rawSelections: { engine: string; model: string }[] = [];
-    if (input.modelAuthorizations !== undefined) {
-      if (Array.isArray(input.modelAuthorizations)) {
-        for (const item of input.modelAuthorizations) {
-          if (item && typeof item === 'object' && typeof item.engine === 'string' && typeof item.model === 'string') {
-            rawSelections.push({ engine: item.engine, model: item.model });
-          }
-        }
-      } else if (typeof input.modelAuthorizations === 'object' && input.modelAuthorizations !== null) {
-        for (const [engine, models] of Object.entries(input.modelAuthorizations)) {
-          if (Array.isArray(models)) {
-            for (const model of models) {
-              if (typeof model === 'string') {
-                rawSelections.push({ engine, model });
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (currentRequirements?.modelsByEngine) {
-      for (const [engine, models] of Object.entries(currentRequirements.modelsByEngine)) {
-        for (const model of models) {
-          const isSelected = rawSelections.some((s) => s.engine === engine && s.model === model);
-          if (isSelected) {
-            const requirementRevision = currentRequirements.revisionsByEngine?.[engine] ?? currentRequirements.revision;
-            authorizedFacts.push({
-              engine,
-              model,
-              source: 'human-approval',
-              ...(requirementRevision !== undefined ? { requirementRevision } : {}),
-              authorizedAt: at,
-              actor: input.actor ?? 'operator',
-            });
-          }
-        }
-      }
-    } else if (rawSelections.length > 0) {
-      for (const selection of rawSelections) {
-        authorizedFacts.push({
-          engine: selection.engine,
-          model: selection.model,
-          source: 'human-approval',
-          authorizedAt: at,
-          actor: input.actor ?? 'operator',
-        });
-      }
-    }
+    const rawSelections = input.modelAuthorizations !== undefined
+      ? rawModelAuthorizationSelections(input.modelAuthorizations)
+      : [];
+    const authorizedFacts = selectModelAuthorizationFacts(rawSelections, currentRequirements, at, input.actor);
 
     const enrollment = await this.#mutateWithCas(enrollmentId, (current) => approveEnrollment(current, {
       capabilityPermissions: input.capabilityPermissions,
@@ -629,6 +586,7 @@ export class EnvironmentEnrollmentService {
     await this.#readiness.recordModelAuthorizations(enrollment.environmentInstanceId, authorizedFacts, {
       enrollmentId: enrollment.id,
       lifecycleGeneration: this.#authority.generation(enrollment.id),
+      isCurrent: () => this.#authority.generation(enrollment.id) === generation,
       ...(currentEpoch !== undefined ? { connectionEpoch: currentEpoch } : {}),
       ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
       ...(input.actor !== undefined ? { actor: input.actor } : {}),
@@ -636,6 +594,63 @@ export class EnvironmentEnrollmentService {
 
     this.#announce(enrollment);
     return { enrollment };
+  }
+
+  /**
+   * Record a Human model-authorization decision on an already-approved
+   * enrollment (#172).
+   *
+   * This is the supported post-approval path ADR-0013's amendment implies: a
+   * requirement-scope change invalidates affected authorizations "requiring a
+   * fresh Human decision", and that decision must be recordable without the
+   * identity-replacing reset ceremony. It shares the approval path's authority
+   * check (approved enrollments only), requirement-revision stamping, durable
+   * decision audit, and readiness evidence recording.
+   */
+  async authorizeModels(
+    enrollmentId: string,
+    input: {
+      readonly modelAuthorizations: ModelAuthorizationSelection;
+      readonly actor?: string;
+    },
+  ): Promise<EnvironmentEnrollment> {
+    const generation = this.#authority.generation(enrollmentId);
+    const currentRequirements = this.#resolveRequirements ? await this.#resolveRequirements() : undefined;
+    const at = this.#clock();
+    const rawSelections = rawModelAuthorizationSelections(input.modelAuthorizations);
+    const authorizedFacts = selectModelAuthorizationFacts(rawSelections, currentRequirements, at, input.actor);
+
+    const enrollment = await this.#mutateWithCas(enrollmentId, (current) =>
+      authorizeEnrollmentModels(current, {
+        modelAuthorizations: authorizedFacts,
+        at,
+        ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      }),
+    );
+
+    // Record the full current decision set, exactly as approval does: the
+    // readiness document carries one complete authorization snapshot per engine,
+    // so a partial write would drop the grants for other models or engines.
+    // Re-read first, then enforce the captured generation again at the store
+    // mutation boundary: the status read alone cannot fence a later revoke.
+    const durable = await this.#requireEnrollment(enrollment.id);
+    if (durable.status !== 'approved' || this.#authority.generation(enrollment.id) !== generation) return durable;
+    const currentEpoch = this.#currentConnectionEpoch(enrollment.id);
+    await this.#readiness.recordModelAuthorizations(
+      enrollment.environmentInstanceId,
+      enrollment.modelAuthorizations ?? [],
+      {
+        enrollmentId: enrollment.id,
+        lifecycleGeneration: generation,
+        isCurrent: () => this.#authority.generation(enrollment.id) === generation,
+        ...(currentEpoch !== undefined ? { connectionEpoch: currentEpoch } : {}),
+        ...(currentRequirements !== undefined ? { requirements: currentRequirements } : {}),
+        ...(input.actor !== undefined ? { actor: input.actor } : {}),
+      },
+    );
+
+    this.#announce(enrollment);
+    return enrollment;
   }
 
   async revoke(enrollmentId: string, reason: string): Promise<EnvironmentEnrollment> {
@@ -928,4 +943,78 @@ export class EnvironmentEnrollmentService {
     this.#connectionAttempts.delete(enrollmentId);
     this.#onAuthorityLost?.(enrollmentId);
   }
+}
+
+/** The accepted selection shapes for one Human model-authorization decision. */
+export type ModelAuthorizationSelection =
+  | Readonly<Record<string, readonly string[]>>
+  | readonly { readonly engine: string; readonly model: string }[];
+
+/** Parse a caller selection into ordered (engine, model) pairs. */
+function rawModelAuthorizationSelections(
+  selection: ModelAuthorizationSelection,
+): { engine: string; model: string }[] {
+  const raw: { engine: string; model: string }[] = [];
+  if (Array.isArray(selection)) {
+    for (const item of selection) {
+      if (item && typeof item === 'object' && typeof item.engine === 'string' && typeof item.model === 'string') {
+        raw.push({ engine: item.engine, model: item.model });
+      }
+    }
+  } else if (typeof selection === 'object' && selection !== null) {
+    for (const [engine, models] of Object.entries(selection)) {
+      if (Array.isArray(models)) {
+        for (const model of models) {
+          if (typeof model === 'string') raw.push({ engine, model });
+        }
+      }
+    }
+  }
+  return raw;
+}
+
+/**
+ * The one place a Human selection becomes stamped authorization facts.
+ *
+ * Approval and post-approval authorization must stamp requirement revisions
+ * identically: a selection outside the current requirements has no revision to
+ * scope, so it is not recorded. When no requirement resolver is configured the
+ * selection is recorded unstamped, exactly as approval does.
+ */
+function selectModelAuthorizationFacts(
+  rawSelections: readonly { engine: string; model: string }[],
+  currentRequirements: ReadinessRequirementScope | undefined,
+  at: number,
+  actor: string | undefined,
+): ModelAuthorizationFact[] {
+  const facts: ModelAuthorizationFact[] = [];
+  if (currentRequirements?.modelsByEngine) {
+    for (const [engine, models] of Object.entries(currentRequirements.modelsByEngine)) {
+      for (const model of models) {
+        if (rawSelections.some((selection) => selection.engine === engine && selection.model === model)) {
+          const requirementRevision =
+            currentRequirements.revisionsByEngine?.[engine] ?? currentRequirements.revision;
+          facts.push({
+            engine,
+            model,
+            source: 'human-approval',
+            ...(requirementRevision !== undefined ? { requirementRevision } : {}),
+            authorizedAt: at,
+            actor: actor ?? 'operator',
+          });
+        }
+      }
+    }
+    return facts;
+  }
+  for (const selection of rawSelections) {
+    facts.push({
+      engine: selection.engine,
+      model: selection.model,
+      source: 'human-approval',
+      authorizedAt: at,
+      actor: actor ?? 'operator',
+    });
+  }
+  return facts;
 }
