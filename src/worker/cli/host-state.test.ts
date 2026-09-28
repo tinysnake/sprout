@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';import { chmodSync, existsSync, mkdtempS
 
 import { tmpdir } from 'node:os';
 
-import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { join } from 'node:path';import { acquireWorkerLock, clearRuntimeState, DuplicateWorkerProcessError, ensureStateDirectory, hasExactPrivateFileMode, isEnrolled, isRestrictive, privateFileRestriction, probeWorkerProcess, readConfig, readIdentityKey, readRuntimeState, removeHostState, stableSlug, syncDirectory, writeConfig, writePrivateFile, writeRuntimeState, workerHostPaths, workerRecoveryJournalPath, workerServiceLabel, WorkerHostStateError, type WorkerHostConfig, type WorkerProcessIdentity, type WorkerProcessProbe } from './host-state.ts';import { verifyWindowsPrivateFileAcl, type PrivateFileSecurityDependencies } from '../host-files.ts';import { renderLaunchAgent } from './launch-agent.ts';
+import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
+import { WorkerRecoveryJournal } from '../recovery-journal.ts';
 
 
 /**
@@ -403,18 +405,119 @@ test('runtime state round-trips and clears without a secret', () => {
 });
 
 
-test('reset removes identity, configuration, and runtime state', () => {
+test('reset removes identity, configuration, runtime state, and recovery journal artifacts', () => {
   const { paths, cleanup } = tempPaths();
   try {
     ensureStateDirectory(paths);
     writeConfig(paths, config());
-    writePrivateFile(paths.identityPath, 'PRIVATE KEY MATERIAL');
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
     writeRuntimeState(paths, { pid: 1, process: processIdentity(1), state: 'stopped', at: 0 });
+
+    const journalPath = workerRecoveryJournalPath(paths.identityPath, id.privateKey);
+    const journal = new WorkerRecoveryJournal(journalPath, 1);
+    journal.begin('sess-1', 'turn-1');
+    const lockPath = `${journalPath}.lock.sqlite`;
+
+    // A journal left at the legacy sidecar path by round-1 code must also be
+    // removed, never silently retained across a reset (#167).
+    const legacyJournalPath = `${paths.identityPath}.recovery`;
+    const legacyJournal = new WorkerRecoveryJournal(legacyJournalPath, 2);
+    legacyJournal.begin('sess-legacy', 'turn-legacy');
+    const legacyLockPath = `${legacyJournalPath}.lock.sqlite`;
+
+    assert.equal(existsSync(journalPath), true);
+    assert.equal(existsSync(lockPath), true);
+    assert.equal(existsSync(legacyJournalPath), true);
+    assert.equal(existsSync(legacyLockPath), true);
+
     removeHostState(paths);
     assert.equal(isEnrolled(paths), false);
     assert.equal(existsSync(paths.identityPath), false);
     assert.equal(existsSync(paths.runtimePath), false);
+    assert.equal(existsSync(journalPath), false);
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(existsSync(legacyJournalPath), false);
+    assert.equal(existsSync(legacyLockPath), false);
     assert.equal(existsSync(paths.stateDirectory), false);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('reset fails closed before unlinking when the state directory cannot be scanned (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writeConfig(paths, config());
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
+    writeRuntimeState(paths, { pid: 1, process: processIdentity(1), state: 'stopped', at: 0 });
+
+    const scanError: NodeJS.ErrnoException = new Error('permission denied');
+    scanError.code = 'EACCES';
+    assert.throws(
+      () => removeHostState(paths, { readDirectory: () => { throw scanError; } }),
+      (error: unknown) => error instanceof WorkerHostStateError,
+      'a discovery error other than a missing directory must fail the reset',
+    );
+    // Fail closed: nothing was destroyed while journals could not be enumerated.
+    assert.equal(existsSync(paths.identityPath), true, 'identity must survive a failed discovery');
+    assert.equal(existsSync(paths.configPath), true, 'configuration must survive a failed discovery');
+    assert.equal(existsSync(paths.runtimePath), true, 'runtime state must survive a failed discovery');
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('reset does not report success while an undiscovered recovery journal survives (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    writeConfig(paths, config());
+    const id = generateWorkerIdentity();
+    writePrivateFile(paths.identityPath, id.privateKey);
+
+    // A prior identity's key-digest journal that an incomplete scan failed to
+    // report. A non-empty directory after removal must fail the reset instead
+    // of being swallowed as `ENOTEMPTY` success.
+    const orphan = join(paths.stateDirectory, 'identity.pem.0123456789abcdef.recovery');
+    writeFileSync(orphan, '{}');
+
+    assert.throws(
+      () => removeHostState(paths, { readDirectory: () => [] }),
+      (error: unknown) => error instanceof WorkerHostStateError,
+      'a surviving recovery journal must not be reported as a clean reset',
+    );
+    assert.equal(existsSync(orphan), true, 'the surviving journal is reported, not hidden or deleted silently');
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('workerRecoveryJournalPath scopes journal filename to the identity public key (#167)', () => {
+  const { paths, cleanup } = tempPaths();
+  try {
+    ensureStateDirectory(paths);
+    const idA = generateWorkerIdentity();
+    const idB = generateWorkerIdentity();
+
+    writePrivateFile(paths.identityPath, idA.privateKey);
+    const pathA1 = workerRecoveryJournalPath(paths.identityPath);
+    const pathA2 = workerRecoveryJournalPath(paths.identityPath, idA.privateKey);
+    assert.equal(pathA1, pathA2, 'path must be deterministic for the same identity');
+    assert.match(pathA1, /\.recovery$/, 'journal file must have .recovery extension');
+
+    writePrivateFile(paths.identityPath, idB.privateKey);
+    const pathB = workerRecoveryJournalPath(paths.identityPath);
+    assert.notEqual(pathA1, pathB, 'two distinct identities must produce distinct journal paths');
+
+    // Fallback for missing or unparseable keys
+    const fallbackPath = workerRecoveryJournalPath('/nonexistent/path/identity.pem');
+    assert.equal(fallbackPath, '/nonexistent/path/identity.pem.recovery');
   } finally {
     cleanup();
   }

@@ -48,7 +48,7 @@ import {
   type PrivateFileSecurityDependencies,
 } from '../host-files.ts';
 import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
-import { validateWorkerIdentityPrivateKey } from '../../environment/worker-proof.ts';
+import { validateWorkerIdentityPrivateKey, workerPublicKey } from '../../environment/worker-proof.ts';
 
 /** The LaunchAgent label prefix the Worker service uses on macOS. */
 export const WORKER_SERVICE_LABEL_PREFIX = 'dev.sprout.worker';
@@ -223,6 +223,85 @@ export function workerServiceLabel(environmentInstanceId: string): string {
  */
 export function stableSlug(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16);
+}
+
+/**
+ * The host-local recovery journal path for one identity.
+ *
+ * Scoped to the identity's public key so that resetting and re-enrolling with a
+ * new identity in the same state directory never imports a prior identity's
+ * retained turns or fails startup due to a stale epoch (#167).
+ */
+export function workerRecoveryJournalPath(identityKeyPath: string, identityKeyPem?: string): string {
+  try {
+    const key = identityKeyPem ?? (existsSync(identityKeyPath) ? readFileSync(identityKeyPath, 'utf8') : undefined);
+    if (key !== undefined) {
+      const publicKey = workerPublicKey(key);
+      const slug = stableSlug(publicKey);
+      return `${identityKeyPath}.${slug}.recovery`;
+    }
+  } catch {
+    // If the key is invalid or unreadable, fall back to the base sidecar path.
+  }
+  return `${identityKeyPath}.recovery`;
+}
+
+/** Test seam: list the entries of one directory. */
+export type ReadDirectory = (directory: string) => readonly string[];
+
+/** Whether a recovery artifact exists, tolerating only its absence. */
+function recoveryArtifactExists(filePath: string): boolean {
+  try {
+    lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/**
+ * Discover host-local recovery journal and lock files belonging to the Worker.
+ *
+ * Discovery is fail-closed: a directory scan error other than a missing state
+ * directory propagates, so `reset` refuses before unlinking anything.
+ * Returning a best-effort subset after a permission or I/O error could leave a
+ * prior identity's journals and SQLite locks on disk while `reset` reports a
+ * clean removal (#167).
+ */
+export function hostRecoveryJournalFiles(
+  paths: WorkerHostPaths,
+  readDirectory: ReadDirectory = (directory) => readdirSync(directory),
+): readonly string[] {
+  const candidates: string[] = [];
+  const identityBase = basename(paths.identityPath);
+  let entries: readonly string[];
+  try {
+    entries = readDirectory(paths.stateDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      entries = [];
+    } else {
+      throw new WorkerHostStateError('invalid', 'the host-local Worker state directory could not be scanned; host-local state was left untouched');
+    }
+  }
+  for (const entry of entries) {
+    if (
+      (entry.startsWith(`${identityBase}.`) && entry.includes('.recovery')) ||
+      entry === `${identityBase}.recovery` ||
+      entry === `${identityBase}.recovery.lock.sqlite`
+    ) {
+      candidates.push(join(paths.stateDirectory, entry));
+    }
+  }
+  try {
+    const specific = workerRecoveryJournalPath(paths.identityPath);
+    candidates.push(specific, `${specific}.lock.sqlite`);
+  } catch {
+    // Fall through to the legacy sidecar candidates.
+  }
+  candidates.push(`${paths.identityPath}.recovery`, `${paths.identityPath}.recovery.lock.sqlite`);
+  return [...new Set(candidates)].filter((filePath) => recoveryArtifactExists(filePath));
 }
 
 /** Ensure the owner-only state directory exists. */
@@ -1245,8 +1324,19 @@ export function acquireWorkerResetLock(
  * propagates, so `reset` can never report success while the old identity key
  * or configuration is still on disk.
  */
-export function removeHostState(paths: WorkerHostPaths, options: { readonly preserveLock?: boolean } = {}): void {
-  const files = [paths.identityPath, paths.configPath, paths.runtimePath, ...(options.preserveLock ? [] : [workerLockPath(paths)])];
+export function removeHostState(
+  paths: WorkerHostPaths,
+  options: { readonly preserveLock?: boolean; readonly readDirectory?: ReadDirectory } = {},
+): void {
+  const lockPath = workerLockPath(paths);
+  const recoveryFiles = hostRecoveryJournalFiles(paths, options.readDirectory);
+  const files = [
+    paths.identityPath,
+    paths.configPath,
+    paths.runtimePath,
+    ...(options.preserveLock ? [] : [lockPath]),
+    ...recoveryFiles,
+  ];
   // Validate all entries before the first unlink. This catches corrupted state
   // such as a directory at a record path without leaving earlier records gone.
   const snapshot = files.flatMap((filePath) => {
@@ -1282,13 +1372,30 @@ export function removeHostState(paths: WorkerHostPaths, options: { readonly pres
     }
     throw error;
   }
-  // The directory is removed only when it is empty, so an operator's unrelated
-  // files under an overridden state root are never deleted by `reset`.
+  // A non-empty directory is never reported as a clean reset. Only two kinds of
+  // entry may survive the transactional removal: the operator-visible log, and
+  // the maintenance fence while its owner still holds it. Anything else is
+  // state discovery did not account for (for example a recovery journal created
+  // after the scan), so the reset fails closed. `rmdirSync` runs only once the
+  // directory is proven empty, so its `ENOTEMPTY` is never swallowed (#167).
+  const allowedSurvivors = new Set<string>([basename(paths.logPath)]);
+  if (options.preserveLock) allowedSurvivors.add(basename(lockPath));
+  let remaining: readonly string[];
   try {
-    rmdirSync(paths.stateDirectory);
+    remaining = readdirSync(paths.stateDirectory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
-      throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') remaining = [];
+    else throw error;
+  }
+  const unexpected = remaining.filter((entry) => !allowedSurvivors.has(entry));
+  if (unexpected.length > 0) {
+    throw new WorkerHostStateError('invalid', 'the host-local Worker state directory still contains records that were not removed');
+  }
+  if (remaining.length === 0) {
+    try {
+      rmdirSync(paths.stateDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 }
