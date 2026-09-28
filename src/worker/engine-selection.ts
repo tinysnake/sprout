@@ -284,16 +284,17 @@ export function lookupCommand(
 /**
  * True when the probe command actually ran and reported no match.
  *
- * `execFileSync` throws for both outcomes: a non-zero exit carries a numeric
- * `status` (and no spawn error `code`), while a probe that could not be spawned
- * carries a system `code` such as `ENOENT`/`EACCES` and a null `status`. Only the
- * former is an ordinary absent engine; the latter is a real failure the caller
- * must see.
+ * Both real probes use the same convention: `command -v` and `where.exe` exit
+ * `1` when nothing matches, and `execFileSync` throws with that numeric `status`
+ * and no spawn-error `code`. Every other throw is a real failure the caller must
+ * see — a spawn failure carries a system `code` such as `ENOENT`/`EACCES` with a
+ * null `status`, and any other numeric exit (`2`, or an injected `0`) is not the
+ * documented no-match exit and must not be mislabeled "engine absent".
  */
 function isExpectedLookupMiss(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const { status, code } = error as { readonly status?: unknown; readonly code?: unknown };
-  return typeof status === 'number' && code === undefined;
+  return status === 1 && code === undefined;
 }
 
 /**

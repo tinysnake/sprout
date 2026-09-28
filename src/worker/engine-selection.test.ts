@@ -211,7 +211,7 @@ test('the Windows probe still prefers a directly runnable executable over an npm
 
 test('an engine probe reports a probe-run not-found exit as engine-absent', () => {
   // What `where.exe` and `command -v` do when nothing matches: the command ran
-  // and exited non-zero, so execFileSync throws with a numeric status and no
+  // and exited `1`, so execFileSync throws with that numeric status and no
   // spawn-error code.
   const notFound = Object.assign(new Error('Command failed: /bin/sh -lc command -v agy'), {
     status: 1,
@@ -219,6 +219,29 @@ test('an engine probe reports a probe-run not-found exit as engine-absent', () =
   });
   assert.equal(lookupCommand('agy', 'darwin', false, () => { throw notFound; }), undefined);
   assert.equal(lookupCommand('agy', 'win32', false, () => { throw notFound; }), undefined);
+});
+
+
+test('only the documented no-match exit is engine-absent; every other numeric exit propagates', () => {
+  for (const platform of ['darwin', 'win32'] as const) {
+    const notFound = Object.assign(new Error('not found'), { status: 1, signal: null });
+    assert.equal(
+      lookupCommand('agy', platform, false, () => { throw notFound; }),
+      undefined,
+      `${platform}: exit 1 is the ordinary no-match`,
+    );
+    for (const status of [0, 2]) {
+      const unexpectedExit = Object.assign(new Error(`Command failed with status ${String(status)}`), {
+        status,
+        signal: null,
+      });
+      assert.throws(
+        () => lookupCommand('agy', platform, false, () => { throw unexpectedExit; }),
+        (error: unknown) => error === unexpectedExit,
+        `${platform}: exit ${String(status)} is not a no-match and must reach the caller`,
+      );
+    }
+  }
 });
 
 
