@@ -14,6 +14,7 @@ import { SqliteEnvironmentReadinessStore } from '../environment/sqlite-readiness
 import { SqliteRecoveryStore } from '../environment/sqlite-recovery-store.ts';
 import { SqliteWorkerConnectionEpochStore } from '../environment/worker-epoch-store.ts';
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
+import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
@@ -66,6 +67,8 @@ export {
  *   (`project/sqlite-authority-store.ts`)
  * - project access domain: `project_environment_access`
  *   (`project/sqlite-access-store.ts`)
+ * - conversation scope domain: `conversation_scopes`
+ *   (`conversation/sqlite-store.ts`)
  * - Task domain: `tasks`, `task_run_links` (`task/sqlite-store.ts`)
  * - collaboration domain: `collaboration_messages`,
  *   `collaboration_wake_requests`, `collaboration_observations`
@@ -112,6 +115,7 @@ export class SqliteStore {
   readonly projects: SqliteProjectStore;
   readonly projectAuthorities: SqliteProjectAuthorityStore;
   readonly projectAccess: SqliteProjectAccessStore;
+  readonly conversationScopes: SqliteConversationScopeStore;
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
@@ -150,6 +154,7 @@ export class SqliteStore {
     this.projects = new SqliteProjectStore({ db: this.db });
     this.projectAuthorities = new SqliteProjectAuthorityStore({ db: this.db });
     this.projectAccess = new SqliteProjectAccessStore({ db: this.db });
+    this.conversationScopes = new SqliteConversationScopeStore({ db: this.db });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });

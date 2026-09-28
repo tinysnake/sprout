@@ -29,6 +29,9 @@ import {
   toTaskView,
   toTaskWithRunsView,
   toWakeView,
+  toConversationScopeView,
+  toScopeContextView,
+  toScopeStateView,
   type RunView,
 } from './views.ts';
 import type { EnvironmentReadiness } from '../environment/readiness.ts';
@@ -432,4 +435,169 @@ test('a run view exposes the workspace binding it was admitted under, sanitized'
 test('a run with no workspace binding reports none rather than inventing one', () => {
   const view = toRunView(run({ projectId: 'project-sprout' }));
   assert.equal('workspaceBinding' in view, false);
+});
+
+test('conversation scope views expose the discriminated wire contract without server internals', () => {
+  const channel = toConversationScopeView({
+    id: 'channel-project-sprout',
+    kind: 'project',
+    projectId: 'project-sprout',
+    createdAt: 1_000,
+    updatedAt: 1_000,
+  });
+  assert.equal(channel.kind, 'project');
+  assert.equal('participants' in channel, false, 'a Project channel carries no participant list');
+  assert.equal('content' in channel, false, 'a Project channel carries no Working group content');
+
+  const direct = toConversationScopeView({
+    id: 'dm-abc',
+    kind: 'direct',
+    projectId: 'project-sprout',
+    participants: ['agent-scout', 'operator'],
+    createdAt: 1_000,
+    updatedAt: 1_000,
+  });
+  assert.equal(direct.kind, 'direct');
+  assert.deepEqual(
+    direct.kind === 'direct' ? direct.participants : [],
+    ['agent-scout', 'operator'],
+  );
+
+  const group = toConversationScopeView({
+    id: 'wg-one',
+    kind: 'working-group',
+    projectId: 'project-sprout',
+    creatorId: 'operator',
+    status: 'disbanded',
+    content: {
+      currentVersion: 1,
+      versions: [
+        {
+          version: 1,
+          at: 1_000,
+          actorMemberId: 'operator',
+          reason: 'Created the group.',
+          displayName: 'Core Mechanics',
+          goal: 'Design the mechanics.',
+          rules: ['Keep the loop short.'],
+        },
+      ],
+    },
+    memberships: [
+      { memberId: 'operator', memberKind: 'human', addedAt: 1_000, addedBy: 'operator' },
+      {
+        memberId: 'agent-scout',
+        memberKind: 'agent',
+        addedAt: 1_000,
+        addedBy: 'operator',
+        endedAt: 2_000,
+        endedBy: 'project-membership',
+        endedReason: 'The membership ended.',
+      },
+    ],
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    disbandedAt: 3_000,
+    disbandedReason: 'done for now',
+  });
+  assert.equal(group.kind, 'working-group');
+  if (group.kind !== 'working-group') assert.fail('working-group view kind');
+  assert.equal(group.status, 'disbanded');
+  assert.equal(group.disbandedAt, 3_000);
+  assert.equal(group.content.versions[0]?.displayName, 'Core Mechanics');
+  assert.equal(group.memberships[1]?.endedBy, 'project-membership');
+  // The wire shape is exactly the documented fields: no store, no SQL, no host fact.
+  assert.deepEqual(Object.keys(group).sort(), [
+    'content',
+    'createdAt',
+    'creatorId',
+    'disbandedAt',
+    'disbandedReason',
+    'id',
+    'kind',
+    'memberships',
+    'projectId',
+    'status',
+    'updatedAt',
+  ]);
+});
+
+test('the scope read projection re-applies the privacy boundary before anything reaches the wire', () => {
+  const group = toConversationScopeView({
+    id: 'wg-leak',
+    kind: 'working-group',
+    projectId: 'project-sprout',
+    creatorId: 'operator',
+    status: 'active',
+    content: {
+      currentVersion: 1,
+      versions: [
+        {
+          version: 1,
+          at: 1_000,
+          actorMemberId: 'operator',
+          reason: 'contact sk-abcdefghijklmnopqrstuvwx now',
+          displayName: 'Group',
+          goal: 'Read /home/someone/.ssh/id_rsa',
+          rules: ['Phone home to worker.internal.corp:9000'],
+        },
+      ],
+    },
+    memberships: [
+      {
+        memberId: 'operator',
+        memberKind: 'human',
+        addedAt: 1_000,
+        addedBy: 'operator',
+        endedReason: 'reached 192.168.1.10 over the LAN',
+      },
+    ],
+    createdAt: 1_000,
+    updatedAt: 1_000,
+  });
+  const serialized = JSON.stringify(group);
+  assert.ok(!serialized.includes('/home/someone'), 'no host path in goal');
+  assert.ok(!serialized.includes('sk-abcdefghijklmnopqrstuvwx'), 'no credential in a reason');
+  assert.ok(!serialized.includes('worker.internal.corp'), 'no hostname in a rule');
+  assert.ok(!serialized.includes('192.168.1.10'), 'no address in an end reason');
+});
+
+test('scope state and context views keep the two governing halves separate and redacted', () => {
+  assert.deepEqual(toScopeStateView({ scopeId: 'wg-one', writable: true }), {
+    scopeId: 'wg-one',
+    writable: true,
+  });
+  assert.deepEqual(toScopeStateView({ scopeId: 'wg-one', writable: false, reason: 'working-group-disbanded' }), {
+    scopeId: 'wg-one',
+    writable: false,
+    reason: 'working-group-disbanded',
+  });
+
+  const view = toScopeContextView({
+    scopeId: 'wg-one',
+    projectId: 'project-sprout',
+    kind: 'working-group',
+    project: { contentVersion: 3, goal: 'Ship. /home/someone/x', rules: ['Report.'] },
+    workingGroup: {
+      displayName: 'Core Mechanics',
+      contentVersion: 2,
+      goal: 'Revised.',
+      rules: ['Never publish.'],
+    },
+  });
+  // Both halves are present, versioned, and never merged into one rule list.
+  assert.equal(view.project.contentVersion, 3);
+  assert.equal(view.workingGroup?.contentVersion, 2);
+  assert.deepEqual(view.project.rules, ['Report.']);
+  assert.deepEqual(view.workingGroup?.rules, ['Never publish.']);
+  assert.ok(!JSON.stringify(view).includes('/home/someone'));
+
+  const direct = toScopeContextView({
+    scopeId: 'dm-abc',
+    projectId: 'project-sprout',
+    kind: 'direct',
+    project: { contentVersion: 0, goal: '', rules: [] },
+  });
+  assert.equal(direct.workingGroup, undefined);
+  assert.equal(direct.project.contentVersion, 0, 'a host-configured Project reports version 0');
 });

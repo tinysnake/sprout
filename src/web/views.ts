@@ -52,6 +52,12 @@ import {
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
+import type {
+  ConversationScope,
+  ScopeContext,
+  ScopeState,
+  WorkingGroupScope,
+} from '../conversation/model.ts';
 import {
   sanitizeWorkspacePath,
   type ProjectEnvironmentAccess,
@@ -1141,5 +1147,238 @@ export function toProjectEnvironmentAccessView(
       : {}),
     ...(access.current !== undefined ? { current: toWorkspaceBindingView(access.current) } : {}),
     history: access.history.map(toWorkspaceBindingView),
+  };
+}
+
+/**
+ * The client-facing shape of one conversation scope (#95, ADR-0008).
+ *
+ * Portable state only: stable identity, kind, participants or Working group
+ * lifecycle, version-attributed goal/rules content, and durable membership
+ * history. No field can carry a credential, hostname, address, absolute path,
+ * or raw command; free text is bounded and redacted at the projection boundary
+ * exactly like the Project authority view.
+ */
+export interface ConversationScopeBaseView {
+  /** The stable scope identity; also the channel identity consumers address. */
+  readonly id: string;
+  readonly projectId: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface ProjectChannelScopeView extends ConversationScopeBaseView {
+  readonly kind: 'project';
+}
+
+export interface DirectConversationScopeView extends ConversationScopeBaseView {
+  readonly kind: 'direct';
+  /** The canonical participant pair, Project-scoped and distinct per Project. */
+  readonly participants: readonly string[];
+}
+
+export interface WorkingGroupMembershipView {
+  readonly memberId: string;
+  readonly memberKind: string;
+  readonly addedAt: number;
+  readonly addedBy: string;
+  readonly endedAt?: number;
+  readonly endedBy?: string;
+  readonly endedReason?: string;
+}
+
+export interface WorkingGroupContentVersionView {
+  readonly version: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly displayName: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+export interface WorkingGroupScopeView extends ConversationScopeBaseView {
+  readonly kind: 'working-group';
+  readonly creatorId: string;
+  readonly status: string;
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly WorkingGroupContentVersionView[];
+  };
+  /** Current and historical participations; never rewritten in place. */
+  readonly memberships: readonly WorkingGroupMembershipView[];
+  readonly disbandedAt?: number;
+  readonly disbandedReason?: string;
+  readonly restoredAt?: number;
+}
+
+export type ConversationScopeView =
+  | ProjectChannelScopeView
+  | DirectConversationScopeView
+  | WorkingGroupScopeView;
+
+/** The read-only admission state of one scope for the acting member. */
+export interface ScopeStateView {
+  readonly scopeId: string;
+  readonly writable: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * The governing goal/rules facts for one scope, returned as two separate
+ * versioned halves: the wire never merges them, because Sprout does not
+ * interpret conflicts between Project and Working group rules (ADR-0008).
+ */
+export interface ScopeContextView {
+  readonly scopeId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly project: {
+    readonly contentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
+  readonly workingGroup?: {
+    readonly displayName: string;
+    readonly contentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
+}
+
+/** Scope ids may carry a `channel-` prefix over a full Project id: bound wider. */
+function sanitizeScopeId(value: string): string {
+  return sanitizeIdentifier(value, { fallback: 'unknown-scope', kind: 'generic', maxLength: 128 });
+}
+
+function toWorkingGroupMembershipView(membership: {
+  readonly memberId: string;
+  readonly memberKind: string;
+  readonly addedAt: number;
+  readonly addedBy: string;
+  readonly endedAt?: number;
+  readonly endedBy?: string;
+  readonly endedReason?: string;
+}): WorkingGroupMembershipView {
+  return {
+    memberId: sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' }),
+    memberKind: membership.memberKind === 'human' ? 'human' : 'agent',
+    addedAt: membership.addedAt,
+    addedBy: sanitizeIdentifier(membership.addedBy, { fallback: 'unknown-member', kind: 'generic' }),
+    ...(membership.endedAt !== undefined ? { endedAt: membership.endedAt } : {}),
+    ...(membership.endedBy !== undefined
+      ? { endedBy: sanitizeIdentifier(membership.endedBy, { fallback: 'unknown-member', kind: 'generic' }) }
+      : {}),
+    ...(membership.endedReason !== undefined
+      ? {
+          endedReason: sanitizeOperatorText(membership.endedReason, {
+            fallback: 'The participation end reason was withheld as sensitive.',
+            maxLength: 320,
+          }),
+        }
+      : {}),
+  };
+}
+
+function toWorkingGroupContentView(group: WorkingGroupScope): WorkingGroupScopeView['content'] {
+  return {
+    currentVersion: group.content.currentVersion,
+    versions: group.content.versions.map((version) => ({
+      version: version.version,
+      at: version.at,
+      actorMemberId: sanitizeIdentifier(version.actorMemberId, {
+        fallback: 'unknown-member',
+        kind: 'generic',
+      }),
+      reason: sanitizeOperatorText(version.reason, {
+        fallback: 'The Working group edit reason was withheld as sensitive.',
+        maxLength: 320,
+      }),
+      displayName: sanitizeOperatorText(version.displayName, {
+        fallback: 'Working group',
+        maxLength: 120,
+      }),
+      goal: sanitizeProjectText(version.goal),
+      rules: version.rules.map((rule) => sanitizeProjectText(rule)),
+    })),
+  };
+}
+
+export function toConversationScopeView(scope: ConversationScope): ConversationScopeView {
+  const base = {
+    id: sanitizeScopeId(scope.id),
+    projectId: sanitizeIdentifier(scope.projectId, {
+      fallback: 'unknown-project',
+      kind: 'generic',
+    }),
+    createdAt: scope.createdAt,
+    updatedAt: scope.updatedAt,
+  };
+  if (scope.kind === 'project') {
+    return { ...base, kind: 'project' };
+  }
+  if (scope.kind === 'direct') {
+    return {
+      ...base,
+      kind: 'direct',
+      participants: scope.participants.map((participant) =>
+        sanitizeIdentifier(participant, { fallback: 'unknown-member', kind: 'generic' }),
+      ),
+    };
+  }
+  return {
+    ...base,
+    kind: 'working-group',
+    creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
+    status: scope.status === 'disbanded' ? 'disbanded' : 'active',
+    content: toWorkingGroupContentView(scope),
+    memberships: scope.memberships.map(toWorkingGroupMembershipView),
+    ...(scope.disbandedAt !== undefined ? { disbandedAt: scope.disbandedAt } : {}),
+    ...(scope.disbandedReason !== undefined
+      ? {
+          disbandedReason: sanitizeOperatorText(scope.disbandedReason, {
+            fallback: 'The disband reason was withheld as sensitive.',
+            maxLength: 320,
+          }),
+        }
+      : {}),
+    ...(scope.restoredAt !== undefined ? { restoredAt: scope.restoredAt } : {}),
+  };
+}
+
+export function toScopeStateView(state: ScopeState): ScopeStateView {
+  return {
+    scopeId: sanitizeScopeId(state.scopeId),
+    writable: state.writable,
+    ...(state.reason !== undefined ? { reason: state.reason } : {}),
+  };
+}
+
+export function toScopeContextView(context: ScopeContext): ScopeContextView {
+  return {
+    scopeId: sanitizeScopeId(context.scopeId),
+    projectId: sanitizeIdentifier(context.projectId, {
+      fallback: 'unknown-project',
+      kind: 'generic',
+    }),
+    kind: context.kind,
+    project: {
+      contentVersion: context.project.contentVersion,
+      goal: sanitizeProjectText(context.project.goal),
+      rules: context.project.rules.map((rule) => sanitizeProjectText(rule)),
+    },
+    ...(context.workingGroup !== undefined
+      ? {
+          workingGroup: {
+            displayName: sanitizeOperatorText(context.workingGroup.displayName, {
+              fallback: 'Working group',
+              maxLength: 120,
+            }),
+            contentVersion: context.workingGroup.contentVersion,
+            goal: sanitizeProjectText(context.workingGroup.goal),
+            rules: context.workingGroup.rules.map((rule) => sanitizeProjectText(rule)),
+          },
+        }
+      : {}),
   };
 }
