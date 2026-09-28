@@ -16,9 +16,10 @@ import {
 
 import { WORKER_PROTOCOL_VERSION } from '../protocol.ts';
 
-import { WORKER_DIAGNOSTICS } from '../diagnostics.ts';
+import { WORKER_DIAGNOSTICS, staticRefusalReason } from '../diagnostics.ts';
 
 import { generateWorkerIdentity } from '../../environment/worker-proof.ts';
+import { WORKER_TRANSPORT_REFUSAL_REASON } from '../../environment/worker-transport.ts';
 
 
 /**
@@ -265,6 +266,89 @@ test('a refused enrollment reports a refusal and leaves no configuration', async
 });
 
 
+test('a refused enrollment surfaces the static transport-rule reason to the operator', async () => {
+  const h = harness({
+    connect: async () => {
+      throw new WorkerEnrollmentRefusedError(WORKER_TRANSPORT_REFUSAL_REASON, 'refused');
+    },
+  });
+  try {
+    assert.equal(await h.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
+    // The operator can now tell a transport refusal from an unreachable
+    // endpoint: the exact, static rule text is printed.
+    assert.ok(
+      h.err.join('\n').includes(WORKER_TRANSPORT_REFUSAL_REASON),
+      'the static transport refusal reason must reach stderr',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('a refusal with unrecognized server text keeps only the sanitized category', async () => {
+  const secret = 'sk-live-SPROUT-CLI-SENTINEL-4f2a9c8e';
+  const privatePath = '/Users/synthetic-private/worker-identity.pem';
+  const tokenUrl = 'wss://token-abc123@private.invalid:7443/api/worker/connect';
+  const hostile = `${secret} at ${privatePath} via ${tokenUrl}`;
+  const h = harness({
+    connect: async () => {
+      throw new WorkerEnrollmentRefusedError(hostile, 'refused');
+    },
+  });
+  try {
+    assert.equal(await h.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']), WORKER_EXIT.refused);
+    const printed = h.err.join('\n') + h.out.join('\n');
+    assert.match(printed, /enrollment could not be completed/);
+    for (const sentinel of [secret, privatePath, tokenUrl, hostile]) {
+      assert.equal(printed.includes(sentinel), false, `untrusted refusal text escaped: ${sentinel}`);
+    }
+    // No secret-shaped substring of any kind may appear, even a fragment.
+    assert.doesNotMatch(printed, /sk-live-|BEGIN [A-Z ]*PRIVATE KEY|token-abc123/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+
+test('every enrollment failure path stays free of secret-shaped and path material', async () => {
+  const secret = 'sk-live-SPROUT-CLI-SENTINEL-4f2a9c8e';
+  const privatePath = '/Users/synthetic-private/worker-identity.pem';
+  const tokenUrl = 'wss://token-abc123@private.invalid:7443/api/worker/connect';
+  const hostile = `${secret} at ${privatePath} via ${tokenUrl}`;
+  const connectors: EnrollmentConnector[] = [
+    async () => { throw new WorkerEnrollmentRefusedError(hostile, 'refused'); },
+    async () => { throw new WorkerEnrollmentRefusedError(hostile, 'incompatible'); },
+    async () => { throw new WorkerEnrollmentRefusedError(hostile, 'revoked'); },
+    async () => { throw new Error(hostile); },
+    async () => { throw new WorkerEnrollmentPendingError(hostile, hostile); },
+  ];
+  for (const connect of connectors) {
+    const h = harness({ connect });
+    try {
+      const status = await h.run(['enroll', '127.0.0.1:5174', 'enroll-synthetic']);
+      assert.notEqual(status, WORKER_EXIT.ok);
+      const printed = h.err.join('\n') + h.out.join('\n');
+      for (const sentinel of [secret, privatePath, tokenUrl, hostile]) {
+        assert.equal(printed.includes(sentinel), false, `failure path leaked: ${sentinel}`);
+      }
+      assert.doesNotMatch(printed, /sk-live-|BEGIN [A-Z ]*PRIVATE KEY|token-abc123/);
+    } finally {
+      h.cleanup();
+    }
+  }
+});
+
+
+test('static refusal classification is an allowlist, not a trust in server text', () => {
+  assert.equal(staticRefusalReason(WORKER_TRANSPORT_REFUSAL_REASON), WORKER_TRANSPORT_REFUSAL_REASON);
+  assert.equal(staticRefusalReason(WORKER_DIAGNOSTICS.enrollmentClaimRefused), WORKER_DIAGNOSTICS.enrollmentClaimRefused);
+  assert.equal(staticRefusalReason('sk-live-not-a-known-reason'), undefined);
+  assert.equal(staticRefusalReason('/Users/private/worker.sock'), undefined);
+  assert.equal(staticRefusalReason('wss://token@host/api/worker/connect'), undefined);
+});
+
+
 test('enroll rejects a malformed endpoint and never accepts the secret as an argument', async () => {
   const h = harness();
   try {
@@ -362,6 +446,9 @@ test('start keeps a hostile protocol refusal out of CLI and persisted diagnostic
     const runtime = readRuntimeState(h.paths);
     assert.equal(runtime?.detail, WORKER_DIAGNOSTICS.protocolIncompatible);
     assert.match(h.err.join('\n'), new RegExp(WORKER_DIAGNOSTICS.connectionRefused));
+    // The recognized incompatibility is surfaced as its static category; the
+    // hostile message text stays out entirely.
+    assert.ok(h.err.join('\n').includes(WORKER_DIAGNOSTICS.protocolIncompatible));
     const exposed = JSON.stringify({ stdout: h.out, stderr: h.err, runtime });
     for (const sentinel of [privacyMarker, privatePath, networkEndpoint, hostileProtocol]) {
       assert.equal(exposed.includes(sentinel), false, `protocol evidence escaped through the CLI: ${sentinel}`);

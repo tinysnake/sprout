@@ -1,13 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
 import {
   createEnvironmentWorkerEngines,
   describeEnvironmentWorkerEngines,
+  ENGINE_PROBE_STDIO,
+  lookupCommand,
   type EngineAdapterFactories,
   type EngineConfiguration,
   type EngineHostFacts,
+  type EngineLookupCommand,
 } from './engine-selection.ts';
 
 /**
@@ -173,3 +177,64 @@ function stubAdapter(id: string): EngineAdapter {
     },
   };
 }
+
+
+test('engine probes pipe stderr on both Windows and POSIX hosts so localized noise never reaches the console', () => {
+  const calls: EngineLookupCommand[] = [];
+  const runner = (command: EngineLookupCommand): string => {
+    calls.push(command);
+    return '';
+  };
+
+  // The Windows branch is simulated by naming the platform, exactly as the
+  // platform-specific CLI tests do, so this runs without a Windows host.
+  lookupCommand('agy', 'win32', false, runner);
+  lookupCommand('agy', 'darwin', false, runner);
+
+  assert.deepEqual(calls, [
+    { file: 'where.exe', args: ['agy'], stdio: ENGINE_PROBE_STDIO },
+    { file: '/bin/sh', args: ['-lc', 'command -v agy'], stdio: ENGINE_PROBE_STDIO },
+  ]);
+  for (const call of calls) {
+    assert.equal(call.stdio[0], 'ignore', 'stdin is never attached to the probe');
+    assert.equal(call.stdio[1], 'pipe', 'stdout is read as the lookup result');
+    assert.equal(call.stdio[2], 'pipe', 'stderr must be captured, never inherited');
+  }
+});
+
+
+test('the Windows probe still prefers a directly runnable executable over an npm shim', () => {
+  const result = lookupCommand('pi', 'win32', true, () => 'C:/npm/pi\nC:/tools/pi.exe\n');
+  assert.equal(result, 'C:/tools/pi.exe');
+});
+
+
+test('a real engine probe never lets the child process stderr reach the console', async () => {
+  const sentinel = 'SPROUT_ENGINE_PROBE_STDERR_SENTINEL';
+  const moduleUrl = new URL('./engine-selection.ts', import.meta.url).href;
+  const program = [
+    `import { runEngineLookup, ENGINE_PROBE_STDIO } from ${JSON.stringify(moduleUrl)};`,
+    `runEngineLookup({ file: process.execPath, args: ['-e', "process.stderr.write('${sentinel}')"], stdio: ENGINE_PROBE_STDIO });`,
+    "process.stdout.write('probe-done');",
+  ].join('\n');
+  // The helper process's own stderr is a pipe here, so an inherited grandchild
+  // stderr would surface in `err`; piping it must keep `err` empty.
+  const child = spawn(process.execPath, ['--input-type=module', '-e', program], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let error = '';
+  child.stdout.on('data', (chunk: Buffer) => { out += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk: Buffer) => { error += chunk.toString('utf8'); });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('engine probe harness did not finish'));
+    }, 30_000);
+    child.once('exit', (status) => { clearTimeout(timer); resolve(status); });
+    child.once('error', reject);
+  });
+  assert.equal(code, 0, error);
+  assert.match(out, /probe-done/);
+  assert.doesNotMatch(error, new RegExp(sentinel), 'probe stderr leaked to the operator console');
+});

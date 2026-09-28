@@ -1,7 +1,7 @@
 /**
- * The `sprout worker` macOS CLI (#117, ADR-0003/0012).
+ * The `sprout worker` host CLI (#117, ADR-0003/0012).
  *
- * Seven executable subcommands give one macOS Environment host a real, repeatable
+ * Seven executable subcommands give one Environment host a real, repeatable
  * bootstrap and user-session lifecycle:
  *
  * - `enroll <endpoint> <enrollment-id>` reads the one-use claim secret from
@@ -16,9 +16,10 @@
  *   printing a secret.
  * - `reset` requires explicit Human confirmation, removes host-local identity and
  *   configuration, and leaves the old identity unable to reconnect.
- * - `install-service` renders and installs a signed-in-user LaunchAgent that
- *   starts after sign-in and restarts after an unexpected exit.
- * - `uninstall-service` cleanly boots the LaunchAgent out and removes its plist.
+ * - `install-service` renders and installs the signed-in-user service: a
+ *   LaunchAgent on macOS, or a Scheduled Task on Windows. It starts after sign-in
+ *   and restarts after an unexpected exit.
+ * - `uninstall-service` cleanly removes that service and its registration.
  * - `stop` signals the running Worker daemon to shut down cleanly.
  *
  * Every command is dependency-injected through `createWorkerCli`, so the tests
@@ -49,7 +50,7 @@ import {
   hostEngineFacts,
 } from '../engine-selection.ts';
 import { probeEnvironmentReadiness, type ReadinessProbeOptions } from '../readiness.ts';
-import { WORKER_DIAGNOSTICS, type WorkerDiagnostic } from '../diagnostics.ts';
+import { WORKER_DIAGNOSTICS, staticRefusalReason, type WorkerDiagnostic } from '../diagnostics.ts';
 import {
   connectWorkerEnrollment,
   WorkerEnrollmentPendingError,
@@ -746,7 +747,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         removeFileIfPresent(paths.identityPath);
         removeFileIfPresent(paths.configPath);
       }
-      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')} :: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`); // DEBUG-E8
+      err(`sprout worker enroll: ${diagnosticOf(error, 'enrollment could not be completed')}`);
       return error instanceof WorkerEnrollmentRefusedError ? WORKER_EXIT.refused : WORKER_EXIT.failure;
     }
   }
@@ -1487,7 +1488,22 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   return { run };
 }
 
-function diagnosticOf(_error: unknown, fallback: string): string {
+function diagnosticOf(error: unknown, fallback: string): string {
+  if (error instanceof WorkerEnrollmentRefusedError) {
+    // A server refusal may carry a static, product-owned reason. Surface it only
+    // when it is exactly a known string; any other server text could echo key
+    // material, an absolute path, or a token-bearing URL, so those paths keep
+    // the sanitized category. Transport-rule and claim/consumption refusals are
+    // static by construction and are therefore the ones an operator can read.
+    const reason =
+      staticRefusalReason(error.message) ??
+      (error.code === 'incompatible'
+        ? WORKER_DIAGNOSTICS.protocolIncompatible
+        : error.code === 'revoked'
+          ? WORKER_DIAGNOSTICS.enrollmentRevoked
+          : undefined);
+    if (reason !== undefined) return `${fallback} (${reason})`;
+  }
 
   // Filesystem, launchd, transport, endpoint, and key errors can contain
   // paths, host names, command output, or secret-adjacent material. The CLI

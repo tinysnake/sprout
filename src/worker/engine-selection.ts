@@ -247,18 +247,19 @@ function resolveEngineBinary(
  * Codex must be launched through its real path because a PATH symlink is not
  * traversable under the sandbox profile.
  */
-function lookupCommand(
+export function lookupCommand(
   command: string,
   platform: NodeJS.Platform,
   preferWindowsExecutable: boolean,
+  runner: EngineLookupRunner = runEngineLookup,
 ): string | undefined {
   const lookup =
     platform === 'win32'
-      ? { file: 'where.exe', args: [command] }
-      : { file: '/bin/sh', args: ['-lc', `command -v ${command}`] };
+      ? { file: 'where.exe', args: [command], stdio: ENGINE_PROBE_STDIO }
+      : { file: '/bin/sh', args: ['-lc', `command -v ${command}`], stdio: ENGINE_PROBE_STDIO };
   let found: string;
   try {
-    found = execFileSync(lookup.file, lookup.args, { encoding: 'utf8' });
+    found = runner(lookup);
   } catch {
     return undefined;
   }
@@ -273,3 +274,29 @@ function lookupCommand(
   const executable = candidates.find((candidate) => /\.(exe|cmd|bat)$/i.test(candidate));
   return executable ?? candidates[0];
 }
+
+/**
+ * The stdio posture of every engine probe: the child's stderr is captured on a
+ * pipe, never inherited, so a localized `where.exe` "cannot find file" line
+ * cannot reach the operator's console on Windows. stdin is ignored and stdout is
+ * read as UTF-8; a real probe failure is still an exception the caller handles.
+ */
+export const ENGINE_PROBE_STDIO: readonly ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe'];
+
+/** One resolved lookup command, including the isolation posture it must run in. */
+export interface EngineLookupCommand {
+  readonly file: string;
+  readonly args: readonly string[];
+  readonly stdio: readonly ['ignore', 'pipe', 'pipe'];
+}
+
+/** Run one engine CLI lookup and return its stdout; injectable for tests. */
+export type EngineLookupRunner = (command: EngineLookupCommand) => string;
+
+/** The real runner, used only when no test seam was injected. */
+export const runEngineLookup: EngineLookupRunner = (command) =>
+  execFileSync(command.file, [...command.args], {
+    encoding: 'utf8',
+    stdio: [...command.stdio],
+    windowsHide: true,
+  });
