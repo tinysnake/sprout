@@ -83,7 +83,7 @@ function accessFixture(projectId: string): ProjectEnvironmentAccessView {
   } as const;
   return {
     projectId,
-    environmentInstanceId: 'env-ready',
+    environmentInstanceId: 'inst-ready',
     status: 'active',
     startedAt: boundAt,
     updatedAt: boundAt,

@@ -17,7 +17,7 @@ function services(options: { readonly rejectWorkspace?: boolean } = {}) {
   const access = new ProjectAccessService({
     store: stores.projectAccess,
     projects,
-    environments: { environmentIsAccessible: () => true },
+    environments: { environmentIsAccessible: (id) => id === 'inst-ready' },
     worker: {
       async validate({ selection }) {
         if (options.rejectWorkspace) throw new Error('worker refused the workspace');
@@ -41,7 +41,7 @@ const selectedResources = {
     displayName: 'Atomic Project',
     agentMemberships: [{ agentId: 'agent-ready', responsibilities: ['Implement'] }],
   },
-  environments: [{ environmentInstanceId: 'env-ready', selection: { kind: 'default' as const } }],
+  environments: [{ environmentInstanceId: 'inst-ready', selection: { kind: 'default' as const } }],
 };
 
 test('one Project creation commits selected Agent membership and workspace access together', async () => {
@@ -49,7 +49,7 @@ test('one Project creation commits selected Agent membership and workspace acces
   try {
     const created = await creation.create(selectedResources);
     const durable = await projects.get(created.id);
-    const access = await stores.projectAccess.get(created.id, 'env-ready');
+    const access = await stores.projectAccess.get(created.id, 'inst-ready');
     assert.ok(durable);
     assert.equal(currentProjectContent(durable).memberships.some((member) => member.memberId === 'agent-ready'), true);
     assert.equal(access?.status, 'active');

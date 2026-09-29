@@ -68,6 +68,8 @@ test('the bridge projects the backend summary as the traffic-light authority', a
   const service = new ProductionEnvironmentService(adapter(enrollmentFacts()));
   const env = await service.getEnvironment('enroll-1');
   assert.ok(env);
+  assert.equal(env.environmentInstanceId, 'inst-1', 'Project consumers need the instance identity, not the enrollment key');
+  assert.equal(env.id, 'enroll-1', 'Environment management still keys by enrollment');
   assert.equal(env.trafficLight, 'green');
   assert.equal(env.trafficLightReason, 'Enrollment is approved and the Worker is online.');
   assert.equal(env.workSafety, 'held');
@@ -158,6 +160,8 @@ test('an unreachable readiness read degrades to its authority facts, never hides
   const service = new ProductionEnvironmentService(flaky);
   const rows = await service.listEnvironments();
   assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.id, 'enroll-1');
+  assert.equal(rows[0]!.environmentInstanceId, 'inst-1', 'a degraded row still carries its Project identity');
   assert.match(rows[0]!.trafficLightReason, /not reachable/);
   assert.equal(rows[0]!.enrollmentStatus, 'approved', 'the enrollment authority is preserved');
 });

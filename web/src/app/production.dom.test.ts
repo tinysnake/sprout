@@ -537,7 +537,8 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     await settle();
     const accessDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
     const selects = accessDialog.querySelectorAll('select');
-    (selects[0] as HTMLSelectElement).value = 'env-ready';
+    assert.equal((selects[0] as HTMLSelectElement).querySelector('option')?.value, 'inst-ready');
+    (selects[0] as HTMLSelectElement).value = 'inst-ready';
     (selects[0] as HTMLSelectElement).dispatchEvent(new dom.window.Event('change', { bubbles: true }));
     (selects[1] as HTMLSelectElement).value = 'relative';
     (selects[1] as HTMLSelectElement).dispatchEvent(new dom.window.Event('change', { bubbles: true }));
@@ -548,6 +549,8 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     [...accessDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Grant Access'))?.click();
     await settle();
     assert.match(doc.body.textContent ?? '', /repos\/new-work-project/);
+    assert.match(doc.querySelector('.project-workspaces-card')?.textContent ?? '', /Mac Studio M2 Max/);
+    assert.equal([...doc.querySelectorAll('.project-workspaces-card select option')].some((option) => option.getAttribute('value') === 'env-ready'), false);
     assert.doesNotMatch(doc.body.textContent ?? '', /(?:\/Users\/|[A-Z]:\\Users\\)/i);
 
     (doc.querySelector('.project-memberships-card button') as HTMLButtonElement).click();
@@ -687,7 +690,7 @@ test('Project creation submits selected memberships and default workspaces as on
     const name = dialog.querySelector('.project-name-input') as HTMLInputElement;
     name.value = 'Ready at creation';
     name.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-    for (const value of ['programmer', 'env-ready']) {
+    for (const value of ['programmer', 'inst-ready']) {
       const checkbox = [...dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) => input.value === value);
       assert.ok(checkbox, `creation option ${value} is available`);
       checkbox.checked = true;
@@ -715,13 +718,19 @@ test('Project creation submits selected memberships and default workspaces as on
     assert.deepEqual(submissions[0]?.rules, []);
     assert.deepEqual(submissions[0]?.agentMemberships, [{ agentId: 'programmer' }]);
     assert.deepEqual(submissions[0]?.environmentAssignments, [{
-      environmentInstanceId: 'env-ready',
+      environmentInstanceId: 'inst-ready',
       workspace: { kind: 'relative', path: 'repos/selected-project' },
     }]);
     assert.equal(laterMembershipWrites, 0);
     assert.equal(laterWorkspaceWrites, 0);
     assert.match(doc.body.textContent ?? '', /Task-begin prerequisites met/);
     assert.match(doc.body.textContent ?? '', /repos\/selected-project/);
+    assert.match(doc.querySelector('.project-workspaces-card')?.textContent ?? '', /Mac Studio M2 Max/,
+      'the access row resolves to its approved Environment, not the raw instance id');
+    (doc.querySelector('.project-workspaces-card button') as HTMLButtonElement).click();
+    await settle();
+    assert.equal([...doc.querySelectorAll('[role="dialog"] select option')].some((option) => option.getAttribute('value') === 'inst-ready'), false,
+      'the already assigned instance cannot be granted twice under its enrollment identity');
   } finally {
     app?.unmount();
     await cleanup();

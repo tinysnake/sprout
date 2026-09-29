@@ -86,13 +86,13 @@ const activeEnvironments = computed(() => overview.value?.environments.filter((e
 const createableAgents = computed(() => creationOptions.value?.agents.filter((agent) => agent.status === 'active') ?? []);
 const createableEnvironments = computed(() => creationOptions.value?.environments.filter((environment) => environment.enrollmentStatus === 'approved') ?? []);
 const unassignedAgents = computed(() => activeAgents.value.filter((agent) => !memberships.value.some((member) => member.memberId === agent.id && member.endedAt === undefined)));
-const unassignedEnvironments = computed(() => activeEnvironments.value.filter((environment) => !currentAccess.value.some((entry) => entry.environmentInstanceId === environment.id)));
+const unassignedEnvironments = computed(() => activeEnvironments.value.filter((environment) => !currentAccess.value.some((entry) => entry.environmentInstanceId === environment.environmentInstanceId)));
 const projectArchived = computed(() => currentProject.value?.status === 'archived');
 const displayNameFor = (member: ProjectMembershipView) => member.memberKind === 'human'
   ? 'You'
   : overview.value?.agents.find((agent) => agent.id === member.memberId)?.displayName ?? member.memberId;
 const linkedAgentFor = (member: ProjectMembershipView) => overview.value?.agents.find((agent) => agent.id === member.memberId);
-const environmentFor = (id: string) => overview.value?.environments.find((environment) => environment.id === id);
+const environmentFor = (id: string) => overview.value?.environments.find((environment) => environment.environmentInstanceId === id);
 
 const accessPrerequisite = computed(() => currentAccess.value.some((entry) =>
   entry.current !== undefined && environmentFor(entry.environmentInstanceId)?.enrollmentStatus === 'approved'));
@@ -277,7 +277,7 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     responsibilities.value = membership?.responsibilities.join(', ') ?? '';
     collaborationInstructions.value = membership?.collaborationInstructions ?? '';
   } else if (kind === 'add-environment' || kind === 'edit-workspace') {
-    selectedEnvironmentId.value = kind === 'edit-workspace' ? environmentId : unassignedEnvironments.value[0]?.id ?? '';
+    selectedEnvironmentId.value = kind === 'edit-workspace' ? environmentId : unassignedEnvironments.value[0]?.environmentInstanceId ?? '';
     const selectedAccess = overview.value?.access.find((entry) => entry.environmentInstanceId === environmentId);
     workspaceKind.value = selectedAccess?.current?.kind === 'relative' ? 'relative' : 'default';
     workspacePath.value = selectedAccess?.current?.path ?? '';
@@ -602,11 +602,11 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
           <p class="pb-1 text-[var(--text-muted)]">Choose the default workspace or a Worker-root-relative location for each Environment. All bindings are recorded with the Project.</p>
           <p v-if="isLoadingCreationOptions" class="py-2 text-[var(--text-muted)]" aria-busy="true">Loading approved Environments…</p>
           <p v-else-if="createableEnvironments.length === 0" class="py-2 text-[var(--text-secondary)]">No approved Environment is available. You can assign one later.</p>
-          <div v-for="environment in createableEnvironments" :key="environment.id" class="py-1">
-            <label class="flex min-h-[44px] items-center gap-2 text-[var(--text-primary)]"><input v-model="selectedCreateEnvironmentIds" type="checkbox" :value="environment.id" class="min-h-5 min-w-5" /><span>{{ environment.displayName }} <span class="text-[var(--text-muted)]">{{ environment.platform }}</span></span></label>
-            <div v-if="selectedCreateEnvironmentIds.includes(environment.id)" class="ml-7 flex flex-col gap-2 pb-2">
-              <label class="flex flex-col gap-1 font-semibold">Workspace for {{ environment.displayName }}<select :aria-label="`Workspace for ${environment.displayName}`" class="project-create-workspace-kind min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" :value="creationWorkspaceKinds[environment.id] ?? 'default'" @change="setCreationWorkspaceKind(environment.id, ($event.target as HTMLSelectElement).value)"><option value="default">Worker-managed default</option><option value="relative">Existing relative location</option></select></label>
-              <label v-if="creationWorkspaceKinds[environment.id] === 'relative'" class="flex flex-col gap-1 font-semibold">Relative Workspace Directory<input :aria-label="`Relative workspace directory for ${environment.displayName}`" class="project-create-workspace-path min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 font-mono text-[var(--text-primary)]" autocomplete="off" placeholder="repos/project" :value="creationWorkspacePaths[environment.id] ?? ''" @input="setCreationWorkspacePath(environment.id, ($event.target as HTMLInputElement).value)" /><span class="font-normal text-[var(--text-muted)]">Relative to the host-configured Worker workspace root. Absolute paths are refused.</span></label>
+          <div v-for="environment in createableEnvironments" :key="environment.environmentInstanceId" class="py-1">
+            <label class="flex min-h-[44px] items-center gap-2 text-[var(--text-primary)]"><input v-model="selectedCreateEnvironmentIds" type="checkbox" :value="environment.environmentInstanceId" class="min-h-5 min-w-5" /><span>{{ environment.displayName }} <span class="text-[var(--text-muted)]">{{ environment.platform }}</span></span></label>
+            <div v-if="selectedCreateEnvironmentIds.includes(environment.environmentInstanceId)" class="ml-7 flex flex-col gap-2 pb-2">
+              <label class="flex flex-col gap-1 font-semibold">Workspace for {{ environment.displayName }}<select :aria-label="`Workspace for ${environment.displayName}`" class="project-create-workspace-kind min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" :value="creationWorkspaceKinds[environment.environmentInstanceId] ?? 'default'" @change="setCreationWorkspaceKind(environment.environmentInstanceId, ($event.target as HTMLSelectElement).value)"><option value="default">Worker-managed default</option><option value="relative">Existing relative location</option></select></label>
+              <label v-if="creationWorkspaceKinds[environment.environmentInstanceId] === 'relative'" class="flex flex-col gap-1 font-semibold">Relative Workspace Directory<input :aria-label="`Relative workspace directory for ${environment.displayName}`" class="project-create-workspace-path min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 font-mono text-[var(--text-primary)]" autocomplete="off" placeholder="repos/project" :value="creationWorkspacePaths[environment.environmentInstanceId] ?? ''" @input="setCreationWorkspacePath(environment.environmentInstanceId, ($event.target as HTMLInputElement).value)" /><span class="font-normal text-[var(--text-muted)]">Relative to the host-configured Worker workspace root. Absolute paths are refused.</span></label>
             </div>
           </div>
         </fieldset>
@@ -628,7 +628,7 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'add-environment' || dialog === 'edit-workspace'" :open="true" :title="dialog === 'add-environment' ? 'Assign Environment & Prepare Workspace' : 'Change Project Workspace'" description="Only a Worker-root-relative location or its managed default crosses this authority boundary; workspace files are never moved or deleted." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <label v-if="dialog === 'add-environment'" class="flex flex-col gap-1 font-semibold">Enrolled Environment<select v-model="selectedEnvironmentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="environment in unassignedEnvironments" :key="environment.id" :value="environment.id">{{ environment.displayName }} · {{ environment.platform }} · {{ environment.trafficLightReason }}</option></select></label>
+        <label v-if="dialog === 'add-environment'" class="flex flex-col gap-1 font-semibold">Enrolled Environment<select v-model="selectedEnvironmentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="environment in unassignedEnvironments" :key="environment.environmentInstanceId" :value="environment.environmentInstanceId">{{ environment.displayName }} · {{ environment.platform }} · {{ environment.trafficLightReason }}</option></select></label>
         <p v-if="dialog === 'add-environment' && unassignedEnvironments.length === 0" class="text-[var(--text-secondary)]">No other approved Environment is available to assign.</p>
         <label class="flex flex-col gap-1 font-semibold">Workspace Selection<select v-model="workspaceKind" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option value="default">Worker-managed default workspace</option><option value="relative">Existing relative location</option></select></label>
         <label v-if="workspaceKind === 'relative'" class="flex flex-col gap-1 font-semibold">Relative Workspace Directory<input v-model="workspacePath" autocomplete="off" placeholder="repos/project" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 font-mono text-[var(--text-primary)]" /><span class="font-normal text-[var(--text-muted)]">Relative to the host-configured Worker workspace root. Absolute paths are not accepted.</span></label>

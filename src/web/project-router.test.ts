@@ -84,7 +84,7 @@ async function projectApi(): Promise<ProjectRuntime> {
   const access = new ProjectAccessService({
     store: accessStore,
     projects,
-    environments: { environmentIsAccessible: () => true },
+    environments: { environmentIsAccessible: (id) => id === 'inst-ready' },
     worker: {
       async validate(input) {
         return {
@@ -232,7 +232,7 @@ test('one Project request carries selected memberships and Environment workspace
       id: 'project-aggregate-web',
       displayName: 'Resource-ready Project',
       agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Review'] }],
-      environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
+      environmentAssignments: [{ environmentInstanceId: 'inst-ready', workspace: { kind: 'default' } }],
     });
     assert.equal(created.status, 201);
     const { project } = (await created.json()) as {
@@ -240,7 +240,7 @@ test('one Project request carries selected memberships and Environment workspace
     };
     assert.equal(project.id, 'project-aggregate-web');
     assert.equal(project.content.versions[0]?.memberships.some((member) => member.memberId === 'agent-scout'), true);
-    const access = await runtime.access.get(project.id, 'env-ready');
+    const access = await runtime.access.get(project.id, 'inst-ready');
     assert.equal(access?.status, 'active');
     assert.equal(access?.current?.kind, 'default');
   } finally {

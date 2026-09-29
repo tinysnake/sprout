@@ -138,7 +138,7 @@ test('creation and content edits send POST JSON command bodies', async () => {
     rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
     routingIntervalMs: 45_000,
-    environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
+    environmentAssignments: [{ environmentInstanceId: 'inst-ready', workspace: { kind: 'default' } }],
   });
   await adapter.updateProjectContent('project-sprout', {
     goal: null,
@@ -155,7 +155,7 @@ test('creation and content edits send POST JSON command bodies', async () => {
     rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
     routingIntervalMs: 45_000,
-    environmentAssignments: [{ environmentInstanceId: 'env-ready', workspace: { kind: 'default' } }],
+    environmentAssignments: [{ environmentInstanceId: 'inst-ready', workspace: { kind: 'default' } }],
   });
   assert.equal(edit?.init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(edit?.init?.body)), {
