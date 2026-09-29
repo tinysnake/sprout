@@ -7,27 +7,26 @@
  * rendered context snapshot, and the manifest that records what the model will
  * see. It never reads a store and never calls a model.
  *
- * The privacy hard gate lives in its **whitelist**, not in a later filter:
- * the builder only receives batch inputs (eligible unaddressed Messages and
- * `wake-eligible` Project events), the Project contract (goal, rules, and the
- * curated open Task state ADR-0007 names — lifecycle state, lead, blocker
- * summary, never Environment, lease, or run facts),
+ * The privacy hard gate combines a source whitelist with redaction of every
+ * free-text field before rendering: the builder only receives batch inputs
+ * (eligible unaddressed Messages and `wake-eligible` Project events), the
+ * Project contract (goal and rules; Tasks are omitted without a relevance rule),
  * candidate Agent facts (identifiers, Project responsibilities, collaboration
  * instructions), thread ancestors of the batch's own inputs, and recent
  * *Project-channel* context including non-routing projected replies. Direct
  * Messages, credentials, private memory, raw reasoning, sessions, tool output,
- * host facts, and transient Environment availability have no source here — the
- * exclusion list is frozen into every manifest so the Human can inspect the
- * boundary, not merely trust it.
+ * host facts, and transient Environment availability have no independent
+ * source here. Shared text still requires redaction; the exclusion list alone
+ * is evidence, not enforcement.
  *
  * Sizing rules:
  *
- * - Every input content is bounded first (`inputContentChars`) with an
+ * - Every input content is redacted and bounded first (`inputContentChars`) with an
  *   explicit truncation marker; the complete content stays durable on the
  *   Message/event.
- * - Inputs are packed greedily in chronological order until the total bound
- *   would be exceeded; the remainder starts the next batch. One input is
- *   *always* accepted into a batch, so a durable input is never dropped.
+ * - Shared narrative is capped before chronological packing. Input excerpts
+ *   shrink to the remaining budget and overflow starts a new batch. One input
+ *   is always accepted, and its complete source remains durable.
  * - Candidate inputs have priority, then their direct thread ancestors, then
  *   recent shared channel context within the remaining bound.
  */
@@ -44,6 +43,7 @@ import {
   type RoutingWindow,
 } from './routing.ts';
 import { ROUTING_JUDGEMENT_CONTRACT } from './routing-judgement.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 
 /** One eligible unaddressed input, resolved from durable records. */
 export interface RoutingInputFact {
@@ -78,7 +78,7 @@ export interface RoutingContractFacts {
   readonly rules: readonly string[];
   /** Every current candidate Agent with its Project-declared facts. */
   readonly candidates: readonly RoutingCandidateView[];
-  /** Curated open Task facts (ADR-0007 item 5); omitted when unavailable. */
+  /** Reserved for a future explicit per-input relevance rule; currently omitted. */
   readonly tasks?: readonly RoutingTaskFact[];
 }
 
@@ -114,9 +114,10 @@ export interface FrozenRoutingBatchPlan {
 export function truncateRoutingContent(
   content: string,
   maxChars: number,
+  durableChars = content.length,
 ): { readonly excerpt: string; readonly truncated: boolean; readonly contentChars: number } {
-  const contentChars = content.length;
-  if (contentChars <= maxChars) {
+  const contentChars = durableChars;
+  if (content.length <= maxChars) {
     return { excerpt: content, truncated: false, contentChars };
   }
   const marker =
@@ -147,26 +148,17 @@ function renderSharedPrefix(
     ROUTING_JUDGEMENT_CONTRACT,
     '',
     'Project goal:',
-    contract.goal,
+    redactSensitiveText(contract.goal),
     'Project rules:',
-    ...(contract.rules.length > 0 ? contract.rules.map((rule) => `- ${rule}`) : ['- (none)']),
+    ...(contract.rules.length > 0 ? contract.rules.map((rule) => `- ${redactSensitiveText(rule)}`) : ['- (none)']),
     '',
     'Candidate Agents (Project responsibilities and collaboration instructions):',
     ...contract.candidates.flatMap((candidate) => [
-      `- ${candidate.agentId}: responsibilities: ${candidate.responsibilities.length > 0 ? candidate.responsibilities.join('; ') : '(none declared)'} | collaboration instructions: ${candidate.collaborationInstructions === '' ? '(none)' : candidate.collaborationInstructions}`,
+      `- ${candidate.agentId}: responsibilities: ${candidate.responsibilities.length > 0 ? candidate.responsibilities.map(redactSensitiveText).join('; ') : '(none declared)'} | collaboration instructions: ${candidate.collaborationInstructions === '' ? '(none)' : redactSensitiveText(candidate.collaborationInstructions)}`,
     ]),
     '',
     'Open Tasks (curated public state, lead, and blocker summary; no Environment, lease, or run facts):',
-    ...(curatedTasks(contract).length > 0
-      ? curatedTasks(contract).map(
-          (task) =>
-            `- task ${task.taskId} | ${task.status} | ${task.title.slice(0, 160)}` +
-            ` | lead: ${task.leadAgentId ?? '(unassigned)'}` +
-            (task.blockerReason !== undefined
-              ? ` | blocker: ${task.blockerReason.slice(0, 240)}`
-              : ''),
-        )
-      : ['- (no open Tasks)']),
+    '- (no explicitly relevant Tasks)',
     '',
     'Privacy boundary — this context deliberately excludes: ' +
       ROUTING_CONTEXT_EXCLUSIONS.join('; ') +
@@ -192,12 +184,20 @@ export function freezeRoutingBatches(
   input: FreezeRoutingBatchesInput,
 ): readonly FrozenRoutingBatchPlan[] {
   const bounds: RoutingBounds = { ...DEFAULT_ROUTING_BOUNDS, ...(input.bounds ?? {}) };
-  const sharedPrefix = renderSharedPrefix(input.contract, input.window, bounds);
-  const splitSlack = 48;
-  const budget = Math.max(bounds.totalContextChars, sharedPrefix.length + splitSlack + 1);
+  const budget = bounds.totalContextChars;
+  // Reserve room for at least one input and its identifiers. A tiny budget
+  // clips shared narrative rather than silently increasing the declared bound.
+  const rawPrefix = renderSharedPrefix(input.contract, input.window, bounds);
+  const prefixCap = Math.max(0, budget - Math.min(300, Math.floor(budget * 0.7)));
+  const sharedPrefix = rawPrefix.length <= prefixCap
+    ? rawPrefix
+    : rawPrefix.slice(0, Math.max(0, prefixCap - 24)) + '\n[shared facts truncated]';
 
   const excerpts = input.inputs.map((fact) =>
-    truncateRoutingContent(fact.content, bounds.inputContentChars),
+    truncateRoutingContent(redactSensitiveText(fact.content), Math.max(0, Math.min(
+      bounds.inputContentChars,
+      budget - sharedPrefix.length - inputHeader(fact, 0).length - 110,
+    )), fact.content.length),
   );
   const blockSize = (index: number): number =>
     inputHeader(input.inputs[index]!, index).length + 2 + excerpts[index]!.excerpt.length + 2;
@@ -210,7 +210,7 @@ export function freezeRoutingBatches(
   let currentSize = 0;
   for (let index = 0; index < input.inputs.length; index += 1) {
     const size = blockSize(index);
-    if (current.length > 0 && sharedPrefix.length + currentSize + size > budget) {
+    if (current.length > 0 && sharedPrefix.length + currentSize + size + 105 > budget) {
       groups.push(current);
       current = [];
       currentSize = 0;
@@ -250,7 +250,7 @@ export function freezeRoutingBatches(
         const parent = input.messageById(parentId);
         if (parent === undefined) break;
         seen.add(parentId);
-        const size = parent.body.slice(0, bounds.contextMessageChars).length + 120;
+        const size = redactSensitiveText(parent.body).slice(0, bounds.contextMessageChars).length + 120;
         if (contextSize + size > budget) {
           parentId = undefined;
           break;
@@ -270,7 +270,7 @@ export function freezeRoutingBatches(
       .slice(0, bounds.recentContextMessages)
       .reverse();
     for (const message of recentPool) {
-      const size = message.body.slice(0, bounds.contextMessageChars).length + 120;
+      const size = redactSensitiveText(message.body).slice(0, bounds.contextMessageChars).length + 120;
       if (contextSize + size > budget) break;
       recent.push(message);
       recentIds.push(message.id);
@@ -307,7 +307,7 @@ export function freezeRoutingBatches(
         sections.push(
           `[ancestor | id=${ancestor.id} | author=${ancestor.authorId} | at=${ancestor.createdAt}]`,
         );
-        sections.push(ancestor.body.slice(0, bounds.contextMessageChars));
+        sections.push(redactSensitiveText(ancestor.body).slice(0, bounds.contextMessageChars));
         sections.push('');
       }
     }
@@ -317,12 +317,12 @@ export function freezeRoutingBatches(
         sections.push(
           `[channel | id=${message.id} | author=${message.authorKind}:${message.authorId} | at=${message.createdAt}]`,
         );
-        sections.push(message.body.slice(0, bounds.contextMessageChars));
+        sections.push(redactSensitiveText(message.body).slice(0, bounds.contextMessageChars));
         sections.push('');
       }
     }
     sections.push('Remember: your rationale is model judgement, not fact.');
-    const context = sections.join('\n');
+    const context = sections.join('\n').slice(0, budget);
 
     const manifest: RoutingContextManifest = {
       projectId: input.contract.projectId,
@@ -333,10 +333,10 @@ export function freezeRoutingBatches(
       inputs: manifestInputs,
       candidates: input.contract.candidates.map((candidate) => ({
         agentId: candidate.agentId,
-        responsibilities: [...candidate.responsibilities],
-        collaborationInstructions: candidate.collaborationInstructions,
+        responsibilities: candidate.responsibilities.map(redactSensitiveText),
+        collaborationInstructions: redactSensitiveText(candidate.collaborationInstructions),
       })),
-      tasks: curatedTasks(input.contract).map((task) => ({ ...task })),
+      tasks: [],
       recentContextIds: recentIds,
       ancestorContextIds: ancestorIds,
       exclusions: [...ROUTING_CONTEXT_EXCLUSIONS],

@@ -132,9 +132,6 @@ function build(options: {
       ? { routingAttemptTimeoutMs: options.routingAttemptTimeoutMs }
       : {}),
     ...(options.bounds !== undefined ? { routingBounds: options.bounds } : {}),
-    ...(options.taskFacts !== undefined
-      ? { routingTaskFacts: async () => options.taskFacts! }
-      : {}),
     clock: { now: () => harness.now },
     onObservation: ({ inputId, observation }) => {
       observations.push({ inputId, detail: observation.detail });
@@ -574,9 +571,10 @@ test('oversized windows split chronologically and truncate a single oversized in
   // while its complete content stays durable on the Message.
   const withTruncation = batches
     .map((batch) => batch)
-    .find((batch) => batch.manifest.inputs.some((input) => input.truncated));
+    .find((batch) => batch.manifest.inputs.some((input) => input.inputId === ids[3]));
   assert.ok(withTruncation, 'the oversized input is marked truncated');
-  const truncatedFact = withTruncation.manifest.inputs.find((input) => input.truncated)!;
+  const truncatedFact = withTruncation.manifest.inputs.find((input) => input.inputId === ids[3])!;
+  assert.equal(truncatedFact.truncated, true);
   assert.ok(truncatedFact.contentChars > truncatedFact.excerptChars);
   const batchInputs = await harness.store.listRoutingBatchInputs(withTruncation.id);
   const row = batchInputs.find((input) => input.inputId === truncatedFact.inputId)!;
@@ -683,11 +681,8 @@ test('the frozen routing context contains only bounded Project-shared facts and 
   assert.ok(context.includes('Ship Sprout'), 'the Project goal is included');
   assert.ok(context.includes('Report what you observed.'), 'the Project rules are included');
   assert.ok(context.includes('Investigate'), 'candidate responsibilities are included');
-  assert.ok(
-    context.includes('- task task-triage | blocked | Triage incoming reports | lead: scout | blocker: Waiting for the operator decision'),
-    'curated open Task state, lead, and blocker join the Project-shared context (ADR-0007 item 5)',
-  );
-  assert.equal(batches[0]!.manifest.tasks[0]?.taskId, 'task-triage', 'Task curation is inspectable in the manifest');
+  assert.ok(!context.includes('Triage incoming reports'), 'unrelated Tasks never enter model context');
+  assert.deepEqual(batches[0]!.manifest.tasks, []);
   assert.ok(
     context.includes('direct Messages and their replies') &&
       context.includes('credentials, tokens, and secrets') &&

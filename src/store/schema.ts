@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 20;
+export const CURRENT_SCHEMA_VERSION = 21;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 20;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 21;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -999,6 +999,20 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         CREATE INDEX IF NOT EXISTS collaboration_routing_outcomes_input
           ON collaboration_routing_outcomes(input_id);
       `);
+    },
+  },
+  {
+    fromVersion: 20,
+    toVersion: 21,
+    name: 'routing_attempt_recovery',
+    migrate: (db) => {
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_routing_attempts'").get() === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(collaboration_routing_attempts)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'judgement')) {
+        db.exec('ALTER TABLE collaboration_routing_attempts ADD COLUMN judgement TEXT;');
+      }
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
+        ON collaboration_routing_attempts(batch_id, attempt_number);`);
     },
   },
 ];

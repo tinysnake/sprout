@@ -57,7 +57,7 @@ import { migrateOrInitializeDatabase } from '../store/schema.ts';
  * arrive with schema version 19; `project_events` is created by the same
  * migration and by `#init` for a fresh database; the routing windows, batch,
  * batch-input, attempt, outcome, and batch-wake `batch_id` columns arrive with
- * schema version 20 (#97).
+ * schema version 21 (#97 recovery boundary).
  */
 
 export class SqliteCollaborationStore implements CollaborationStore {
@@ -187,8 +187,11 @@ export class SqliteCollaborationStore implements CollaborationStore {
         finished_at INTEGER NOT NULL,
         status TEXT NOT NULL,
         error_kind TEXT,
-        error_detail TEXT
+        error_detail TEXT,
+        judgement TEXT
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
+        ON collaboration_routing_attempts(batch_id, attempt_number);
       CREATE INDEX IF NOT EXISTS collaboration_routing_attempts_batch
         ON collaboration_routing_attempts(batch_id);
       CREATE TABLE IF NOT EXISTS collaboration_routing_outcomes (
@@ -689,11 +692,19 @@ export class SqliteCollaborationStore implements CollaborationStore {
   }
 
   async recordRoutingAttempt(attempt: RoutingAttempt): Promise<void> {
+    const updated = this.#db.prepare(
+      `UPDATE collaboration_routing_attempts SET finished_at = ?, status = ?, error_kind = ?,
+         error_detail = ?, judgement = ? WHERE id = ? AND batch_id = ? AND attempt_number = ? AND status = 'started'`,
+    ).run(attempt.finishedAt, attempt.status, attempt.errorKind ?? null,
+      attempt.errorDetail ?? null, attempt.judgement === undefined ? null : JSON.stringify(attempt.judgement),
+      attempt.id, attempt.batchId, attempt.attemptNumber);
+    if (updated.changes === 1) return;
+    if (attempt.status !== 'started') throw new Error('routing attempt was not started');
     this.#db
       .prepare(
         `INSERT INTO collaboration_routing_attempts
-           (id, batch_id, attempt_number, model_id, started_at, finished_at, status, error_kind, error_detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, batch_id, attempt_number, model_id, started_at, finished_at, status, error_kind, error_detail, judgement)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         attempt.id,
@@ -705,6 +716,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
         attempt.status,
         attempt.errorKind ?? null,
         attempt.errorDetail ?? null,
+        null,
       );
   }
 
@@ -724,6 +736,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
       status: row.status as RoutingAttempt['status'],
       ...(row.error_kind !== null ? { errorKind: row.error_kind as RoutingFailureKind } : {}),
       ...(row.error_detail !== null ? { errorDetail: row.error_detail } : {}),
+      ...(row.judgement !== null ? { judgement: JSON.parse(row.judgement) as NonNullable<RoutingAttempt['judgement']> } : {}),
     }));
   }
 
@@ -992,6 +1005,7 @@ interface AttemptRow {
   readonly status: string;
   readonly error_kind: string | null;
   readonly error_detail: string | null;
+  readonly judgement: string | null;
 }
 
 interface OutcomeRow {

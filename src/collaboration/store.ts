@@ -510,7 +510,10 @@ export class InMemoryCollaborationStore implements CollaborationStore {
 
   async recordRoutingAttempt(attempt: RoutingAttempt): Promise<void> {
     const attempts = this.#attempts.get(attempt.batchId) ?? [];
-    attempts.push(attempt);
+    const index = attempts.findIndex((row) => row.attemptNumber === attempt.attemptNumber);
+    if (index < 0) attempts.push(attempt);
+    else if (attempts[index]!.id === attempt.id && attempts[index]!.status === 'started') attempts[index] = attempt;
+    else throw new Error('routing attempt already completed');
     this.#attempts.set(attempt.batchId, attempts);
   }
 

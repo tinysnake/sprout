@@ -148,7 +148,8 @@ test('the first input of an oversized window is always accepted, even past the b
   assert.equal(entry.truncated, true);
   assert.equal(entry.contentChars, 5_000);
   assert.equal(entry.excerptChars, plans[0]!.inputs[0]!.excerpt.length);
-  assert.match(plans[0]!.inputs[0]!.excerpt, /\[truncated: first 50 of 5000 characters/);
+  assert.match(plans[0]!.inputs[0]!.excerpt, /\[truncated: first \d+ of 5000 characters/);
+  assert.ok(plans[0]!.context.length <= 300);
 });
 
 test('freezing is deterministic: identical facts produce identical plans and context bytes', () => {
@@ -166,6 +167,41 @@ test('freezing is deterministic: identical facts produce identical plans and con
       context: plan.context,
     }));
   assert.deepEqual(strip(first), strip(second), 'only batch ids differ between identical freezes');
+});
+
+test('every model-visible free-text source is redacted before the snapshot is frozen', () => {
+  const canary = 'api_key=CANARY_DO_NOT_SEND';
+  const path = '/opt/private/CANARY_PATH';
+  const contextMessage = { id: 'ctx-safe', authorId: 'operator', authorKind: 'human', createdAt: 900,
+    body: `recent ${canary} ${path}` };
+  const plans = freeze([input('msg-safe', { content: `input ${canary} ${path}`, inReplyTo: 'ctx-safe' })], {
+    contract: { ...contract, goal: `goal ${canary}`, rules: [`rule ${path}`], candidates: [
+      { agentId: 'scout', responsibilities: [`role ${canary}`], collaborationInstructions: `instruction ${path}` },
+    ] },
+    recentContext: [contextMessage, { ...contextMessage, id: 'ctx-recent', body: `recent ${canary} ${path}` }],
+    messageById: () => contextMessage,
+  });
+  const plan = plans[0]!;
+  assert.ok(!plan.context.includes('CANARY_DO_NOT_SEND'));
+  assert.ok(!plan.context.includes('CANARY_PATH'));
+  assert.ok(!plan.inputs[0]!.excerpt.includes('CANARY_DO_NOT_SEND'));
+  assert.match(plan.context, /<redacted-credential>/);
+  assert.match(plan.context, /<redacted-path>/);
+});
+
+test('large Project narrative and candidate roster never raise the declared aggregate budget', () => {
+  const plans = freeze([input('msg-one'), input('msg-two')], {
+    contract: { ...contract, goal: 'G'.repeat(40_000), rules: ['R'.repeat(40_000)],
+      candidates: Array.from({ length: 100 }, (_, index) => ({
+        agentId: `agent-${index}`, responsibilities: ['D'.repeat(400)], collaborationInstructions: 'I'.repeat(400),
+      })) },
+    bounds: { totalContextChars: 700 },
+  });
+  assert.deepEqual(plans.flatMap((plan) => plan.inputs.map((entry) => entry.inputId)), ['msg-one', 'msg-two']);
+  assert.ok(plans.every((plan) => plan.context.length <= 700));
+  for (const plan of plans) {
+    for (const entry of plan.inputs) assert.ok(plan.context.includes(`id=${entry.inputId}`));
+  }
 });
 
 test('the frozen context carries the project contract, candidates, and privacy boundary', () => {
@@ -293,17 +329,11 @@ test('the frozen context presents curated Task state, capped and bounded', () =>
   const withTasks = freeze([input('msg-1')], { contract: { ...contract, tasks } });
   const context = withTasks[0]!.context;
   assert.match(context, /Open Tasks \(curated public state, lead, and blocker summary/);
-  assert.match(context, /- task task-1 \| todo \| Task 1 \| lead: scout/);
-  assert.match(context, /- task task-2 \| blocked \| Task 2 \| lead: scout \| blocker: blocked reason 2/);
-  assert.equal(
-    context.split('\n').filter((line) => line.startsWith('- task ')).length,
-    ROUTING_CONTEXT_TASK_CAP,
-    'the Task section is capped',
-  );
-  assert.equal(withTasks[0]!.manifest.tasks.length, ROUTING_CONTEXT_TASK_CAP);
+  assert.equal(context.split('\n').filter((line) => line.startsWith('- task ')).length, 0);
+  assert.equal(withTasks[0]!.manifest.tasks.length, 0);
   assert.ok(!context.includes(`task-${ROUTING_CONTEXT_TASK_CAP + 1}`), 'tasks past the cap are out');
 
   const withoutTasks = freeze([input('msg-1')]);
-  assert.match(withoutTasks[0]!.context, /- \(no open Tasks\)/);
+  assert.match(withoutTasks[0]!.context, /- \(no explicitly relevant Tasks\)/);
   assert.deepEqual(withoutTasks[0]!.manifest.tasks, []);
 });

@@ -106,6 +106,20 @@ class CrashAfterFreezeStore extends SqliteCollaborationStore {
   }
 }
 
+class CrashAfterAttemptStore extends SqliteCollaborationStore {
+  crashOn: 'succeeded' | 'failed' = 'succeeded';
+  #tripped = false;
+  override async recordRoutingAttempt(
+    attempt: Parameters<SqliteCollaborationStore['recordRoutingAttempt']>[0],
+  ): Promise<void> {
+    await super.recordRoutingAttempt(attempt);
+    if (!this.#tripped && attempt.status === this.crashOn) {
+      this.#tripped = true;
+      throw new Error('simulated crash after durable attempt');
+    }
+  }
+}
+
 interface Harness {
   readonly coordinator: CollaborationCoordinator;
   readonly store: SqliteCollaborationStore;
@@ -257,6 +271,59 @@ test('a batch frozen by a crashed process resumes, judges, and settles after res
     assert.equal(wakes[0]?.status, 'admitted');
     assert.equal(after.runs.submits.length, 1);
     reopened.close();
+  });
+});
+
+test('restart after a durable successful judgement settles without a second model call', async () => {
+  await withPath(async (path) => {
+    const first = new CrashAfterAttemptStore({ filename: path });
+    const before = await openHarness(first, { model: selectAllModel() });
+    await before.coordinator.deliver({ scopeId: before.scopeId,
+      author: { id: 'operator', kind: 'human' }, body: 'resume judgement', deliveryKey: 'attempt-success' });
+    before.now = 120_000;
+    await assert.rejects(before.coordinator.sweepRouting(), /simulated crash after durable attempt/);
+    const batch = (await first.listRoutingBatches())[0]!;
+    assert.equal((await first.listRoutingAttempts(batch.id))[0]?.status, 'succeeded');
+    first.close();
+    let calls = 0;
+    const second = new SqliteCollaborationStore({ filename: path });
+    const after = await openHarness(second, { model: { id: 'counting', async judge() { calls++; throw Error('unexpected call'); } } });
+    after.now = 120_000;
+    await after.coordinator.reconcile();
+    assert.equal(calls, 0);
+    assert.equal((await second.getRoutingBatch(batch.id))?.status, 'routed');
+    assert.equal((await second.listRoutingAttempts(batch.id)).length, 1);
+    assert.equal(after.runs.submits.length, 1);
+    second.close();
+  });
+});
+
+test('restart after a failed attempt consumes its retry budget across further restarts', async () => {
+  await withPath(async (path) => {
+    const first = new CrashAfterAttemptStore({ filename: path });
+    first.crashOn = 'failed';
+    const before = await openHarness(first, { model: { id: 'bad', async judge() { return 'not-json'; } } });
+    await before.coordinator.deliver({ scopeId: before.scopeId,
+      author: { id: 'operator', kind: 'human' }, body: 'retry boundary', deliveryKey: 'attempt-fail' });
+    before.now = 120_000;
+    await assert.rejects(before.coordinator.sweepRouting(), /simulated crash after durable attempt/);
+    const batch = (await first.listRoutingBatches())[0]!;
+    first.close();
+    let calls = 0;
+    const second = new SqliteCollaborationStore({ filename: path });
+    const after = await openHarness(second, { model: { id: 'bad', async judge() { calls++; return 'not-json'; } } });
+    after.now = 120_000;
+    await after.coordinator.reconcile();
+    assert.equal(calls, 1);
+    assert.deepEqual((await second.listRoutingAttempts(batch.id)).map((a) => a.attemptNumber), [1, 2]);
+    assert.equal((await second.getRoutingBatch(batch.id))?.status, 'failed');
+    second.close();
+    const third = new SqliteCollaborationStore({ filename: path });
+    const again = await openHarness(third, { model: { id: 'bad', async judge() { calls++; return 'not-json'; } } });
+    again.now = 120_000;
+    await again.coordinator.reconcile();
+    assert.equal(calls, 1);
+    third.close();
   });
 });
 

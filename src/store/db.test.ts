@@ -223,6 +223,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'status', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'error_kind', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'error_detail', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'judgement', type: 'TEXT', notnull: 0, pk: 0 },
   ],
   collaboration_routing_outcomes: [
     { name: 'batch_id', type: 'TEXT', notnull: 1, pk: 1 },
@@ -416,6 +417,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'project_events_project', tbl: 'project_events' },
         { name: 'collaboration_routing_windows_project', tbl: 'collaboration_routing_windows' },
         { name: 'collaboration_routing_batches_project', tbl: 'collaboration_routing_batches' },
+        { name: 'collaboration_routing_attempt_number', tbl: 'collaboration_routing_attempts' },
         { name: 'collaboration_routing_attempts_batch', tbl: 'collaboration_routing_attempts' },
         { name: 'collaboration_routing_outcomes_input', tbl: 'collaboration_routing_outcomes' },
         { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },

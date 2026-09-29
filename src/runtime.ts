@@ -12,7 +12,6 @@ import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
 } from './collaboration/coordinator.ts';
-import { curateOpenTaskFacts } from './collaboration/routing.ts';
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
@@ -1092,16 +1091,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      * unaddressed input collects into the Project's durable routing window;
      * each frozen batch is judged by the composed wake model when one exists
      * (configuring a real low-cost wake model remains future work) and fails
-     * closed with visible per-input outcomes when none does. Curated open Task
-     * state (state, lead, blocker — never Environment, lease, or run facts)
-     * joins the bounded Project-shared routing context.
+     * closed with visible per-input outcomes when none does. Task summaries
+     * remain omitted until explicit per-input relevance can be established.
      */
     const collaboration = new CollaborationCoordinator({
       scopes: conversationScopes,
       store: stores.collaboration,
       runs: orchestrator,
-      routingTaskFacts: async (projectId) =>
-        curateOpenTaskFacts(await durableStores.tasks.list({ projectId })),
       onObservation:
         options.onObservation ??
         (({ inputId, observation }) => {

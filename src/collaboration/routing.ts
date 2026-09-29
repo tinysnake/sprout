@@ -276,10 +276,12 @@ export interface RoutingAttempt {
   readonly modelId: string;
   readonly startedAt: number;
   readonly finishedAt: number;
-  readonly status: 'succeeded' | 'failed';
+  readonly status: 'started' | 'succeeded' | 'failed';
   readonly errorKind?: RoutingFailureKind;
   /** Redacted, bounded failure detail — never raw model output. */
   readonly errorDetail?: string;
+  /** Validated, redacted judgement, persisted before settlement for restart recovery. */
+  readonly judgement?: import('./routing-judgement.ts').RoutingJudgement;
 }
 
 /** The durable result of one input in one settled batch. */

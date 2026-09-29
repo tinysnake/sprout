@@ -124,7 +124,6 @@ import {
   type RoutingFailureKind,
   type RoutingInputOutcome,
   type RoutingModelPort,
-  type RoutingTaskFact,
   type RoutingWindow,
 } from './routing.ts';
 import {
@@ -240,13 +239,6 @@ export interface CollaborationCoordinatorOptions {
    * (docs/roadmap.md M2 evidence note).
    */
   readonly routingModel?: RoutingModelPort;
-  /**
-   * Curated open Task facts for the frozen context (ADR-0007 item 5,
-   * "curated public Task state, Task lead, and blocker summaries"). Absent
-   * means no Task section is frozen; a throwing port is fail-soft and simply
-   * omits the section rather than failing the window.
-   */
-  readonly routingTaskFacts?: (projectId: string) => Promise<readonly RoutingTaskFact[]>;
   /** Per-attempt wake-model timeout; defaults to 30 seconds. */
   readonly routingAttemptTimeoutMs?: number;
   /** Bounds overrides; defaults to `DEFAULT_ROUTING_BOUNDS`. Tests shrink them. */
@@ -374,7 +366,6 @@ export class CollaborationCoordinator {
   readonly #clock: { now(): number };
   readonly #onObservation: CollaborationCoordinatorOptions['onObservation'];
   readonly #routingModel: RoutingModelPort | undefined;
-  readonly #routingTaskFacts: CollaborationCoordinatorOptions['routingTaskFacts'];
   readonly #attemptTimeoutMs: number;
   readonly #routingBounds: Partial<RoutingBounds> | undefined;
   /** Routing ids for an injected factory that predates routing (#97). */
@@ -392,7 +383,6 @@ export class CollaborationCoordinator {
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#onObservation = options.onObservation;
     this.#routingModel = options.routingModel;
-    this.#routingTaskFacts = options.routingTaskFacts;
     this.#attemptTimeoutMs = options.routingAttemptTimeoutMs ?? 30_000;
     this.#routingBounds = options.routingBounds;
   }
@@ -1011,16 +1001,8 @@ export class CollaborationCoordinator {
     const details = new Map(
       (facts?.members ?? []).map((member) => [member.memberId, member] as const),
     );
-    let tasks: readonly RoutingTaskFact[] = [];
-    if (this.#routingTaskFacts !== undefined) {
-      try {
-        tasks = await this.#routingTaskFacts(projectId);
-      } catch {
-        // Fail-soft: a Task projection failure narrows the context; it never
-        // fails the window or leaks a partial error into the frozen snapshot.
-        tasks = [];
-      }
-    }
+    // No per-input Task relevance rule exists yet. Omitting Tasks is safer
+    // than presenting unrelated open work as routing evidence (ADR-0007).
     return {
       projectId,
       goal: facts?.goal ?? '',
@@ -1032,7 +1014,6 @@ export class CollaborationCoordinator {
           responsibilities: [...(details.get(member.memberId)?.responsibilities ?? [])],
           collaborationInstructions: details.get(member.memberId)?.collaborationInstructions ?? '',
         })),
-      ...(tasks.length > 0 ? { tasks } : {}),
     };
   }
 
@@ -1052,9 +1033,24 @@ export class CollaborationCoordinator {
       ),
     };
 
-    let lastFailure: { readonly kind: RoutingFailureKind; readonly detail: string } | undefined;
-    for (let attemptNumber = 1; attemptNumber <= 2; attemptNumber += 1) {
+    const previous = await this.#store.listRoutingAttempts(current.id);
+    const successful = previous.find((attempt) => attempt.status === 'succeeded');
+    if (successful?.judgement !== undefined) {
+      await this.#settleBatchRouted(current, batchInputs, successful.judgement);
+      return;
+    }
+    let lastFailure: { readonly kind: RoutingFailureKind; readonly detail: string } =
+      { kind: 'model-unavailable', detail: 'routing attempt interrupted before completion' };
+    const priorFailure = previous.at(-1);
+    if (priorFailure?.errorKind !== undefined) lastFailure = { kind: priorFailure.errorKind, detail: priorFailure.errorDetail ?? '' };
+    for (let attemptNumber = previous.length + 1; attemptNumber <= 2; attemptNumber += 1) {
       const startedAt = this.#clock.now();
+      const attemptId = this.#newRoutingId('routingAttempt');
+      await this.#store.recordRoutingAttempt({
+        id: attemptId, batchId: current.id, attemptNumber,
+        modelId: this.#routingModel?.id ?? 'unavailable',
+        startedAt, finishedAt: startedAt, status: 'started',
+      });
       let judgement: RoutingJudgement | undefined;
       let parsed: JudgementParseResult | undefined;
       let failure: { readonly kind: RoutingFailureKind; readonly detail: string } | undefined;
@@ -1092,13 +1088,14 @@ export class CollaborationCoordinator {
       }
       judgement = parsed !== undefined && parsed.ok ? parsed.judgement : undefined;
       await this.#store.recordRoutingAttempt({
-        id: this.#newRoutingId('routingAttempt'),
+        id: attemptId,
         batchId: current.id,
         attemptNumber,
         modelId: this.#routingModel?.id ?? 'unavailable',
         startedAt,
         finishedAt: this.#clock.now(),
         status: judgement !== undefined ? 'succeeded' : 'failed',
+        ...(judgement !== undefined ? { judgement } : {}),
         ...(failure !== undefined
           ? { errorKind: failure.kind, errorDetail: failure.detail }
           : {}),
@@ -1109,7 +1106,7 @@ export class CollaborationCoordinator {
       }
       lastFailure = failure!;
     }
-    await this.#failBatchClosed(current, batchInputs, lastFailure!);
+    await this.#failBatchClosed(current, batchInputs, lastFailure);
   }
 
   /**
