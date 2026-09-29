@@ -188,7 +188,7 @@ export function freezeRoutingBatches(
   // Reserve room for at least one input and its identifiers. A tiny budget
   // clips shared narrative rather than silently increasing the declared bound.
   const rawPrefix = renderSharedPrefix(input.contract, input.window, bounds);
-  const prefixCap = Math.max(0, budget - Math.min(300, Math.floor(budget * 0.7)));
+  const prefixCap = Math.max(0, budget - Math.min(375, Math.floor(budget * 0.9)));
   const sharedPrefix = rawPrefix.length <= prefixCap
     ? rawPrefix
     : rawPrefix.slice(0, Math.max(0, prefixCap - 24)) + '\n[shared facts truncated]';

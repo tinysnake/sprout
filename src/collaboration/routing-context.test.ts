@@ -150,6 +150,7 @@ test('the first input of an oversized window is always accepted, even past the b
   assert.equal(entry.excerptChars, plans[0]!.inputs[0]!.excerpt.length);
   assert.match(plans[0]!.inputs[0]!.excerpt, /\[truncated: first \d+ of 5000 characters/);
   assert.ok(plans[0]!.context.length <= 300);
+  assert.match(plans[0]!.context, /complete content remains durable\]/);
 });
 
 test('freezing is deterministic: identical facts produce identical plans and context bytes', () => {

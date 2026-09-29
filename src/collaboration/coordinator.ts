@@ -1039,6 +1039,14 @@ export class CollaborationCoordinator {
       await this.#settleBatchRouted(current, batchInputs, successful.judgement);
       return;
     }
+    if (successful !== undefined) {
+      // A pre-v21 success has no recoverable judgement. Never ask the model
+      // again and pretend the resulting decision was the original one.
+      await this.#failBatchClosed(current, batchInputs, {
+        kind: 'invalid-output', detail: 'legacy successful attempt has no recoverable judgement',
+      });
+      return;
+    }
     let lastFailure: { readonly kind: RoutingFailureKind; readonly detail: string } =
       { kind: 'model-unavailable', detail: 'routing attempt interrupted before completion' };
     const priorFailure = previous.at(-1);

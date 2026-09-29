@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from '../run/model.ts';
 import { buildCollaborationScopes } from './scope-harness.ts';
@@ -294,6 +295,31 @@ test('restart after a durable successful judgement settles without a second mode
     assert.equal((await second.getRoutingBatch(batch.id))?.status, 'routed');
     assert.equal((await second.listRoutingAttempts(batch.id)).length, 1);
     assert.equal(after.runs.submits.length, 1);
+    second.close();
+  });
+});
+
+test('a legacy success without a stored judgement fails visibly rather than re-evaluating', async () => {
+  await withPath(async (path) => {
+    const first = new CrashAfterAttemptStore({ filename: path });
+    const before = await openHarness(first, { model: selectAllModel() });
+    await before.coordinator.deliver({ scopeId: before.scopeId,
+      author: { id: 'operator', kind: 'human' }, body: 'legacy boundary', deliveryKey: 'legacy-success' });
+    before.now = 120_000;
+    await assert.rejects(before.coordinator.sweepRouting(), /simulated crash after durable attempt/);
+    const batch = (await first.listRoutingBatches())[0]!;
+    first.close();
+    const legacy = new DatabaseSync(path);
+    legacy.prepare('UPDATE collaboration_routing_attempts SET judgement = NULL WHERE batch_id = ?').run(batch.id);
+    legacy.close();
+    let calls = 0;
+    const second = new SqliteCollaborationStore({ filename: path });
+    const after = await openHarness(second, { model: { id: 'counting', async judge() { calls++; throw Error('unexpected call'); } } });
+    after.now = 120_000;
+    await after.coordinator.reconcile();
+    assert.equal(calls, 0);
+    assert.equal((await second.getRoutingBatch(batch.id))?.status, 'failed');
+    assert.equal((await second.listRoutingOutcomes(batch.id))[0]?.status, 'failed');
     second.close();
   });
 });
