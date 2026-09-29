@@ -388,6 +388,16 @@ export class ProductionEnvironmentService implements EnvironmentService {
     await this.#adapter.approveEnrollment(id, resolvedPermissions, modelAuthorizations);
   }
 
+  async authorizeModelEnrollments(
+    id: string,
+    modelAuthorizations: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
+    if (modelAuthorizations === undefined || modelAuthorizations === null) {
+      throw new Error('Human-selected model authorizations are required');
+    }
+    await this.#adapter.authorizeModelEnrollments(id, modelAuthorizations);
+  }
+
   async amendCapabilityRequests(
     id: string,
     capabilityRequests: readonly string[],

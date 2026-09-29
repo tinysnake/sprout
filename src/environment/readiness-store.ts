@@ -172,6 +172,8 @@ export interface EnvironmentReadinessStore {
       readonly enrollmentId?: string;
       readonly connectionEpoch?: number;
       readonly lifecycleGeneration?: number;
+      /** Synchronous fence checked by the store immediately before mutation. */
+      readonly isCurrent?: () => boolean;
       readonly connectionId?: string;
       readonly requirements?: ReadinessRequirementScope;
       readonly actor?: string;
@@ -339,11 +341,13 @@ export class InMemoryEnvironmentReadinessStore implements EnvironmentReadinessSt
       readonly enrollmentId?: string;
       readonly connectionEpoch?: number;
       readonly lifecycleGeneration?: number;
+      readonly isCurrent?: () => boolean;
       readonly connectionId?: string;
       readonly requirements?: ReadinessRequirementScope;
       readonly actor?: string;
     },
   ): Promise<void> {
+    if (context?.isCurrent?.() === false) return;
     const existing = this.#readiness.get(instance);
     if (!existing && authorizations.length === 0) return;
     const updated = withModelAuthorizations(existing, authorizations, context);

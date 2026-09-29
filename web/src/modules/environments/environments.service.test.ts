@@ -190,3 +190,25 @@ test('EnvironmentService: archive, restore, and unenroll transitions', async () 
   assert.equal(env?.enrollmentStatus, 'revoked');
   assert.equal(env?.trafficLight, 'red');
 });
+
+test('EnvironmentService: authorizeModelEnrollments records a Human model decision on an approved enrollment without resetting it', async () => {
+  const service = new FixtureEnvironmentService();
+  const before = await service.getEnvironment('env-ready');
+  const beforeDecisions = before?.decisions?.length ?? 0;
+
+  await service.authorizeModelEnrollments('env-ready', { codex: ['target-model', 'late-model'] });
+
+  const after = await service.getEnvironment('env-ready');
+  assert.ok(after);
+  assert.equal(after.enrollmentStatus, 'approved', 'the approved identity binding is untouched');
+  const codexAuths = after.engineDetails?.codex?.modelAuthorizations ?? [];
+  assert.deepEqual(codexAuths.map((auth) => auth.model).sort(), ['late-model', 'target-model']);
+  assert.equal(codexAuths.every((auth) => auth.source === 'human-approval'), true);
+  assert.equal((after.decisions ?? []).length, beforeDecisions + 1);
+  assert.equal(after.decisions?.at(-1)?.kind, 'models-authorized');
+});
+
+test('EnvironmentService: authorizeModelEnrollments refuses a non-approved enrollment', async () => {
+  const service = new FixtureEnvironmentService();
+  await assert.rejects(() => service.authorizeModelEnrollments('env-pending', { codex: ['target-model'] }));
+});

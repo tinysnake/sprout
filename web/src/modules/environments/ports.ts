@@ -36,6 +36,15 @@ export interface EnvironmentService {
     permissions: Record<string, boolean>,
     modelAuthorizations?: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
   ): Promise<void>;
+  /**
+   * Record a Human model-authorization decision on an already-approved
+   * enrollment (#172). This is the supported post-approval remedy when an Agent
+   * gains a work model after approval: it never resets the bound Worker identity.
+   */
+  authorizeModelEnrollments(
+    id: string,
+    modelAuthorizations: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void>;
   amendCapabilityRequests(
     id: string,
     capabilityRequests: readonly string[],

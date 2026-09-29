@@ -495,6 +495,44 @@ export class FixtureEnvironmentService implements EnvironmentService {
     );
   }
 
+  async authorizeModelEnrollments(
+    id: string,
+    modelAuthorizations: Record<string, readonly string[]> | readonly { engine: string; model: string }[],
+  ): Promise<void> {
+    const env = this.instances.find((e) => e.id === id);
+    if (!env) throw new Error(`Environment ${id} not found`);
+    if (env.enrollmentStatus !== 'approved') {
+      throw new Error('Model authorizations can only be recorded on an approved enrollment');
+    }
+    const selections: { engine: string; model: string }[] = Array.isArray(modelAuthorizations)
+      ? [...modelAuthorizations]
+      : Object.entries(modelAuthorizations).flatMap(([engine, models]) =>
+          models.map((model: string) => ({ engine, model })),
+        );
+    for (const selection of selections) {
+      const details = env.engineDetails?.[selection.engine];
+      if (details === undefined) continue;
+      details.modelAuthorizations = [
+        ...(details.modelAuthorizations ?? []).filter((auth) => auth.model !== selection.model),
+        {
+          engine: selection.engine,
+          model: selection.model,
+          source: 'human-approval' as const,
+          authorizedAt: Date.now(),
+        },
+      ];
+    }
+    env.decisions = [
+      ...(env.decisions ?? []),
+      {
+        kind: 'models-authorized',
+        actor: 'operator',
+        at: Date.now(),
+        reason: 'Human recorded model authorizations on the approved enrollment.',
+      },
+    ];
+  }
+
   async amendCapabilityRequests(
     id: string,
     capabilityRequests: readonly string[],

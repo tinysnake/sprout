@@ -38,6 +38,12 @@ export interface AgentView {
     readonly currentVersion: number;
     readonly versions: readonly AgentConfigurationVersionView[];
   };
+  /**
+   * The current configuration version's ordered work options (#173): the same
+   * portable values the compatibility route resolves, projected top-level so
+   * the list row alone shows an Agent's declared options.
+   */
+  readonly workOptions: readonly AgentWorkOptionView[];
   readonly createdAt: number;
   readonly updatedAt: number;
 }
