@@ -45,3 +45,7 @@ Before implementing a feature, check `docs/references.md` for reference reposito
 ### Development control loop
 
 When evaluating next work, selecting a roadmap outcome, assigning or accepting a task, recording implementation results, or replanning after completed work, follow `docs/agents/development-loop.md`.
+
+### Human preview
+
+Before preparing a human-facing preview, starting or stopping its service, or retaining or discarding its state, follow `docs/agents/preview.md`. Ask the Human before closing an existing instance or resolving a port conflict.

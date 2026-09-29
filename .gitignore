@@ -11,6 +11,7 @@ web/dist/
 
 # Local runtime state
 /test-timeout.jsonl
+/.preview-data/
 # Codex auth is never copied into an image or committed; it is mounted read-only
 # into a container at run time.
 auth.json
