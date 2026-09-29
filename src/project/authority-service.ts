@@ -86,11 +86,25 @@ export interface ProjectAgentAuthorityPort {
  * A prepared authority-to-runtime projection.
  *
  * Preparation validates and allocates the complete projection without making
- * it visible. The returned synchronous commit cannot fail: ProjectService
- * persists only after preparation succeeds, then publishes the prepared view.
+ * it visible. The returned `commit` cannot fail: ProjectService persists only
+ * after preparation succeeds, then publishes the prepared view. The optional
+ * `rollback` undoes durable preparation work when persistence (or a later
+ * step of the same preparation) fails, so a failed Project change leaves no
+ * partial durable record behind (ADR-0008: a failed final submission never
+ * stores a partially created Project).
  */
+export interface PreparedProjectBridge {
+  /** Publish the prepared in-memory view; runs after persistence, cannot fail. */
+  readonly commit: () => void;
+  /**
+   * Undo durable work done during preparation when persistence fails.
+   * Its own failure must not mask the persistence error.
+   */
+  readonly rollback?: () => void | Promise<void>;
+}
+
 export interface ProjectAuthorityBridgePort {
-  prepare(project: ProjectAuthority): (() => void) | Promise<() => void>;
+  prepare(project: ProjectAuthority): PreparedProjectBridge | Promise<PreparedProjectBridge>;
 }
 
 export interface ProjectServiceOptions {
@@ -143,8 +157,12 @@ export interface CreateProjectInput {
 }
 
 export interface UpdateProjectContentInput {
+  /** Optional user-facing identity edit; the stable Project id is unchanged. */
+  readonly displayName?: string;
   /** `undefined` keeps the current goal; a string (possibly empty) replaces it. */
   readonly goal?: string;
+  /** `undefined` keeps current completion guidance; an empty string clears it. */
+  readonly completionGuidance?: string;
   /** `undefined` keeps the current rules; an array (possibly empty) replaces them. */
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
@@ -163,6 +181,12 @@ export interface AddMembershipInput {
 
 export interface EndMembershipInput {
   /** The sanitized operator reason recorded on the ended membership. */
+  readonly reason?: string;
+}
+
+export interface UpdateMembershipInput {
+  readonly responsibilities?: readonly string[];
+  readonly collaborationInstructions?: string;
   readonly reason?: string;
 }
 
@@ -211,6 +235,13 @@ export class ProjectService {
    * Project can do; they never invalidate its identity.
    */
   async create(input: CreateProjectInput): Promise<ProjectAuthority> {
+    const project = await this.prepareCreate(input);
+    await this.commitPreparedCreate(project, () => this.#store.save(project));
+    return project;
+  }
+
+  /** Build and validate a new Project without making it durable or visible. */
+  async prepareCreate(input: CreateProjectInput): Promise<ProjectAuthority> {
     const now = this.#clock();
     const id = input.id !== undefined ? sanitizeProjectId(input.id) : this.#createId();
     if (id === undefined) {
@@ -256,6 +287,7 @@ export class ProjectService {
       goal: input.goal === undefined
         ? sanitizeProjectGoal(this.#template.goalGuidance)
         : sanitizeProjectGoal(input.goal),
+      completionGuidance: sanitizeProjectGoal(this.#template.completionGuidance),
       rules: input.rules === undefined
         ? sanitizeProjectRules(this.#template.suggestedRules)
         : sanitizeProjectRules(input.rules),
@@ -281,8 +313,35 @@ export class ProjectService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.#persist(project);
     return project;
+  }
+
+  /**
+   * Persist a prepared Project through a caller-owned atomic boundary, then
+   * publish its runtime projection. Resource-complete creation supplies one
+   * transaction that writes Project identity and workspace bindings together.
+   */
+  async commitPreparedCreate(
+    project: ProjectAuthority,
+    persist: () => Promise<void>,
+    publishRelated?: () => void,
+  ): Promise<void> {
+    const prepared = await this.#bridge?.prepare(project);
+    try {
+      await this.#onChanged?.(project);
+      await persist();
+    } catch (failure) {
+      if (prepared !== undefined) {
+        try {
+          await prepared.rollback?.();
+        } catch {
+          // Preserve the original persistence failure, as in #persist.
+        }
+      }
+      throw failure;
+    }
+    prepared?.commit();
+    publishRelated?.();
   }
 
   /** One deep copy of the template source, attributed and frozen apart. */
@@ -330,6 +389,7 @@ export class ProjectService {
     const current = currentProjectContent(project);
     const next: ProjectAuthority = {
       ...project,
+      ...(input.displayName !== undefined ? { displayName: sanitizeProjectDisplayName(input.displayName) } : {}),
       content: {
         currentVersion: project.content.currentVersion + 1,
         versions: [
@@ -339,6 +399,9 @@ export class ProjectService {
             at: now,
             reason: sanitizeEditReason(input.reason),
             goal: input.goal === undefined ? current.goal : sanitizeProjectGoal(input.goal),
+            completionGuidance: input.completionGuidance === undefined
+              ? current.completionGuidance
+              : sanitizeProjectGoal(input.completionGuidance),
             rules: input.rules === undefined ? current.rules : sanitizeProjectRules(input.rules),
             wakePolicy: input.wakePolicy === undefined ? current.wakePolicy : sanitizeWakePolicy(input.wakePolicy),
             routingIntervalMs: input.routingIntervalMs === undefined
@@ -435,6 +498,32 @@ export class ProjectService {
         : entry,
     );
     return this.#appendVersion(project, now, sanitizeEditReason(input.reason), { memberships });
+  }
+
+  /** Append a content version with updated responsibilities for one active Agent. */
+  async updateMembership(
+    projectId: string,
+    memberId: string,
+    input: UpdateMembershipInput,
+  ): Promise<ProjectAuthority> {
+    const project = await this.#require(projectId);
+    this.#assertEditable(project);
+    const current = currentProjectContent(project);
+    const membership = current.memberships.find((entry) => entry.memberId === memberId);
+    if (membership === undefined || membership.endedAt !== undefined) {
+      throw new ProjectAuthorityError('membership-not-active', `${memberId} has no active membership in ${projectId}`);
+    }
+    if (membership.memberKind !== 'agent') {
+      throw new ProjectAuthorityError('human-membership-required', 'the local Human membership cannot be edited');
+    }
+    const sanitized = sanitizeMembershipText({
+      responsibilities: input.responsibilities ?? membership.responsibilities,
+      collaborationInstructions: input.collaborationInstructions ?? membership.collaborationInstructions,
+    });
+    const memberships = current.memberships.map((entry) =>
+      entry.memberId === memberId ? { ...entry, ...sanitized } : entry,
+    );
+    return this.#appendVersion(project, this.#clock(), sanitizeEditReason(input.reason), { memberships });
   }
 
   /**
@@ -567,6 +656,7 @@ export class ProjectService {
             at,
             reason,
             goal: current.goal,
+            completionGuidance: current.completionGuidance,
             rules: current.rules,
             wakePolicy: overrides.wakePolicy ?? current.wakePolicy,
             routingIntervalMs: current.routingIntervalMs,
@@ -605,14 +695,32 @@ export class ProjectService {
     }
   }
 
-  /** Prepare the runtime bridge, persist, then publish the infallible commit. */
+  /**
+   * Prepare the runtime bridge, persist, then publish the infallible commit.
+   *
+   * If anything between preparation and publication fails — the legacy hook
+   * or the durable save — the bridge's prepared rollback runs first so no
+   * durable preparation artifact (such as the Project channel row) outlives a
+   * failed Project change; a rollback failure never masks the original error.
+   */
   async #persist(project: ProjectAuthority): Promise<void> {
-    const commit = await this.#bridge?.prepare(project);
-    // Legacy hooks are treated as preparation, not post-persistence
-    // notification: a rejection must never leave a durable partial change.
-    await this.#onChanged?.(project);
-    await this.#store.save(project);
-    commit?.();
+    const prepared = await this.#bridge?.prepare(project);
+    try {
+      // Legacy hooks are treated as preparation, not post-persistence
+      // notification: a rejection must never leave a durable partial change.
+      await this.#onChanged?.(project);
+      await this.#store.save(project);
+    } catch (failure) {
+      if (prepared !== undefined) {
+        try {
+          await prepared.rollback?.();
+        } catch {
+          // The persistence failure stays the reported error.
+        }
+      }
+      throw failure;
+    }
+    prepared?.commit();
   }
 
   /** An archived Project is read-only (ADR-0008). */

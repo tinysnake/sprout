@@ -292,6 +292,13 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
+  conversation_scopes: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
 };
 
 

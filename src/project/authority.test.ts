@@ -108,10 +108,31 @@ test('a Project can be created with only a name; the Human membership and templa
   assert.equal(project.template.completionGuidance.length > 0, true);
 });
 
+test('explicit empty goal and rules at creation clear the template starting content', async () => {
+  const projects = service();
+  const project = await projects.create({
+    id: 'project-cleared',
+    displayName: 'Cleared contract',
+    goal: '',
+    rules: [],
+  });
+  const content = currentProjectContent(project);
+  // Absent fields seed from the template; explicit empty fields are the
+  // operator's clear (ADR-0008: fill or clear goal and rules).
+  assert.equal(content.goal, '');
+  assert.deepEqual(content.rules, []);
+  // The clear is content, not identity: the template snapshot and the rest of
+  // the versioned contract remain attributed copies.
+  assert.equal(content.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
+  assert.equal(project.template.goalGuidance, GENERAL_COLLABORATION_TEMPLATE.goalGuidance);
+  assert.deepEqual(project.template.suggestedRules, [...GENERAL_COLLABORATION_TEMPLATE.suggestedRules]);
+});
+
 test('creating a Project copies the template as an editable snapshot, not a link', async () => {
   const projects = service();
   const project = await projects.create({ id: 'project-snap', displayName: 'Snapshot' });
   const copied = currentProjectContent(project);
+  assert.equal(copied.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
 
   // The snapshot records the template's full editable starting content
   // (F2): goal guidance, suggested rules, role slots, wake policy, and
@@ -131,8 +152,15 @@ test('creating a Project copies the template as an editable snapshot, not a link
 
   // The copy is editable: a later edit appends a Project content version and
   // leaves the template source untouched.
-  const edited = await projects.updateContent('project-snap', { goal: 'A different goal' });
+  const edited = await projects.updateContent('project-snap', {
+    goal: 'A different goal',
+    completionGuidance: 'Require a reproducible validation result.',
+    routingIntervalMs: 75_000,
+  });
   assert.equal(currentProjectContent(edited).goal, 'A different goal');
+  assert.equal(currentProjectContent(edited).completionGuidance, 'Require a reproducible validation result.');
+  assert.equal(currentProjectContent(edited).routingIntervalMs, 75_000);
+  assert.equal(copied.completionGuidance, GENERAL_COLLABORATION_TEMPLATE.completionGuidance);
   assert.equal(GENERAL_COLLABORATION_TEMPLATE.goalGuidance.length > 0, true);
   assert.equal(copied.version, 1);
   assert.equal(edited.content.currentVersion, 2);
@@ -482,4 +510,71 @@ test('a bridge prepare failure leaves no durable Project behind', async () => {
     /bridge unavailable/,
   );
   assert.equal(await store.get('project-uncommitted'), undefined);
+});
+
+test('a failed persistence runs the prepared rollback and never the commit', async () => {
+  const store = new InMemoryProjectAuthorityStore();
+  let failNextSave = true;
+  const save = store.save.bind(store);
+  store.save = async (project) => {
+    if (failNextSave) {
+      failNextSave = false;
+      throw new Error('disk full');
+    }
+    await save(project);
+  };
+  const events: string[] = [];
+  const projects = new ProjectService({
+    store,
+    bridge: {
+      prepare() {
+        return {
+          commit: () => {
+            events.push('commit');
+          },
+          rollback: () => {
+            events.push('rollback');
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => projects.create({ id: 'project-rollback', displayName: 'Rollback' }),
+    /disk full/,
+  );
+  assert.deepEqual(events, ['rollback'], 'rollback ran after the failed save; the commit did not');
+  assert.equal(await store.get('project-rollback'), undefined, 'no partial Project is durable');
+
+  // The retried creation persists and publishes exactly once.
+  const created = await projects.create({ id: 'project-rollback', displayName: 'Rollback' });
+  assert.equal(created.id, 'project-rollback');
+  assert.deepEqual(events, ['rollback', 'commit']);
+});
+
+test('a failing rollback never masks the persistence error', async () => {
+  const store = new InMemoryProjectAuthorityStore();
+  store.save = async () => {
+    throw new Error('disk full');
+  };
+  const projects = new ProjectService({
+    store,
+    bridge: {
+      prepare() {
+        return {
+          commit: () => undefined,
+          rollback: () => {
+            throw new Error('rollback broken');
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => projects.create({ id: 'project-broken-rollback', displayName: 'Broken rollback' }),
+    /disk full/,
+  );
+  assert.equal(await store.get('project-broken-rollback'), undefined);
 });

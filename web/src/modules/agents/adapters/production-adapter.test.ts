@@ -108,8 +108,8 @@ function recordingAdapter(): Recorder {
         calls.push('restoreAgent');
         return agent;
       },
-      async compatibility(id: string) {
-        calls.push(`compatibility:${id}`);
+      async compatibility(id: string, environmentInstanceId?: string) {
+        calls.push(`compatibility:${id}${environmentInstanceId ? `:${environmentInstanceId}` : ''}`);
         if (recorder.failCompatibility) throw new Error('not configured');
         return recorder.compatibility;
       },
@@ -121,6 +121,14 @@ function recordingAdapter(): Recorder {
   };
   return recorder;
 }
+
+test('Project prerequisites can request the Agent verdict for a specific assigned Environment', async () => {
+  const wire = recordingAdapter();
+  const service = new ProductionAgentService(wire.adapter, runHistory([]));
+  const result = await service.compatibilityForEnvironment('programmer', 'inst-1');
+  assert.equal(result?.environmentAvailable, true);
+  assert.equal(wire.calls.includes('compatibility:programmer:inst-1'), true);
+});
 
 function runHistory(runs: readonly Partial<RunView>[]): () => Promise<{ runs: RunView[] }> {
   return async () => ({ runs: runs as RunView[] });

@@ -3,7 +3,7 @@ import { ProjectRegistry } from './registry.ts';
 import type { ProjectAuthority } from './authority-model.ts';
 import { activeAgentMemberIds, currentProjectContent } from './authority-model.ts';
 import type { ProjectAuthorityStore } from './authority-store.ts';
-import type { ProjectAuthorityBridgePort } from './authority-service.ts';
+import type { ProjectAuthorityBridgePort, PreparedProjectBridge } from './authority-service.ts';
 import type { ProjectEnvironmentAccess } from './access.ts';
 import { sanitizeWorkspacePath } from './access.ts';
 import type { ProjectAccessStore } from './access-store.ts';
@@ -124,17 +124,22 @@ export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAu
    * ProjectService invokes this before persistence and invokes the returned
    * infallible commit only after persistence succeeds. Archived Projects commit
    * as removal, so legacy GET/routing/wake readers cannot retain stale access.
+   * The projection is in-memory only, so there is nothing durable to roll back.
    */
-  prepare(project: ProjectAuthority): () => void {
+  prepare(project: ProjectAuthority): PreparedProjectBridge {
     if (project.status === 'archived') {
-      return () => {
-        this.#authorities.delete(project.id);
-        this.remove(project.id);
+      return {
+        commit: () => {
+          this.#authorities.delete(project.id);
+          this.remove(project.id);
+        },
       };
     }
-    return () => {
-      this.#authorities.set(project.id, project);
-      this.#publish(project);
+    return {
+      commit: () => {
+        this.#authorities.set(project.id, project);
+        this.#publish(project);
+      },
     };
   }
 
@@ -179,7 +184,7 @@ export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAu
    * prepared bridge protocol through ProjectService.
    */
   mirror(project: ProjectAuthority, _availableEnvironmentInstanceIds: readonly string[] = []): void {
-    this.prepare(project)();
+    this.prepare(project).commit();
   }
 
   /**
@@ -206,7 +211,7 @@ export class BridgedProjectRegistry extends ProjectRegistry implements ProjectAu
     }
     const stored = await store.list();
     for (const project of stored) {
-      this.prepare(project)();
+      this.prepare(project).commit();
     }
     return stored;
   }

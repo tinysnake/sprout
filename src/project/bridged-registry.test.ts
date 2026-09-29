@@ -275,7 +275,7 @@ test('a corrupt access record with an absolute path projects no location', async
   const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
   await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
   const authority = (await projects.get('project-corrupt'))!;
-  registry.prepare(authority)();
+  registry.prepare(authority).commit();
   const corrupt = {
     projectId: 'project-corrupt',
     environmentInstanceId: 'mac-mini-1',
@@ -317,7 +317,7 @@ test('a corrupt access record with a traversal path projects no location', async
   const projects = new ProjectService({ store: new InMemoryProjectAuthorityStore(), clock: () => 5_000 });
   await projects.create({ id: 'project-corrupt', displayName: 'Corrupt' });
   const authority = (await projects.get('project-corrupt'))!;
-  registry.prepare(authority)();
+  registry.prepare(authority).commit();
   registry.prepareAccess('project-corrupt', [
     {
       projectId: 'project-corrupt',

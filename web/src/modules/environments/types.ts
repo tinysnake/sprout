@@ -103,7 +103,10 @@ export interface BoundWorkspace {
 }
 
 export interface EnvironmentInstance {
+  /** Enrollment key for Manage Environments routes and enrollment commands. */
   id: string;
+  /** Runtime/catalog identity for Project access, workspace and Agent compatibility. */
+  environmentInstanceId: string;
   displayName: string;
   platform: PlatformType;
   trafficLight: TrafficLight;

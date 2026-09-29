@@ -8,6 +8,9 @@ import { ProductionEnvironmentService } from '../modules/environments/adapters/p
 import { AGENT_SERVICE, type AgentManagementService } from '../modules/agents/types.js';
 import { createAgentBrowserAdapter } from '../adapters/agent-api.js';
 import { ProductionAgentService } from '../modules/agents/adapters/production-adapter.js';
+import { PROJECT_SERVICE, type ProjectManagementService } from '../modules/projects/types.js';
+import { ProductionProjectService } from '../modules/projects/adapters/production-adapter.js';
+import { createProjectAccessBrowserAdapter, createProjectBrowserAdapter } from '../adapters/project-api.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
 import { createOperatorSessionBrowserAdapter } from '../adapters/operator-session-api.js';
 import { OPERATOR_SESSION } from './auth.js';
@@ -37,6 +40,8 @@ export interface SproutAppOptions {
    * production route can never expose fixture-backed behaviour.
    */
   agentService?: AgentManagementService;
+  /** The typed Project Overview authority; production and tests inject it explicitly. */
+  projectService?: ProjectManagementService;
   /**
    * A page-owned connection source.
    *
@@ -70,6 +75,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   if (options.agentService) {
     app.provide(AGENT_SERVICE, options.agentService);
   }
+  if (options.projectService) {
+    app.provide(PROJECT_SERVICE, options.projectService);
+  }
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);
   }
@@ -98,16 +106,24 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
     // Environment-facts compatibility projection arrive through the #90 wire
     // adapter over the same shared transport; the run history read supplies
     // the attribution foldable. No fixture is involved.
+    const agentAdapter = createAgentBrowserAdapter(transport);
     const agentService = new ProductionAgentService(
-      createAgentBrowserAdapter(transport),
+      agentAdapter,
       () =>
         transport
           .request<{ readonly runs: readonly RunView[] }>('/api/runs')
           .then((body) => body.runs),
     );
+    const projectService = new ProductionProjectService({
+      projects: createProjectBrowserAdapter(transport),
+      access: createProjectAccessBrowserAdapter(transport),
+      agents: agentService,
+      environments: environmentService,
+    });
     const { app, router } = createSproutApp({
       environmentService,
       agentService,
+      projectService,
       connectionSource: transport,
       operatorSession,
     });
