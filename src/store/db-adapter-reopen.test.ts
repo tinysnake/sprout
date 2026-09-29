@@ -136,6 +136,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
   collaboration_messages: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'scope_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'channel', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'author_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'author_kind', type: 'TEXT', notnull: 1, pk: 0 },
@@ -147,7 +148,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
   ],
   collaboration_wake_requests: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
-    { name: 'message_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'input_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'agent_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'reason', type: 'TEXT', notnull: 1, pk: 0 },
@@ -159,11 +160,24 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
   ],
   collaboration_observations: [
     { name: 'id', type: 'INTEGER', notnull: 0, pk: 1 },
-    { name: 'message_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'input_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'agent_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'status', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'reason', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'detail', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  project_events: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'summary', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'detail', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'producer_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'producer_kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'disposition', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'responsible_agents', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'delivery_key', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
   tasks: [

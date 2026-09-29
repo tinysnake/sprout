@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GENERAL_COLLABORATION_TEMPLATE as GENERAL_TEMPLATE } from './project/template.ts';
+import { MessageDeliveryError } from './collaboration/coordinator.ts';
 import {
   build,
   INSTANCE_ID,
@@ -168,9 +169,8 @@ test('the authority bridge keeps GET compatibility without inventing execution a
       'an authority Project with no durable Environment grant is not executable',
     );
     const delivered = await runtime.collaboration.deliver({
-      projectId: authorityProject.id,
-      channel: 'project',
-      author: { id: 'human', kind: 'human' },
+      scopeId: `channel-${authorityProject.id}`,
+      author: { id: 'operator', kind: 'human' },
       body: '@scout answer on the new channel',
       deliveryKey: 'bridge-delivery-1',
       awaitReply: true,
@@ -194,15 +194,19 @@ test('the authority bridge keeps GET compatibility without inventing execution a
       await fetch(`${base}/api/projects?status=archived`, { headers: { cookie } })
     ).json()) as { projects: { id: string }[] };
     assert.equal(archivedStatusList.projects.some((entry) => entry.id === 'project-channel-live'), false);
-    const archivedDelivery = await runtime.collaboration.deliver({
-      projectId: authorityProject.id,
-      channel: 'project',
-      author: { id: 'human', kind: 'human' },
+    const archivedDelivery = runtime.collaboration.deliver({
+      scopeId: `channel-${authorityProject.id}`,
+      author: { id: 'operator', kind: 'human' },
       body: '@scout must not wake after archive',
       deliveryKey: 'bridge-delivery-archived',
       awaitReply: true,
     });
-    assert.deepEqual(archivedDelivery.admittedRunIds, []);
+    await assert.rejects(
+      archivedDelivery,
+      (error: unknown) =>
+        error instanceof MessageDeliveryError && error.reason === 'project-archived',
+      'an archived Project refuses delivery instead of silently dropping it',
+    );
   } finally {
     await runtime.api.close();
     await runtime.close();

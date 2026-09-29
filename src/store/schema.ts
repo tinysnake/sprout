@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 19;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 18;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 19;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -843,6 +843,63 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         );
         CREATE INDEX IF NOT EXISTS conversation_scopes_project
           ON conversation_scopes(project_id);
+      `);
+    },
+  },
+  {
+    fromVersion: 18,
+    toVersion: 19,
+    name: 'scoped_messages_and_project_events',
+    migrate: (db) => {
+      // Messages now live in exactly one conversation scope (#96), and Project
+      // events are durable system-produced facts with a required routing
+      // disposition (ADR-0007). Wake requests and observations key on the
+      // causal *input* — a Message id or a Project event id — so `message_id`
+      // becomes `input_id`.
+      //
+      // Backfill: a legacy Project-channel Message's scope is the invariant
+      // Project channel (`channel-<project>`), which is exact. A legacy direct
+      // Message predates scope identity (its pair is not recoverable from the
+      // recipients alone), so it keeps an empty scope id: readable history
+      // that can never receive a new Message, because delivery resolves its
+      // scope first. No credential, hostname, address, or path has a column.
+      const messages = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_messages'")
+        .get();
+      if (messages !== undefined) {
+        const columns = db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+        if (!columns.some((column) => column.name === 'scope_id')) {
+          db.exec("ALTER TABLE collaboration_messages ADD COLUMN scope_id TEXT NOT NULL DEFAULT '';");
+        }
+        db.exec(
+          "UPDATE collaboration_messages SET scope_id = 'channel-' || project_id " +
+            "WHERE channel = 'project' AND scope_id = '';",
+        );
+      }
+      for (const table of ['collaboration_wake_requests', 'collaboration_observations']) {
+        const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+        if (exists === undefined) continue;
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
+        if (columns.some((column) => column.name === 'message_id')) {
+          db.exec(`ALTER TABLE ${table} RENAME COLUMN message_id TO input_id;`);
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_events (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          detail TEXT,
+          producer_id TEXT NOT NULL,
+          producer_kind TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          responsible_agents TEXT NOT NULL,
+          delivery_key TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS project_events_project
+          ON project_events(project_id);
       `);
     },
   },

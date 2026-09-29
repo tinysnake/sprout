@@ -32,13 +32,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 18);
+  assert.equal(CURRENT_SCHEMA_VERSION, 19);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 18);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 19);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 18,
-    current: 18,
+    max: 19,
+    current: 19,
   });
 });
 
@@ -61,7 +61,7 @@ test('v17 recovery migration makes a safety copy and preserves v16 run rows with
     db.close();
     const store = new SqliteStore({ filename: path });
     try {
-      assert.equal(store.schemaVersion, 18);
+      assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
       assert.equal(existsSync(defaultSafetyCopyPath(path)), true);
       const run = await store.runs.get('legacy-run');
       assert.equal(run?.recoverySettlement, undefined);

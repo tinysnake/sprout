@@ -14,6 +14,8 @@ export interface IdFactory {
   lease(): string;
   /** Ids for durable collaboration Messages (prototype #25). */
   message(): string;
+  /** Ids for durable Project events (#96). */
+  projectEvent(): string;
   /** Ids for durable Tasks (#28). */
   task(): string;
 }
@@ -23,6 +25,7 @@ export function createIdFactory(): IdFactory {
     run: () => `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     lease: () => `lease-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     message: () => `msg-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    projectEvent: () => `evt-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     task: () => `task-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
   };
 }

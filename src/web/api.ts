@@ -8,6 +8,12 @@ import { createWebSocketStream } from 'ws';
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
+import { MessageDeliveryError } from '../collaboration/coordinator.ts';
+import type { MessageAuthor } from '../collaboration/model.ts';
+import { ProjectEventError } from '../collaboration/events.ts';
+import { ConversationScopeError } from '../conversation/model.ts';
+import type { ConversationScopeService } from '../conversation/service.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
@@ -18,6 +24,7 @@ import type { WorkerGateway } from '../worker/gateway.ts';
 import {
   summarizeRunHistory,
   toMessageView,
+  toProjectEventView,
   toProjectView,
   toRunView,
   toTaskView,
@@ -58,6 +65,16 @@ export interface RunApiOptions {
    * coordinator so the wake contract has exactly one implementation.
    */
   readonly collaboration?: CollaborationCoordinator;
+  /**
+   * The conversation-scope authority Message delivery governs against (#95,
+   * #96).
+   *
+   * Required beside `collaboration`: a Message is posted to exactly one scope,
+   * and the routes resolve the scope, the acting author's admission state, and
+   * the Project's Human membership from this service rather than trusting
+   * request JSON. Without it the message routes are not served.
+   */
+  readonly conversationScopes?: ConversationScopeService;
   /**
    * The projects the client may address (#27).
    *
@@ -103,7 +120,7 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
+  const { orchestrator, agents, collaboration, conversationScopes, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const additiveRouters = composeApiRouters(options.routers ?? []);
@@ -274,27 +291,23 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/messages — deliver one Message to a project channel and wake
-    // whoever the M1 wake contract addresses.
-    if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
+    // POST /api/messages — deliver one Message to one conversation scope and
+    // wake whoever the deterministic wake contract addresses (#96). The scope
+    // is the single source of the Message's Project, channel, and admission
+    // state; the routes keep no routing logic of their own.
+    if (
+      request.method === 'POST' &&
+      url.pathname === '/api/messages' &&
+      collaboration &&
+      conversationScopes
+    ) {
       const body = await readBody();
-      const projectId = typeof body.projectId === 'string' ? body.projectId : '';
-      const channel = body.channel;
-      const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
-      const authorKind = auth ? 'human' : body.authorKind === 'agent' ? 'agent' : 'human';
+      const scopeId = typeof body.scopeId === 'string' ? body.scopeId : '';
       const text = typeof body.body === 'string' ? body.body : '';
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
-      if (
-        projectId === '' ||
-        authorId === '' ||
-        text === '' ||
-        deliveryKey === '' ||
-        (channel !== 'direct' && channel !== 'project')
-      ) {
-        sendJson(response, 400, {
-          error: 'projectId, channel, authorId, body, and deliveryKey are required',
-        });
+      if (scopeId === '' || text === '' || deliveryKey === '') {
+        sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
         return;
       }
       // An authenticated browser is the only source of Human authority. In the
@@ -304,27 +317,56 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 403, { error: 'browser commands are Human-only' });
         return;
       }
-      if (
-        (body.recipients !== undefined &&
-          (!Array.isArray(body.recipients) || !body.recipients.every((value) => typeof value === 'string'))) ||
-        (channel === 'direct' && (!Array.isArray(body.recipients) || body.recipients.length === 0)) ||
-        (channel === 'project' && Array.isArray(body.recipients) && body.recipients.length > 0)
-      ) {
-        sendJson(response, 400, {
-          error: 'direct messages require string recipients; project messages cannot have recipients',
-        });
+      const scope = await conversationScopes.getScope(scopeId);
+      if (scope === undefined) {
+        sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
         return;
       }
-      const recipients = body.recipients as readonly string[] | undefined;
-      const delivered = await collaboration.deliver({
-        projectId,
-        channel,
-        author: { id: authorId, kind: authorKind },
-        body: text,
-        ...(recipients !== undefined ? { recipients } : {}),
-        deliveryKey,
-        awaitReply,
-      });
+      const recipients = body.recipients;
+      if (
+        recipients !== undefined &&
+        (!Array.isArray(recipients) || !recipients.every((value) => typeof value === 'string'))
+      ) {
+        sendJson(response, 400, { error: 'recipients must be an array of member ids' });
+        return;
+      }
+      if (scope.kind !== 'direct' && Array.isArray(recipients) && recipients.length > 0) {
+        sendJson(response, 400, { error: 'only direct messages can name recipients' });
+        return;
+      }
+      let author: MessageAuthor;
+      if (auth) {
+        // The acting author is the Project's Human membership resolved from the
+        // authority, never a client-supplied identity.
+        try {
+          const actor = await conversationScopes.humanAuthority(scope.projectId);
+          author = { id: actor.memberId, kind: actor.kind };
+        } catch (error) {
+          sendDomainFailure(response, error);
+          return;
+        }
+      } else {
+        const authorId = typeof body.authorId === 'string' ? body.authorId : '';
+        if (authorId === '') {
+          sendJson(response, 400, { error: 'authorId is required' });
+          return;
+        }
+        author = { id: authorId, kind: body.authorKind === 'agent' ? 'agent' : 'human' };
+      }
+      let delivered: Awaited<ReturnType<CollaborationCoordinator['deliver']>>;
+      try {
+        delivered = await collaboration.deliver({
+          scopeId,
+          author,
+          body: text,
+          ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
+          deliveryKey,
+          awaitReply,
+        });
+      } catch (error) {
+        sendDomainFailure(response, error);
+        return;
+      }
       sendJson(response, delivered.duplicate ? 200 : 202, {
         message: toMessageView(delivered.message),
         duplicate: delivered.duplicate,
@@ -334,10 +376,15 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // GET /api/messages — the durable conversation, newest last.
+    // GET /api/messages — the durable conversation, newest last; optionally
+    // restricted to one conversation scope with ?scopeId=.
     if (request.method === 'GET' && url.pathname === '/api/messages' && collaboration) {
+      const scopeId = url.searchParams.get('scopeId');
+      const messages = await collaboration.listMessages(
+        scopeId !== null && scopeId !== '' ? { scopeId } : undefined,
+      );
       sendJson(response, 200, {
-        messages: (await collaboration.listMessages()).map(toMessageView),
+        messages: messages.map(toMessageView),
       });
       return;
     }
@@ -362,7 +409,52 @@ export function createRunApi(options: RunApiOptions): RunApi {
       sendJson(response, 200, {
         observations: await collaboration.listObservations(messageId),
         wakes: (await collaboration.listWakeRequests())
-          .filter((wake) => wake.messageId === messageId)
+          .filter((wake) => wake.inputId === messageId)
+          .map(toWakeView),
+      });
+      return;
+    }
+
+    // GET /api/projects/:id/events — durable Project events with their declared
+    // routing dispositions (#96, ADR-0007). Events are system-produced, so
+    // publication stays an in-process Module contract; this route is read-only
+    // evidence.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'projects' &&
+      segments[3] === 'events' &&
+      collaboration
+    ) {
+      const events = await collaboration.listEvents(segments[2] ?? '');
+      sendJson(response, 200, { events: events.map(toProjectEventView) });
+      return;
+    }
+
+    // GET /api/project-events/:id/observations — the routing evidence for one
+    // Project event: its wake requests and durable non-wake outcomes.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'project-events' &&
+      segments[3] === 'observations' &&
+      collaboration
+    ) {
+      const eventId = segments[2] ?? '';
+      const event = (await collaboration.listEvents()).find(
+        (candidate) => candidate.id === eventId,
+      );
+      if (!event) {
+        sendJson(response, 404, { error: `unknown project event: ${eventId}` });
+        return;
+      }
+      sendJson(response, 200, {
+        event: toProjectEventView(event),
+        observations: await collaboration.listObservations(event.id),
+        wakes: (await collaboration.listWakeRequests())
+          .filter((wake) => wake.inputId === event.id)
           .map(toWakeView),
       });
       return;
@@ -923,6 +1015,43 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     return {};
   }
+}
+
+/**
+ * Shape the Message/Project-event domain failures onto the HTTP contract:
+ * unknown targets are 404, malformed publication is 400, an author outside
+ * the scope is 403, and a scope that is read-only for the author is 409. The
+ * typed code travels verbatim; the message passes the privacy boundary as
+ * defence in depth, so no diagnostic raised along the delivery path can carry
+ * a credential, host, or path onto the wire.
+ */
+function sendDomainFailure(response: ServerResponse, error: unknown): void {
+  if (error instanceof MessageDeliveryError) {
+    const status =
+      error.reason === 'not-a-member' || error.reason === 'not-a-participant' ? 403 : 409;
+    sendJson(response, status, {
+      error: redactSensitiveText(error.message),
+      code: error.code,
+      reason: error.reason,
+    });
+    return;
+  }
+  if (error instanceof ConversationScopeError) {
+    const status =
+      error.code === 'unknown-scope' || error.code === 'unknown-project'
+        ? 404
+        : error.code === 'human-membership-required' || error.code === 'not-a-project-member'
+          ? 403
+          : 400;
+    sendJson(response, status, { error: redactSensitiveText(error.message), code: error.code });
+    return;
+  }
+  if (error instanceof ProjectEventError) {
+    const status = error.code === 'unknown-project' ? 404 : 400;
+    sendJson(response, status, { error: redactSensitiveText(error.message), code: error.code });
+    return;
+  }
+  throw error;
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

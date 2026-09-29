@@ -18,7 +18,7 @@ import {
   type WorkingGroupScope,
 } from './model.ts';
 import type { ConversationProjectFacts } from './service.ts';
-import { getSchemaVersion, defaultSafetyCopyPath } from '../store/schema.ts';
+import { CURRENT_SCHEMA_VERSION, getSchemaVersion, defaultSafetyCopyPath } from '../store/schema.ts';
 
 /**
  * Persistence and restart behaviour for conversation scopes (#95).
@@ -219,7 +219,7 @@ test('scopes, history, and lifecycle survive a restart reopen', async () => {
   }
 });
 
-test('an existing pre-scope database receives the conversation scope table through migration v18', async () => {
+test('an existing pre-scope database receives the conversation scope table through forward migration', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-conversation-migrate-'));
   const path = join(directory, 'sprout.db');
   try {
@@ -237,7 +237,7 @@ test('an existing pre-scope database receives the conversation scope table throu
     try {
       // Probe through a second connection: the adapter owns no version accessor.
       const probe = new DatabaseSync(path);
-      assert.equal(getSchemaVersion(probe), 18);
+      assert.equal(getSchemaVersion(probe), CURRENT_SCHEMA_VERSION);
       probe.close();
       assert.ok(existsSync(defaultSafetyCopyPath(path)), 'the pre-migration safety copy exists');
       const scopes: readonly ConversationScope[] = await store.list();

@@ -1069,25 +1069,27 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     });
 
     /**
-     * The collaboration coordinator: durable Messages, the M1 wake contract, and
-     * automatic final-result projection (#26).
+     * The collaboration coordinator: scope-governed Messages, Project events,
+     * deterministic routing, and automatic final-result projection (#26, #96).
      *
      * It shares the process's one durable store and the run orchestrator, so a
-     * reply is projected from the same run record the core persisted. No wake model
-     * is configured at M1, which the contract handles explicitly: an unaddressed
-     * project-channel Message fails open to one wake per other member (see
-     * `src/collaboration/wake.ts`) rather than being silently dropped.
+     * reply is projected from the same run record the core persisted. Routing
+     * is deterministic — direct recipients, exact mentions, exact broadcasts,
+     * and addressed Project events resolve against the Project's member facts
+     * through the conversation-scope service, with no wake model consulted
+     * (ADR-0007). An unaddressed input stays durable with a visible suppressed
+     * observation; wake-model-assisted batches arrive with #97.
      */
     const collaboration = new CollaborationCoordinator({
-      projects,
+      scopes: conversationScopes,
       store: stores.collaboration,
       runs: orchestrator,
       onObservation:
         options.onObservation ??
-        (({ messageId, observation }) => {
+        (({ inputId, observation }) => {
           process.stderr.write(
             `[collaboration] ${observation.status} (${observation.agentId}) ` +
-              `on message ${messageId}: ${observation.detail}\n`,
+              `on input ${inputId}: ${observation.detail}\n`,
           );
         }),
     });
@@ -1548,8 +1550,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       orchestrator,
       agents,
       // The project channel is served over the same core: delivery, wake dispatch,
-      // and projected replies all go through the one coordinator above.
+      // and projected replies all go through the one coordinator above, governed
+      // by the conversation-scope service below.
       collaboration,
+      conversationScopes,
       // Members the Web composer may address (#27); read-only from the registry.
       projects,
       // Durable multi-run Tasks (#28): create, list, inspect, and advance.

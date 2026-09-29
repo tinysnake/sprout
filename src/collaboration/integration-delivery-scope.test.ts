@@ -9,10 +9,10 @@
  * actually wires.
  *
  * Acceptance behaviours covered here:
- * - Direct messages, exact `@id` mentions, and `@all` broadcasts follow the M1
- *   wake contract and start runs with contextual prompts.
- * - Unaddressed project messages consult the wake model; a suppression and a
- *   failure are each durably recorded, and a failure fails open.
+ * - Direct messages, exact `@id` mentions, and `@all` broadcasts follow the
+ *   deterministic wake contract and start runs with contextual prompts.
+ * - An unaddressed input stays durable with a visible suppression; there is no
+ *   model to consult and no fail-open fan-out.
  * - A completed run projects one Agent-authored reply; failed or interrupted runs
  *   project none.
  * - Private run events never enter conversation.
@@ -21,6 +21,7 @@
  *   that belongs to several Projects never resolves through the wrong one, uses
  *   the causal Project's environment, and receives its contract; a target that
  *   is not a member fails explicitly instead of falling back.
+ * - Project events require a routing disposition; only `addressed` routes.
  */
 
 import { test } from 'node:test';
@@ -54,7 +55,7 @@ import { SqliteStore } from '../store/db.ts';
 
 import { CollaborationCoordinator } from './coordinator.ts';
 
-import type { WakeModel } from './model.ts';
+import { buildCollaborationScopes, type CollaborationScopeHarness } from './scope-harness.ts';
 
 
 const definition: EnvironmentDefinition = {
@@ -101,13 +102,13 @@ interface Harness {
   readonly sqlite: SqliteStore;
   readonly coordinator: CollaborationCoordinator;
   readonly engine: ScriptedEngineAdapter;
+  readonly scopes: CollaborationScopeHarness;
   close(): void;
 }
 
 
 function build(options: {
   turns: readonly ScriptedTurn[];
-  wakeModel?: WakeModel;
   /** Overrides the default single project; used by the multi-Project regression. */
   projects?: readonly Project[];
   definitions?: readonly EnvironmentDefinition[];
@@ -135,16 +136,17 @@ function build(options: {
     }),
     store: sqlite.runs,
   });
+  const scopes = buildCollaborationScopes({ projects });
   const coordinator = new CollaborationCoordinator({
-    projects,
+    scopes: scopes.scopes,
     store: sqlite.collaboration,
     runs: orchestrator,
-    ...(options.wakeModel !== undefined ? { wakeModel: options.wakeModel } : {}),
   });
   return {
     sqlite,
     coordinator,
     engine,
+    scopes,
     close: () => {
       sqlite.close();
       rmSync(directory, { recursive: true, force: true });
@@ -193,8 +195,7 @@ test('a duplicated delivery key produces one durable input and one run admission
   t.after(harness.close);
 
   const request = {
-    projectId: 'project-sprout',
-    channel: 'direct' as const,
+    scopeId: await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' as const },
     body: 'Do the thing.',
     recipients: ['scout'],
@@ -208,7 +209,7 @@ test('a duplicated delivery key produces one durable input and one run admission
   assert.equal(second.admittedRunIds.length, 0);
 
   const wakeRows = (await harness.sqlite.collaboration.listWakeRequests()).filter(
-    (wake) => wake.messageId === first.message.id,
+    (wake) => wake.inputId === first.message.id,
   );
   assert.equal(wakeRows.length, 1);
   assert.equal(wakeRows[0]?.status, 'admitted');
@@ -218,13 +219,12 @@ test('a duplicated delivery key produces one durable input and one run admission
 });
 
 
-test('a direct message to a non-member makes no run and records the failure durably', async (t) => {
+test('a direct target outside the conversation makes no run and records the failure durably', async (t) => {
   const harness = build({ turns: [scriptedTurn('should not run')] });
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId: await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' },
     body: 'hello?',
     recipients: ['ghost'],
@@ -237,7 +237,7 @@ test('a direct message to a non-member makes no run and records the failure dura
   assert.equal(observations.length, 1);
   assert.equal(observations[0]?.status, 'failed');
   assert.equal(observations[0]?.agentId, 'ghost');
-  assert.match(observations[0]?.detail ?? '', /not a member/);
+  assert.match(observations[0]?.detail ?? '', /not a participant of this direct conversation/);
 });
 
 
@@ -256,8 +256,7 @@ test('a Message in Project B records Project B, uses its environment, and receiv
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-beta',
-    channel: 'direct',
+    scopeId: await harness.scopes.openDirect('project-beta', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' },
     body: 'Work on beta.',
     recipients: ['scout'],
@@ -278,9 +277,11 @@ test('a Message in Project B records Project B, uses its environment, and receiv
 });
 
 
-test('a non-member wake target fails explicitly and never falls back to another Project containing the Agent', async (t) => {
-  // Scout is a member of Project A only. A Message in Project B (which Scout
-  // does not belong to) must not run Scout in Project A's environment.
+test('a wake target outside the causal Project fails explicitly and never falls back to another Project containing the Agent', async (t) => {
+  // Scout is a member of Project A only. An addressed input in Project B (which
+  // Scout does not belong to) must not run Scout in Project A's environment —
+  // and Project B refuses even to open a direct conversation with Scout, so the
+  // deterministic mention path is where the invalid target becomes durable.
   const harness = build({
     turns: [scriptedTurn('must not run')],
     projects: [
@@ -301,11 +302,9 @@ test('a non-member wake target fails explicitly and never falls back to another 
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-beta',
-    channel: 'direct',
+    scopeId: await harness.scopes.channel('project-beta'),
     author: { id: 'human-lead', kind: 'human' },
-    body: 'Scout, take this.',
-    recipients: ['scout'],
+    body: '@scout take this.',
     deliveryKey: 'non-member-1',
   });
 

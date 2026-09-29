@@ -22,6 +22,7 @@
  */
 
 import type { Message, WakeRequest } from '../collaboration/model.ts';
+import type { ProjectEvent } from '../collaboration/events.ts';
 import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
@@ -184,14 +185,16 @@ export function toRunView(run: AgentRun): RunView {
 /**
  * The client-facing shape of one Message.
  *
- * The conversation unit only: author, body, reply link, and ordering. A reply's
- * body is already the run's final assistant text, so tool calls, tool output, and
- * raw reasoning have no path into this view — they were never stored as a
- * Message in the first place.
+ * The conversation unit only: scope, author, body, reply link, and ordering.
+ * A reply's body is already the run's final assistant text, so tool calls,
+ * tool output, and raw reasoning have no path into this view — they were never
+ * stored as a Message in the first place.
  */
 export interface MessageView {
   readonly id: string;
   readonly projectId: string;
+  /** The conversation scope this Message was posted to (#95, #96). */
+  readonly scopeId: string;
   readonly channel: string;
   readonly authorId: string;
   readonly authorKind: string;
@@ -205,6 +208,7 @@ export function toMessageView(message: Message): MessageView {
   return {
     id: message.id,
     projectId: message.projectId,
+    scopeId: message.scopeId,
     channel: message.channel,
     authorId: message.author.id,
     authorKind: message.author.kind,
@@ -236,6 +240,43 @@ export function toWakeView(wake: WakeRequest): WakeView {
     reason: wake.reason,
     status: wake.status,
     ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one Project event (#96).
+ *
+ * A durable system-produced fact with its declared routing disposition — the
+ * evidence a human needs to answer "why did (or didn't) this route" without
+ * consulting internal logs (ADR-0007). Free text below has already passed the
+ * privacy boundary at publication, so no credential, host, or path shape can
+ * appear here.
+ */
+export interface ProjectEventView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly detail?: string;
+  readonly producerId: string;
+  readonly producerKind: string;
+  readonly disposition: string;
+  readonly responsibleAgentIds: readonly string[];
+  readonly createdAt: number;
+}
+
+export function toProjectEventView(event: ProjectEvent): ProjectEventView {
+  return {
+    id: event.id,
+    projectId: event.projectId,
+    kind: event.kind,
+    summary: event.summary,
+    ...(event.detail !== undefined ? { detail: event.detail } : {}),
+    producerId: event.producer.id,
+    producerKind: event.producer.kind,
+    disposition: event.disposition,
+    responsibleAgentIds: event.responsibleAgentIds,
+    createdAt: event.createdAt,
   };
 }
 

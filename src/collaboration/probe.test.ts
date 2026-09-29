@@ -42,6 +42,7 @@ import { RunOrchestrator } from '../run/orchestrator.ts';
 import { SqliteStore } from '../store/db.ts';
 import { EndpointCarrier, type WorkerConnection } from '../worker/carrier.ts';
 import { CollaborationCoordinator } from './coordinator.ts';
+import { buildCollaborationScopes, type CollaborationScopeHarness } from './scope-harness.ts';
 import type { SqliteCollaborationStore } from './sqlite-store.ts';
 
 /**
@@ -102,6 +103,7 @@ interface Probe {
   readonly coordinator: CollaborationCoordinator;
   readonly store: SqliteCollaborationStore;
   readonly sqlite: SqliteStore;
+  readonly scopes: CollaborationScopeHarness;
   readonly dbPath: string;
   close(): Promise<void>;
 }
@@ -149,8 +151,9 @@ async function startProbe(): Promise<Probe> {
     leaseTtlMs: 60_000,
   });
 
+  const scopes = buildCollaborationScopes({ projects });
   const coordinator = new CollaborationCoordinator({
-    projects,
+    scopes: scopes.scopes,
     store,
     runs: orchestrator,
   });
@@ -160,6 +163,7 @@ async function startProbe(): Promise<Probe> {
     coordinator,
     store,
     sqlite,
+    scopes,
     dbPath,
     close: async () => {
       await connection.close();
@@ -190,10 +194,9 @@ test('one addressed input produces one durable Agent-authored reply across a rea
   assert.notEqual(probe.connection.info.pid, process.pid, 'the worker is a different process');
 
   const delivered = await probe.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId: await probe.scopes.openDirect('project-sprout', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' },
-    body: 'What does the wake contract prefer?',
+    body: 'What does the deterministic wake contract prefer?',
     recipients: ['scout'],
     deliveryKey: 'delivery-1',
   });
@@ -253,8 +256,7 @@ test('a duplicate delivery key produces one durable input and at most one wake a
   t.after(() => probe.close());
 
   const request = {
-    projectId: 'project-sprout',
-    channel: 'direct' as const,
+    scopeId: await probe.scopes.openDirect('project-sprout', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' as const },
     body: 'Do the thing.',
     recipients: ['scout'],
@@ -285,9 +287,9 @@ test('a lost acknowledgement is recoverable: the wake is durable before its run 
   const probe = await startProbe();
   t.after(() => probe.close());
 
+  const scopeId = await probe.scopes.openDirect('project-sprout', ['human-lead', 'scout']);
   const delivered = await probe.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId,
     author: { id: 'human-lead', kind: 'human' },
     body: 'Answer this even if my client never hears back.',
     recipients: ['scout'],
@@ -298,8 +300,7 @@ test('a lost acknowledgement is recoverable: the wake is durable before its run 
   // Simulate the acknowledgement being lost and the caller retrying with the
   // same key: the durable input exists, so no second input or run is created.
   const retried = await probe.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId,
     author: { id: 'human-lead', kind: 'human' },
     body: 'Answer this even if my client never hears back.',
     recipients: ['scout'],

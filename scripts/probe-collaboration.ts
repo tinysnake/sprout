@@ -29,6 +29,7 @@ import { RunOrchestrator } from '../src/run/orchestrator.ts';
 import { SqliteStore } from '../src/store/db.ts';
 import { EndpointCarrier } from '../src/worker/carrier.ts';
 import { CollaborationCoordinator } from '../src/collaboration/coordinator.ts';
+import { buildCollaborationScopes } from '../src/collaboration/scope-harness.ts';
 
 function workerScript(): string {
   const workerServer = new URL('../src/worker/server.ts', import.meta.url).pathname;
@@ -86,6 +87,10 @@ const connection = await EndpointCarrier.start({
 const sqlite = new SqliteStore({ filename: dbPath });
 const store = sqlite.collaboration;
 const projects = new ProjectRegistry([project]);
+// Delivery is scope-governed (#96): the probe opens the Project-scoped direct
+// conversation its Message is posted to, exactly as the product does.
+const scopesHarness = buildCollaborationScopes({ projects });
+const directScopeId = await scopesHarness.openDirect('project-sprout', ['human-lead', 'scout']);
 const orchestrator = new RunOrchestrator({
   engines: async () => connection.adapters,
   agents: new AgentRegistry([
@@ -103,7 +108,7 @@ const orchestrator = new RunOrchestrator({
   leaseTtlMs: 60_000,
 });
 const coordinator = new CollaborationCoordinator({
-  projects,
+  scopes: scopesHarness.scopes,
   store,
   runs: orchestrator,
   onObservation: ({ observation }) =>
@@ -118,10 +123,9 @@ try {
   line();
 
   const input = {
-    projectId: 'project-sprout',
-    channel: 'direct' as const,
+    scopeId: directScopeId,
     author: { id: 'human-lead', kind: 'human' as const },
-    body: 'What does the M1 wake contract prefer?',
+    body: 'What does the deterministic wake contract prefer?',
     recipients: ['scout'],
     deliveryKey: 'probe-delivery-1',
   };
