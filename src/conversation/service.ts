@@ -180,6 +180,8 @@ export class ConversationScopeService {
    * remove.
    */
   readonly #preparing = new Set<string>();
+  /** Hold a scope's preparation turn until its Project persistence settles. */
+  readonly #preparationTurns = new Map<string, Promise<void>>();
 
   constructor(options: ConversationScopeServiceOptions) {
     this.#store = options.store;
@@ -202,31 +204,53 @@ export class ConversationScopeService {
    */
   async prepareProjectChannel(project: { readonly id: string }): Promise<PreparedProjectChannel> {
     const id = projectChannelScopeId(project.id);
-    const existing = await this.#store.get(id);
+    const previous = this.#preparationTurns.get(id);
+    let unlock!: () => void;
+    const turn = new Promise<void>((resolve) => { unlock = resolve; });
+    this.#preparationTurns.set(id, turn);
+    if (previous !== undefined) await previous;
+    const release = () => {
+      if (this.#preparationTurns.get(id) === turn) this.#preparationTurns.delete(id);
+      unlock();
+    };
     this.#preparing.add(id);
-    if (existing !== undefined && existing.kind === 'project') {
-      return {
-        commit: () => this.#preparing.delete(id),
-        rollback: () => this.#settlePreparation(id, false),
-      };
-    }
-    const now = this.#clock();
     try {
-      await this.#store.save({
-        id,
-        kind: 'project',
-        projectId: project.id,
-        createdAt: now,
-        updatedAt: now,
-      });
+      const existing = await this.#store.get(id);
+      if (existing !== undefined && existing.kind !== 'project') {
+        throw new Error(`refusing to replace non-Project scope ${id} during Project preparation`);
+      }
+      const created = existing === undefined;
+      if (created) {
+        const now = this.#clock();
+        await this.#store.save({
+          id,
+          kind: 'project',
+          projectId: project.id,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      let settled = false;
+      let rollingBack: Promise<void> | undefined;
+      return {
+        commit: () => {
+          if (settled) return;
+          settled = true;
+          this.#preparing.delete(id);
+          release();
+        },
+        rollback: () => {
+          if (settled) return rollingBack ?? Promise.resolve();
+          settled = true;
+          rollingBack = this.#settlePreparation(id, created).finally(release);
+          return rollingBack;
+        },
+      };
     } catch (error) {
       this.#preparing.delete(id);
+      release();
       throw error;
     }
-    return {
-      commit: () => this.#preparing.delete(id),
-      rollback: () => this.#settlePreparation(id, true),
-    };
   }
 
   /** Release one preparation; only a row this preparation created is removed. */

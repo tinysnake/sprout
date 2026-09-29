@@ -174,6 +174,8 @@ test('a failed Project persistence rolls back exactly the channel row its prepar
   const prepared = await f.scopes.prepareProjectChannel({ id: 'project-alpha' });
   assert.equal((await f.store.get(id))?.kind, 'project', 'the row exists during preparation');
   await prepared.rollback();
+  await prepared.rollback();
+  prepared.commit();
   assert.equal(await f.store.get(id), undefined, 'rollback removes the prepared row');
 
   // A channel that already existed before preparation is never removed: the
