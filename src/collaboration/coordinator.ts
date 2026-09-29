@@ -42,17 +42,19 @@
  * state for that scope is checked: an archived Project, a disbanded Working
  * group, or an ended membership refuses delivery with a typed error while the
  * durable history stays readable. The scope is the single source of the
- * Message's `projectId`, `channel`, and (for a direct conversation)
- * participants, so routing can never disagree with scope governance.
+ * Message's `projectId`, `channel`, and current participants (the pair for a
+ * direct conversation, the group's active participations for a Working group),
+ * so routing can never disagree with scope governance.
  *
  * ## Deterministic routing, no model (#96, ADR-0007)
  *
  * `planWake` and `planEventWake` are pure: direct recipients, exact
  * whole-token mentions, exact `@all` broadcasts, and `addressed` Project
- * events resolve against current Project member facts and never consult a
- * wake model or the Project's wake policy. Unaddressed inputs persist with a
- * durable suppressed observation instead of a guessed wake; wake-model-
- * assisted judgement arrives with routing batches (#97).
+ * events resolve against current Project member facts — and, for direct and
+ * Working-group scopes, against that scope's current participants — and never
+ * consult a wake model or the Project's wake policy. Unaddressed inputs
+ * persist with a durable suppressed observation instead of a guessed wake;
+ * wake-model-assisted judgement arrives with routing batches (#97).
  *
  * ## Project events (#96)
  *
@@ -665,11 +667,28 @@ export class CollaborationCoordinator {
   }
 }
 
-/** The scope facts the wake plan resolves a Message's targets against. */
+/**
+ * The scope facts the wake plan resolves a Message's targets against.
+ *
+ * This is where scope governance becomes routing: a Working group's current
+ * participations (active `memberships` only) are its channel's participants,
+ * exactly as ADR-0008 defines them, so group content can never fan out beyond
+ * the group. The Project channel carries no participant list because every
+ * current Project member is its participant.
+ */
 function scopeFacts(scope: ConversationScope): WakeScopeFacts {
-  return scope.kind === 'direct'
-    ? { kind: scope.kind, participants: scope.participants }
-    : { kind: scope.kind };
+  if (scope.kind === 'direct') {
+    return { kind: scope.kind, participants: scope.participants };
+  }
+  if (scope.kind === 'working-group') {
+    return {
+      kind: scope.kind,
+      participants: scope.memberships
+        .filter((membership) => membership.endedAt === undefined)
+        .map((membership) => membership.memberId),
+    };
+  }
+  return { kind: scope.kind };
 }
 
 /**

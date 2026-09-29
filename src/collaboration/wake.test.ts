@@ -40,6 +40,19 @@ function projectChannel() {
   return { members, scope: { kind: 'project' as const } };
 }
 
+/**
+ * A Working group of `human-lead` and `scout`. `forge` and `scribe` are current
+ * Project Agents outside the group: they must never receive a wake for this
+ * scope's content (ADR-0008, #96 F1).
+ */
+const workingGroup = {
+  members,
+  scope: {
+    kind: 'working-group' as const,
+    participants: ['human-lead', 'scout'],
+  },
+};
+
 test('an exact @id mention wakes exactly the mentioned member', () => {
   const plan = planWake(message({ body: 'please review, @forge' }), projectChannel());
   assert.deepEqual(plan.decisions, [{ agentId: 'forge', reason: 'agent-mention' }]);
@@ -173,25 +186,72 @@ test('a direct message to a non-member is reported, not silently dropped', () =>
   assert.match(plan.observations[0]?.detail ?? '', /not a member/);
 });
 
-test('a Working group channel uses the same exact mention and broadcast rules', () => {
-  const mentioned = planWake(
-    message({ scopeId: 'wg-1', channel: 'working-group', body: '@scribe take notes' }),
-    { members, scope: { kind: 'working-group' } },
+test('a Working group broadcast wakes only the group\'s current participant Agents', () => {
+  // `forge` and `scribe` are current Project Agents; only `scout` (plus the
+  // Human creator) participates in this group, so only `scout` may be woken by
+  // group-only content.
+  const plan = planWake(
+    message({ scopeId: 'wg-1', channel: 'working-group', body: '@all standup' }),
+    workingGroup,
   );
-  assert.deepEqual(mentioned.decisions, [{ agentId: 'scribe', reason: 'agent-mention' }]);
+  assert.deepEqual(
+    plan.decisions.map((decision) => decision.agentId).sort(),
+    ['scout'],
+    'an Agent outside the group never receives a wake for group-only content',
+  );
+  assert.ok(plan.decisions.every((decision) => decision.reason === 'broadcast'));
+  assert.deepEqual(
+    plan.observations,
+    [],
+    'a nonparticipant was never addressed, so its exclusion is not a failure',
+  );
+});
 
+test('a Working group mention of a Project Agent outside the group is a durable failure while the participant still wakes', () => {
+  const plan = planWake(
+    message({ scopeId: 'wg-1', channel: 'working-group', body: '@forge and @scout please review' }),
+    workingGroup,
+  );
+  assert.deepEqual(plan.decisions, [{ agentId: 'scout', reason: 'agent-mention' }]);
+  assert.deepEqual(plan.observations, [
+    {
+      agentId: 'forge',
+      status: 'failed',
+      reason: 'agent-mention',
+      detail: 'addressed target is not a participant of this working group',
+    },
+  ]);
+});
+
+test('a Working group mention of a Human participant is a known non-wakeable target', () => {
+  const plan = planWake(
+    message({ scopeId: 'wg-1', channel: 'working-group', body: '@operator please look' }),
+    { members, scope: { kind: 'working-group', participants: ['operator', 'scout'] } },
+  );
+  assert.deepEqual(plan.decisions, []);
+  assert.deepEqual(plan.observations, []);
+});
+
+test('a Working group without participant facts fails closed instead of widening to the Project', () => {
+  const scope = { kind: 'working-group' as const };
   const broadcast = planWake(
     message({ scopeId: 'wg-1', channel: 'working-group', body: '@all standup' }),
-    { members, scope: { kind: 'working-group' } },
+    { members, scope },
   );
-  assert.ok(broadcast.decisions.every((decision) => decision.reason === 'broadcast'));
-  assert.equal(broadcast.decisions.length, 3);
+  assert.deepEqual(broadcast.decisions, [], 'no participant facts means no broadcast recipient');
+
+  const mentioned = planWake(
+    message({ scopeId: 'wg-1', channel: 'working-group', body: '@scout hi' }),
+    { members, scope },
+  );
+  assert.deepEqual(mentioned.decisions, []);
+  assert.equal(mentioned.observations[0]?.status, 'failed');
 });
 
 test('an unaddressed input wakes nobody and records a durable suppression', () => {
   for (const scope of [
     { kind: 'project' as const },
-    { kind: 'working-group' as const },
+    { kind: 'working-group' as const, participants: ['human-lead', 'scout'] },
   ]) {
     const plan = planWake(message({ body: 'fyi, no question here' }), { members, scope });
     assert.deepEqual(plan.decisions, [], 'no member is woken by guesswork');

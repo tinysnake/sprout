@@ -24,9 +24,14 @@
  *   or no longer a Project member produces a durable per-target failure while
  *   every valid target continues. A Human member is a known non-wakeable
  *   target, not a failure: Humans are not woken by wake requests.
- * - A direct conversation additionally resolves against its scope's
- *   participants: a target outside the pair cannot be woken with that
- *   conversation's content.
+ * - A direct conversation and a Working group channel additionally resolve
+ *   against their scope's **current participants** — the pair, or the group's
+ *   active participations. A target outside them is an invalid target for that
+ *   scope and produces a durable per-target failure while valid participants
+ *   still wake, and a broadcast reaches only the scope's participant Agents:
+ *   content stays inside the scope that carries it (ADR-0008). The Project
+ *   channel has no narrower participant set — its participants are every
+ *   current Project member.
  */
 
 import type { ProjectEvent } from './events.ts';
@@ -51,8 +56,14 @@ export interface WakeMember {
 export interface WakeScopeFacts {
   /** The scope kind the Message was posted to. */
   readonly kind: 'project' | 'direct' | 'working-group';
-  /** The canonical participant pair; present only for a direct scope. */
-  readonly participants?: readonly [string, string];
+  /**
+   * The scope's current participants: the canonical pair for a direct
+   * conversation, the active participations for a Working group. Absent for
+   * the Project channel, whose participants are every current Project member.
+   * A participant-scoped kind that names no participants fails closed —
+   * missing facts never widen a fan-out.
+   */
+  readonly participants?: readonly string[];
 }
 
 export interface WakePlanInput {
@@ -97,39 +108,51 @@ export function parseAgentMentions(body: string, memberIds: readonly string[]): 
  *
  * Returns the addresses to wake plus the durable non-wake outcomes. The plan
  * never consults a model and never needs to: every branch is decided from the
- * input, its scope, and the Project's member facts.
+ * input, its scope (including its current participants), and the Project's
+ * member facts.
  */
 export function planWake(message: Message, input: WakePlanInput): WakePlan {
-  const resolver = new TargetResolver(message.projectId, message.author.id, input.members);
+  const scope = input.scope;
+  // Only the Project channel resolves over the whole Project. The direct pair
+  // and the Working group's participants gate every target; if a scoped kind
+  // arrives without a participant set, the gate is the empty set (fail
+  // closed — missing facts never widen a fan-out).
+  const participants = scope.kind === 'project' ? undefined : (scope.participants ?? []);
+  const resolver = new TargetResolver({
+    projectId: message.projectId,
+    excludedId: message.author.id,
+    members: input.members,
+    ...(participants !== undefined
+      ? {
+          participants,
+          scopeLabel: scope.kind === 'direct' ? 'direct conversation' : 'working group',
+        }
+      : {}),
+  });
   const decisions: WakeDecision[] = [];
   const observations: WakeObservation[] = [];
 
-  if (input.scope.kind === 'direct') {
-    const participants: readonly string[] = input.scope.participants ?? [];
+  if (scope.kind === 'direct') {
+    const pair: readonly string[] = participants ?? [];
     const targets =
       message.recipients.length > 0
         ? message.recipients
-        : participants.filter((memberId) => memberId !== message.author.id);
+        : pair.filter((memberId) => memberId !== message.author.id);
     for (const target of dedupe(targets)) {
-      if (!participants.includes(target)) {
-        observations.push({
-          agentId: target,
-          status: 'failed',
-          reason: 'direct-recipient',
-          detail: 'addressed target is not a participant of this direct conversation',
-        });
-        continue;
-      }
       resolver.resolve(target, 'direct-recipient', decisions, observations);
     }
     return { inputId: message.id, decisions, observations };
   }
 
   // The Project and Working group channels. A broadcast or an exact mention is
-  // deterministic and never reaches any model.
+  // deterministic and never reaches any model. In a Working group the
+  // broadcast resolves over the group's current participant Agents only: an
+  // Agent outside the group was never addressed, so it is excluded rather
+  // than failed.
   if (ALL_MENTION.test(message.body)) {
     for (const agentId of resolver.currentAgentIds) {
       if (agentId === message.author.id) continue;
+      if (!resolver.isParticipant(agentId)) continue;
       decisions.push({ agentId, reason: 'broadcast' });
     }
     return { inputId: message.id, decisions, observations };
@@ -166,7 +189,11 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
  * durably per target without blocking the valid ones.
  */
 export function planEventWake(event: ProjectEvent, input: { members: readonly WakeMember[] }): WakePlan {
-  const resolver = new TargetResolver(event.projectId, event.producer.id, input.members);
+  const resolver = new TargetResolver({
+    projectId: event.projectId,
+    excludedId: event.producer.id,
+    members: input.members,
+  });
   const decisions: WakeDecision[] = [];
   const observations: WakeObservation[] = [];
   if (event.disposition !== 'addressed') {
@@ -190,12 +217,31 @@ function dedupe(targets: readonly string[]): readonly string[] {
   return unique;
 }
 
+/** The resolver's scope facts: Project membership plus, optionally, one
+ * participant-scoped conversation's current participants. */
+interface TargetResolverOptions {
+  readonly projectId: string;
+  readonly excludedId: string;
+  readonly members: readonly WakeMember[];
+  /**
+   * The Message scope's current participants. Absent means the Project
+   * channel, whose participants are every current Project member.
+   */
+  readonly participants?: readonly string[];
+  /** The scope label a participant failure names (direct conversation / working group). */
+  readonly scopeLabel?: string;
+}
+
 /**
- * Resolves one input's targets against the Project's current membership.
+ * Resolves one input's targets against the scope's current participants and,
+ * beneath that, the Project's current membership.
  *
- * The classification is exactly three-way, so no target can vanish silently:
- * a current Agent wakes, a current Human member is a known non-wakeable
- * target, and anything else is a durable failure.
+ * The scope gate comes first: a target outside the conversation's current
+ * participants can never be woken with that scope's content, whatever its
+ * Project membership. The membership classification beneath it is exactly
+ * three-way, so no target can vanish silently: a current Agent wakes, a
+ * current Human member is a known non-wakeable target, and anything else —
+ * unknown or ended — is a durable failure.
  */
 class TargetResolver {
   readonly currentAgentIds: readonly string[];
@@ -203,18 +249,27 @@ class TargetResolver {
   readonly #members: readonly WakeMember[];
   readonly #projectId: string;
   readonly #excludedId: string;
+  readonly #participants: readonly string[] | undefined;
+  readonly #scopeLabel: string;
   readonly #seen = new Set<string>();
 
-  constructor(projectId: string, excludedId: string, members: readonly WakeMember[]) {
-    this.#projectId = projectId;
-    this.#excludedId = excludedId;
-    this.#members = members;
-    this.currentAgentIds = members
+  constructor(options: TargetResolverOptions) {
+    this.#projectId = options.projectId;
+    this.#excludedId = options.excludedId;
+    this.#members = options.members;
+    this.#participants = options.participants;
+    this.#scopeLabel = options.scopeLabel ?? 'conversation scope';
+    this.currentAgentIds = options.members
       .filter((member) => member.memberKind === 'agent' && member.endedAt === undefined)
       .map((member) => member.memberId);
-    this.currentMemberIds = members
+    this.currentMemberIds = options.members
       .filter((member) => member.endedAt === undefined)
       .map((member) => member.memberId);
+  }
+
+  /** Whether the member belongs to the scope this input was posted to. */
+  isParticipant(memberId: string): boolean {
+    return this.#participants === undefined || this.#participants.includes(memberId);
   }
 
   resolve(
@@ -225,14 +280,28 @@ class TargetResolver {
   ): void {
     if (target === this.#excludedId || this.#seen.has(target)) return;
     this.#seen.add(target);
+    if (!this.isParticipant(target)) {
+      // A target outside this conversation's participants is an invalid
+      // target for the scope: its content never wakes them, and the refusal
+      // is durable beside the valid wakes. The Project channel has no
+      // narrower participant set, so this gate only bites for direct and
+      // Working-group scopes.
+      observations.push({
+        agentId: target,
+        status: 'failed',
+        reason,
+        detail: `addressed target is not a participant of this ${this.#scopeLabel}`,
+      });
+      return;
+    }
     if (this.currentAgentIds.includes(target)) {
       decisions.push({ agentId: target, reason });
       return;
     }
     if (this.currentMemberIds.includes(target)) {
-      // A current Human member belongs to the Project but is never a wake
-      // target: wake requests admit Agent runs, and Human attention is not
-      // model- or wake-granted authority.
+      // A current Human member of the scope is a known non-wakeable target,
+      // not a failure: wake requests admit Agent runs, and Human attention is
+      // not model- or wake-granted authority.
       return;
     }
     const ended = this.#members.some(

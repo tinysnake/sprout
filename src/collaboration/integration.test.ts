@@ -22,6 +22,10 @@
  *   `addressed` event wakes its responsible Agent through the same
  *   persistence-before-admission path, a non-addressed one persists without
  *   any wake.
+ * - Working-group deterministic addresses resolve against the group's current
+ *   participants: an Agent outside the group never receives a wake or run for
+ *   group-only content, while a nonparticipant named explicitly keeps a
+ *   durable failure beside the valid participant's wake.
  */
 
 import { test } from 'node:test';
@@ -330,6 +334,116 @@ test('a Working group channel message routes and replies inside its own scope', 
   assert.equal(reply?.scopeId, groupId, 'the reply stays in the Working group channel');
   const prompt = harness.engine.sessions[0]?.prompts[0] ?? '';
   assert.match(prompt, /the Working group channel/);
+});
+
+
+test('a Working group broadcast and mention never wake Agents outside the group', async (t) => {
+  // The #96 F1 regression: `forge` and `scribe` are current Project Agents but
+  // not participants of this group, so group-only content must never produce a
+  // wake or a run for them, while the participant still wakes and an explicit
+  // nonparticipant mention keeps a durable failure beside it.
+  const harness = build({
+    turns: [scriptedTurn('Scout: noted.'), scriptedTurn('Scout: reviewed.')],
+  });
+  t.after(harness.close);
+  const groupId = (
+    await harness.scopes.scopes.createWorkingGroup({
+      projectId: 'project-sprout',
+      displayName: 'Docs',
+      creator: { memberId: 'human-lead', kind: 'human' },
+      memberIds: ['scout'],
+    })
+  ).id;
+
+  const broadcast = await harness.coordinator.deliver({
+    scopeId: groupId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'standup @all',
+    deliveryKey: 'wg-all-1',
+  });
+  assert.deepEqual(
+    broadcast.wakes.map((wake) => `${wake.agentId}:${wake.reason}`),
+    ['scout:broadcast'],
+    'the broadcast resolves over the group\'s current participant Agents only',
+  );
+  assert.equal(broadcast.admittedRunIds.length, 1);
+  assert.deepEqual(
+    harness.engine.requests.map((request) => request.agentId),
+    ['scout'],
+    'no run is ever submitted for an Agent outside the group',
+  );
+
+  const mention = await harness.coordinator.deliver({
+    scopeId: groupId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: '@forge and @scout please review',
+    deliveryKey: 'wg-mention-1',
+  });
+  assert.deepEqual(
+    mention.wakes.map((wake) => wake.agentId),
+    ['scout'],
+    'the participant still wakes',
+  );
+  assert.equal(mention.admittedRunIds.length, 1);
+  assert.deepEqual(harness.sqlite.collaboration.observations(mention.message.id), [
+    {
+      agentId: 'forge',
+      status: 'failed',
+      reason: 'agent-mention',
+      detail: 'addressed target is not a participant of this working group',
+    },
+  ]);
+  assert.deepEqual(
+    harness.engine.requests.map((request) => request.agentId),
+    ['scout', 'scout'],
+    'the nonparticipant never receives a run',
+  );
+});
+
+
+test('an ended Working group participation drops out of the group\'s routing participants', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Scout: here.')] });
+  t.after(harness.close);
+  const groupId = (
+    await harness.scopes.scopes.createWorkingGroup({
+      projectId: 'project-sprout',
+      displayName: 'Docs',
+      creator: { memberId: 'human-lead', kind: 'human' },
+      memberIds: ['scout', 'scribe'],
+    })
+  ).id;
+  await harness.scopes.scopes.endWorkingGroupMember(
+    groupId,
+    { memberId: 'human-lead', kind: 'human' },
+    'scribe',
+    { reason: 'off rotation' },
+  );
+
+  const broadcast = await harness.coordinator.deliver({
+    scopeId: groupId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'standup @all',
+    deliveryKey: 'wg-ended-all-1',
+  });
+  assert.deepEqual(
+    broadcast.wakes.map((wake) => wake.agentId),
+    ['scout'],
+    'only the current participation is wakeable',
+  );
+
+  const mention = await harness.coordinator.deliver({
+    scopeId: groupId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: '@scribe status?',
+    deliveryKey: 'wg-ended-mention-1',
+  });
+  assert.deepEqual(mention.wakes, []);
+  const observations = harness.sqlite.collaboration.observations(mention.message.id);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0]?.agentId, 'scribe');
+  assert.equal(observations[0]?.status, 'failed');
+  assert.match(observations[0]?.detail ?? '', /not a participant of this working group/);
+  assert.equal(harness.engine.requests.length, 1, 'the ended participation never receives a run');
 });
 
 

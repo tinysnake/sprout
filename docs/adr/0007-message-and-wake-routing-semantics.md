@@ -50,6 +50,15 @@ or no longer belongs to the Project produces a durable per-target routing
 failure while other valid targets continue; it never falls through to model
 judgement. Human notification semantics are outside this decision.
 
+A Working group channel follows these same rules resolved against the group's
+**current participants** (ADR-0008): its `@all` broadcast wakes every current
+participant Agent except the author, and its mentions wake participant Agents.
+A current Project member who is not a current participant of that group is an
+invalid target for that scope: naming it produces a durable per-target routing
+failure beside the valid participant wakes, never a wake, so group-only
+content never reaches an Agent outside the group. The Project channel needs no
+narrower gate because its participants are every current Project member.
+
 ## Eligible inputs and routing dispositions
 
 Under wake-model-assisted routing, an unaddressed Project-channel Message that
