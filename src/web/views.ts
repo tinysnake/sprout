@@ -1125,10 +1125,24 @@ export function toProjectEnvironmentAccessView(
 ): ProjectEnvironmentAccessView {
   return {
     projectId: sanitizeIdentifier(access.projectId, { fallback: 'unknown-project', kind: 'generic' }),
-    environmentInstanceId: sanitizeIdentifier(access.environmentInstanceId, {
-      fallback: 'unknown-environment',
-      kind: 'generic',
-    }),
+    // The Environment instance identity is this record's durable action key,
+    // and it is passed through exactly as stored — like the enrollment view,
+    // readiness facts, and every other projection of this identity (#94 H4).
+    // The operator supplies this identifier at enrollment and the same value
+    // already crosses this boundary on `/api/environments/enrollments`, in
+    // grant/access error messages, and in the request bodies this router
+    // accepts, so no new class of data reaches the wire. Sanitizing it here
+    // replaced a stored identifier whose shape the generic-identifier boundary
+    // refuses (a host-shaped name an operator legitimately registered) with
+    // the `unknown-environment` display fallback, and that label then leaked
+    // into every action: the page could not display, filter, nor remove the
+    // access it actually has. Free-text and host-path fields below keep their
+    // sanitization; only a corrupt non-string record still degrades to the
+    // harmless fallback, and only for display.
+    environmentInstanceId:
+      typeof access.environmentInstanceId === 'string' && access.environmentInstanceId !== ''
+        ? access.environmentInstanceId
+        : 'unknown-environment',
     status: access.status === 'ended' ? 'ended' : 'active',
     startedAt: access.startedAt,
     updatedAt: access.updatedAt,

@@ -88,13 +88,23 @@ const activeEnvironments = computed(() => overview.value?.environments.filter((e
 const createableAgents = computed(() => creationOptions.value?.agents.filter((agent) => agent.status === 'active') ?? []);
 const createableEnvironments = computed(() => creationOptions.value?.environments.filter((environment) => environment.enrollmentStatus === 'approved') ?? []);
 const unassignedAgents = computed(() => activeAgents.value.filter((agent) => !memberships.value.some((member) => member.memberId === agent.id && member.endedAt === undefined)));
-const unassignedEnvironments = computed(() => activeEnvironments.value.filter((environment) => !currentAccess.value.some((entry) => entry.environmentInstanceId === environment.environmentInstanceId)));
+const unassignedEnvironments = computed(() => activeEnvironments.value.filter((environment) => !currentAccess.value.some((entry) =>
+  // Access is assigned across both identifier spaces: a row stored under the
+  // listed Environment's instance identity or under its enrollment identity
+  // (#94 H4) counts as granted, so a granted Environment never reappears as
+  // an add choice; the server's duplicate check remains the backstop.
+  entry.environmentInstanceId === environment.environmentInstanceId ||
+  entry.environmentInstanceId === environment.id)));
 const projectArchived = computed(() => currentProject.value?.status === 'archived');
 const displayNameFor = (member: ProjectMembershipView) => member.memberKind === 'human'
   ? 'You'
   : overview.value?.agents.find((agent) => agent.id === member.memberId)?.displayName ?? member.memberId;
 const linkedAgentFor = (member: ProjectMembershipView) => overview.value?.agents.find((agent) => agent.id === member.memberId);
-const environmentFor = (id: string) => overview.value?.environments.find((environment) => environment.environmentInstanceId === id);
+/** Display-only fallback when an access row names an Environment absent from the current list; never an action key. */
+const UNKNOWN_ENVIRONMENT_LABEL = 'unknown-environment';
+const environmentFor = (id: string) => overview.value?.environments.find(
+  (environment) => environment.environmentInstanceId === id || environment.id === id,
+);
 
 const accessPrerequisite = computed(() => currentAccess.value.some((entry) =>
   entry.current !== undefined && environmentFor(entry.environmentInstanceId)?.enrollmentStatus === 'approved'));
@@ -440,6 +450,8 @@ async function confirmDialogAction() {
 }
 
 const closeDialog = () => { if (!submitting.value) dialog.value = null; };
+/** With no unassigned active Agent the add flow is pointless: message only, no form (#94 H3). */
+const addMemberExhausted = computed(() => dialog.value === 'add-member' && unassignedAgents.value.length === 0);
 </script>
 
 <template>
@@ -586,13 +598,13 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
               <div v-for="entry in overview.access" :key="`${entry.environmentInstanceId}-${entry.startedAt}`" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3">
                 <div class="flex flex-wrap items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? entry.environmentInstanceId }}</strong><Badge :variant="entry.status === 'active' ? 'success' : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
+                    <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? 'success' : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
                     <p class="mt-1 break-all font-mono text-[11px] text-[var(--text-secondary)]">{{ entry.current ? entry.current.kind === 'relative' ? entry.current.path : 'Worker-managed default workspace' : 'No current workspace binding' }}</p>
                     <p class="mt-1 text-[10px] text-[var(--text-muted)]">{{ environmentFor(entry.environmentInstanceId)?.platform ?? 'Environment status unavailable' }} · Workspace files stay on the Environment host.</p>
                   </div>
                   <div v-if="entry.status === 'active' && !projectArchived" class="flex shrink-0 flex-wrap gap-1">
                     <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="controlsDisabled" @click="openDialog('edit-workspace', '', entry.environmentInstanceId)">Change workspace</Button>
-                    <Button variant="ghost" size="icon" class="min-h-[44px] min-w-[44px] text-[var(--red-action)]" :aria-label="`End access to ${environmentFor(entry.environmentInstanceId)?.displayName ?? entry.environmentInstanceId}`" :disabled="controlsDisabled" @click="openDialog('end-access', '', entry.environmentInstanceId)"><Icon name="close" :size="14" /></Button>
+                    <Button variant="ghost" size="icon" class="min-h-[44px] min-w-[44px] text-[var(--red-action)]" :aria-label="`End access to ${environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL}`" :disabled="controlsDisabled" @click="openDialog('end-access', '', entry.environmentInstanceId)"><Icon name="close" :size="14" /></Button>
                   </div>
                 </div>
                 <details v-if="entry.history.length > 0" class="mt-2 border-t border-[var(--border-subtle)] pt-1 text-[10px] text-[var(--text-secondary)]">
@@ -644,13 +656,15 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'add-member' || dialog === 'edit-member'" :open="true" :title="dialog === 'add-member' ? 'Add Global Agent to Project' : 'Edit Project Membership'" description="Membership-specific responsibilities and collaboration instructions are versioned Project content." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <label v-if="dialog === 'add-member' && unassignedAgents.length > 0" class="flex flex-col gap-1 font-semibold">Active Global Agent<select v-model="selectedAgentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="agent in unassignedAgents" :key="agent.id" :value="agent.id">{{ agent.displayName }} · {{ agent.trafficLightReason }}</option></select></label>
-        <p v-else-if="dialog === 'add-member'" class="text-[var(--text-secondary)]">Every active Agent is already a member, or no active Agent exists. Create or restore an Agent in Manage → Agents first.</p>
-        <label class="flex flex-col gap-1 font-semibold">Responsibilities <span class="font-normal text-[var(--text-muted)]">Separate entries with commas.</span><input v-model="responsibilities" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /></label>
-        <label class="flex flex-col gap-1 font-semibold">Collaboration Instructions<textarea v-model="collaborationInstructions" rows="3" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
+        <p v-if="addMemberExhausted" class="text-[var(--text-secondary)]">Every active Agent is already a member, or no active Agent exists. Create or restore an Agent in Manage → Agents first.</p>
+        <template v-else>
+          <label v-if="dialog === 'add-member'" class="flex flex-col gap-1 font-semibold">Active Global Agent<select v-model="selectedAgentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="agent in unassignedAgents" :key="agent.id" :value="agent.id">{{ agent.displayName }} · {{ agent.trafficLightReason }}</option></select></label>
+          <label class="flex flex-col gap-1 font-semibold">Responsibilities <span class="font-normal text-[var(--text-muted)]">Separate entries with commas.</span><input v-model="responsibilities" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /></label>
+          <label class="flex flex-col gap-1 font-semibold">Collaboration Instructions<textarea v-model="collaborationInstructions" rows="3" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
+        </template>
         <p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p>
       </div>
-      <template #footer><Button variant="secondary" size="md" :disabled="submitting" @click="closeDialog">Cancel</Button><Button variant="primary" size="md" class="min-h-[44px]" :disabled="submitting || controlsDisabled || (dialog === 'add-member' && !selectedAgentId)" @click="submitMembership">{{ dialog === 'add-member' ? 'Add Agent Member' : 'Save Membership' }}</Button></template>
+      <template #footer><Button variant="secondary" size="md" :disabled="submitting" @click="closeDialog">Cancel</Button><Button v-if="!addMemberExhausted" variant="primary" size="md" class="min-h-[44px]" :disabled="submitting || controlsDisabled || (dialog === 'add-member' && !selectedAgentId)" @click="submitMembership">{{ dialog === 'add-member' ? 'Add Agent Member' : 'Save Membership' }}</Button></template>
     </Dialog>
 
     <Dialog v-if="dialog === 'add-environment' || dialog === 'edit-workspace'" :open="true" :title="dialog === 'add-environment' ? 'Assign Environment & Prepare Workspace' : 'Change Project Workspace'" description="Only a Worker-root-relative location or its managed default crosses this authority boundary; workspace files are never moved or deleted." @update:open="closeDialog">

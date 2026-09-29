@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
+import type { ProjectEnvironmentAccessView } from '../adapters/project-api.js';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
 const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
@@ -713,6 +714,12 @@ test('Add Agent explains the exhausted choice set without rendering an empty sel
     const dialog = doc.querySelector('[role="dialog"]') as HTMLElement;
     assert.match(dialog.textContent ?? '', /Every active Agent is already a member, or no active Agent exists/);
     assert.equal(dialog.querySelector('select'), null, 'no dead empty Agent control accompanies the explanation');
+    assert.doesNotMatch(dialog.textContent ?? '', /Responsibilities/,
+      'the pointless Responsibilities field is hidden with the selector when no Agent can be added');
+    assert.doesNotMatch(dialog.textContent ?? '', /Collaboration Instructions/,
+      'the pointless Collaboration Instructions field is hidden with the selector when no Agent can be added');
+    assert.equal([...dialog.querySelectorAll('button')].some((button) => button.textContent?.includes('Add Agent Member')), false,
+      'no add action is offered when the choice set is exhausted');
   } finally {
     app?.unmount();
     await cleanup();
@@ -765,6 +772,101 @@ test('Add Environment refreshes access and omits an already-assigned instance fr
     assert.ok(environmentSelect.options.length > 0);
     assert.equal([...environmentSelect.options].some((option) => option.value === readyEnvironment.environmentInstanceId), false,
       'an instance with active access is excluded even though its enrollment id differs');
+  } finally {
+    app?.unmount();
+    await cleanup();
+  }
+});
+
+test('Project Overview degrades an unlistable access row, ends it by its stored identifier, and keeps granted Environments out of the choices', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const base = new projectsModule.FixtureProjectService(options.agentService, options.environmentService);
+    // What the access authority can hand the page (#94 H4): one active row
+    // stored under the listed Environment's *enrollment* identity (the other
+    // identifier space), and one legacy row whose stored identifier matches
+    // nothing in the current Environments list.
+    const binding = { bindingId: 'binding-legacy', workspaceId: 'workspace-legacy', kind: 'default', boundAt: 900 } as const;
+    const legacyAccess: readonly ProjectEnvironmentAccessView[] = [
+      { projectId: 'project-sprout', environmentInstanceId: 'env-ready', status: 'active', startedAt: 1_000, updatedAt: 1_000, current: binding, history: [binding] },
+      { projectId: 'project-sprout', environmentInstanceId: 'mac-mini-1', status: 'active', startedAt: 900, updatedAt: 900, current: binding, history: [binding] },
+    ];
+    const endedIdentifiers: string[] = [];
+    const projectService = new Proxy(base, {
+      get(target, property) {
+        if (property === 'loadOverview') {
+          return async (id: string) => ({ ...(await target.loadOverview(id)), access: legacyAccess });
+        }
+        if (property === 'endProjectAccess') {
+          return (id: string, environmentInstanceId: string) => {
+            endedIdentifiers.push(environmentInstanceId);
+            const row = legacyAccess.find((entry) => entry.environmentInstanceId === environmentInstanceId);
+            if (row === undefined) return Promise.reject(new Error('unknown access row'));
+            return Promise.resolve({ ...row, status: 'ended' });
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const doc = dom.window.document;
+    doc.body.innerHTML = '<div id="app"></div>';
+    dom.window.history.replaceState(null, '', '/app/project/overview');
+    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(doc.getElementById('app')!);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+
+    // Add-flow filter first: the Environment granted under the enrollment
+    // identity is recognized as assigned across both identifier spaces and is
+    // absent from the add choices, while other approved Environments remain
+    // offered. Opening the dialog runs the stale-data refresh from the
+    // previous fix, so this also proves the refresh cooperates with the filter.
+    const assignButton = [...doc.querySelectorAll('.project-workspaces-card button')].find((button) => button.textContent?.includes('Assign Environment')) as HTMLButtonElement;
+    assert.ok(assignButton, 'the assign action remains available for the unassigned Environments');
+    assert.equal(assignButton.disabled, false, 'unassigned approved Environments keep the assign action usable');
+    assignButton.click();
+    await settle();
+    const addDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const environmentSelect = addDialog.querySelector('select') as HTMLSelectElement;
+    assert.ok(environmentSelect, 'other approved Environments remain selectable');
+    const optionValues = [...environmentSelect.options].map((option) => option.value);
+    assert.ok(optionValues.length > 0, 'the choice set is not empty');
+    assert.equal(optionValues.includes('inst-ready'), false,
+      'the granted Environment is absent from the add choices across both identifier spaces');
+    [...addDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Cancel'))?.click();
+    await settle();
+
+    const cards = () => [...doc.querySelectorAll('.project-workspaces-card .space-y-2 > div')] as HTMLElement[];
+    const cardWith = (name: string) => cards().find((card) => card.querySelector('strong')?.textContent === name);
+
+    // Display: a row stored under the enrollment identity resolves to the
+    // listed Environment's name, and a row that resolves to nothing degrades
+    // to a harmless display label — never to a raw identifier presented as a
+    // name, and never to a value that later drives an action.
+    const resolvedCard = cardWith('Mac Studio M2 Max');
+    assert.ok(resolvedCard, 'a row stored under the other identifier space resolves to the listed Environment name');
+    const legacyCard = cardWith('unknown-environment');
+    assert.ok(legacyCard, 'an access row that resolves to no listed Environment degrades to the harmless display label');
+    assert.doesNotMatch(legacyCard.textContent ?? '', /mac-mini-1/, 'the raw stored identifier is not presented as an Environment name');
+
+    // Removal issues the access row's own stored identifier — what the server
+    // matches on — not a display label and not a resolved value.
+    const endButton = legacyCard.querySelector('button[aria-label^="End access"]') as HTMLButtonElement;
+    assert.ok(endButton, 'the degraded row still exposes its removal action');
+    endButton.click();
+    await settle();
+    const confirmDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    [...confirmDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('End Access'))?.click();
+    await settle();
+    assert.deepEqual(endedIdentifiers, ['mac-mini-1'], "the end action carries the access row's own stored identifier");
   } finally {
     app?.unmount();
     await cleanup();
