@@ -105,6 +105,13 @@ const UNKNOWN_ENVIRONMENT_LABEL = 'unknown-environment';
 const environmentFor = (id: string) => overview.value?.environments.find(
   (environment) => environment.environmentInstanceId === id || environment.id === id,
 );
+function environmentNoticeVariant(environmentInstanceId: string): 'success' | 'warning' | 'danger' | 'secondary' {
+  const severity = environmentFor(environmentInstanceId)?.trafficLight;
+  if (severity === 'green') return 'success';
+  if (severity === 'yellow') return 'warning';
+  if (severity === 'red') return 'danger';
+  return 'secondary';
+}
 
 const accessPrerequisite = computed(() => currentAccess.value.some((entry) =>
   entry.current !== undefined && environmentFor(entry.environmentInstanceId)?.enrollmentStatus === 'approved'));
@@ -598,7 +605,7 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
               <div v-for="entry in overview.access" :key="`${entry.environmentInstanceId}-${entry.startedAt}`" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3">
                 <div class="flex flex-wrap items-start justify-between gap-2">
                   <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? 'success' : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
+                    <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? environmentNoticeVariant(entry.environmentInstanceId) : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
                     <p class="mt-1 break-all font-mono text-[11px] text-[var(--text-secondary)]">{{ entry.current ? entry.current.kind === 'relative' ? entry.current.path : 'Worker-managed default workspace' : 'No current workspace binding' }}</p>
                     <p class="mt-1 text-[10px] text-[var(--text-muted)]">{{ environmentFor(entry.environmentInstanceId)?.platform ?? 'Environment status unavailable' }} · Workspace files stay on the Environment host.</p>
                   </div>

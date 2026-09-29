@@ -1023,3 +1023,69 @@ test('Project Overview distinguishes unavailable, empty, failed, and unconfirmed
     await cleanup();
   }
 });
+
+test('Project Environment notices use the same severity treatment as Environment readiness', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const environmentModule = (await vite.ssrLoadModule('/src/modules/environments/adapters/fixture-adapter.ts')) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
+    const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const doc = dom.window.document;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    const environments = await new environmentModule.FixtureEnvironmentService().listEnvironments();
+    const readyEnvironment = environments.find((environment) => environment.id === 'env-ready');
+    assert.ok(readyEnvironment, 'the Project fixture access resolves to an approved Environment');
+
+    const cases = [
+      {
+        severity: 'green' as const,
+        reason: 'Environment readiness is confirmed.',
+        variantClass: 'bg-[var(--green-ready-bg)]',
+      },
+      {
+        severity: 'yellow' as const,
+        reason: 'Engine "agy" is unknown.',
+        variantClass: 'bg-[var(--yellow-attention-bg)]',
+      },
+      {
+        severity: 'red' as const,
+        reason: 'Environment readiness failed.',
+        variantClass: 'bg-[var(--red-action-bg)]',
+      },
+    ];
+
+    for (const { severity, reason, variantClass } of cases) {
+      doc.body.innerHTML = '<div id="app"></div>';
+      dom.window.history.replaceState(null, '', '/app/project/overview');
+      const environmentService = new environmentModule.FixtureEnvironmentService(environments.map((environment) =>
+        environment.id === readyEnvironment.id
+          ? { ...environment, trafficLight: severity, trafficLightReason: reason }
+          : environment,
+      ));
+      const agentService = new agentsModule.FixtureAgentService();
+      const projectService = new projectsModule.FixtureProjectService(agentService, environmentService);
+      const { app, router } = createSproutApp({
+        routerBase: '/app/',
+        environmentService,
+        agentService,
+        projectService,
+      });
+      await router.push('/project/overview');
+      await router.isReady();
+      app.mount(doc.getElementById('app')!);
+      await settle();
+
+      try {
+        const notice = [...doc.querySelectorAll('.project-workspaces-card span')]
+          .find((element) => element.textContent?.trim() === reason);
+        assert.ok(notice, `the original readiness notice is preserved: ${reason}`);
+        assert.ok(notice.className.includes(variantClass), `${severity} readiness uses ${variantClass}`);
+      } finally {
+        app.unmount();
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
