@@ -120,17 +120,24 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   },
   { pattern: /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
   { pattern: /-----BEGIN [A-Z0-9 ]+-----/g, replacement: '<redacted-pem-block>' },
+  // A URL is one sensitive value; consume it before a slash inside the URL
+  // can be mistaken for a standalone POSIX path.
+  { pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s"')`\]]+/gi, replacement: '<redacted-url>' },
   // Absolute host paths run before the credential rules: a path whose basename
   // happens to be a credential word (`/secret`) is a host path, and removing it
   // first stops the bare-space rule from treating the following prose as its
   // value. The POSIX rule is general on purpose: any `/`-rooted path is a host
   // path, so `/srv/...`, `/data/...`, and a bare `/secret` are removed rather
   // than only the enumerated system roots.
+  // Consume drives before POSIX roots so a slash-style Windows path is not
+  // mistaken for a POSIX path starting after its drive colon.
+  { pattern: /\b[A-Za-z]:[\\/][^\s"')`\]]*/g, replacement: '<redacted-path>' },
   {
-    pattern: /(^|[\s"'(=`])((?:\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*))/g,
+    // A path may follow punctuation such as a label colon without whitespace.
+    // Do not start halfway through a word or an existing relative path.
+    pattern: /(^|[^A-Za-z0-9._~/-])(\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*)/g,
     replacement: '$1<redacted-path>',
   },
-  { pattern: /\b[A-Za-z]:\\[^\s"')`\]]*/g, replacement: '<redacted-path>' },
   { pattern: /\\\\[^\s"')`\]]+/g, replacement: '<redacted-path>' },
   // A named credential assignment is removed as a **whole** key/value pair, not
   // punctuation-stripped: the keyword names the secret and the value must not
@@ -145,6 +152,12 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   // `private key <value>` assignment cannot survive after the keyword is
   // replaced. An earlier rework replaced only the keyword and left the value,
   // which the review reproduced (`private key AAAAbbbb`).
+  // Authorization is a header, not a named credential keyword. Redact its
+  // scheme and value together, including Basic and unknown auth schemes.
+  {
+    pattern: /\bauthorization\b\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9_-]*\s+)?[^\s,;]+/gi,
+    replacement: '<redacted-credential>',
+  },
   {
     pattern: new RegExp(
       String.raw`\b(?i:passphrase|passcode)\b\s*(?::|=|(?i:is|was|are|were))?\s*${CREDENTIAL_VALUE}(?:\s+[^\s,;]+){0,3}`,
@@ -183,7 +196,6 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   { pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, replacement: '<redacted-token>' },
   { pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{12,}/g, replacement: 'Bearer <redacted-credential>' },
   // Network identity: URLs, user@host, IPv4/IPv6, private host suffixes.
-  { pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s"')`\]]+/gi, replacement: '<redacted-url>' },
   { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\b/g, replacement: '<redacted-identity>' },
   { pattern: /\b\d{1,3}(?:\.\d{1,3}){3}\b/g, replacement: '<redacted-address>' },
   // IPv6 only when it is unambiguous: a `::` compresses, or a group contains a

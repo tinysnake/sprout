@@ -1011,6 +1011,25 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       if (!columns.some((column) => column.name === 'judgement')) {
         db.exec('ALTER TABLE collaboration_routing_attempts ADD COLUMN judgement TEXT;');
       }
+      // v20 did not constrain attempt numbers. Repeated restarts could record
+      // several calls with the same number. Preserve every historical call and
+      // its status, assigning chronological ordinals only in affected batches.
+      // Recovery counts rows, so no duplicate can create an unearned retry.
+      db.exec(`
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY batch_id ORDER BY started_at, rowid
+          ) AS ordinal
+          FROM collaboration_routing_attempts
+          WHERE batch_id IN (
+            SELECT batch_id FROM collaboration_routing_attempts
+            GROUP BY batch_id, attempt_number HAVING COUNT(*) > 1
+          )
+        )
+        UPDATE collaboration_routing_attempts
+          SET attempt_number = (SELECT ordinal FROM ranked WHERE ranked.id = collaboration_routing_attempts.id)
+          WHERE id IN (SELECT id FROM ranked);
+      `);
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
         ON collaboration_routing_attempts(batch_id, attempt_number);`);
     },

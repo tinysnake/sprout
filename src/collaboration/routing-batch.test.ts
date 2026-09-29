@@ -666,7 +666,7 @@ test('the frozen routing context contains only bounded Project-shared facts and 
   await harness.coordinator.deliver({
     scopeId: channelScope,
     author: { id: 'operator', kind: 'human' },
-    body: 'please triage this',
+    body: 'please triage this location:/home/example/PRIVATE_PATH_ALPHA location:C:/Users/Example/PRIVATE_PATH_BETA Authorization: Basic SYNTHETIC_BASIC_SECRET',
     deliveryKey: 'pc2',
   });
 
@@ -675,6 +675,10 @@ test('the frozen routing context contains only bounded Project-shared facts and 
 
   const batches = await harness.coordinator.listRoutingBatches('project-sprout');
   const context = batches[0]!.context;
+  assert.equal(harness.modelCalls[0]?.context, context, 'the model receives the stored frozen snapshot');
+  for (const marker of ['PRIVATE_PATH_ALPHA', 'PRIVATE_PATH_BETA', 'SYNTHETIC_BASIC_SECRET']) {
+    assert.ok(!context.includes(marker), `${marker} reached the model`);
+  }
   assert.ok(!context.includes('SECRET_DIRECT_MESSAGE_TOKEN'), 'direct Messages are excluded');
   assert.ok(context.includes('please triage this'), 'the batch input is included');
   assert.ok(context.includes('the goal moves forward'), 'bounded recent channel context is included');

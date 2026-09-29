@@ -42,6 +42,46 @@ test('schema constants declare supported version range', () => {
   });
 });
 
+test('v20 duplicate routing attempts migrate without losing calls or granting a fresh retry', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sprout.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 20;
+      CREATE TABLE collaboration_routing_attempts (
+        id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+        model_id TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL,
+        status TEXT NOT NULL, error_kind TEXT, error_detail TEXT
+      );
+      INSERT INTO collaboration_routing_attempts VALUES
+        ('first', 'batch-a', 1, 'model', 10, 11, 'failed', 'timeout', 'first failure'),
+        ('second', 'batch-a', 1, 'model', 12, 13, 'failed', 'timeout', 'second failure'),
+        ('third', 'batch-a', 2, 'model', 14, 15, 'failed', 'timeout', 'third failure'),
+        ('other', 'batch-b', 1, 'model', 10, 11, 'failed', 'timeout', 'other failure');
+    `);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: path });
+    try {
+      assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
+      const attempts = await store.collaboration.listRoutingAttempts('batch-a');
+      assert.deepEqual(attempts.map((attempt) => [attempt.id, attempt.attemptNumber, attempt.errorDetail]), [
+        ['first', 1, 'first failure'], ['second', 2, 'second failure'], ['third', 3, 'third failure'],
+      ]);
+      assert.equal(attempts.length > 2, true, 'all spent calls remain visible to recovery');
+      assert.deepEqual((await store.collaboration.listRoutingAttempts('batch-b')).map((attempt) => attempt.attemptNumber), [1]);
+      assert.throws(() => store.db.prepare(`INSERT INTO collaboration_routing_attempts
+        (id, batch_id, attempt_number, model_id, started_at, finished_at, status)
+        VALUES ('duplicate', 'batch-a', 2, 'model', 16, 17, 'started')`).run());
+    } finally { store.close(); }
+
+    const reopened = new SqliteStore({ filename: path });
+    try {
+      assert.equal((await reopened.collaboration.listRoutingAttempts('batch-a')).length, 3);
+    } finally { reopened.close(); }
+  });
+});
+
 test('v17 recovery migration makes a safety copy and preserves v16 run rows without invented proof', async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, 'sprout.db');

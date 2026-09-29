@@ -190,6 +190,32 @@ test('every model-visible free-text source is redacted before the snapshot is fr
   assert.match(plan.context, /<redacted-path>/);
 });
 
+test('ordinary credential and path encodings are excluded from input, recent, and contract snapshots', () => {
+  const canaries = [
+    'location:/home/example/PRIVATE_PATH_ALPHA',
+    'location:C:/Users/Example/PRIVATE_PATH_BETA',
+    'Authorization: Basic SYNTHETIC_BASIC_SECRET',
+  ];
+  const message = { id: 'ctx-sensitive', authorId: 'operator', authorKind: 'human', createdAt: 900,
+    body: `recent ${canaries.join(' ')}` };
+  const plan = freeze([input('msg-sensitive', { content: `input ${canaries.join(' ')}` })], {
+    contract: { ...contract, goal: `goal ${canaries.join(' ')}`,
+      rules: [`rule ${canaries.join(' ')}`], candidates: [{ agentId: 'scout',
+        responsibilities: [`role ${canaries.join(' ')}`],
+        collaborationInstructions: `instructions ${canaries.join(' ')}` }] },
+    recentContext: [message],
+  })[0]!;
+  assert.ok(plan.manifest.recentContextIds.includes(message.id), 'recent context must actually be rendered');
+  assert.match(plan.context, /\[channel \| id=ctx-sensitive/);
+  assert.match(plan.context, /goal location:<redacted-path>/);
+  assert.match(plan.context, /role location:<redacted-path>/);
+  for (const text of [plan.context, plan.inputs[0]!.excerpt, JSON.stringify(plan.manifest)]) {
+    for (const marker of ['PRIVATE_PATH_ALPHA', 'PRIVATE_PATH_BETA', 'SYNTHETIC_BASIC_SECRET']) {
+      assert.ok(!text.includes(marker), `${marker} reached the frozen snapshot`);
+    }
+  }
+});
+
 test('large Project narrative and candidate roster never raise the declared aggregate budget', () => {
   const plans = freeze([input('msg-one'), input('msg-two')], {
     contract: { ...contract, goal: 'G'.repeat(40_000), rules: ['R'.repeat(40_000)],
