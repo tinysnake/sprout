@@ -289,3 +289,125 @@ test('a schema-v18 database forward-migrates to scoped inputs and Project events
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('a routing window freezes once and a batch settles once, even if asked twice', async () => {
+  await withDatabase(async (store) => {
+    // One eligible input opens the fixed window durably.
+    const stored = await store.postMessage({
+      message: message({ id: 'msg-r1', deliveryKey: 'delivery-r1' }),
+      plan: { inputId: 'msg-r1', decisions: [], observations: [] },
+      now: 10,
+      collect: { intervalMs: 30_000 },
+    });
+    assert.equal(stored.window?.deadlineAt, 30_010, 'the deadline is fixed at open time');
+    assert.equal(stored.window?.cursor, 'msg-r1');
+
+    const bounds = {
+      inputContentChars: 4_000,
+      contextMessageChars: 1_000,
+      recentContextMessages: 12,
+      totalContextChars: 48_000,
+    };
+    const plan = {
+      batchId: 'bat-r1',
+      splitIndex: 0,
+      splitCount: 1,
+      cutoffAt: 30_010,
+      bounds,
+      manifest: {
+        projectId: 'project-sprout',
+        windowId: stored.window!.id,
+        cutoffAt: 30_010,
+        policy: 'wake-model-assisted' as const,
+        bounds,
+        inputs: [
+          {
+            inputId: 'msg-r1',
+            kind: 'message' as const,
+            authorId: 'human-lead',
+            createdAt: 10,
+            scopeId: 'dm-1',
+            candidates: ['scout'],
+            excerptChars: 5,
+            contentChars: 5,
+            truncated: false,
+          },
+        ],
+        candidates: [
+          { agentId: 'scout', responsibilities: [], collaborationInstructions: '' },
+        ],
+        tasks: [],
+        recentContextIds: [],
+        ancestorContextIds: [],
+        exclusions: ['direct Messages and their replies'],
+        contextChars: 96,
+      },
+      context: 'frozen context',
+      inputs: [
+        {
+          batchId: 'bat-r1',
+          inputId: 'msg-r1',
+          position: 0,
+          excerpt: 'hello',
+          truncated: false,
+          excerptChars: 5,
+          contentChars: 5,
+        },
+      ],
+    };
+
+    // The freeze is a compare-and-set: a second freezer gets no batches.
+    const frozen = await store.freezeRoutingWindow({ windowId: stored.window!.id, now: 30_010, batches: [plan] });
+    assert.equal(frozen.length, 1);
+    const again = await store.freezeRoutingWindow({ windowId: stored.window!.id, now: 31_000, batches: [plan] });
+    assert.deepEqual(again, [], 'the second freeze observes the closed window');
+    assert.equal((await store.listRoutingBatches()).length, 1, 'one window, one batch — never split twice');
+
+    // The settle is a compare-and-set: outcomes and wakes are written once.
+    const outcome = {
+      batchId: 'bat-r1',
+      inputId: 'msg-r1',
+      status: 'selected' as const,
+      assignments: [{ agentId: 'scout', rationale: 'Fits the investigation.' }],
+      settledAt: 30_010,
+    };
+    const wake = {
+      id: 'wake-bat-r1-scout',
+      inputId: 'bat-r1',
+      batchId: 'bat-r1',
+      projectId: 'project-sprout',
+      agentId: 'scout',
+      reason: 'routing-model' as const,
+      status: 'pending' as const,
+      idempotencyKey: 'bat-r1:scout',
+      createdAt: 30_010,
+    };
+    await store.settleRoutingBatch({
+      batchId: 'bat-r1',
+      status: 'routed',
+      outcomes: [outcome],
+      wakes: [wake],
+      now: 30_010,
+    });
+    await store.settleRoutingBatch({
+      batchId: 'bat-r1',
+      status: 'failed',
+      outcomes: [outcome, { ...outcome, inputId: 'msg-ghost' }],
+      wakes: [wake, { ...wake, id: 'wake-ghost', idempotencyKey: 'bat-r1:ghost', agentId: 'ghost' }],
+      now: 40_000,
+    });
+
+    assert.equal((await store.listRoutingBatches())[0]?.status, 'routed', 'the first settle wins');
+    assert.equal((await store.listRoutingOutcomes('bat-r1')).length, 1, 'no duplicate outcomes');
+    const wakes = await store.listWakeRequests();
+    assert.equal(wakes.length, 1, 'at most one WakeRequest per batch — never a second judge');
+    assert.equal(wakes[0]?.agentId, 'scout');
+    assert.equal((await store.listRoutingAttempts('bat-r1')).length, 0);
+
+    await assert.rejects(
+      store.settleRoutingBatch({ batchId: 'bat-missing', status: 'routed', outcomes: [], now: 1 }),
+      /unknown routing batch/,
+      'an unknown id stays a loud failure, not a silent no-op',
+    );
+  });
+});

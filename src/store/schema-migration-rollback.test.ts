@@ -156,7 +156,7 @@ test('directly constructed domain adapters enforce schema coordination and safet
     // 2. Direct SqliteLeaseStore on a future schema throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 20; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec('PRAGMA user_version = 21; CREATE TABLE dummy (id TEXT);');
     seedFuture.close();
 
     assert.throws(

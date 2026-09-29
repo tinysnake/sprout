@@ -334,3 +334,58 @@ for (const disposition of ['wake-eligible', 'informational', 'human-action-requi
     assert.deepEqual(plan.observations, []);
   });
 }
+
+// --- wake-model-assisted eligibility (#97) ---
+
+test('under wake-model-assisted, an unaddressed channel input is batch-eligible instead of suppressed', () => {
+  for (const scope of [
+    { kind: 'project' as const },
+    { kind: 'working-group' as const, participants: ['human-lead', 'scout'] },
+  ]) {
+    const plan = planWake(message({ body: 'fyi, no question here' }), {
+      members,
+      scope,
+      wakePolicy: 'wake-model-assisted',
+    });
+    assert.deepEqual(plan.decisions, [], 'the window path decides, not this plan');
+    assert.equal(plan.batchEligible, true, 'the input joins the Project routing window');
+    assert.deepEqual(
+      plan.observations,
+      [],
+      'no early suppression: the batch outcome is this input\'s durable evidence',
+    );
+  }
+});
+
+test('deterministic addressing bypasses batch eligibility even under wake-model-assisted', () => {
+  const plan = planWake(message({ body: 'please review, @forge' }), {
+    ...projectChannel(),
+    wakePolicy: 'wake-model-assisted',
+  });
+  assert.deepEqual(plan.decisions, [{ agentId: 'forge', reason: 'agent-mention' }]);
+  assert.equal(plan.batchEligible, undefined, 'explicit addresses never wait for a window');
+});
+
+test('a direct conversation never becomes batch-eligible under wake-model-assisted', () => {
+  const plan = planWake(
+    message({ scopeId: 'dm-3', channel: 'direct', body: 'ping' }),
+    {
+      members,
+      scope: { kind: 'direct', participants: ['operator', 'human-lead'] },
+      wakePolicy: 'wake-model-assisted',
+    },
+  );
+  assert.equal(plan.batchEligible, undefined, 'direct Messages stay outside every routing window');
+  assert.deepEqual(plan.decisions, [], 'both participants are Human');
+});
+
+test('a wake-eligible event is batch-eligible only under wake-model-assisted', () => {
+  const input = { members, event: event({ disposition: 'wake-eligible', responsibleAgentIds: [] }) };
+  const assisted = planEventWake(input.event, { members, wakePolicy: 'wake-model-assisted' });
+  assert.deepEqual(assisted.decisions, []);
+  assert.equal(assisted.batchEligible, true, 'the #96 follow-up: wake-eligible reaches a batch');
+
+  const explicit = planEventWake(input.event, { members });
+  assert.equal(explicit.batchEligible, undefined, 'explicit-only keeps events durable and silent');
+  assert.deepEqual(explicit.observations, []);
+});

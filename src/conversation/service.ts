@@ -67,6 +67,11 @@ import {
 } from './model.ts';
 import type { ConversationScopeStore } from './store.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
+import {
+  sanitizeRoutingIntervalMs,
+  sanitizeWakePolicy,
+  type WakePolicy,
+} from '../project/authority-model.ts';
 
 /** One current or ended member of a Project, as a scope validates against. */
 export interface ConversationProjectMemberFacts {
@@ -74,6 +79,13 @@ export interface ConversationProjectMemberFacts {
   readonly memberKind: 'human' | 'agent';
   readonly endedAt?: number;
   readonly endedReason?: string;
+  /**
+   * The member's Project-declared facts (#97): routing context presents them
+   * to the wake model as Project-shared responsibility evidence. Absent for a
+   * host-configured M1 Project that declares none.
+   */
+  readonly responsibilities?: readonly string[];
+  readonly collaborationInstructions?: string;
 }
 
 /**
@@ -91,6 +103,16 @@ export interface ConversationProjectFacts {
   readonly goal: string;
   readonly rules: readonly string[];
   readonly members: readonly ConversationProjectMemberFacts[];
+  /**
+   * The Project's wake policy and fixed routing interval (#97).
+   *
+   * Optional on the port so an existing fixture that predates assisted routing
+   * keeps compiling; readers apply the ADR-0007 defaults (`explicit-only`,
+   * 30 seconds) — the migration and template defaults — when a Project fact
+   * source does not declare them.
+   */
+  readonly wakePolicy?: WakePolicy;
+  readonly routingIntervalMs?: number;
 }
 
 /**
@@ -335,6 +357,34 @@ export class ConversationScopeService {
     projectId: string,
   ): Promise<readonly ConversationProjectMemberFacts[] | undefined> {
     return (await this.#projects.projectFacts(projectId))?.members;
+  }
+
+  /**
+   * The Project's wake policy and fixed routing interval (#97), with the
+   * ADR-0007 defaults applied when the fact source declares neither
+   * (`explicit-only`, 30 seconds — the migration, template, and new-Project
+   * defaults). Returns `undefined` for an unknown Project so a caller can
+   * distinguish "no such Project" from "defaults".
+   */
+  async routingPolicy(
+    projectId: string,
+  ): Promise<{ readonly wakePolicy: WakePolicy; readonly intervalMs: number } | undefined> {
+    const facts = await this.#projects.projectFacts(projectId);
+    if (facts === undefined) return undefined;
+    return {
+      wakePolicy: sanitizeWakePolicy(facts.wakePolicy),
+      intervalMs: sanitizeRoutingIntervalMs(facts.routingIntervalMs),
+    };
+  }
+
+  /**
+   * The Project-shared contract facts a routing attempt freezes (#97): the
+   * Project goal and rules plus every member's declared responsibilities and
+   * collaboration instructions. Read-only; the Project authority stays the
+   * one owner of these facts.
+   */
+  async projectContract(projectId: string): Promise<ConversationProjectFacts | undefined> {
+    return this.#projects.projectFacts(projectId);
   }
 
   /** One Working group by identity, after materializing participation ends. */

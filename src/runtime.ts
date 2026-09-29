@@ -12,6 +12,7 @@ import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
 } from './collaboration/coordinator.ts';
+import { curateOpenTaskFacts } from './collaboration/routing.ts';
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
@@ -669,9 +670,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             contentVersion: authority.content.currentVersion,
             goal: content.goal,
             rules: [...content.rules],
+            wakePolicy: content.wakePolicy,
+            routingIntervalMs: content.routingIntervalMs,
             members: content.memberships.map((membership) => ({
               memberId: membership.memberId,
               memberKind: membership.memberKind,
+              responsibilities: [...membership.responsibilities],
+              collaborationInstructions: membership.collaborationInstructions,
               ...(membership.endedAt !== undefined ? { endedAt: membership.endedAt } : {}),
               ...(membership.endedReason !== undefined
                 ? { endedReason: membership.endedReason }
@@ -687,6 +692,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           contentVersion: 0,
           goal: configured.goal,
           rules: [...configured.rules],
+          // A host-configured M1 Project carries no policy record: it projects
+          // the ADR-0007 defaults, exactly like migration and the template.
+          wakePolicy: 'explicit-only' as const,
+          routingIntervalMs: 30_000,
           members: [
             // The local Human is a member of every Project (ADR-0008); the M1
             // projection carries no durable membership rows, so it attributes
@@ -695,6 +704,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             ...configured.memberships.map((membership) => ({
               memberId: membership.agentId,
               memberKind: 'agent' as const,
+              responsibilities: [...membership.responsibilities],
+              collaborationInstructions: membership.collaborationInstructions,
             })),
           ],
         };
@@ -1070,20 +1081,27 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     /**
      * The collaboration coordinator: scope-governed Messages, Project events,
-     * deterministic routing, and automatic final-result projection (#26, #96).
+     * deterministic routing, collection windows, wake-model-assisted batches,
+     * and automatic final-result projection (#26, #96, #97).
      *
      * It shares the process's one durable store and the run orchestrator, so a
-     * reply is projected from the same run record the core persisted. Routing
-     * is deterministic — direct recipients, exact mentions, exact broadcasts,
-     * and addressed Project events resolve against the Project's member facts
-     * through the conversation-scope service, with no wake model consulted
-     * (ADR-0007). An unaddressed input stays durable with a visible suppressed
-     * observation; wake-model-assisted batches arrive with #97.
+     * reply is projected from the same run record the core persisted. Direct
+     * recipients, exact mentions, exact broadcasts, and addressed Project
+     * events resolve deterministically against the Project's member facts
+     * through the conversation-scope service (ADR-0007). An eligible
+     * unaddressed input collects into the Project's durable routing window;
+     * each frozen batch is judged by the composed wake model when one exists
+     * (configuring a real low-cost wake model remains future work) and fails
+     * closed with visible per-input outcomes when none does. Curated open Task
+     * state (state, lead, blocker — never Environment, lease, or run facts)
+     * joins the bounded Project-shared routing context.
      */
     const collaboration = new CollaborationCoordinator({
       scopes: conversationScopes,
       store: stores.collaboration,
       runs: orchestrator,
+      routingTaskFacts: async (projectId) =>
+        curateOpenTaskFacts(await durableStores.tasks.list({ projectId })),
       onObservation:
         options.onObservation ??
         (({ inputId, observation }) => {

@@ -18,6 +18,16 @@ export interface IdFactory {
   projectEvent(): string;
   /** Ids for durable Tasks (#28). */
   task(): string;
+  /**
+   * Ids for durable routing windows, batches, and attempts (#97).
+   *
+   * Optional so a hand-rolled factory that only names runs and tasks stays
+   * valid; the collaboration coordinator falls back to its own factory for
+   * routing identity when the supplied one does not provide them.
+   */
+  routingWindow?(): string;
+  routingBatch?(): string;
+  routingAttempt?(): string;
 }
 
 export function createIdFactory(): IdFactory {
@@ -27,5 +37,8 @@ export function createIdFactory(): IdFactory {
     message: () => `msg-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     projectEvent: () => `evt-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     task: () => `task-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingWindow: () => `win-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingBatch: () => `bat-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingAttempt: () => `att-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
   };
 }
