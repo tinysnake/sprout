@@ -155,6 +155,19 @@ export class ProductionAgentService implements AgentManagementService {
     return composeInstance(agent, await this.#safeProjection(id));
   }
 
+  async compatibilityForEnvironment(
+    agentId: string,
+    environmentInstanceId: string,
+  ): Promise<AgentCompatibilitySummary | undefined> {
+    try {
+      return compatibilityOf(await this.#adapter.compatibility(agentId, environmentInstanceId));
+    } catch {
+      // Compatibility is an observation, not a guessed yes/no. Its caller can
+      // distinguish unavailable evidence from an evaluated incompatibility.
+      return undefined;
+    }
+  }
+
   async createAgent(input: CreateAgentInput): Promise<void> {
     await this.#adapter.createAgent({
       displayName: input.displayName,

@@ -132,18 +132,61 @@ test('creation and content edits send POST JSON command bodies', async () => {
   await adapter.createProject({
     id: 'project-sprout',
     displayName: 'Sprout',
+    // Explicit empties must survive serialization: an omitted key would make
+    // authority restore template content instead of honoring the clear (F4).
+    goal: '',
+    rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
+    routingIntervalMs: 45_000,
+    environmentAssignments: [{ environmentInstanceId: 'inst-ready', workspace: { kind: 'default' } }],
   });
-  await adapter.updateProjectContent('project-sprout', { goal: null, rules: ['New rule'] });
+  await adapter.updateProjectContent('project-sprout', {
+    goal: null,
+    completionGuidance: 'Require proof.',
+    rules: ['New rule'],
+    routingIntervalMs: 45_000,
+  });
   const [create, edit] = calls;
   assert.equal(create?.init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(create?.init?.body)), {
     id: 'project-sprout',
     displayName: 'Sprout',
+    goal: '',
+    rules: [],
     agentMemberships: [{ agentId: 'agent-scout', responsibilities: ['Investigate'] }],
+    routingIntervalMs: 45_000,
+    environmentAssignments: [{ environmentInstanceId: 'inst-ready', workspace: { kind: 'default' } }],
   });
   assert.equal(edit?.init?.method, 'POST');
-  assert.deepEqual(JSON.parse(String(edit?.init?.body)), { goal: null, rules: ['New rule'] });
+  assert.deepEqual(JSON.parse(String(edit?.init?.body)), {
+    goal: null,
+    completionGuidance: 'Require proof.',
+    rules: ['New rule'],
+    routingIntervalMs: 45_000,
+  });
+});
+
+test('identity and membership edits use durable Project routes', async () => {
+  const { transport, calls } = recordingTransport(() => ({ project }));
+  const adapter = createProjectBrowserAdapter(transport);
+  await adapter.updateProjectContent('project-sprout', { displayName: 'Sprout Local', reason: 'Clarify scope' });
+  await adapter.updateProjectMembership('project-sprout', 'agent-scout', {
+    responsibilities: ['Investigate'],
+    collaborationInstructions: 'Keep findings concise.',
+  });
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/api/projects/project-sprout/content',
+    '/api/projects/project-sprout/memberships/agent-scout',
+  ]);
+  assert.ok(calls.every((call) => call.init?.method === 'POST'));
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    displayName: 'Sprout Local',
+    reason: 'Clarify scope',
+  });
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+    responsibilities: ['Investigate'],
+    collaborationInstructions: 'Keep findings concise.',
+  });
 });
 
 test('membership, archive, and restore commands hit their dedicated routes', async () => {

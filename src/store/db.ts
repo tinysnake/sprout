@@ -15,6 +15,7 @@ import { SqliteRecoveryStore } from '../environment/sqlite-recovery-store.ts';
 import { SqliteWorkerConnectionEpochStore } from '../environment/worker-epoch-store.ts';
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
 import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
+import { SqliteProjectCreationStore } from '../project/creation-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
@@ -116,6 +117,7 @@ export class SqliteStore {
   readonly projectAuthorities: SqliteProjectAuthorityStore;
   readonly projectAccess: SqliteProjectAccessStore;
   readonly conversationScopes: SqliteConversationScopeStore;
+  readonly projectCreation: SqliteProjectCreationStore;
   readonly sessionKeys: SqliteSessionKeyStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
@@ -155,6 +157,7 @@ export class SqliteStore {
     this.projectAuthorities = new SqliteProjectAuthorityStore({ db: this.db });
     this.projectAccess = new SqliteProjectAccessStore({ db: this.db });
     this.conversationScopes = new SqliteConversationScopeStore({ db: this.db });
+    this.projectCreation = new SqliteProjectCreationStore({ db: this.db, transactions: this.transactions });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });

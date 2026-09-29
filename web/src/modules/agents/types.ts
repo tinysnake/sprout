@@ -119,6 +119,8 @@ export interface ReconfigureAgentInput {
 export interface AgentManagementService {
   listAgents(): Promise<readonly AgentInstance[]>;
   getAgent(id: string): Promise<AgentInstance | undefined>;
+  /** Current compatibility for one Agent on one specific Environment. */
+  compatibilityForEnvironment(agentId: string, environmentInstanceId: string): Promise<AgentCompatibilitySummary | undefined>;
   createAgent(input: CreateAgentInput): Promise<void>;
   /**
    * Append one configuration version. Earlier versions are never rewritten, so

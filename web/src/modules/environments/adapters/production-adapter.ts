@@ -225,6 +225,7 @@ function composeInstance(facts: EnvironmentFacts, now: number): EnvironmentInsta
   const ageSec = connectionAgeSec(readiness.connection.lastConfirmedAt, now);
   return {
     id: enrollment.id,
+    environmentInstanceId: enrollment.environmentInstanceId,
     displayName: enrollment.displayName,
     platform:
       enrollment.platform === 'windows' || enrollment.platform === 'container'

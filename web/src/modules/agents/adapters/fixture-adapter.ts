@@ -381,6 +381,10 @@ export class FixtureAgentService implements AgentManagementService {
     return found ? (JSON.parse(JSON.stringify(found)) as AgentInstance) : undefined;
   }
 
+  async compatibilityForEnvironment(agentId: string, _environmentInstanceId: string) {
+    return this.#agents.find((agent) => agent.id === agentId)?.compatibility;
+  }
+
   async createAgent(input: CreateAgentInput): Promise<void> {
     if (input.displayName.trim() === '') {
       throw new Error('an Agent requires a non-empty display name');

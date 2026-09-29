@@ -119,6 +119,12 @@ export interface EndAccessInput {
   readonly reason?: string;
 }
 
+export interface PreparedProjectCreationAccess {
+  readonly access: ProjectEnvironmentAccess;
+  /** Publish the runtime projection after the aggregate transaction commits. */
+  publish(): void;
+}
+
 export class ProjectAccessService {
   readonly #store: ProjectAccessStore;
   readonly #projects: ProjectService;
@@ -186,6 +192,46 @@ export class ProjectAccessService {
 
   async list(): Promise<readonly ProjectEnvironmentAccess[]> {
     return this.#store.list();
+  }
+
+  /**
+   * Validate one initial Environment/workspace assignment without persisting
+   * it. ProjectCreationService commits these records with the new Project in a
+   * single durable transaction, then publishes their prepared projections.
+   */
+  async prepareCreationAccess(input: {
+    readonly projectId: string;
+    readonly environmentInstanceId: string;
+    readonly selection: WorkspaceSelection;
+  }): Promise<PreparedProjectCreationAccess> {
+    const selection = sanitizeWorkspaceSelection(input.selection);
+    await this.#requireAccessibleEnvironment(input.environmentInstanceId);
+    if (await this.#store.get(input.projectId, input.environmentInstanceId) !== undefined) {
+      throw new ProjectAccessError(
+        'duplicate-environment-access',
+        `project ${input.projectId} already has an Environment access record for ${input.environmentInstanceId}`,
+      );
+    }
+    const validated = await this.#validate(input.projectId, input.environmentInstanceId, selection);
+    const now = this.#clock();
+    const binding = this.#newBinding(validated, now);
+    const access: ProjectEnvironmentAccess = {
+      projectId: input.projectId,
+      environmentInstanceId: input.environmentInstanceId,
+      status: 'active',
+      startedAt: now,
+      updatedAt: now,
+      current: binding,
+      history: [binding],
+    };
+    if (!accessIsConsistent(access)) {
+      throw new ProjectAccessError(
+        'workspace-validation-failed',
+        'the prepared Project workspace binding did not satisfy access invariants',
+      );
+    }
+    const commit = await this.#bridge?.prepareAccess(access);
+    return { access, publish: () => commit?.() };
   }
 
   /**

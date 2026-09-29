@@ -4,6 +4,8 @@ import { ProjectAccessError, type WorkspaceSelection } from '../project/access.t
 import { redactSensitiveText } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
+import type { ProjectCreationService, ProjectEnvironmentCreation } from '../project/creation-service.ts';
+import { ProjectCreationConflictError } from '../project/creation-store.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import {
   toProjectAuthorityView,
@@ -41,6 +43,8 @@ export interface ProjectRouterOptions {
    * the binding safety guards have exactly one implementation.
    */
   readonly access?: ProjectAccessService;
+  /** Atomic Project + selected Environment/workspace creation boundary. */
+  readonly creation?: ProjectCreationService;
   /**
    * The M1 composer registry, when the runtime composed one. Its configured
    * Projects are merged into `GET /api/projects` so the authority route never
@@ -83,6 +87,12 @@ function statusFilter(value: string | undefined): 'active' | 'archived' | undefi
 }
 
 function projectFailure(context: ApiRequestContext, error: unknown): boolean {
+  if (error instanceof ProjectCreationConflictError) {
+    return json(context, 409, {
+      error: error.message,
+      code: error.kind,
+    });
+  }
   if (error instanceof ProjectAccessError) {
     // A lifecycle conflict is 409, exactly like the Project authority contract:
     // a duplicate access, an ended access, and active work are states of the
@@ -127,7 +137,7 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
 }
 
 export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
-  const { projects, access, legacyProjects } = options;
+  const { projects, access, creation, legacyProjects } = options;
 
   /**
    * The merged composer-compatible listing: legacy configured Projects plus
@@ -169,12 +179,16 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         if (agentMemberships === 'invalid') {
           return json(context, 400, { error: 'agentMemberships must be an array of agent memberships' });
         }
+        const environmentAssignments = parseEnvironmentAssignments(body['environmentAssignments']);
+        if (environmentAssignments === 'invalid') {
+          return json(context, 400, { error: 'environmentAssignments must contain unique Environment ids and workspace selections' });
+        }
         const id = stringField(body, 'id');
         const goal = stringField(body, 'goal');
         const wakePolicy = stringField(body, 'wakePolicy');
         const reason = stringField(body, 'reason');
         try {
-          const project = await projects.create({
+          const projectInput = {
             ...(id !== undefined ? { id } : {}),
             displayName,
             ...(goal !== undefined ? { goal } : {}),
@@ -183,7 +197,16 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
             ...(typeof routingIntervalMs === 'number' ? { routingIntervalMs } : {}),
             ...(agentMemberships !== undefined ? { agentMemberships } : {}),
             ...(reason !== undefined ? { reason } : {}),
-          });
+          };
+          if (creation === undefined && (environmentAssignments?.length ?? 0) > 0) {
+            return json(context, 503, { error: 'atomic Project and workspace creation is unavailable' });
+          }
+          const project = creation !== undefined
+            ? await creation.create({
+                project: projectInput,
+                ...(environmentAssignments !== undefined ? { environments: environmentAssignments } : {}),
+              })
+            : await projects.create(projectInput);
           return json(context, 201, { project: toProjectAuthorityView(project) });
         } catch (error) {
           return projectFailure(context, error);
@@ -236,11 +259,14 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
           return json(context, 400, { error: 'rules must be an array of strings' });
         }
         const goalField = body['goal'];
+        const completionGuidance = stringField(body, 'completionGuidance');
         const routingIntervalMs = body['routingIntervalMs'];
         const reason = stringField(body, 'reason');
+        const displayName = stringField(body, 'displayName');
         const wakePolicy = stringField(body, 'wakePolicy');
         try {
           const project = await projects.updateContent(segments[2] ?? '', {
+            ...(displayName !== undefined ? { displayName } : {}),
             // `goal: null` is an explicit clear; an omitted field keeps the
             // current goal; a string replaces it.
             ...(goalField === null
@@ -248,9 +274,38 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
               : typeof goalField === 'string'
                 ? { goal: goalField }
                 : {}),
+            ...(completionGuidance !== undefined ? { completionGuidance } : {}),
             ...(rules !== undefined ? { rules } : {}),
             ...(wakePolicy !== undefined ? { wakePolicy } : {}),
             ...(typeof routingIntervalMs === 'number' ? { routingIntervalMs } : {}),
+            ...(reason !== undefined ? { reason } : {}),
+          });
+          return json(context, 200, { project: toProjectAuthorityView(project) });
+        } catch (error) {
+          return projectFailure(context, error);
+        }
+      }
+
+      // POST /api/projects/:id/memberships/:memberId — append a Project
+      // content version with revised responsibilities/instructions.
+      if (
+        method === 'POST' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'memberships'
+      ) {
+        const body = await context.readBody();
+        const responsibilities = parseResponsibilities(body['responsibilities']);
+        if (responsibilities === 'invalid') {
+          return json(context, 400, { error: 'responsibilities must be an array of strings' });
+        }
+        const collaborationInstructions = stringField(body, 'collaborationInstructions');
+        const reason = stringField(body, 'reason');
+        try {
+          const project = await projects.updateMembership(segments[2] ?? '', segments[4] ?? '', {
+            ...(responsibilities !== undefined ? { responsibilities } : {}),
+            ...(collaborationInstructions !== undefined ? { collaborationInstructions } : {}),
             ...(reason !== undefined ? { reason } : {}),
           });
           return json(context, 200, { project: toProjectAuthorityView(project) });
@@ -518,4 +573,22 @@ function parseAgentMemberships(
     });
   }
   return memberships;
+}
+
+function parseEnvironmentAssignments(value: unknown): readonly ProjectEnvironmentCreation[] | 'invalid' | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return 'invalid';
+  const assignments: ProjectEnvironmentCreation[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return 'invalid';
+    const record = entry as Record<string, unknown>;
+    const environmentInstanceId = record['environmentInstanceId'];
+    if (typeof environmentInstanceId !== 'string' || seen.has(environmentInstanceId)) return 'invalid';
+    const selection = parseWorkspaceSelection({ workspace: record['workspace'] });
+    if (selection === 'invalid') return 'invalid';
+    seen.add(environmentInstanceId);
+    assignments.push({ environmentInstanceId, selection });
+  }
+  return assignments;
 }

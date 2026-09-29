@@ -10,6 +10,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
   return [
     {
       id: 'env-ready',
+      environmentInstanceId: 'inst-ready',
       displayName: 'Mac Studio M2 Max',
       platform: 'macos',
       trafficLight: 'green',
@@ -75,6 +76,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-recovery',
+      environmentInstanceId: 'inst-recovery',
       displayName: 'Windows Workstation 01',
       platform: 'windows',
       trafficLight: 'red',
@@ -142,6 +144,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-reconciling',
+      environmentInstanceId: 'inst-reconciling',
       displayName: 'Debian Worker Node 02',
       platform: 'container',
       trafficLight: 'yellow',
@@ -209,6 +212,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-pending',
+      environmentInstanceId: 'inst-pending',
       displayName: 'MacBook Pro Operator Local',
       platform: 'macos',
       trafficLight: 'yellow',
@@ -237,6 +241,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-degraded',
+      environmentInstanceId: 'inst-degraded',
       displayName: 'Linux Container Node',
       platform: 'container',
       trafficLight: 'yellow',
@@ -287,6 +292,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-incompatible',
+      environmentInstanceId: 'inst-incompatible',
       displayName: 'Legacy Mac mini',
       platform: 'macos',
       trafficLight: 'red',
@@ -316,6 +322,7 @@ export function createInitialFixtures(): EnvironmentInstance[] {
     },
     {
       id: 'env-archived',
+      environmentInstanceId: 'inst-archived',
       displayName: 'Old Windows Server 2022',
       platform: 'windows',
       trafficLight: 'yellow',
@@ -392,6 +399,7 @@ export class FixtureEnvironmentService implements EnvironmentService {
     }
     const newEnv: EnvironmentInstance = {
       id,
+      environmentInstanceId: input.environmentInstanceId,
       displayName: input.displayName,
       platform: (input.platform as any) ?? 'macos',
       trafficLight: 'yellow',

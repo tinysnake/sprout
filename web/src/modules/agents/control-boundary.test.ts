@@ -20,6 +20,7 @@ function service(): AgentManagementService {
   return {
     listAgents: async () => [],
     getAgent: async () => undefined,
+    compatibilityForEnvironment: async () => undefined,
     createAgent: async () => undefined,
     reconfigureAgent: async () => undefined,
     archiveAgent: async () => undefined,

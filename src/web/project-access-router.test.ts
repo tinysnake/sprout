@@ -307,6 +307,48 @@ test('the access view never exposes an absolute host path, even from a corrupt r
   assert.ok(!serialized.includes('C:\\'));
 });
 
+test('the access wire keeps the stored Environment identity actionable end to end', async () => {
+  // #94 H4: the registered identifier is host-shaped, so a generic-identifier
+  // sanitization at this projection would collapse it to `unknown-environment`.
+  // The page would then render, filter, and remove by a display label while
+  // the server still keys the row by the stored identity — the access exists
+  // but can neither be shown nor ended. The stored identifier must round-trip
+  // byte for byte, and removal is issued with it.
+  const runtime = await accessApi();
+  try {
+    const granted = await command(runtime, '/api/projects/project-sprout/access', {
+      environmentInstanceId: 'mac-mini-1',
+      workspace: { kind: 'default' },
+    });
+    assert.equal(granted.status, 201);
+    const grantBody = (await granted.json()) as { access: { environmentInstanceId: string } };
+    assert.equal(grantBody.access.environmentInstanceId, 'mac-mini-1');
+
+    const listed = (await (await get(runtime, '/api/projects/project-sprout/access')).json()) as {
+      access: { environmentInstanceId: string; status: string }[];
+    };
+    assert.equal(listed.access.length, 1);
+    assert.equal(
+      listed.access[0]?.environmentInstanceId,
+      'mac-mini-1',
+      'the listed access carries the stored identifier so the client can display, deduplicate, and act on the row itself',
+    );
+
+    // Removal succeeds when issued with the row's own stored identifier.
+    const ended = await command(runtime, '/api/projects/project-sprout/access/mac-mini-1/end', {});
+    assert.equal(ended.status, 200);
+    const endedBody = (await ended.json()) as { access: { status: string } };
+    assert.equal(endedBody.access.status, 'ended');
+
+    // A display fallback is never an action key: it names no stored row.
+    const fallback = await command(runtime, '/api/projects/project-sprout/access/unknown-environment/end', {});
+    assert.equal(fallback.status, 404);
+    assert.equal(((await fallback.json()) as { code: string }).code, 'unknown-environment-access');
+  } finally {
+    await runtime.api.close();
+  }
+});
+
 test('unknown access operations return typed errors rather than 500', async () => {
   const runtime = await accessApi();
   try {

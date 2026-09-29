@@ -42,6 +42,8 @@ import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
 import { currentProjectContent } from './project/authority-model.ts';
 import type { ProjectAccessStore } from './project/access-store.ts';
+import type { ProjectCreationStore } from './project/creation-store.ts';
+import { ProjectCreationService } from './project/creation-service.ts';
 import { sanitizeWorkspacePath } from './project/access.ts';
 import {
   ProjectService,
@@ -162,6 +164,8 @@ export interface RuntimeStores {
   readonly projectAccess: ProjectAccessStore;
   /** The durable conversation scopes and Working groups (#95). */
   readonly conversationScopes: ConversationScopeStore;
+  /** Atomic insert boundary for first Project + Environment/workspace setup. */
+  readonly projectCreation?: ProjectCreationStore;
   close(): void;
 }
 
@@ -864,6 +868,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workSafety: projectAccessSafety,
       bridge: projects,
     });
+    const projectCreationService = stores.projectCreation === undefined
+      ? undefined
+      : new ProjectCreationService({
+          projects: projectService,
+          access: projectAccessService,
+          store: stores.projectCreation,
+        });
     const pool = new EnvironmentPool({
       definitions: configuredCarrierPresent ? [configuredDefinition] : [],
       instances: configuredCarrierPresent ? [configuredInstance] : [],
@@ -1564,6 +1575,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           projects: projectService,
           legacyProjects: projects,
           access: projectAccessService,
+          ...(projectCreationService !== undefined ? { creation: projectCreationService } : {}),
         }),
         // Conversation scopes and Working groups (#95), composed through the
         // same additive seam. Every command delegates to the scope service, so
