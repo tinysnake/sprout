@@ -111,15 +111,15 @@ try {
 
   const durableMessage = await post('/api/messages', {
     projectId,
-    channel: 'direct',
+    channel: 'project',
+    scopeId: `channel-${projectId}`,
     authorId: 'pi-a',
     authorKind: 'agent',
     body: `DURABLE-RESTART-MESSAGE ${projectToken}`,
-    recipients: ['pi-a'],
     deliveryKey: 'live-o6-restart-message',
   });
   assert.equal(durableMessage.duplicate, false);
-  assert.equal(durableMessage.admittedRunIds.length, 0, 'self-addressed durable Message does not create a competing run');
+  assert.equal(durableMessage.admittedRunIds.length, 0, 'an unaddressed durable Message does not create a competing run');
   assert.equal(durableMessage.message.projectId, projectId);
   assert.equal(durableMessage.message.body, `DURABLE-RESTART-MESSAGE ${projectToken}`);
   const beforeRestart = await getTask(taskId);

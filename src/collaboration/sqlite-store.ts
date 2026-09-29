@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
+import type { ProjectEvent } from './events.ts';
 import type {
   Message,
   MessageChannel,
@@ -14,28 +15,33 @@ import {
   type AdmitWakeResult,
   type CollaborationStore,
   type PostMessageResult,
+  type PublishEventResult,
   wakeFromDecision,
 } from './store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 
 /**
- * SQLite-backed collaboration storage (ticket #26, ADR-0002).
+ * SQLite-backed collaboration storage (#26, #96, ADR-0002).
  *
  * The only module that knows the collaboration SQL. It is mounted on Sprout's
  * primary `SqliteStore` so collaboration rows share the one database the run
- * lifecycle, leases, and projects already use. It enforces both idempotency
+ * lifecycle, leases, and projects already use. It enforces the idempotency
  * identities with primary keys rather than caller checks:
  *
- * - `collaboration_messages.delivery_key` is unique, so a repeated delivery
- *   produces one Message (and its `INSERT OR IGNORE` reports that nothing was
- *   added).
- * - `collaboration_wake_requests.idempotency_key` is unique, and
- *   `admitWake` performs the state transition and the status guard in one
- *   synchronous statement, so two admiters cannot both win the same wake.
+ * - `collaboration_messages.delivery_key` and `project_events.delivery_key`
+ *   are unique, so a repeated delivery produces one input (and its `INSERT OR
+ *   IGNORE` reports that nothing was added).
+ * - `collaboration_wake_requests.idempotency_key` is unique, and `admitWake`
+ *   performs the state transition and the status guard in one synchronous
+ *   statement, so two admiters cannot both win the same wake.
  *
- * Wake requests are written **in the same transaction as the Message**, which is
- * what makes persistence-before-wake a property of the store rather than a
+ * Inputs and their wake requests are written **in the same transaction**, which
+ * is what makes persistence-before-wake a property of the store rather than a
  * convention the coordinator is trusted to follow.
+ *
+ * Schema history: `scope_id` and the `input_id` rename (from `message_id`)
+ * arrive with schema version 19; `project_events` is created by the same
+ * migration and by `#init` for a fresh database.
  */
 
 export class SqliteCollaborationStore implements CollaborationStore {
@@ -64,6 +70,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
       CREATE TABLE IF NOT EXISTS collaboration_messages (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL DEFAULT '',
         channel TEXT NOT NULL,
         author_id TEXT NOT NULL,
         author_kind TEXT NOT NULL,
@@ -75,7 +82,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
       );
       CREATE TABLE IF NOT EXISTS collaboration_wake_requests (
         id TEXT PRIMARY KEY,
-        message_id TEXT NOT NULL,
+        input_id TEXT NOT NULL,
         project_id TEXT NOT NULL,
         agent_id TEXT NOT NULL,
         reason TEXT NOT NULL,
@@ -87,13 +94,28 @@ export class SqliteCollaborationStore implements CollaborationStore {
       );
       CREATE TABLE IF NOT EXISTS collaboration_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT NOT NULL,
+        input_id TEXT NOT NULL,
         agent_id TEXT NOT NULL,
         status TEXT NOT NULL,
         reason TEXT NOT NULL,
         detail TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS project_events (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT,
+        producer_id TEXT NOT NULL,
+        producer_kind TEXT NOT NULL,
+        disposition TEXT NOT NULL,
+        responsible_agents TEXT NOT NULL,
+        delivery_key TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS project_events_project
+        ON project_events(project_id);
     `);
   }
 
@@ -110,12 +132,13 @@ export class SqliteCollaborationStore implements CollaborationStore {
       const inserted = this.#db
         .prepare(
           `INSERT OR IGNORE INTO collaboration_messages
-             (id, project_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, project_id, scope_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.message.id,
           input.message.projectId,
+          input.message.scopeId,
           input.message.channel,
           input.message.author.id,
           input.message.author.kind,
@@ -133,21 +156,22 @@ export class SqliteCollaborationStore implements CollaborationStore {
         const existing = (await this.getMessageByDeliveryKey(input.message.deliveryKey))!;
         return {
           message: existing,
-          wakes: (await this.listWakeRequests()).filter((w) => w.messageId === existing.id),
+          wakes: (await this.listWakeRequests()).filter((w) => w.inputId === existing.id),
           duplicate: true,
         };
       }
 
       for (const decision of input.plan.decisions) {
-        const wake = wakeFromDecision({
-          id: `wake-${input.message.id}-${decision.agentId}`,
-          messageId: input.message.id,
-          projectId: input.message.projectId,
-          agentId: decision.agentId,
-          reason: decision.reason,
-          now: input.now,
-        });
-        this.#insertWake(wake);
+        this.#insertWake(
+          wakeFromDecision({
+            id: `wake-${input.message.id}-${decision.agentId}`,
+            inputId: input.message.id,
+            projectId: input.message.projectId,
+            agentId: decision.agentId,
+            reason: decision.reason,
+            now: input.now,
+          }),
+        );
       }
       for (const observation of input.plan.observations) {
         this.#insertObservation(input.message.id, observation, input.now);
@@ -155,7 +179,71 @@ export class SqliteCollaborationStore implements CollaborationStore {
       this.#db.exec('COMMIT');
       return {
         message: input.message,
-        wakes: (await this.listWakeRequests()).filter((w) => w.messageId === input.message.id),
+        wakes: (await this.listWakeRequests()).filter((w) => w.inputId === input.message.id),
+        duplicate: false,
+      };
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async publishEvent(input: {
+    readonly event: ProjectEvent;
+    readonly plan: WakePlan;
+    readonly now: number;
+  }): Promise<PublishEventResult> {
+    this.#db.exec('BEGIN');
+    try {
+      const inserted = this.#db
+        .prepare(
+          `INSERT OR IGNORE INTO project_events
+             (id, project_id, kind, summary, detail, producer_id, producer_kind, disposition, responsible_agents, delivery_key, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.event.id,
+          input.event.projectId,
+          input.event.kind,
+          input.event.summary,
+          input.event.detail ?? null,
+          input.event.producer.id,
+          input.event.producer.kind,
+          input.event.disposition,
+          JSON.stringify(input.event.responsibleAgentIds),
+          input.event.deliveryKey,
+          input.event.createdAt,
+        );
+
+      if (inserted.changes === 0) {
+        this.#db.exec('COMMIT');
+        const existing = (await this.getEventByDeliveryKey(input.event.deliveryKey))!;
+        return {
+          event: existing,
+          wakes: (await this.listWakeRequests()).filter((w) => w.inputId === existing.id),
+          duplicate: true,
+        };
+      }
+
+      for (const decision of input.plan.decisions) {
+        this.#insertWake(
+          wakeFromDecision({
+            id: `wake-${input.event.id}-${decision.agentId}`,
+            inputId: input.event.id,
+            projectId: input.event.projectId,
+            agentId: decision.agentId,
+            reason: decision.reason,
+            now: input.now,
+          }),
+        );
+      }
+      for (const observation of input.plan.observations) {
+        this.#insertObservation(input.event.id, observation, input.now);
+      }
+      this.#db.exec('COMMIT');
+      return {
+        event: input.event,
+        wakes: (await this.listWakeRequests()).filter((w) => w.inputId === input.event.id),
         duplicate: false,
       };
     } catch (error) {
@@ -168,12 +256,12 @@ export class SqliteCollaborationStore implements CollaborationStore {
     this.#db
       .prepare(
         `INSERT OR IGNORE INTO collaboration_wake_requests
-           (id, message_id, project_id, agent_id, reason, status, idempotency_key, run_id, detail, created_at)
+           (id, input_id, project_id, agent_id, reason, status, idempotency_key, run_id, detail, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         wake.id,
-        wake.messageId,
+        wake.inputId,
         wake.projectId,
         wake.agentId,
         wake.reason,
@@ -185,14 +273,14 @@ export class SqliteCollaborationStore implements CollaborationStore {
       );
   }
 
-  #insertObservation(messageId: string, observation: WakeObservation, now: number): void {
+  #insertObservation(inputId: string, observation: WakeObservation, now: number): void {
     this.#db
       .prepare(
         `INSERT INTO collaboration_observations
-           (message_id, agent_id, status, reason, detail, created_at)
+           (input_id, agent_id, status, reason, detail, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(messageId, observation.agentId, observation.status, observation.reason, observation.detail, now);
+      .run(inputId, observation.agentId, observation.status, observation.reason, observation.detail, now);
   }
 
   async getMessage(messageId: string): Promise<Message | undefined> {
@@ -214,6 +302,32 @@ export class SqliteCollaborationStore implements CollaborationStore {
       .prepare('SELECT * FROM collaboration_messages ORDER BY created_at ASC')
       .all() as unknown as MessageRow[];
     return rows.map(toMessage);
+  }
+
+  async getEvent(eventId: string): Promise<ProjectEvent | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM project_events WHERE id = ?')
+      .get(eventId) as EventRow | undefined;
+    return row ? toEvent(row) : undefined;
+  }
+
+  async getEventByDeliveryKey(deliveryKey: string): Promise<ProjectEvent | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM project_events WHERE delivery_key = ?')
+      .get(deliveryKey) as EventRow | undefined;
+    return row ? toEvent(row) : undefined;
+  }
+
+  async listEvents(projectId?: string): Promise<readonly ProjectEvent[]> {
+    const rows =
+      projectId === undefined
+        ? (this.#db
+            .prepare('SELECT * FROM project_events ORDER BY created_at ASC')
+            .all() as unknown as EventRow[])
+        : (this.#db
+            .prepare('SELECT * FROM project_events WHERE project_id = ? ORDER BY created_at ASC')
+            .all(projectId) as unknown as EventRow[]);
+    return rows.map(toEvent);
   }
 
   async getWakeRequest(idempotencyKey: string): Promise<WakeRequest | undefined> {
@@ -255,22 +369,22 @@ export class SqliteCollaborationStore implements CollaborationStore {
   }
 
   async recordObservation(input: {
-    readonly messageId: string;
+    readonly inputId: string;
     readonly observation: WakeObservation;
     readonly now: number;
   }): Promise<void> {
-    this.#insertObservation(input.messageId, input.observation, input.now);
+    this.#insertObservation(input.inputId, input.observation, input.now);
   }
 
-  async listObservations(messageId: string): Promise<readonly WakeObservation[]> {
-    return this.observations(messageId);
+  async listObservations(inputId: string): Promise<readonly WakeObservation[]> {
+    return this.observations(inputId);
   }
 
-  /** Observations recorded for one Message, for observability and tests. */
-  observations(messageId: string): readonly WakeObservation[] {
+  /** Observations recorded for one input, for observability and tests. */
+  observations(inputId: string): readonly WakeObservation[] {
     const rows = this.#db
-      .prepare('SELECT * FROM collaboration_observations WHERE message_id = ? ORDER BY id ASC')
-      .all(messageId) as unknown as ObservationRow[];
+      .prepare('SELECT * FROM collaboration_observations WHERE input_id = ? ORDER BY id ASC')
+      .all(inputId) as unknown as ObservationRow[];
     return rows.map((row) => ({
       agentId: row.agent_id,
       status: row.status as WakeObservation['status'],
@@ -287,6 +401,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
 interface MessageRow {
   readonly id: string;
   readonly project_id: string;
+  readonly scope_id: string;
   readonly channel: string;
   readonly author_id: string;
   readonly author_kind: string;
@@ -297,9 +412,23 @@ interface MessageRow {
   readonly created_at: number;
 }
 
+interface EventRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly detail: string | null;
+  readonly producer_id: string;
+  readonly producer_kind: string;
+  readonly disposition: string;
+  readonly responsible_agents: string;
+  readonly delivery_key: string;
+  readonly created_at: number;
+}
+
 interface WakeRow {
   readonly id: string;
-  readonly message_id: string;
+  readonly input_id: string;
   readonly project_id: string;
   readonly agent_id: string;
   readonly reason: string;
@@ -322,6 +451,7 @@ function toMessage(row: MessageRow): Message {
   return {
     id: row.id,
     projectId: row.project_id,
+    scopeId: row.scope_id ?? '',
     channel: row.channel as MessageChannel,
     author,
     body: row.body,
@@ -332,10 +462,28 @@ function toMessage(row: MessageRow): Message {
   };
 }
 
+function toEvent(row: EventRow): ProjectEvent {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind,
+    summary: row.summary,
+    ...(row.detail !== null ? { detail: row.detail } : {}),
+    producer: {
+      id: row.producer_id,
+      kind: row.producer_kind as ProjectEvent['producer']['kind'],
+    },
+    disposition: row.disposition as ProjectEvent['disposition'],
+    responsibleAgentIds: JSON.parse(row.responsible_agents) as string[],
+    deliveryKey: row.delivery_key,
+    createdAt: row.created_at,
+  };
+}
+
 function toWake(row: WakeRow): WakeRequest {
   return {
     id: row.id,
-    messageId: row.message_id,
+    inputId: row.input_id,
     projectId: row.project_id,
     agentId: row.agent_id,
     reason: row.reason as WakeReason,

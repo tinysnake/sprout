@@ -281,11 +281,12 @@ test('an Agent or Worker request cannot manufacture Human message authority', as
   const base = `http://127.0.0.1:${port}`;
   try {
     const browser = await signIn(base, credential);
+    const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
     const request = (authorKind: string) => fetch(`${base}/api/messages`, {
       method: 'POST',
       headers: { cookie: browser.cookie, 'x-sprout-csrf': browser.csrf, 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: 'project-sprout', channel: 'direct', authorId: 'forged', authorKind,
+        scopeId, authorId: 'forged', authorKind,
         body: 'request', recipients: ['agent-scout'], deliveryKey: `forged-${authorKind}`,
       }),
     });

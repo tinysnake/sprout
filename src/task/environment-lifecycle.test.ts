@@ -32,7 +32,7 @@ function build(options: { worker?: TaskContextWorker; store?: InMemoryTaskStore;
   const store = options.store ?? new InMemoryTaskStore();
   const pool = options.pool ?? new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const submitted: { runId: string }[] = [];
-  const lifecycle = new TaskEnvironmentLifecycle({ store, pool, agents, projects, ...(options.worker !== undefined ? { worker: options.worker } : {}), ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' }, runs: { submit: async (request) => { submitted.push({ runId: request.runId }); return { id: request.runId }; } } });
+  const lifecycle = new TaskEnvironmentLifecycle({ store, pool, agents, projects, ...(options.worker !== undefined ? { worker: options.worker } : {}), ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' }, runs: { submit: async (request) => { submitted.push({ runId: request.runId }); return { id: request.runId }; } } });
   return { store, pool, lifecycle, submitted };
 }
 
@@ -55,7 +55,7 @@ function sqliteLifecycle(store: SqliteStore, options: {
     projects,
     ids: {
       task: () => 'task',
-      message: () => 'message',
+      message: () => 'message', projectEvent: () => 'project-event',
       lease: () => options.leaseId ?? 'lease-1',
       run: options.runId ?? (() => 'run-1'),
     },
@@ -92,7 +92,7 @@ function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void 
       pool,
       agents: new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]),
       projects: new ProjectRegistry([{ id: 'project', goal: 'Goal', rules: [], availableEnvironmentInstanceIds: ['mac-1'], memberships: [{ agentId: 'pi', responsibilities: [], collaborationInstructions: '' }] }]),
-      ids: { task: () => 'task', message: () => 'message', lease: () => 'lease-1', run: () => 'run-1' },
+      ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease-1', run: () => 'run-1' },
       runs: { submit: async (request) => ({ id: request.runId }) },
       faults: ${boundary === 'begin'
         ? `{ afterBeginningCommit: () => process.exit(${exitCode}) }`

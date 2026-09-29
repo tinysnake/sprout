@@ -321,6 +321,22 @@ export class ConversationScopeService {
     return this.#store.get(scopeId);
   }
 
+  /**
+   * The Project's member facts (current and ended), for routing consumers (#96).
+   *
+   * A read-only projection of the same Project facts this service validates
+   * against: deterministic Message and Project-event routing resolves its
+   * recipients from here, so "current Project Agents" is decided by one
+   * authority rather than by a second membership copy. Returns `undefined` for
+   * an unknown Project, so a caller can distinguish "no such Project" from
+   * "a Project with no members".
+   */
+  async projectMembers(
+    projectId: string,
+  ): Promise<readonly ConversationProjectMemberFacts[] | undefined> {
+    return (await this.#projects.projectFacts(projectId))?.members;
+  }
+
   /** One Working group by identity, after materializing participation ends. */
   async getWorkingGroup(groupId: string): Promise<WorkingGroupScope | undefined> {
     const scope = await this.#store.get(groupId);

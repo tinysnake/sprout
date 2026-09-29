@@ -27,6 +27,7 @@ import type { AgentRun } from '../run/model.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { SqliteStore } from '../store/db.ts';
 import { CollaborationCoordinator } from './coordinator.ts';
+import { buildCollaborationScopes } from './scope-harness.ts';
 import type { Message } from './model.ts';
 
 const definition: EnvironmentDefinition = {
@@ -93,7 +94,7 @@ function reopen(filename: string, turns: readonly ScriptedTurn[] = []): Harness 
     store: sqlite.runs,
   });
   const coordinator = new CollaborationCoordinator({
-    projects,
+    scopes: buildCollaborationScopes({ projects }).scopes,
     store: sqlite.collaboration,
     runs: orchestrator,
   });
@@ -104,6 +105,7 @@ function inputMessage(overrides: Partial<Message> = {}): Message {
   return {
     id: 'msg-input',
     projectId: 'project-sprout',
+    scopeId: 'dm-test-1',
     channel: 'direct',
     author: { id: 'human-lead', kind: 'human' },
     body: 'status?',
@@ -141,7 +143,7 @@ async function seedUnprojectedCompleteRun(sqlite: SqliteStore): Promise<void> {
   await sqlite.collaboration.postMessage({
     message,
     plan: {
-      messageId: message.id,
+      inputId: message.id,
       decisions: [{ agentId: 'scout', reason: 'direct-recipient' }],
       observations: [],
     },
@@ -222,7 +224,7 @@ test('a pending wake persisted before a crash is admitted on reconcile', async (
     await crashed.sqlite.collaboration.postMessage({
       message,
       plan: {
-        messageId: message.id,
+        inputId: message.id,
         decisions: [{ agentId: 'scout', reason: 'direct-recipient' }],
         observations: [],
       },
@@ -323,7 +325,7 @@ test('a wake naming a run that no longer exists does not abort reconciliation', 
     await crashed.sqlite.collaboration.postMessage({
       message: inputMessage({ id: 'msg-orphan', deliveryKey: 'delivery-orphan' }),
       plan: {
-        messageId: 'msg-orphan',
+        inputId: 'msg-orphan',
         decisions: [{ agentId: 'scout', reason: 'direct-recipient' }],
         observations: [],
       },
@@ -359,10 +361,10 @@ test('a suppressed-only message has no wake to admit or project', async () => {
       await store.sqlite.collaboration.postMessage({
         message: inputMessage({ id: 'msg-none', deliveryKey: 'delivery-none' }),
         plan: {
-          messageId: 'msg-none',
+          inputId: 'msg-none',
           decisions: [],
           observations: [
-            { agentId: '*', status: 'suppressed', reason: 'wake-model', detail: 'nothing to do' },
+            { agentId: '*', status: 'suppressed', reason: 'unaddressed', detail: 'nothing to do' },
           ],
         },
         now: 1,
@@ -376,6 +378,59 @@ test('a suppressed-only message has no wake to admit or project', async () => {
       assert.equal(store.sqlite.collaboration.observations('msg-none').length, 1);
     } finally {
       store.sqlite.close();
+    }
+  });
+});
+
+test('an addressed Project event wake recovers through the same reconcile pass', async () => {
+  await withDatabase(async (filename) => {
+    const crashed = reopen(filename);
+    // The crash happened between persistence and admission: the event and its
+    // wake are durable, no run was ever admitted, and there is no reply.
+    await crashed.sqlite.collaboration.publishEvent({
+      event: {
+        id: 'evt-pending',
+        projectId: 'project-sprout',
+        kind: 'task-blocker',
+        summary: 'Task T1 is blocked',
+        producer: { id: 'sprout', kind: 'system' },
+        disposition: 'addressed',
+        responsibleAgentIds: ['scout'],
+        deliveryKey: 'event-delivery-1',
+        createdAt: 1,
+      },
+      plan: {
+        inputId: 'evt-pending',
+        decisions: [{ agentId: 'scout', reason: 'event-addressed' }],
+        observations: [],
+      },
+      now: 1,
+    });
+    crashed.sqlite.close();
+
+    const restarted = reopen(filename, [completedTurn('Unblocked.')]);
+    try {
+      const result = await restarted.coordinator.reconcile();
+      assert.equal(result.admittedRunIds.length, 1, 'the pending event wake admitted a run');
+      assert.deepEqual(result.projectedMessageIds, ['evt-pending']);
+
+      const replies = (await restarted.sqlite.collaboration.listMessages()).filter(
+        (message) => message.author.kind === 'agent',
+      );
+      assert.equal(replies.length, 1, 'exactly one projected reply');
+      assert.equal(replies[0]?.body, 'Unblocked.');
+      assert.equal(replies[0]?.channel, 'project', 'event replies land on the Project channel');
+      assert.equal(replies[0]?.scopeId, 'channel-project-sprout');
+      assert.equal(replies[0]?.inReplyTo, undefined, 'an event reply answers no Message');
+
+      const wake = await restarted.sqlite.collaboration.getWakeRequest('evt-pending:scout');
+      assert.equal(wake?.status, 'admitted');
+      assert.deepEqual(await restarted.coordinator.reconcile(), {
+        admittedRunIds: [],
+        projectedMessageIds: [],
+      });
+    } finally {
+      restarted.sqlite.close();
     }
   });
 });

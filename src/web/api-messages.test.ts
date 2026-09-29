@@ -9,6 +9,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
+import { buildCollaborationScopes } from '../collaboration/scope-harness.ts';
 import { createRunApi } from './api.ts';
 
 import { withServer, buildWithCollaboration, buildObservableCollaboration } from './api-harness.ts';
@@ -17,13 +18,13 @@ test('a message delivered over the API wakes its recipient and a reply is projec
   const context = buildWithCollaboration();
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
   try {
     const delivered = await fetch(`${base}/api/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: 'project-sprout',
-        channel: 'direct',
+        scopeId,
         authorId: 'human-lead',
         authorKind: 'human',
         body: 'Please investigate.',
@@ -33,20 +34,22 @@ test('a message delivered over the API wakes its recipient and a reply is projec
     });
     assert.equal(delivered.status, 202);
     const result = (await delivered.json()) as {
-      message: { id: string };
+      message: { id: string; scopeId: string };
       duplicate: boolean;
       admittedRunIds: string[];
       wakes: { agentId: string; reason: string; status: string }[];
     };
     assert.equal(result.duplicate, false);
+    assert.equal(result.message.scopeId, scopeId, 'the Message belongs to its conversation scope');
     assert.equal(result.admittedRunIds.length, 1);
     assert.equal(result.wakes[0]?.agentId, 'agent-scout');
     assert.equal(result.wakes[0]?.reason, 'direct-recipient');
     assert.equal(result.wakes[0]?.status, 'admitted');
 
-    const listed = (await (await fetch(`${base}/api/messages`)).json()) as {
-      messages: { authorKind: string; body: string; inReplyTo?: string }[];
+    const listed = (await (await fetch(`${base}/api/messages?scopeId=${scopeId}`)).json()) as {
+      messages: { authorKind: string; body: string; scopeId: string; inReplyTo?: string }[];
     };
+    assert.ok(listed.messages.every((message) => message.scopeId === scopeId), 'the stream filters by scope');
     const reply = listed.messages.find((message) => message.authorKind === 'agent');
     assert.ok(reply);
     assert.equal(reply.body, 'Scout: replied.');
@@ -63,9 +66,9 @@ test('a duplicate message delivery over the API is idempotent', async () => {
   const context = buildWithCollaboration();
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
   const request = {
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId,
     authorId: 'human-lead',
     authorKind: 'human',
     body: 'Once.',
@@ -100,50 +103,94 @@ test('a duplicate message delivery over the API is idempotent', async () => {
   }
 });
 
-test('the message API rejects invalid channel and recipient shapes', async () => {
+test('the message API refuses missing, unknown, and mis-shaped scope requests', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const channelScope = await context.scopes.channel('project-sprout');
+  try {
+    const missingScope = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        deliveryKey: 'api-missing-scope-1',
+      }),
+    });
+    assert.equal(missingScope.status, 400, 'scopeId, body, and deliveryKey are required');
+
+    const unknownScope = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: 'channel-does-not-exist',
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        deliveryKey: 'api-unknown-scope-1',
+      }),
+    });
+    assert.equal(unknownScope.status, 404);
+
+    const recipientsOnChannel = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: channelScope,
+        authorId: 'human-lead',
+        body: 'Please investigate.',
+        recipients: ['agent-scout'],
+        deliveryKey: 'api-channel-recipients-1',
+      }),
+    });
+    assert.equal(recipientsOnChannel.status, 400, 'channel Messages address through their body only');
+
+    const unknownAuthor = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: channelScope,
+        authorId: 'ghost-author',
+        body: 'Please investigate.',
+        deliveryKey: 'api-unknown-author-1',
+      }),
+    });
+    assert.equal(unknownAuthor.status, 403, 'an author outside the membership cannot post');
+    const failure = (await unknownAuthor.json()) as { code: string; reason: string };
+    assert.equal(failure.code, 'scope-read-only');
+    assert.equal(failure.reason, 'not-a-member');
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('a delivery to a read-only scope is refused with its settled reason', async () => {
   const context = buildWithCollaboration();
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
   try {
-    const invalidChannel = await fetch(`${base}/api/messages`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        projectId: 'project-sprout',
-        channel: 'unknown',
-        authorId: 'human-lead',
-        body: 'Please investigate.',
-        deliveryKey: 'api-invalid-channel-1',
-      }),
+    const group = await context.scopes.scopes.createWorkingGroup({
+      projectId: 'project-sprout',
+      displayName: 'Read-only test',
+      creator: { memberId: 'operator', kind: 'human' },
     });
-    assert.equal(invalidChannel.status, 400);
+    await context.scopes.scopes.disbandWorkingGroup(group.id, { memberId: 'operator', kind: 'human' });
 
-    const missingDirectRecipient = await fetch(`${base}/api/messages`, {
+    const refused = await fetch(`${base}/api/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: 'project-sprout',
-        channel: 'direct',
-        authorId: 'human-lead',
-        body: 'Please investigate.',
-        deliveryKey: 'api-missing-recipient-1',
+        scopeId: group.id,
+        authorId: 'operator',
+        authorKind: 'human',
+        body: 'still writable?',
+        deliveryKey: 'api-read-only-1',
       }),
     });
-    assert.equal(missingDirectRecipient.status, 400);
-
-    const projectRecipient = await fetch(`${base}/api/messages`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        projectId: 'project-sprout',
-        channel: 'project',
-        authorId: 'human-lead',
-        body: 'Please investigate.',
-        recipients: ['agent-scout'],
-        deliveryKey: 'api-project-recipient-1',
-      }),
-    });
-    assert.equal(projectRecipient.status, 400);
+    assert.equal(refused.status, 409, 'a disbanded Working group channel is read-only');
+    const failure = (await refused.json()) as { code: string; reason: string };
+    assert.equal(failure.code, 'scope-read-only');
+    assert.equal(failure.reason, 'working-group-disbanded');
   } finally {
     await context.api.close();
   }
@@ -161,23 +208,23 @@ test('an unaddressed message and its wake observations are readable over the API
     pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
     store: new InMemoryRunStore(),
   });
+  const scopes = buildCollaborationScopes({ projects });
   const collaboration = new CollaborationCoordinator({
-    projects,
+    scopes: scopes.scopes,
     store: new InMemoryCollaborationStore(),
     runs: orchestrator,
-    wakeModel: { decide: async () => ({ engage: false, detail: 'nothing to do' }) },
   });
-  const api = createRunApi({ orchestrator, agents: registry, collaboration });
+  const api = createRunApi({ orchestrator, agents: registry, collaboration, conversationScopes: scopes.scopes });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const channelScope = await scopes.channel('project-sprout');
   try {
     const delivered = (await (
       await fetch(`${base}/api/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          projectId: 'project-sprout',
-          channel: 'project',
+          scopeId: channelScope,
           authorId: 'human-lead',
           body: 'just an fyi',
           deliveryKey: 'api-suppress-1',
@@ -188,11 +235,12 @@ test('an unaddressed message and its wake observations are readable over the API
 
     const observations = (await (
       await fetch(`${base}/api/messages/${delivered.message.id}/observations`)
-    ).json()) as { observations: { status: string; detail: string }[]; wakes: unknown[] };
+    ).json()) as { observations: { status: string; reason: string; detail: string }[]; wakes: unknown[] };
     assert.equal(observations.wakes.length, 0);
-    assert.equal(observations.observations.length, 1);
+    assert.equal(observations.observations.length, 1, 'nothing happened, and that is durably visible');
     assert.equal(observations.observations[0]?.status, 'suppressed');
-    assert.equal(observations.observations[0]?.detail, 'nothing to do');
+    assert.equal(observations.observations[0]?.reason, 'unaddressed');
+    assert.match(observations.observations[0]?.detail ?? '', /remains durable/);
 
     const missing = await fetch(`${base}/api/messages/does-not-exist/observations`);
     assert.equal(missing.status, 404);
@@ -209,12 +257,13 @@ test('a message endpoint is absent when no collaboration plane is configured', a
 });
 
 /**
- * Collaboration observability (#27).
+ * Collaboration observability (#27, #96).
  *
  * These assert the client-facing shapes the Web composer and stream depend on:
  * the project member list, the message stream with author identity and reply
- * causality, wake request detail including the linked run, and the durable
- * suppression/failure observations that must not stay silent.
+ * causality, wake request detail including the linked run, the durable
+ * suppression/failure observations that must not stay silent, and the Project
+ * event routes that carry each event's declared routing disposition.
  */
 test('the project list exposes the members a composer may address', async () => {
   const context = buildObservableCollaboration();
@@ -236,14 +285,14 @@ test('the message stream carries author identity, reply causality, and wake deta
   const context = buildObservableCollaboration();
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
   try {
     const delivered = (await (
       await fetch(`${base}/api/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          projectId: 'project-sprout',
-          channel: 'direct',
+          scopeId,
           authorId: 'operator',
           authorKind: 'human',
           body: 'Please investigate.',
@@ -295,14 +344,14 @@ test('a broadcast addresses every other member with an observable reason', async
   const context = buildObservableCollaboration();
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const channelScope = await context.scopes.channel('project-sprout');
   try {
     const delivered = (await (
       await fetch(`${base}/api/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          projectId: 'project-sprout',
-          channel: 'project',
+          scopeId: channelScope,
           authorId: 'operator',
           body: '@all please take a look.',
           deliveryKey: 'web-broadcast-1',
@@ -321,52 +370,61 @@ test('a broadcast addresses every other member with an observable reason', async
   }
 });
 
-test('a wake-model suppression is visible through the observations route', async () => {
-  const adapter = new ScriptedEngineAdapter({ turns: [] });
-  const registry = new AgentRegistry([
-    { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
-  ]);
-  const orchestrator = new RunOrchestrator({
-    engines: new Map([['scripted', adapter]]),
-    agents: registry,
-    projects,
-    pool: new EnvironmentPool({ definitions: [definition], instances: [instance] }),
-    store: new InMemoryRunStore(),
-  });
-  const collaboration = new CollaborationCoordinator({
-    projects,
-    store: new InMemoryCollaborationStore(),
-    runs: orchestrator,
-    wakeModel: { decide: async () => ({ engage: false, detail: 'nothing to do' }) },
-  });
-  const api = createRunApi({ orchestrator, agents: registry, collaboration, projects });
-  const { port } = await api.listen(0);
+test('Project events expose their declared disposition and routing evidence', async () => {
+  const context = buildObservableCollaboration();
+  const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
   try {
-    const delivered = (await (
-      await fetch(`${base}/api/messages`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          projectId: 'project-sprout',
-          channel: 'project',
-          authorId: 'operator',
-          body: 'just an fyi',
-          deliveryKey: 'web-suppression-1',
-        }),
-      })
-    ).json()) as { message: { id: string } };
-    const observations = (await (
-      await fetch(`${base}/api/messages/${delivered.message.id}/observations`)
-    ).json()) as { observations: { status: string; reason: string; detail: string }[] };
-    const suppression = observations.observations.find(
-      (observation) => observation.status === 'suppressed',
+    const addressed = await context.collaboration.publishEvent({
+      projectId: 'project-sprout',
+      kind: 'task-blocker',
+      summary: 'Task T1 is blocked',
+      disposition: 'addressed',
+      responsibleAgentIds: ['agent-scout'],
+      deliveryKey: 'api-event-1',
+    });
+    const informational = await context.collaboration.publishEvent({
+      projectId: 'project-sprout',
+      kind: 'run-completed',
+      summary: 'A run completed',
+      disposition: 'informational',
+      deliveryKey: 'api-event-2',
+    });
+    assert.equal(addressed.admittedRunIds.length, 1, 'an addressed event routes without a model');
+    assert.deepEqual(informational.wakes, [], 'an informational event routes nothing');
+
+    const listed = (await (
+      await fetch(`${base}/api/projects/project-sprout/events`)
+    ).json()) as {
+      events: { id: string; kind: string; disposition: string; responsibleAgentIds: string[] }[];
+    };
+    assert.equal(listed.events.length, 2);
+    const addressedView = listed.events.find((event) => event.id === addressed.event.id);
+    assert.equal(addressedView?.disposition, 'addressed');
+    assert.deepEqual(addressedView?.responsibleAgentIds, ['agent-scout']);
+    assert.equal(
+      listed.events.find((event) => event.id === informational.event.id)?.disposition,
+      'informational',
     );
-    assert.ok(suppression, 'the suppression is surfaced to the operator');
-    assert.equal(suppression.reason, 'wake-model');
-    assert.equal(suppression.detail, 'nothing to do');
+
+    const evidence = (await (
+      await fetch(`${base}/api/project-events/${addressed.event.id}/observations`)
+    ).json()) as {
+      event: { disposition: string };
+      observations: unknown[];
+      wakes: { agentId: string; reason: string; status: string }[];
+    };
+    assert.equal(evidence.event.disposition, 'addressed');
+    assert.deepEqual(evidence.observations, []);
+    assert.deepEqual(
+      evidence.wakes.map((wake) => [wake.agentId, wake.reason, wake.status]),
+      [['agent-scout', 'event-addressed', 'admitted']],
+    );
+
+    const missing = await fetch(`${base}/api/project-events/evt-none/observations`);
+    assert.equal(missing.status, 404);
   } finally {
-    await api.close();
+    await context.api.close();
   }
 });
 
@@ -374,6 +432,7 @@ test('a run admitted by a collaboration wake is stoppable through the run contro
   const context = buildObservableCollaboration({ settleAfterMs: 5_000 });
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
   try {
     // Delivery waits for the admitted run to settle before projecting a reply, so
     // the POST is left in flight: the run must be observable and stoppable through
@@ -382,8 +441,7 @@ test('a run admitted by a collaboration wake is stoppable through the run contro
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: 'project-sprout',
-        channel: 'direct',
+        scopeId,
         authorId: 'operator',
         body: 'A long job, please.',
         recipients: ['agent-scout'],

@@ -9,6 +9,7 @@ import { InMemoryRunStore } from '../run/store.ts';
 import { RunOrchestrator } from '../run/orchestrator.ts';
 import { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { InMemoryCollaborationStore } from '../collaboration/store.ts';
+import { buildCollaborationScopes } from '../collaboration/scope-harness.ts';
 import { createRunApi } from './api.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
@@ -198,8 +199,9 @@ export function buildWithCollaboration(options: { body?: string } = {}, auth?: O
     store,
     leaseTtlMs: 60_000,
   });
+  const scopeHarness = buildCollaborationScopes({ projects });
   const collaboration = new CollaborationCoordinator({
-    projects,
+    scopes: scopeHarness.scopes,
     store: new InMemoryCollaborationStore(),
     runs: orchestrator,
   });
@@ -207,10 +209,11 @@ export function buildWithCollaboration(options: { body?: string } = {}, auth?: O
     orchestrator,
     agents: registry,
     collaboration,
+    conversationScopes: scopeHarness.scopes,
     projects,
     ...(auth !== undefined ? { auth } : {}),
   });
-  return { api, orchestrator, collaboration };
+  return { api, orchestrator, collaboration, scopes: scopeHarness };
 }
 
 
@@ -248,11 +251,18 @@ export function buildObservableCollaboration(options: { settleAfterMs?: number }
     store: new InMemoryRunStore(),
     leaseTtlMs: 60_000,
   });
+  const scopeHarness = buildCollaborationScopes({ projects: twoMemberProjects });
   const collaboration = new CollaborationCoordinator({
-    projects: twoMemberProjects,
+    scopes: scopeHarness.scopes,
     store: new InMemoryCollaborationStore(),
     runs: orchestrator,
   });
-  const api = createRunApi({ orchestrator, agents: registry, collaboration, projects: twoMemberProjects });
-  return { api, orchestrator };
+  const api = createRunApi({
+    orchestrator,
+    agents: registry,
+    collaboration,
+    conversationScopes: scopeHarness.scopes,
+    projects: twoMemberProjects,
+  });
+  return { api, orchestrator, collaboration, scopes: scopeHarness };
 }

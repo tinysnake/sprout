@@ -252,7 +252,7 @@ function lifecycle(store: SqliteStore, connection: Awaited<ReturnType<typeof wor
         await connection.contexts.recycle(input);
       },
     },
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease-1', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease-1', run: () => 'run-1' },
     clock: { now: () => 2 },
   });
   return { pool, lifecycle };

@@ -114,7 +114,7 @@ function build(options: {
     projects,
     ids: {
       task: () => 'task',
-      message: () => 'message',
+      message: () => 'message', projectEvent: () => 'project-event',
       lease: () => 'lease',
       run: () => 'run-1',
     },
@@ -223,7 +223,7 @@ test('a restart reopens protection for a leftover recovering lease and never res
     pool,
     agents,
     projects,
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' },
     runs: { submit: async (request) => ({ id: request.runId }) },
     onRecovery: async ({ leaseId, hadActiveRun }) => {
       await recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun });

@@ -104,7 +104,7 @@ function build(options: {
     projects,
     ids: {
       task: () => 'task',
-      message: () => 'message',
+      message: () => 'message', projectEvent: () => 'project-event',
       lease: () => 'lease',
       run: () => 'run-1',
     },
@@ -358,7 +358,7 @@ test('ordinary Discard performs safe Task end: context recycled then lease relea
     pool,
     agents,
     projects,
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' },
     runs: { submit: async (request) => ({ id: request.runId }) },
     worker: {
       prepare: async () => ({ bootstrapInstructions: '' }),

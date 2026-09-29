@@ -9,13 +9,13 @@ test('an unknown mention failure is visible through the observations route', asy
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
   try {
+    const scopeId = await context.scopes.channel('project-sprout');
     const delivered = (await (
       await fetch(`${base}/api/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          projectId: 'project-sprout',
-          channel: 'project',
+          scopeId,
           authorId: 'operator',
           body: '@ghost are you there?',
           deliveryKey: 'web-unknown-mention-1',

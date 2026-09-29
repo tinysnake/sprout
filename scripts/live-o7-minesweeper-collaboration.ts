@@ -161,9 +161,26 @@ async function shutdown(): Promise<void> {
   server = undefined;
 }
 
+const directScopes = new Map<string, string>();
+
+/** Open (idempotently) the Project-scoped direct conversation for one pair. */
+async function openDirectScope(authorId: string, recipient: string): Promise<string> {
+  const key = [authorId, recipient].sort().join('|');
+  const cached = directScopes.get(key);
+  if (cached !== undefined) return cached;
+  const opened = await post(`/api/projects/${projectId}/scopes/direct`, {
+    participants: [authorId, recipient],
+  });
+  const scope = opened['scope'] as { readonly id: string } | undefined;
+  assert.ok(scope, `direct conversation ${key} was not opened`);
+  directScopes.set(key, scope.id);
+  return scope.id;
+}
+
 async function direct(authorId: string, recipient: string, body: string, label: string): Promise<Run> {
   const response = await post('/api/messages', {
     projectId, channel: 'direct', authorId, authorKind: authorId === 'human' ? 'human' : 'agent',
+    scopeId: await openDirectScope(authorId, recipient),
     recipients: [recipient], body, deliveryKey: `o7-${Date.now()}-${++delivery}-${label}`, awaitReply: false,
   });
   const runId = (response.admittedRunIds as readonly string[])[0];
@@ -180,6 +197,7 @@ async function direct(authorId: string, recipient: string, body: string, label: 
 async function publishCompletionToHuman(report: string): Promise<Message> {
   const response = await post('/api/messages', {
     projectId, channel: 'project', authorId: 'planner', authorKind: 'agent',
+    scopeId: `channel-${projectId}`,
     body: `Final completion report for Human:\n\n${report}\n\nPublication marker: @planner`,
     deliveryKey: `o7-${Date.now()}-${++delivery}-planner-final-human`,
   });

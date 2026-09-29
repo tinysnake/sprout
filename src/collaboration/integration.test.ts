@@ -1,5 +1,5 @@
 /**
- * Production integration for the collaboration write path (#26).
+ * Production integration for the collaboration write path (#26, #96).
  *
  * The unit tests exercise each seam in isolation and the probe crosses a real
  * worker process. This file is the middle ground: the **real** `SqliteStore`
@@ -9,18 +9,19 @@
  * actually wires.
  *
  * Acceptance behaviours covered here:
- * - Direct messages, exact `@id` mentions, and `@all` broadcasts follow the M1
- *   wake contract and start runs with contextual prompts.
- * - Unaddressed project messages consult the wake model; a suppression and a
- *   failure are each durably recorded, and a failure fails open.
- * - A completed run projects one Agent-authored reply; failed or interrupted runs
- *   project none.
- * - Private run events never enter conversation.
+ * - Direct messages, exact `@id` mentions, and `@all` broadcasts are routed
+ *   deterministically — no wake model is consulted on any branch — and start
+ *   runs with contextual prompts in the input's conversation scope.
+ * - An unaddressed input wakes nobody and records a durable suppressed
+ *   observation instead of a guessed or failed-open wake.
+ * - A completed run projects one Agent-authored reply; failed or interrupted
+ *   runs project none.
+ * - Private run events never enter conversation (final-text-only projection).
  * - Idempotent retry produces one durable input and at most one run admission.
- * - A Message's wake is scoped to the causal Message's Project: a target Agent
- *   that belongs to several Projects never resolves through the wrong one, uses
- *   the causal Project's environment, and receives its contract; a target that
- *   is not a member fails explicitly instead of falling back.
+ * - Project events are published with a required routing disposition; an
+ *   `addressed` event wakes its responsible Agent through the same
+ *   persistence-before-admission path, a non-addressed one persists without
+ *   any wake.
  */
 
 import { test } from 'node:test';
@@ -52,7 +53,7 @@ import { SqliteStore } from '../store/db.ts';
 
 import { CollaborationCoordinator } from './coordinator.ts';
 
-import type { WakeModel } from './model.ts';
+import { buildCollaborationScopes, type CollaborationScopeHarness } from './scope-harness.ts';
 
 
 const definition: EnvironmentDefinition = {
@@ -99,13 +100,13 @@ interface Harness {
   readonly sqlite: SqliteStore;
   readonly coordinator: CollaborationCoordinator;
   readonly engine: ScriptedEngineAdapter;
+  readonly scopes: CollaborationScopeHarness;
   close(): void;
 }
 
 
 function build(options: {
   turns: readonly ScriptedTurn[];
-  wakeModel?: WakeModel;
   /** Overrides the default single project; used by the multi-Project regression. */
   projects?: readonly Project[];
   definitions?: readonly EnvironmentDefinition[];
@@ -133,16 +134,17 @@ function build(options: {
     }),
     store: sqlite.runs,
   });
+  const scopes = buildCollaborationScopes({ projects });
   const coordinator = new CollaborationCoordinator({
-    projects,
+    scopes: scopes.scopes,
     store: sqlite.collaboration,
     runs: orchestrator,
-    ...(options.wakeModel !== undefined ? { wakeModel: options.wakeModel } : {}),
   });
   return {
     sqlite,
     coordinator,
     engine,
+    scopes,
     close: () => {
       sqlite.close();
       rmSync(directory, { recursive: true, force: true });
@@ -154,10 +156,10 @@ function build(options: {
 test('a direct message wakes its recipient with a contextual prompt and projects one reply', async (t) => {
   const harness = build({ turns: [scriptedTurn('Scout: on it.')] });
   t.after(harness.close);
+  const scopeId = await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId,
     author: { id: 'human-lead', kind: 'human' },
     body: 'Please check the wake rule.',
     recipients: ['scout'],
@@ -167,8 +169,10 @@ test('a direct message wakes its recipient with a contextual prompt and projects
   assert.equal(delivered.wakes.length, 1);
   assert.equal(delivered.wakes[0]?.reason, 'direct-recipient');
   assert.equal(delivered.admittedRunIds.length, 1);
+  assert.equal(delivered.message.channel, 'direct');
+  assert.equal(delivered.message.scopeId, scopeId);
 
-  // The prompt names author, channel, and the target agent (acceptance item 3).
+  // The prompt names author, location, and the target agent.
   const prompt = harness.engine.sessions[0]?.prompts[0] ?? '';
   assert.match(prompt, /human human-lead wrote:/);
   assert.match(prompt, /Please check the wake rule\./);
@@ -181,26 +185,17 @@ test('a direct message wakes its recipient with a contextual prompt and projects
   assert.equal(replies.length, 1);
   assert.equal(replies[0]?.author.id, 'scout');
   assert.equal(replies[0]?.inReplyTo, delivered.message.id);
+  assert.equal(replies[0]?.scopeId, scopeId, 'the reply stays in the conversation scope');
   assert.equal(replies[0]?.body, 'Scout: on it.');
 });
 
 
-test('an exact @id mention wakes only the mentioned member and never the wake model', async (t) => {
-  let modelCalls = 0;
-  const harness = build({
-    turns: [scriptedTurn('Forge: acknowledged.')],
-    wakeModel: {
-      decide: async () => {
-        modelCalls += 1;
-        return { engage: true };
-      },
-    },
-  });
+test('an exact @id mention wakes only the mentioned member, without any model', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Forge: acknowledged.')] });
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
+    scopeId: await harness.scopes.channel('project-sprout'),
     author: { id: 'human-lead', kind: 'human' },
     body: '@forge can you take the review?',
     deliveryKey: 'mention-1',
@@ -210,7 +205,6 @@ test('an exact @id mention wakes only the mentioned member and never the wake mo
     delivered.wakes.map((wake) => `${wake.agentId}:${wake.reason}`),
     ['forge:agent-mention'],
   );
-  assert.equal(modelCalls, 0, 'an addressed message never reaches the wake model');
   assert.equal(delivered.admittedRunIds.length, 1);
 
   const replies = (await harness.sqlite.collaboration.listMessages()).filter(
@@ -221,58 +215,45 @@ test('an exact @id mention wakes only the mentioned member and never the wake mo
 });
 
 
-test('an unknown @id records a durable failure and bypasses the wake model', async (t) => {
-  let modelCalls = 0;
-  const harness = build({
-    turns: [],
-    wakeModel: {
-      decide: async () => {
-        modelCalls += 1;
-        return { engage: true };
-      },
-    },
-  });
+test('an unknown @id records a durable failure beside the valid deterministic route', async (t) => {
+  const harness = build({ turns: [] });
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
+    scopeId: await harness.scopes.channel('project-sprout'),
     author: { id: 'human-lead', kind: 'human' },
-    body: '@ghost can you take this?',
+    body: '@ghost and @scout can you take this?',
     deliveryKey: 'unknown-mention-1',
   });
 
-  assert.deepEqual(delivered.wakes, []);
+  assert.deepEqual(
+    delivered.wakes.map((wake) => `${wake.agentId}:${wake.reason}`),
+    ['scout:agent-mention'],
+    'the valid target still routes; the invalid one never blocks it',
+  );
   assert.deepEqual(harness.sqlite.collaboration.observations(delivered.message.id), [
     {
       agentId: 'ghost',
       status: 'failed',
       reason: 'agent-mention',
-      detail: 'addressed agent is not a member of project project-sprout',
+      detail: 'addressed target is not a member of project project-sprout',
     },
   ]);
-  assert.equal(modelCalls, 0, 'an addressed unknown target never reaches the wake model');
 });
 
 
-test('an @all broadcast wakes every other member and bypasses the wake model', async (t) => {
+test('an @all broadcast wakes every other current Agent', async (t) => {
   const harness = build({
     turns: [
       scriptedTurn('Scout: ready.'),
       scriptedTurn('Forge: ready.'),
       scriptedTurn('Scribe: ready.'),
     ],
-    wakeModel: {
-      decide: async () => {
-        throw new Error('the wake model must not be consulted for a broadcast');
-      },
-    },
   });
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
+    scopeId: await harness.scopes.channel('project-sprout'),
     author: { id: 'human-lead', kind: 'human' },
     body: 'standup @all',
     deliveryKey: 'broadcast-1',
@@ -293,27 +274,24 @@ test('an @all broadcast wakes every other member and bypasses the wake model', a
 });
 
 
-test('an unaddressed project message suppressed by the wake model is durably recorded and wakes nobody', async (t) => {
-  const harness = build({
-    turns: [scriptedTurn('should not run')],
-    wakeModel: { decide: async () => ({ engage: false, detail: 'no action needed' }) },
-  });
+test('an unaddressed project message wakes nobody and records a durable suppression', async (t) => {
+  const harness = build({ turns: [scriptedTurn('should not run')] });
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
+    scopeId: await harness.scopes.channel('project-sprout'),
     author: { id: 'human-lead', kind: 'human' },
     body: 'just an fyi',
     deliveryKey: 'suppressed-1',
   });
 
   assert.equal(delivered.admittedRunIds.length, 0);
+  assert.deepEqual(delivered.wakes, []);
   const observations = harness.sqlite.collaboration.observations(delivered.message.id);
-  assert.equal(observations.length, 1);
+  assert.equal(observations.length, 1, 'nothing happened, and that is durably visible');
   assert.equal(observations[0]?.status, 'suppressed');
-  assert.equal(observations[0]?.reason, 'wake-model');
-  assert.equal(observations[0]?.detail, 'no action needed');
+  assert.equal(observations[0]?.reason, 'unaddressed');
+  assert.match(observations[0]?.detail ?? '', /remains durable under the Project wake policy/);
 
   const replies = (await harness.sqlite.collaboration.listMessages()).filter(
     (message) => message.author.kind === 'agent',
@@ -322,62 +300,36 @@ test('an unaddressed project message suppressed by the wake model is durably rec
 });
 
 
-test('a wake model failure fails open to every member and is durably recorded', async (t) => {
-  const harness = build({
-    turns: [scriptedTurn('Scout: engaged.'), scriptedTurn('Forge: engaged.'), scriptedTurn('Scribe: engaged.')],
-    wakeModel: {
-      decide: async () => {
-        throw new Error('model unavailable');
-      },
-    },
-  });
+test('a Working group channel message routes and replies inside its own scope', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Scribe: noted.')] });
   t.after(harness.close);
+  const groupId = (
+    await harness.scopes.scopes.createWorkingGroup({
+      projectId: 'project-sprout',
+      displayName: 'Docs',
+      creator: { memberId: 'human-lead', kind: 'human' },
+      memberIds: ['scribe'],
+    })
+  ).id;
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
+    scopeId: groupId,
     author: { id: 'human-lead', kind: 'human' },
-    body: 'anyone around?',
-    deliveryKey: 'fail-open-1',
+    body: '@scribe please capture this',
+    deliveryKey: 'wg-1',
   });
 
-  assert.equal(delivered.wakes.length, 3, 'a failure wakes every other member');
-  assert.ok(delivered.wakes.every((wake) => wake.reason === 'wake-model-fail-open'));
-  assert.equal(delivered.admittedRunIds.length, 3);
-
-  const observations = harness.sqlite.collaboration.observations(delivered.message.id);
-  assert.equal(observations.length, 1);
-  assert.equal(observations[0]?.status, 'failed');
-  assert.match(observations[0]?.detail ?? '', /model unavailable/);
-});
-
-
-test('an invalid wake-model verdict fails open and is durably recorded', async (t) => {
-  const harness = build({
-    turns: [scriptedTurn('Scout: engaged.'), scriptedTurn('Forge: engaged.'), scriptedTurn('Scribe: engaged.')],
-    wakeModel: { decide: async () => undefined } as unknown as WakeModel,
-  });
-  t.after(harness.close);
-
-  const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'project',
-    author: { id: 'human-lead', kind: 'human' },
-    body: 'anyone around?',
-    deliveryKey: 'invalid-verdict-1',
-  });
-
-  assert.equal(delivered.wakes.length, 3, 'an invalid result wakes every other member');
-  assert.ok(delivered.wakes.every((wake) => wake.reason === 'wake-model-fail-open'));
-  const observations = harness.sqlite.collaboration.observations(delivered.message.id);
-  assert.deepEqual(observations, [
-    {
-      agentId: '*',
-      status: 'failed',
-      reason: 'wake-model-fail-open',
-      detail: 'invalid-verdict: wake model must return an object with boolean engage',
-    },
-  ]);
+  assert.equal(delivered.message.channel, 'working-group');
+  assert.deepEqual(
+    delivered.wakes.map((wake) => `${wake.agentId}:${wake.reason}`),
+    ['scribe:agent-mention'],
+  );
+  const reply = (await harness.sqlite.collaboration.listMessages()).find(
+    (message) => message.author.kind === 'agent',
+  );
+  assert.equal(reply?.scopeId, groupId, 'the reply stays in the Working group channel');
+  const prompt = harness.engine.sessions[0]?.prompts[0] ?? '';
+  assert.match(prompt, /the Working group channel/);
 });
 
 
@@ -394,8 +346,7 @@ test('a completed run with private events projects only its final text', async (
   t.after(harness.close);
 
   const delivered = await harness.coordinator.deliver({
-    projectId: 'project-sprout',
-    channel: 'direct',
+    scopeId: await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']),
     author: { id: 'human-lead', kind: 'human' },
     body: 'what did you find?',
     recipients: ['scout'],
@@ -414,4 +365,61 @@ test('a completed run with private events projects only its final text', async (
   // conversation: the exclusion is a projection rule, not data loss.
   const run = await harness.sqlite.runs.get(delivered.admittedRunIds[0]!);
   assert.ok(run?.events.some((event) => event.type === 'tool-output'));
+});
+
+
+test('an addressed Project event persists before admission and projects a non-routing reply', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Scout: unblocking.')] });
+  t.after(harness.close);
+
+  const published = await harness.coordinator.publishEvent({
+    projectId: 'project-sprout',
+    kind: 'task-blocker',
+    summary: 'Task T1 is blocked on review',
+    disposition: 'addressed',
+    responsibleAgentIds: ['scout'],
+    deliveryKey: 'event-1',
+  });
+
+  // Persistence-before-admission: the wake was durable before the run existed.
+  assert.equal(published.wakes.length, 1);
+  assert.equal(published.wakes[0]?.inputId, published.event.id);
+  assert.equal(published.wakes[0]?.reason, 'event-addressed');
+  assert.equal(published.wakes[0]?.status, 'admitted');
+  assert.equal(published.admittedRunIds.length, 1);
+
+  const replies = (await harness.sqlite.collaboration.listMessages()).filter(
+    (message) => message.author.kind === 'agent',
+  );
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0]?.body, 'Scout: unblocking.');
+  assert.equal(replies[0]?.channel, 'project');
+  assert.equal(replies[0]?.scopeId, 'channel-project-sprout');
+  assert.equal(replies[0]?.inReplyTo, undefined, 'the projection is keyed to the event, not a Message');
+
+  const prompt = harness.engine.sessions[0]?.prompts[0] ?? '';
+  assert.match(prompt, /Project event "task-blocker"/);
+});
+
+
+test('a non-addressed Project event persists without any wake or run', async (t) => {
+  const harness = build({ turns: [scriptedTurn('must not run')] });
+  t.after(harness.close);
+
+  for (const disposition of ['wake-eligible', 'informational', 'human-action-required', 'non-routing'] as const) {
+    const published = await harness.coordinator.publishEvent({
+      projectId: 'project-sprout',
+      kind: 'run-completed',
+      summary: 'Run finished',
+      disposition,
+      deliveryKey: `event-${disposition}`,
+    });
+    assert.deepEqual(published.wakes, []);
+    assert.deepEqual(published.admittedRunIds, []);
+    assert.equal(published.event.disposition, disposition);
+  }
+
+  assert.equal((await harness.sqlite.collaboration.listWakeRequests()).length, 0);
+  assert.equal((await harness.sqlite.collaboration.listEvents('project-sprout')).length, 4);
+  assert.equal(harness.engine.requests.length, 0, 'the engine was never consulted');
 });
