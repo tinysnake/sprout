@@ -625,7 +625,20 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     archiveButton.click();
     await settle();
     const archiveDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
-    [...archiveDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Archive Project'))?.click();
+    assert.match(archiveDialog.textContent ?? '', /Renamed Work Project/, 'archive confirmation identifies the exact Project');
+    const archiveConfirm = [...archiveDialog.querySelectorAll('button')].find((button) => button.textContent?.includes('Archive Project')) as HTMLButtonElement;
+    const archiveNameInput = archiveDialog.querySelector('input') as HTMLInputElement | null;
+    assert.ok(archiveNameInput, 'archive confirmation requires typing the Project name');
+    assert.equal(archiveConfirm.disabled, true, 'archive is disabled until the exact name is entered');
+    archiveNameInput.value = 'Renamed Work';
+    archiveNameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle();
+    assert.equal(archiveConfirm.disabled, true, 'a partial Project name does not authorize archival');
+    archiveNameInput.value = 'Renamed Work Project';
+    archiveNameInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle();
+    assert.equal(archiveConfirm.disabled, false, 'the exact Project name enables archival');
+    archiveConfirm.click();
     await settle();
     assert.equal(pageState(), 'archived', 'archive state is distinct');
     assert.match(doc.body.textContent ?? '', /repos\/new-work-project/);
@@ -638,6 +651,122 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
     assert.match(doc.body.textContent ?? '', /Workspace binding history/);
     app.unmount();
   } finally {
+    await cleanup();
+  }
+});
+
+test('Project Overview hides project identity details in the zero-Project header', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const projectService = new projectsModule.FixtureProjectService(options.agentService, options.environmentService, []);
+    const doc = dom.window.document;
+    doc.body.innerHTML = '<div id="app"></div>';
+    dom.window.history.replaceState(null, '', '/app/project/overview');
+    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(doc.getElementById('app')!);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(doc.querySelector('.projects-overview-view [data-state]')?.getAttribute('data-state'), 'empty');
+    const header = doc.querySelector('.projects-overview-view header') as HTMLElement;
+    assert.ok(header);
+    assert.equal(header.querySelector('#project-selector'), null, 'no empty Project selector is rendered');
+    assert.doesNotMatch(header.textContent ?? '', /Project authority/, 'no fallback Project label is shown as if it were a selected identity');
+    assert.ok(header.querySelector('.new-project-btn'), 'the deliberate create action remains available');
+  } finally {
+    app?.unmount();
+    await cleanup();
+  }
+});
+
+test('Add Agent explains the exhausted choice set without rendering an empty selector', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const projectService = new projectsModule.FixtureProjectService(options.agentService, options.environmentService);
+    const activeAgents = (await options.agentService.listAgents()).filter((agent) => agent.status === 'active');
+    for (const agent of activeAgents) {
+      await projectService.addProjectMembership('project-sprout', { agentId: agent.id });
+    }
+    const doc = dom.window.document;
+    doc.body.innerHTML = '<div id="app"></div>';
+    dom.window.history.replaceState(null, '', '/app/project/overview');
+    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(doc.getElementById('app')!);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+
+    (doc.querySelector('.project-memberships-card button') as HTMLButtonElement).click();
+    await settle();
+    const dialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    assert.match(dialog.textContent ?? '', /Every active Agent is already a member, or no active Agent exists/);
+    assert.equal(dialog.querySelector('select'), null, 'no dead empty Agent control accompanies the explanation');
+  } finally {
+    app?.unmount();
+    await cleanup();
+  }
+});
+
+test('Add Environment refreshes access and omits an already-assigned instance from choices', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+    const base = new projectsModule.FixtureProjectService(options.agentService, options.environmentService);
+    const readyEnvironment = (await options.environmentService.listEnvironments()).find((environment) => environment.environmentInstanceId === 'inst-ready');
+    assert.ok(readyEnvironment);
+    assert.notEqual(readyEnvironment.id, readyEnvironment.environmentInstanceId, 'enrollment and instance identities remain distinct');
+    let overviewReads = 0;
+    const projectService = new Proxy(base, {
+      get(target, property) {
+        if (property === 'loadOverview') {
+          return async (id: string) => {
+            const snapshot = await target.loadOverview(id);
+            // Simulate the page's initial snapshot predating an access grant by
+            // another authorized action; opening the dialog must refresh it.
+            if (overviewReads++ === 0) return { ...snapshot, access: [] };
+            return snapshot;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const doc = dom.window.document;
+    doc.body.innerHTML = '<div id="app"></div>';
+    dom.window.history.replaceState(null, '', '/app/project/overview');
+    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(doc.getElementById('app')!);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+
+    (doc.querySelector('.project-workspaces-card button') as HTMLButtonElement).click();
+    await settle();
+    const dialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    const environmentSelect = dialog.querySelector('select') as HTMLSelectElement;
+    assert.ok(environmentSelect, 'available Environment choices remain selectable');
+    assert.ok(environmentSelect.options.length > 0);
+    assert.equal([...environmentSelect.options].some((option) => option.value === readyEnvironment.environmentInstanceId), false,
+      'an instance with active access is excluded even though its enrollment id differs');
+  } finally {
+    app?.unmount();
     await cleanup();
   }
 });

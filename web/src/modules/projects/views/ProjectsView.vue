@@ -44,6 +44,7 @@ const isLoadingOverview = ref(false);
 const loadError = ref('');
 const missingProject = ref(false);
 const actionError = ref('');
+const isRefreshingEnvironmentChoices = ref(false);
 let loadGeneration = 0;
 
 type DialogKind = 'create' | 'edit' | 'add-member' | 'edit-member' | 'add-environment' | 'edit-workspace' | 'info' | 'archive' | 'restore' | 'end-member' | 'end-access';
@@ -65,6 +66,7 @@ const selectedAgentId = ref('');
 const responsibilities = ref('');
 const collaborationInstructions = ref('');
 const selectedEnvironmentId = ref('');
+const archiveConfirmation = ref('');
 const workspaceKind = ref<'default' | 'relative'>('default');
 const workspacePath = ref('');
 const submitting = ref(false);
@@ -248,6 +250,7 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
   actionError.value = '';
   editingMemberId.value = memberId;
   editingEnvironmentId.value = environmentId;
+  if (kind === 'archive') archiveConfirmation.value = '';
   const project = currentProject.value;
   const content = currentContent.value;
   if (kind === 'create') {
@@ -283,6 +286,29 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     workspacePath.value = selectedAccess?.current?.path ?? '';
   }
   dialog.value = kind;
+}
+
+async function openAddEnvironmentDialog() {
+  const projectId = currentProject.value?.id;
+  const currentService = service.value;
+  if (!projectId || !currentService || isRefreshingEnvironmentChoices.value) return;
+
+  isRefreshingEnvironmentChoices.value = true;
+  actionError.value = '';
+  try {
+    // The assignment choice set is only useful when it reflects current
+    // authority facts. Refresh before opening so a grant made elsewhere does
+    // not appear selectable from a stale overview snapshot.
+    const snapshot = await currentService.loadOverview(projectId);
+    if (selectedProjectId.value !== projectId || snapshot.project.id !== projectId) return;
+    overview.value = snapshot;
+    openDialog('add-environment');
+  } catch {
+    actionError.value = 'Environment choices could not be refreshed. No assignment was attempted; retry to request current Project access facts.';
+    announcer.announce(actionError.value);
+  } finally {
+    isRefreshingEnvironmentChoices.value = false;
+  }
 }
 
 function parseRules(value: string): string[] {
@@ -404,6 +430,7 @@ async function submitWorkspace() {
 async function confirmDialogAction() {
   const project = currentProject.value;
   if (!project) return;
+  if (dialog.value === 'archive' && archiveConfirmation.value !== project.displayName) return;
   let done = false;
   if (dialog.value === 'archive') done = await runControl((authority) => authority.archiveProject(project.id), 'Project archived. History and host-local workspaces are preserved.');
   else if (dialog.value === 'restore') done = await runControl((authority) => authority.restoreProject(project.id), 'Project restored after the authority safety check.');
@@ -420,7 +447,7 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
     <header class="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-3 sm:px-5">
       <div class="flex min-w-0 flex-1 items-center gap-2.5">
         <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-[var(--accent-bg)] text-[var(--accent-primary)]"><Icon name="folder" :size="18" /></span>
-        <div class="min-w-0 flex-1">
+        <div v-if="currentProject" class="min-w-0 flex-1">
           <label for="project-selector" class="sr-only">Select Project</label>
           <select id="project-selector" class="project-dropdown-select max-w-full truncate rounded bg-transparent py-1 text-sm font-bold text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :value="selectedProjectId" :disabled="isLoadingProjects || projects.length === 0" @change="selectProject(($event.target as HTMLSelectElement).value)">
             <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.displayName }}{{ project.status === 'archived' ? ' (Archived)' : '' }}</option>
@@ -553,7 +580,7 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
           <article class="project-workspaces-card rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] shadow-xs">
             <div class="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-4 py-3">
               <div><h2 class="text-sm font-bold text-[var(--text-primary)]">Bound Workspaces &amp; Host Environments</h2><p class="mt-0.5 text-[10px] text-[var(--text-secondary)]">{{ currentAccess.length }} active Environment access binding(s)</p></div>
-              <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="projectArchived || controlsDisabled || unassignedEnvironments.length === 0" @click="openDialog('add-environment')"><Icon name="plus" :size="14" /><span class="hidden sm:inline">Assign Environment</span><span class="sm:hidden">Assign</span></Button>
+              <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="projectArchived || controlsDisabled || isRefreshingEnvironmentChoices || unassignedEnvironments.length === 0" @click="openAddEnvironmentDialog"><Icon name="plus" :size="14" /><span class="hidden sm:inline">Assign Environment</span><span class="sm:hidden">Assign</span></Button>
             </div>
             <div v-if="overview.access.length" class="space-y-2 p-3 sm:p-4">
               <div v-for="entry in overview.access" :key="`${entry.environmentInstanceId}-${entry.startedAt}`" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3">
@@ -617,8 +644,8 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'add-member' || dialog === 'edit-member'" :open="true" :title="dialog === 'add-member' ? 'Add Global Agent to Project' : 'Edit Project Membership'" description="Membership-specific responsibilities and collaboration instructions are versioned Project content." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <label v-if="dialog === 'add-member'" class="flex flex-col gap-1 font-semibold">Active Global Agent<select v-model="selectedAgentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="agent in unassignedAgents" :key="agent.id" :value="agent.id">{{ agent.displayName }} · {{ agent.trafficLightReason }}</option></select></label>
-        <p v-if="dialog === 'add-member' && unassignedAgents.length === 0" class="text-[var(--text-secondary)]">Every active Agent is already a member, or no active Agent exists. Create or restore an Agent in Manage → Agents first.</p>
+        <label v-if="dialog === 'add-member' && unassignedAgents.length > 0" class="flex flex-col gap-1 font-semibold">Active Global Agent<select v-model="selectedAgentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="agent in unassignedAgents" :key="agent.id" :value="agent.id">{{ agent.displayName }} · {{ agent.trafficLightReason }}</option></select></label>
+        <p v-else-if="dialog === 'add-member'" class="text-[var(--text-secondary)]">Every active Agent is already a member, or no active Agent exists. Create or restore an Agent in Manage → Agents first.</p>
         <label class="flex flex-col gap-1 font-semibold">Responsibilities <span class="font-normal text-[var(--text-muted)]">Separate entries with commas.</span><input v-model="responsibilities" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /></label>
         <label class="flex flex-col gap-1 font-semibold">Collaboration Instructions<textarea v-model="collaborationInstructions" rows="3" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
         <p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p>
@@ -628,8 +655,8 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
 
     <Dialog v-if="dialog === 'add-environment' || dialog === 'edit-workspace'" :open="true" :title="dialog === 'add-environment' ? 'Assign Environment & Prepare Workspace' : 'Change Project Workspace'" description="Only a Worker-root-relative location or its managed default crosses this authority boundary; workspace files are never moved or deleted." @update:open="closeDialog">
       <div class="flex flex-col gap-3 text-xs">
-        <label v-if="dialog === 'add-environment'" class="flex flex-col gap-1 font-semibold">Enrolled Environment<select v-model="selectedEnvironmentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="environment in unassignedEnvironments" :key="environment.environmentInstanceId" :value="environment.environmentInstanceId">{{ environment.displayName }} · {{ environment.platform }} · {{ environment.trafficLightReason }}</option></select></label>
-        <p v-if="dialog === 'add-environment' && unassignedEnvironments.length === 0" class="text-[var(--text-secondary)]">No other approved Environment is available to assign.</p>
+        <label v-if="dialog === 'add-environment' && unassignedEnvironments.length > 0" class="flex flex-col gap-1 font-semibold">Enrolled Environment<select v-model="selectedEnvironmentId" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option v-for="environment in unassignedEnvironments" :key="environment.environmentInstanceId" :value="environment.environmentInstanceId">{{ environment.displayName }} · {{ environment.platform }} · {{ environment.trafficLightReason }}</option></select></label>
+        <p v-else-if="dialog === 'add-environment'" class="text-[var(--text-secondary)]">No other approved Environment is available to assign.</p>
         <label class="flex flex-col gap-1 font-semibold">Workspace Selection<select v-model="workspaceKind" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option value="default">Worker-managed default workspace</option><option value="relative">Existing relative location</option></select></label>
         <label v-if="workspaceKind === 'relative'" class="flex flex-col gap-1 font-semibold">Relative Workspace Directory<input v-model="workspacePath" autocomplete="off" placeholder="repos/project" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 font-mono text-[var(--text-primary)]" /><span class="font-normal text-[var(--text-muted)]">Relative to the host-configured Worker workspace root. Absolute paths are not accepted.</span></label>
         <p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p>
@@ -644,8 +671,10 @@ const closeDialog = () => { if (!submitting.value) dialog.value = null; };
     </Dialog>
 
     <Dialog v-if="dialog === 'archive' || dialog === 'restore' || dialog === 'end-member' || dialog === 'end-access'" :open="true" :title="dialog === 'archive' ? 'Archive Project Safely' : dialog === 'restore' ? 'Restore Project' : dialog === 'end-member' ? 'End Project Membership' : 'End Environment Access'" :description="dialog === 'archive' ? 'The authority refuses archival while active work, unfinished Tasks, or held/recovering leases still depend on this Project.' : 'This is a non-destructive change. Historical facts and host-local workspaces remain preserved.'" @update:open="closeDialog">
-      <div class="space-y-3 text-xs text-[var(--text-secondary)]"><p v-if="dialog === 'archive'">Archiving makes this Project read-only. It does not delete Project history, memberships, Environment access, or any host-local Project workspace.</p><p v-else-if="dialog === 'restore'">Restore rechecks the authority's current safety conditions. Existing memberships and workspace bindings are not recreated or moved.</p><p v-else-if="dialog === 'end-member'">End this Agent's membership non-destructively. Past Messages, runs, and attribution remain. Any active work dependency can refuse the change.</p><p v-else>End access to this Environment. Project workspace files stay on the host and all old workspace bindings remain in history. Active work can refuse the change.</p><p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p></div>
-      <template #footer><Button variant="secondary" size="md" :disabled="submitting" @click="closeDialog">Cancel</Button><Button :variant="dialog === 'archive' || dialog === 'end-member' || dialog === 'end-access' ? 'danger' : 'primary'" size="md" class="min-h-[44px]" :disabled="submitting || controlsDisabled" @click="confirmDialogAction">{{ dialog === 'archive' ? 'Archive Project' : dialog === 'restore' ? 'Restore Project' : dialog === 'end-member' ? 'End Membership' : 'End Access' }}</Button></template>
+      <div class="space-y-3 text-xs text-[var(--text-secondary)]"><p v-if="dialog === 'archive'">Archiving <strong class="text-[var(--text-primary)]">{{ currentProject?.displayName }}</strong> makes this Project read-only. It does not delete Project history, memberships, Environment access, or any host-local Project workspace.</p><p v-else-if="dialog === 'restore'">Restore rechecks the authority's current safety conditions. Existing memberships and workspace bindings are not recreated or moved.</p><p v-else-if="dialog === 'end-member'">End this Agent's membership non-destructively. Past Messages, runs, and attribution remain. Any active work dependency can refuse the change.</p><p v-else>End access to this Environment. Project workspace files stay on the host and all old workspace bindings remain in history. Active work can refuse the change.</p>
+        <label v-if="dialog === 'archive'" class="flex flex-col gap-1 font-semibold text-[var(--text-primary)]">Type “{{ currentProject?.displayName }}” exactly to confirm<input v-model="archiveConfirmation" class="archive-project-name-input min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" autocomplete="off" /></label>
+        <p v-if="formError" role="alert" class="text-[var(--red-action)]">{{ formError }}</p></div>
+      <template #footer><Button variant="secondary" size="md" :disabled="submitting" @click="closeDialog">Cancel</Button><Button :variant="dialog === 'archive' || dialog === 'end-member' || dialog === 'end-access' ? 'danger' : 'primary'" size="md" class="min-h-[44px]" :disabled="submitting || controlsDisabled || (dialog === 'archive' && archiveConfirmation !== currentProject?.displayName)" @click="confirmDialogAction">{{ dialog === 'archive' ? 'Archive Project' : dialog === 'restore' ? 'Restore Project' : dialog === 'end-member' ? 'End Membership' : 'End Access' }}</Button></template>
     </Dialog>
   </main>
 </template>
