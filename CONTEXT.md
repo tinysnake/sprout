@@ -36,6 +36,10 @@ _Avoid_: Project, Task, default group
 The shared conversation whose participants are the current members of one Working group.
 _Avoid_: Project channel, direct message
 
+**Conversation scope**:
+The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, or one Working group channel. It binds its Messages to explicit membership, versioned goal and rules facts, and read-only rules; disbanding or an ended membership renders it read-only without deleting its record or history.
+_Avoid_: Chat room, DM thread, channel list
+
 **Project-scoped direct message**:
 A private conversation between two current members of one Project, governed and recorded within that Project. The same pair communicating in another Project has a separate conversation and context.
 _Avoid_: Global direct message, cross-Project direct message

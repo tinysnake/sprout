@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 17;
+export const CURRENT_SCHEMA_VERSION = 18;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 17;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 18;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -817,6 +817,32 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           enrollment_id TEXT NOT NULL, task_id TEXT NOT NULL,
           state TEXT NOT NULL, PRIMARY KEY (enrollment_id, task_id)
         );
+      `);
+    },
+  },
+  {
+    fromVersion: 17,
+    toVersion: 18,
+    name: 'conversation_scopes_and_working_groups',
+    migrate: (db) => {
+      // Conversation scopes are durable Project channels, Project-scoped direct
+      // conversations, and Working groups (#95, ADR-0008). Each is one JSON
+      // document keyed by its stable id: the append-only content versions and
+      // membership history belong to the scope as a whole, disbanding and ended
+      // membership are statuses and recorded facts, and there is no delete. The
+      // document holds only sanitized display name, goal, rules, member and
+      // actor ids, reasons, and timestamps — no credential, hostname, address,
+      // or absolute path has a column here.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS conversation_scopes (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          document TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS conversation_scopes_project
+          ON conversation_scopes(project_id);
       `);
     },
   },

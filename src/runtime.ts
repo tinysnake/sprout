@@ -40,6 +40,7 @@ import { workspaceFor } from './project/resolve.ts';
 import { BridgedProjectRegistry } from './project/bridged-registry.ts';
 import type { ProjectStore } from './project/store.ts';
 import type { ProjectAuthorityStore } from './project/authority-store.ts';
+import { currentProjectContent } from './project/authority-model.ts';
 import type { ProjectAccessStore } from './project/access-store.ts';
 import { sanitizeWorkspacePath } from './project/access.ts';
 import {
@@ -52,6 +53,11 @@ import {
   type ProjectBindingWorkSafetyPort,
   type ProjectEnvironmentAuthorityPort,
 } from './project/access-service.ts';
+import {
+  ConversationScopeService,
+  type ConversationProjectPort,
+} from './conversation/service.ts';
+import type { ConversationScopeStore } from './conversation/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
@@ -72,6 +78,7 @@ import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
 import { createProjectRouter } from './web/project-router.ts';
+import { createConversationRouter } from './web/conversation-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
@@ -153,6 +160,8 @@ export interface RuntimeStores {
   readonly projectAuthorities: ProjectAuthorityStore;
   /** The durable Project Environment access and workspace bindings (#93). */
   readonly projectAccess: ProjectAccessStore;
+  /** The durable conversation scopes and Working groups (#95). */
+  readonly conversationScopes: ConversationScopeStore;
   close(): void;
 }
 
@@ -275,6 +284,8 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
+  /** The conversation scope and Working group capability (#95). */
+  readonly conversationScopes: ConversationScopeService;
   /**
    * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
    * `configured` is the M1 carrier path retained only for an injected
@@ -633,13 +644,118 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         return durable !== undefined ? durable.status === 'active' : agents.get(agentId) !== undefined;
       },
     };
+    /**
+     * The Project facts the conversation scope Module validates against (#95).
+     *
+     * A narrow read-only projection of the same durable #92 authority record —
+     * lifecycle, versioned goal/rules, and membership facts — so Project
+     * lifecycle stays owned by one Module. A host-configured M1 Project with no
+     * authority record projects as active content version `0` with its
+     * configured members plus the local Human, mirroring the "one identity,
+     * never two" merge the BridgedProjectRegistry applies elsewhere.
+     */
+    const conversationProjects: ConversationProjectPort = {
+      async projectFacts(projectId) {
+        const authority = await openedStores.projectAuthorities.get(projectId);
+        if (authority !== undefined) {
+          const content = currentProjectContent(authority);
+          return {
+            projectId: authority.id,
+            status: authority.status,
+            contentVersion: authority.content.currentVersion,
+            goal: content.goal,
+            rules: [...content.rules],
+            members: content.memberships.map((membership) => ({
+              memberId: membership.memberId,
+              memberKind: membership.memberKind,
+              ...(membership.endedAt !== undefined ? { endedAt: membership.endedAt } : {}),
+              ...(membership.endedReason !== undefined
+                ? { endedReason: membership.endedReason }
+                : {}),
+            })),
+          };
+        }
+        const configured = projects.get(projectId);
+        if (configured === undefined) return undefined;
+        return {
+          projectId: configured.id,
+          status: 'active',
+          contentVersion: 0,
+          goal: configured.goal,
+          rules: [...configured.rules],
+          members: [
+            // The local Human is a member of every Project (ADR-0008); the M1
+            // projection carries no durable membership rows, so it attributes
+            // the Human with the operator member id ProjectService defaults to.
+            { memberId: 'operator', memberKind: 'human' as const },
+            ...configured.memberships.map((membership) => ({
+              memberId: membership.agentId,
+              memberKind: 'agent' as const,
+            })),
+          ],
+        };
+      },
+    };
+    /**
+     * The conversation scope and Working group capability (#95): the invariant
+     * Project channel, Project-scoped direct conversations, and temporary
+     * Working groups with durable membership history (ADR-0008). It holds no
+     * Message, wake, run, Task, or lease port, so scope commands can never
+     * wake an Agent or create work by themselves.
+     */
+    const conversationScopes = new ConversationScopeService({
+      store: stores.conversationScopes,
+      projects: conversationProjects,
+    });
+    // Hydrate the Project channel invariant for every Project that already
+    // exists before this composition serves: durable authority records from
+    // earlier runs and the host-configured projection each gain their one
+    // Project channel, idempotently (ADR-0008: the channel is an invariant of
+    // the Project, not template content).
+    for (const authority of await openedStores.projectAuthorities.list()) {
+      // Hydration settles the preparation immediately: the Project already
+      // exists, so this is the ensure side, never an in-flight creation.
+      (await conversationScopes.prepareProjectChannel(authority)).commit();
+    }
+    for (const configured of projects.list()) {
+      await conversationScopes.ensureProjectChannel(configured.id);
+    }
     const projectService = new ProjectService({
       store: stores.projectAuthorities,
       workSafety: projectWorkSafety,
       agentAuthority: projectAgentAuthority,
       // The bridge prepares before persistence and publishes only afterwards;
-      // archive commits as removal from every M1 route and wake lookup.
-      bridge: projects,
+      // archive commits as removal from every M1 route and wake lookup. The
+      // conversation scope bridge records the Project's one Project channel
+      // during the same preparation, so a Project creation and its invariant
+      // channel become durable together (#95, ADR-0008). If the Project fails
+      // to persist, the prepared rollback removes the channel row this
+      // preparation created — and only that row — so a failed creation leaves
+      // no orphan scope record; a retried creation finds the channel
+      // idempotently.
+      bridge: {
+        async prepare(project) {
+          const channel = await conversationScopes.prepareProjectChannel(project);
+          let publishRegistry: () => void;
+          try {
+            publishRegistry = (await projects.prepare(project)).commit;
+          } catch (error) {
+            try {
+              await channel.rollback();
+            } catch {
+              // The preparation failure stays the reported error.
+            }
+            throw error;
+          }
+          return {
+            commit: () => {
+              publishRegistry();
+              channel.commit();
+            },
+            rollback: () => channel.rollback(),
+          };
+        },
+      },
     });
     /**
      * The Project Environment access and Project workspace capability (#93).
@@ -1449,6 +1565,12 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           legacyProjects: projects,
           access: projectAccessService,
         }),
+        // Conversation scopes and Working groups (#95), composed through the
+        // same additive seam. Every command delegates to the scope service, so
+        // membership, creator/Human authority, and read-only rules have exactly
+        // one implementation; the routes sit behind the operator browser
+        // boundary, so their actor is the authenticated Human by construction.
+        createConversationRouter({ scopes: conversationScopes }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -1553,6 +1675,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       agentService,
       projectService,
       projectAccess: projectAccessService,
+      conversationScopes,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
@@ -1570,6 +1693,19 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.
         await refreshEnvironmentCatalog();
+        // A process that died between the Project-channel prepare and the
+        // Project save leaves a channel row with no Project behind it — the
+        // rollback cannot run on termination. Restart reconciliation removes
+        // exactly those abandoned preparations before anything is served;
+        // every channel whose Project exists and every Working group record
+        // (history is never deleted, ADR-0008) survives, and a preparation
+        // still in flight in this process is never reaped (#95).
+        await conversationScopes.removeOrphanProjectChannels();
+        // Working group participation ends cascade from an ended Project
+        // membership (#95); materializing them here means a process that died
+        // between the end and its first scope read converges at startup. The
+        // pass is idempotent, so a healthy restart changes nothing.
+        await conversationScopes.syncAll();
         const reconciled = await collaboration.reconcile();
         const result: SproutReconciliation = {
           recoveredRuns,

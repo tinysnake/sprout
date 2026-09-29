@@ -86,11 +86,25 @@ export interface ProjectAgentAuthorityPort {
  * A prepared authority-to-runtime projection.
  *
  * Preparation validates and allocates the complete projection without making
- * it visible. The returned synchronous commit cannot fail: ProjectService
- * persists only after preparation succeeds, then publishes the prepared view.
+ * it visible. The returned `commit` cannot fail: ProjectService persists only
+ * after preparation succeeds, then publishes the prepared view. The optional
+ * `rollback` undoes durable preparation work when persistence (or a later
+ * step of the same preparation) fails, so a failed Project change leaves no
+ * partial durable record behind (ADR-0008: a failed final submission never
+ * stores a partially created Project).
  */
+export interface PreparedProjectBridge {
+  /** Publish the prepared in-memory view; runs after persistence, cannot fail. */
+  readonly commit: () => void;
+  /**
+   * Undo durable work done during preparation when persistence fails.
+   * Its own failure must not mask the persistence error.
+   */
+  readonly rollback?: () => void | Promise<void>;
+}
+
 export interface ProjectAuthorityBridgePort {
-  prepare(project: ProjectAuthority): (() => void) | Promise<() => void>;
+  prepare(project: ProjectAuthority): PreparedProjectBridge | Promise<PreparedProjectBridge>;
 }
 
 export interface ProjectServiceOptions {
@@ -605,14 +619,32 @@ export class ProjectService {
     }
   }
 
-  /** Prepare the runtime bridge, persist, then publish the infallible commit. */
+  /**
+   * Prepare the runtime bridge, persist, then publish the infallible commit.
+   *
+   * If anything between preparation and publication fails — the legacy hook
+   * or the durable save — the bridge's prepared rollback runs first so no
+   * durable preparation artifact (such as the Project channel row) outlives a
+   * failed Project change; a rollback failure never masks the original error.
+   */
   async #persist(project: ProjectAuthority): Promise<void> {
-    const commit = await this.#bridge?.prepare(project);
-    // Legacy hooks are treated as preparation, not post-persistence
-    // notification: a rejection must never leave a durable partial change.
-    await this.#onChanged?.(project);
-    await this.#store.save(project);
-    commit?.();
+    const prepared = await this.#bridge?.prepare(project);
+    try {
+      // Legacy hooks are treated as preparation, not post-persistence
+      // notification: a rejection must never leave a durable partial change.
+      await this.#onChanged?.(project);
+      await this.#store.save(project);
+    } catch (failure) {
+      if (prepared !== undefined) {
+        try {
+          await prepared.rollback?.();
+        } catch {
+          // The persistence failure stays the reported error.
+        }
+      }
+      throw failure;
+    }
+    prepared?.commit();
   }
 
   /** An archived Project is read-only (ADR-0008). */

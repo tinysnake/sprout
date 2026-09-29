@@ -284,6 +284,13 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
+  conversation_scopes: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
 };
 
 
@@ -330,6 +337,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
       indexes.map((index) => ({ name: index.name, tbl: index.tbl_name })),
       [
         { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
+        { name: 'conversation_scopes_project', tbl: 'conversation_scopes' },
         { name: 'browser_sessions_active_idx', tbl: 'browser_sessions' },
         { name: 'environment_enrollments_instance_idx', tbl: 'environment_enrollments' },
         { name: 'environment_observations_instance_seq_idx', tbl: 'environment_observations' },
@@ -383,6 +391,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'collaboration_messages',
         'collaboration_wake_requests',
         'collaboration_wake_requests',
+        'conversation_scopes',
         'environment_catalog',
         'environment_enrollments',
         'environment_force_releases',
