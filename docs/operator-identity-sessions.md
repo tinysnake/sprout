@@ -17,6 +17,14 @@ the prior identity and its sessions together; it never persists a replacement
 verifier beside active sessions from an earlier credential version. No Web API
 can initialize, recover, rotate, or export this input.
 
+When the host generates this input, shape it for a human to type and store:
+random **lowercase English words and digits joined with `-`**, for example
+`today-hot-superb-useful-2026` — not a random letters-and-digits string. Use
+four or more word segments so the friendly shape still carries enough
+strength. This format applies only to the human-typed credential; every
+machine-to-machine value in this design (browser bearer and request-forgery
+values, salts, nonces) stays opaque random bytes.
+
 The durable store retains an scrypt verifier and salt, not the host input. It
 retains SHA-256 digests for browser bearer and request-forgery values, not their
 raw values. Each session persists a finite 30-day absolute deadline and a
