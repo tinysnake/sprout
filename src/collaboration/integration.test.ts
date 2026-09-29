@@ -400,6 +400,35 @@ test('a Working group broadcast and mention never wake Agents outside the group'
   );
 });
 
+test('a mixed Working group broadcast and explicit nonparticipant mention persists the failed target beside one participant wake', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Scout: noted.')] });
+  t.after(harness.close);
+  const groupId = (
+    await harness.scopes.scopes.createWorkingGroup({
+      projectId: 'project-sprout',
+      displayName: 'Docs',
+      creator: { memberId: 'human-lead', kind: 'human' },
+      memberIds: ['scout'],
+    })
+  ).id;
+
+  const delivered = await harness.coordinator.deliver({
+    scopeId: groupId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: '@all and @forge; @scout please review',
+    deliveryKey: 'wg-mixed-1',
+  });
+  assert.deepEqual(delivered.wakes.map((wake) => `${wake.agentId}:${wake.reason}`), ['scout:broadcast']);
+  assert.equal(delivered.admittedRunIds.length, 1);
+  assert.deepEqual(harness.sqlite.collaboration.observations(delivered.message.id), [{
+    agentId: 'forge',
+    status: 'failed',
+    reason: 'agent-mention',
+    detail: 'addressed target is not a participant of this working group',
+  }]);
+  assert.deepEqual(harness.engine.requests.map((request) => request.agentId), ['scout']);
+});
+
 
 test('an ended Working group participation drops out of the group\'s routing participants', async (t) => {
   const harness = build({ turns: [scriptedTurn('Scout: here.')] });

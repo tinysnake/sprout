@@ -223,6 +223,20 @@ test('a Working group mention of a Project Agent outside the group is a durable 
   ]);
 });
 
+test('a Working group broadcast with an explicit nonparticipant mention retains the failure without waking outside the group', () => {
+  const plan = planWake(
+    message({ scopeId: 'wg-1', channel: 'working-group', body: '@all and @forge; @scout please review' }),
+    workingGroup,
+  );
+  assert.deepEqual(plan.decisions, [{ agentId: 'scout', reason: 'broadcast' }]);
+  assert.deepEqual(plan.observations, [{
+    agentId: 'forge',
+    status: 'failed',
+    reason: 'agent-mention',
+    detail: 'addressed target is not a participant of this working group',
+  }]);
+});
+
 test('a Working group mention of a Human participant is a known non-wakeable target', () => {
   const plan = planWake(
     message({ scopeId: 'wg-1', channel: 'working-group', body: '@operator please look' }),

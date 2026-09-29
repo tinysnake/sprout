@@ -144,23 +144,25 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
     return { inputId: message.id, decisions, observations };
   }
 
-  // The Project and Working group channels. A broadcast or an exact mention is
-  // deterministic and never reaches any model. In a Working group the
-  // broadcast resolves over the group's current participant Agents only: an
-  // Agent outside the group was never addressed, so it is excluded rather
-  // than failed.
-  if (ALL_MENTION.test(message.body)) {
+  // Broadcast and explicit mentions are independent addresses on the same
+  // input. Broadcast excludes nonparticipants silently, but an explicitly
+  // named nonparticipant must still receive a durable failure. Neither form
+  // reaches a model.
+  const broadcast = ALL_MENTION.test(message.body);
+  if (broadcast) {
     for (const agentId of resolver.currentAgentIds) {
       if (agentId === message.author.id) continue;
       if (!resolver.isParticipant(agentId)) continue;
       decisions.push({ agentId, reason: 'broadcast' });
     }
-    return { inputId: message.id, decisions, observations };
   }
 
   const mentioned = parseMentions(message.body, resolver.currentMemberIds);
-  if (mentioned.members.length > 0 || mentioned.unknown.length > 0) {
-    for (const target of dedupe([...mentioned.members, ...mentioned.unknown])) {
+  const targets = dedupe([...mentioned.members, ...mentioned.unknown])
+    .filter((target) => !(broadcast && target.toLowerCase() === 'all'));
+  if (broadcast || targets.length > 0) {
+    for (const target of targets) {
+      if (decisions.some((decision) => decision.agentId === target)) continue;
       resolver.resolve(target, 'agent-mention', decisions, observations);
     }
     return { inputId: message.id, decisions, observations };
