@@ -66,13 +66,18 @@ const unopenedAgents = computed(() => {
 });
 const missingScope = computed(() => !!requestedScopeId.value && !loading.value && !scopes.value.some((s) => s.id === requestedScopeId.value));
 const activeScope = computed(() => requestedScopeId.value ? scopes.value.find((s) => s.id === requestedScopeId.value) : channelScopes.value[0] ?? scopes.value[0]);
+const archivedDirectAgent = computed(() => {
+  const scope = activeScope.value;
+  return scope?.kind === 'direct' ? agents.value.find((agent) => agent.status === 'archived' && scope.participants.includes(agent.id)) : undefined;
+});
 const activeMessages = computed(() => messages.value.filter((m) => m.scopeId === activeScope.value?.id));
 const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
   ...(activeScope.value?.kind === 'project' ? events.value.map((event) => ({ kind: 'event' as const, event })) : []),
 ].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
-const canSend = computed(() => !!service && !!activeScope.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
+const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 const unavailableReason = computed(() => !presentation.value.controlAvailable ? `${presentation.value.label}. Shown facts may be stale; control actions are disabled, not queued.` :
+  archivedDirectAgent.value ? `Agent @${archivedDirectAgent.value.displayName} is archived. History is preserved for review; restore the Agent before sending new messages.` :
   inspection.value && !inspection.value.state.writable ? readOnlyReason(inspection.value.state.reason) : detailLoading.value ? 'Checking conversation admission before sending.' : '');
 const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined) : 'informational');
 const evidenceMessage = computed(() => messages.value.find((m) => m.id === evidenceOpen.value));
@@ -337,6 +342,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
         </header>
         <div v-if="!presentation.controlAvailable" class="chat-offline-banner border-b border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
         <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><span><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</span><Button v-if="inspection.state.reason === 'working-group-disbanded' && project?.status === 'active'" variant="secondary" size="sm" class="min-h-11 shrink-0" :disabled="!presentation.controlAvailable || managingGroup" @click="restoreGroup">Restore WG</Button></div>
+        <div v-else-if="archivedDirectAgent" class="chat-readonly-banner border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><Icon name="alert" :size="14" /> Agent @{{ archivedDirectAgent.displayName }} is archived. History is preserved for review; restore the Agent before sending new messages.</div>
         <div v-if="actionError" class="p-3 text-xs text-[var(--red-action)]" role="alert">{{ actionError }}</div>
         <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto p-4" :aria-busy="detailLoading">
           <div v-if="detailLoading" class="chat-detail-loading text-xs text-[var(--text-muted)]" role="status">Checking conversation admission…</div>

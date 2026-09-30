@@ -602,3 +602,21 @@ test('a disconnected inspector never presents an unverified batch as not found o
     app.unmount();
   } finally { await cleanup(); }
 });
+
+test('an archived Agent preserves its Project direct history but cannot receive new messages', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const options = await deterministicAppOptions(vite);
+    await options.chatService.openDirectConversation('project-sprout', ['operator', 'programmer']);
+    await options.agentService.archiveAgent('programmer');
+    const { app, router } = createSproutApp(options);
+    await router.push('/project/chat/dm-programmer');
+    app.mount(mount);
+    await settle(150);
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /Agent @Programmer is archived/);
+    assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, true);
+    assert.match(doc.querySelector('[data-scope-id="dm-programmer"]')?.textContent ?? '', /Archived/);
+    app.unmount();
+  } finally { await cleanup(); }
+});
