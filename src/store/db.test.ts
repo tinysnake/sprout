@@ -273,6 +273,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'environment_lifecycle_state', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'recovery_state', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'active_run_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'admission_document', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'completed_at', type: 'INTEGER', notnull: 0, pk: 0 },
@@ -295,6 +296,10 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'summary_text', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'summary_agent_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'summary_recorded_at', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'advance_actor', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'advance_reason', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'content_version', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'requested_at', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
   environment_enrollments: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },

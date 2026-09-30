@@ -334,7 +334,9 @@ function renderProject(input: TaskContextMaterialization): string {
 }
 
 function renderTask(input: TaskContextMaterialization): string {
-  return ['# Sprout Task', '', `Title: ${input.taskTitle}`, `Status: ${input.taskStatus}`, '', `Goal: ${input.taskGoal}`, '', 'Constraints:', ...(input.taskConstraints.length ? input.taskConstraints.map((constraint) => `- ${constraint}`) : ['- (none declared)']), '', 'Prior bounded run summaries:', input.priorRunSummaries || '(none)', ''].join('\n');
+  return ['# Sprout Task', '', `Title: ${input.taskTitle}`, `Status: ${input.taskStatus}`, '', `Goal: ${input.taskGoal}`, '', 'Constraints:', ...(input.taskConstraints.length ? input.taskConstraints.map((constraint) => `- ${constraint}`) : ['- (none declared)']),
+    ...(input.taskContentVersion !== undefined ? ['', `Content version: ${input.taskContentVersion}`, '', 'Validation criteria:', ...(input.taskValidationCriteria?.length ? input.taskValidationCriteria.map((criterion) => `- ${criterion}`) : ['- (none declared)'])] : []),
+    '', 'Prior bounded run summaries:', input.priorRunSummaries || '(none)', ''].join('\n');
 }
 
 function renderAgent(input: TaskContextMaterialization): string {

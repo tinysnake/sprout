@@ -68,6 +68,26 @@ export type TaskEnvironmentLifecycleState =
  * constraints". `environmentPreference` is optional: absent means the Task leaves
  * environment choice entirely to project matching.
  */
+export interface TaskActor {
+  readonly memberId: string;
+  readonly memberKind: 'human' | 'agent';
+}
+
+/** Approval and the exact proposal snapshot bound by one approve-and-begin command. */
+export interface TaskAdmission {
+  readonly proposalId: string;
+  /** Proposal revision consumed atomically with the Task-held lease. */
+  readonly proposalRevision: number;
+  readonly contentVersion: number;
+  readonly validationCriteria: readonly string[];
+  readonly lead: TaskActor;
+  /** Agent identity used to materialize Worker-owned Task context. */
+  readonly contextAgentId: string;
+  readonly approvedBy: TaskActor;
+  readonly approvedAt: number;
+  readonly approvalReason: string;
+}
+
 export interface Task {
   readonly id: string;
   readonly projectId: string;
@@ -81,6 +101,8 @@ export interface Task {
   readonly assignedAgentId?: string;
   /** An explicitly selected environment, taking priority over project matching. */
   readonly environmentPreference?: EnvironmentPreference;
+  /** Present for Tasks created by Human approve-and-begin; binds immutable proposal facts. */
+  readonly admission?: TaskAdmission;
   /** Why the Task is `blocked`, when it is. */
   readonly blockerReason?: string;
   /** Fixed only by Task begin; absent for an unbegun Task. */
@@ -120,6 +142,11 @@ export interface TaskRunLink {
   readonly taskId: string;
   readonly runId: string;
   readonly agentId: string;
+  /** Present for an explicitly attributed Task-lead or Human advance. */
+  readonly actor?: TaskActor;
+  readonly reason?: string;
+  readonly contentVersion?: number;
+  readonly requestedAt?: number;
   /** Position in the Task's run sequence, starting at 1. */
   readonly sequence: number;
   readonly linkedAt: number;

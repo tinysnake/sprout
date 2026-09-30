@@ -26,24 +26,38 @@ export interface TaskProposal {
   readonly projectId: string;
   readonly proposer: ProposalActor;
   readonly origin: TaskProposalOrigin | null;
-  readonly status: 'proposed' | 'withdrawn' | 'rejected';
+  readonly status: 'proposed' | 'withdrawn' | 'rejected' | 'begun';
   /** All mutations, including lifecycle decisions, increment this stale-command fence. */
   readonly revision: number;
   readonly currentContentVersion: number;
   readonly versions: readonly TaskContentVersion[];
-  readonly lifecycle: readonly {
-    readonly action: 'withdraw' | 'reject';
-    readonly actor: ProposalActor;
-    readonly at: number;
-    readonly reason: string;
-    readonly contentVersion: number;
-  }[];
+  readonly lifecycle: readonly (
+    | {
+        readonly action: 'withdraw' | 'reject';
+        readonly actor: ProposalActor;
+        readonly at: number;
+        readonly reason: string;
+        readonly contentVersion: number;
+      }
+    | {
+        readonly action: 'begun';
+        readonly actor: ProposalActor;
+        readonly at: number;
+        readonly reason: string;
+        readonly contentVersion: number;
+        readonly taskId: string;
+      }
+  )[];
   readonly createdAt: number;
   readonly updatedAt: number;
 }
 export interface ProposalDecision {
   readonly expectedRevision: number;
   readonly reason: string;
+}
+export interface TaskProposalBeginInput extends ProposalDecision {
+  readonly environmentInstanceId: string;
+  readonly lead: ProposalActor;
 }
 export type ReviseTaskProposal = TaskProposalContent & ProposalDecision;
 export type ProposalErrorCode = 'invalid-content' | 'unknown-project' | 'unknown-proposal'
