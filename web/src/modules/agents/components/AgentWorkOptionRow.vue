@@ -180,7 +180,8 @@ function handleRowKeydown(event: KeyboardEvent) {
       <Button
         variant="ghost"
         size="xs"
-        class="edit-opt-btn h-7 w-7 p-0"
+        class="edit-opt-btn p-0"
+        style="width: 44px; height: 44px"
         title="Edit Work Option"
         :aria-label="`Edit ${option.engine} work option`"
         @click.stop="emit('edit', option.id)"

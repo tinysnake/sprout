@@ -388,12 +388,12 @@ test('every editable row offers a keyboard-reachable Edit control with an access
     assert.equal(editBtn.getAttribute('aria-label'), 'Edit pi work option', 'accessible name names the target');
     assert.equal(editBtn.disabled, false);
 
-    // Touch-target parity with the sibling move/remove controls of the row.
-    const moveBtn = row.querySelector('.move-opt-up-btn') as HTMLButtonElement;
-    for (const token of ['h-7', 'w-7', 'min-h-[28px]']) {
-      assert.equal(editBtn.className.includes(token), true, `Edit carries ${token}`);
-      assert.equal(moveBtn.className.includes(token), true, `the sibling control carries ${token}`);
-    }
+    // The button itself, not just its icon or a class token, supplies the mobile hit area.
+    // jsdom has no layout engine, so measure its computed box dimensions rather than its rect.
+    const hitBox = dom.window.getComputedStyle(editBtn);
+    assert.ok(parseFloat(hitBox.width) >= 44, 'Edit has at least a 44px-wide hit area');
+    assert.ok(parseFloat(hitBox.height) >= 44, 'Edit has at least a 44px-high hit area');
+    assert.equal(editBtn.title, 'Edit Work Option', 'the tooltip is preserved');
 
     // Keyboard activation: focus it, press Enter, the editor opens.
     editBtn.focus();
