@@ -26,6 +26,7 @@ import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
 import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
+import { InMemoryTaskProposalStore } from './task/proposal-store.ts';
 import { InMemoryConversationScopeStore } from './conversation/store.ts';
 import {
   build,
@@ -306,6 +307,7 @@ test('runtime construction failure closes environment and worker resources witho
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
+    taskProposals: new InMemoryTaskProposalStore(),
     close() {
       storesClosed++;
     },

@@ -5,6 +5,7 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteProjectAuthorityStore } from '../project/sqlite-authority-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
+import { SqliteTaskProposalStore } from '../task/sqlite-proposal-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
 import { SqliteAgentStore } from '../agent/sqlite-store.ts';
@@ -124,6 +125,7 @@ export class SqliteStore {
   readonly runReconnectRetries: SqliteRunReconnectRetryStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
+  readonly taskProposals: SqliteTaskProposalStore;
   readonly operatorSessions: SqliteOperatorSessionStore;
   readonly agents: SqliteAgentStore;
   readonly agentIdentities: SqliteAgentStore;
@@ -175,6 +177,7 @@ export class SqliteStore {
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than
     // issuing `environment_leases` statements itself.
+    this.taskProposals = new SqliteTaskProposalStore(this.db);
     this.tasks = new SqliteTaskStore({ db: this.db, leases: this.leases, transactions: this.transactions });
   }
 

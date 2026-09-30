@@ -44,6 +44,7 @@ import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
 import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
+import { InMemoryTaskProposalStore } from './task/proposal-store.ts';
 import { InMemoryConversationScopeStore } from './conversation/store.ts';
 import {
   createSproutRuntime,
@@ -240,6 +241,7 @@ export function inMemoryStores(): MemoryStores {
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
+    taskProposals: new InMemoryTaskProposalStore(),
     runsStore: runs,
     close: () => {
       closes += 1;

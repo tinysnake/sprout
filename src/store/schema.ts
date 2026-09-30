@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 21;
+export const CURRENT_SCHEMA_VERSION = 22;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 21;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 22;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1032,6 +1032,21 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       `);
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
         ON collaboration_routing_attempts(batch_id, attempt_number);`);
+    },
+  },
+  {
+    fromVersion: 21,
+    toVersion: 22,
+    migrate(db) {
+      db.exec(`
+        CREATE TABLE task_proposals (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision >= 1)
+        );
+        CREATE INDEX task_proposals_project ON task_proposals(project_id);
+      `);
     },
   },
 ];
