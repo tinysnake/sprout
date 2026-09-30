@@ -314,7 +314,7 @@ export class CodexSession implements EngineSession {
         detailedTokens: usageEntry.detailedTokens,
         ...(usageEntry.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: usageEntry.engineTurnDurationMs } : {}),
         ...(usageEntry.costEstimate !== undefined ? { costEstimate: usageEntry.costEstimate } : {}),
-        billingBasis: usageEntry.billingBasis ?? 'metered_api',
+        billingBasis: usageEntry.billingBasis ?? 'unknown',
         source: 'codex-protocol:thread/tokenUsage/updated',
         sourceVersion: 'codex-cli 0.154.0',
       };
@@ -485,7 +485,7 @@ function readCodexTokenUsage(params: unknown): CodexTurnUsageEntry | undefined {
     detailedTokens,
     ...(durationMs !== undefined ? { engineTurnDurationMs: durationMs } : {}),
     ...(costEstimate !== undefined ? { costEstimate } : {}),
-    billingBasis: 'metered_api',
+    billingBasis: 'unknown',
   };
 }
 

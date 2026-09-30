@@ -161,7 +161,7 @@ test('assistant usage is captured once from a completed message', () => {
       outputTokens: 20,
       totalTokens: 120,
     },
-    billingBasis: 'metered_api',
+    billingBasis: 'unknown',
     source: 'pi-protocol:message_end',
     sourceVersion: 'pi 0.85.1',
   });

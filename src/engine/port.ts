@@ -224,7 +224,7 @@ export interface EngineTurn {
   readonly completion: Promise<EngineTurnResult>;
 }
 
-export type EngineTurnResult =
+export type EngineTurnResult = { readonly pricingContext?: import('../usage/valuation.ts').LocalPricingContext } & (
   | {
       readonly status: 'completed';
       readonly text: string;
@@ -267,7 +267,8 @@ export type EngineTurnResult =
        * never mistaken for a stale key and never discards a usable key.
        */
       readonly resumeRefused?: boolean;
-    };
+    }
+);
 
 export interface EngineAdapter {
   readonly id: string;

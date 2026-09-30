@@ -18,6 +18,12 @@ import type {
   DetailedTokenDimensions,
 } from './model.ts';
 
+/** Authoritative execution metadata, not inferred from a model name or token event. */
+export interface LocalPricingContext {
+  readonly route: string;
+  readonly serviceTier: string;
+}
+
 export interface ModelPricingRates {
   readonly inputMicrosPerToken: number;
   readonly cachedInputMicrosPerToken: number;
@@ -116,8 +122,9 @@ export function calculateLocalEstimate(options: {
   readonly model: string;
   readonly tokens?: DetailedTokenDimensions | undefined;
   readonly valuedAt: number;
+  readonly pricingContext?: LocalPricingContext | undefined;
 }): ApiEquivalentCostEstimate {
-  const { model, tokens, valuedAt } = options;
+  const { model, tokens, valuedAt, pricingContext } = options;
   if (!tokens) {
     return {
       status: 'unavailable',
@@ -135,11 +142,24 @@ export function calculateLocalEstimate(options: {
     };
   }
 
-  const cachedInput = tokens.cachedInputTokens ?? 0;
-  const uncachedInput = tokens.uncachedInputTokens ?? (
-    tokens.inputTokens !== undefined ? Math.max(0, tokens.inputTokens - cachedInput) : 0
-  );
-  const output = tokens.outputTokens ?? 0;
+  // This snapshot covers only standard OpenAI API rates. Other routes/tiers
+  // and unknown metadata cannot be valued using these rates.
+  if (pricingContext?.route !== 'openai' || pricingContext.serviceTier !== 'standard') {
+    return defaultUnavailableCostEstimate('route or service tier is unknown or unsupported by the snapshot');
+  }
+  const { inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens } = tokens;
+  const dimensions = [inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens];
+  if (dimensions.some((value) => value === undefined || !Number.isSafeInteger(value) || value < 0) ||
+      inputTokens === undefined || cachedInputTokens === undefined || outputTokens === undefined ||
+      cachedInputTokens > inputTokens || cacheWriteInputTokens !== 0) {
+    return defaultUnavailableCostEstimate('pricing dimensions are incomplete, inconsistent, or unsupported');
+  }
+  const cachedInput = cachedInputTokens;
+  const uncachedInput = inputTokens - cachedInput;
+  if (tokens.uncachedInputTokens !== undefined && tokens.uncachedInputTokens !== uncachedInput) {
+    return defaultUnavailableCostEstimate('uncached input disagrees with input and cache dimensions');
+  }
+  const output = outputTokens;
 
   const uncachedMicros = uncachedInput * rates.inputMicrosPerToken;
   const cachedMicros = cachedInput * rates.cachedInputMicrosPerToken;
@@ -156,6 +176,9 @@ export function calculateLocalEstimate(options: {
     priceSourceVersion: CODEX_PRICE_SNAPSHOT_VERSION,
     priceDimensions: {
       model,
+      route: pricingContext.route,
+      serviceTier: pricingContext.serviceTier,
+      cacheWriteInputTokens,
       rates,
       uncachedInputTokens: uncachedInput,
       cachedInputTokens: cachedInput,

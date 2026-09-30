@@ -45,6 +45,7 @@ test('record completed run with detailed token dimensions, Sprout wall duration,
         workModel: 'gpt-4o',
         effort: 'high',
       },
+      result: { status: 'completed', text: 'done', pricingContext: { route: 'openai', serviceTier: 'standard' } },
       detailedTokens: {
         inputTokens: 1000,
         uncachedInputTokens: 800,
@@ -95,7 +96,7 @@ test('record completed run with detailed token dimensions, Sprout wall duration,
     assert.equal(obs.costEstimate.valuationProvenance, 'locally_estimated');
     assert.equal(obs.costEstimate.priceSource, 'codex-price-snapshot');
     assert.equal(obs.costEstimate.priceSourceVersion, '2026-09-15');
-    assert.equal(obs.billingBasis, 'metered_api');
+    assert.equal(obs.billingBasis, 'unknown');
   });
 });
 
@@ -217,7 +218,7 @@ test('delayed observations and corrections append with source, reason, and super
     const initialDetail = await service.getActivity('ua_run_run-delayed');
     const initialObsId = initialDetail?.effectiveObservation?.id;
     assert.ok(initialObsId);
-    assert.equal(initialDetail?.effectiveObservation?.costEstimate.valuationProvenance, 'locally_estimated');
+    assert.equal(initialDetail?.effectiveObservation?.costEstimate.status, 'unavailable');
 
     // 1. Delayed provider estimate arrives
     const delayed = await service.recordDelayedObservation({
@@ -245,7 +246,7 @@ test('delayed observations and corrections append with source, reason, and super
     const correction = await service.recordCorrection({
       activityId: 'ua_run_run-delayed',
       supersedesObservationId: delayed.id,
-      source: 'operator-audit',
+      source: 'adapter-reconciliation',
       reason: 'Reconciliation adjustment after provider token discrepancy audit',
       tokens: { inputTokens: 110, outputTokens: 20, totalTokens: 130 },
       costEstimate: {
@@ -312,6 +313,39 @@ test('routing attempt records as usage activity belonging to Project but not Age
     assert.equal(obs.costEstimate.status, 'unavailable');
     assert.equal(obs.billedCost.status, 'unavailable');
     assert.equal(obs.durations.sproutWallDurationMs, 350);
+  });
+});
+
+test('Human stops retain stopped outcome and observed partial tokens', async () => {
+  await withService(async (service) => {
+    await service.recordRunActivity({
+      id: 'stopped-run', agentId: 'agent-1', environmentInstanceId: 'env-1', prompt: 'work',
+      status: 'interrupted', recoverySettlement: { status: 'stopped', eventCount: 1 },
+      events: [], createdAt: 1000, completedAt: 1100,
+      detailedTokens: { inputTokens: 100 },
+    });
+    const detail = await service.getActivityByRunId('stopped-run');
+    assert.equal(detail?.activity.status, 'stopped');
+    assert.equal(detail?.effectiveObservation?.completeness, 'partial');
+    assert.equal(detail?.effectiveObservation?.tokens?.inputTokens, 100);
+  });
+});
+
+test('two corrections against the same initial observation retain exactly one effective head', async () => {
+  await withService(async (service) => {
+    const activity = await service.recordRunActivity({
+      id: 'correction-run', agentId: 'agent-1', environmentInstanceId: 'env-1', prompt: 'work',
+      status: 'completed', events: [], createdAt: 1000, completedAt: 1100,
+    });
+    const initial = (await service.getActivity(activity.id))!.effectiveObservation!;
+    const input = { activityId: activity.id, supersedesObservationId: initial.id,
+      source: 'adapter-reconciliation', reason: 'Delayed provider estimate' };
+    const results = await Promise.allSettled([service.recordCorrection(input), service.recordCorrection(input)]);
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    const detail = (await service.getActivity(activity.id))!;
+    assert.equal(detail.observations.length, 2);
+    assert.equal(detail.observations.filter((obs) => obs.isEffective).length, 1);
+    await assert.rejects(service.recordCorrection(input), /effective|stale/);
   });
 });
 

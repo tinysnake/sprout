@@ -361,7 +361,7 @@ test('a turn attaches the per-turn Codex token usage notification on completion'
       reasoningOutputTokens: 10,
       totalTokens: 160,
     },
-    billingBasis: 'metered_api',
+    billingBasis: 'unknown',
     source: 'codex-protocol:thread/tokenUsage/updated',
     sourceVersion: 'codex-cli 0.154.0',
   });

@@ -205,7 +205,7 @@ test('a Pi turn totals token usage reported for each completed assistant message
       reasoningOutputTokens: 0,
       totalTokens: 335,
     },
-    billingBasis: 'metered_api',
+    billingBasis: 'unknown',
     source: 'pi-protocol:message_end',
     sourceVersion: 'pi 0.85.1',
   });

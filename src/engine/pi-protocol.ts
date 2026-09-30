@@ -268,7 +268,7 @@ function createPiTurnResult(
       ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
       ...(costEstimate !== undefined ? { costEstimate } : {}),
       ...(hasUsage ? {
-        billingBasis: 'metered_api' as const,
+        billingBasis: 'unknown' as const,
         source: 'pi-protocol:message_end',
         sourceVersion: 'pi 0.85.1',
       } : {}),
@@ -281,7 +281,7 @@ function createPiTurnResult(
     ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
     ...(costEstimate !== undefined ? { costEstimate } : {}),
     ...(hasUsage ? {
-      billingBasis: 'metered_api' as const,
+      billingBasis: 'unknown' as const,
       source: 'pi-protocol:message_end',
       sourceVersion: 'pi 0.85.1',
     } : {}),

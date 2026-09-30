@@ -149,9 +149,6 @@ export class UsageService {
       run.tokenUsage !== undefined
         ? {
             inputTokens: run.tokenUsage.promptTokens,
-            uncachedInputTokens: run.tokenUsage.promptTokens,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
             outputTokens: run.tokenUsage.completionTokens,
             totalTokens: run.tokenUsage.totalTokens,
           }
@@ -173,6 +170,7 @@ export class UsageService {
         engine,
         model,
         tokens: detailedTokens,
+        pricingContext: result?.pricingContext,
         valuedAt: now,
       });
     } else {
@@ -193,7 +191,7 @@ export class UsageService {
       },
       billedCost: defaultUnavailableBilledCost(),
       costEstimate,
-      billingBasis: result?.billingBasis ?? 'metered_api',
+      billingBasis: result?.billingBasis ?? 'unknown',
       isEffective: true,
     };
 
