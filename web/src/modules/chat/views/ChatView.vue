@@ -24,7 +24,6 @@ const service = inject(CHAT_SERVICE, null);
 const projectService = inject(PROJECT_SERVICE, null);
 const agentService = inject(AGENT_SERVICE, null);
 const { presentation, state: connectionState } = useShellConnection();
-const showConnectionNotice = useConnectionNotice(computed(() => presentation.value.controlAvailable));
 const announcer = useAnnouncer();
 const projects = ref<readonly ProjectAuthorityView[]>([]);
 const agents = ref<readonly AgentInstance[]>([]);
@@ -99,9 +98,6 @@ const timeline = computed<ChatTimelineItem[]>(() => [
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 // A background read may refuse Send, but must not interrupt draft entry.
 const canEnterText = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && inspection.value?.state.writable !== false && connectionState.value.connection !== 'offline');
-const unavailableReason = computed(() => !presentation.value.controlAvailable ? `${presentation.value.label}. Shown facts may be stale; control actions are disabled, not queued.` :
-  archivedDirectAgent.value ? `Agent @${archivedDirectAgent.value.displayName} is archived. History is preserved for review; restore the Agent before sending new messages.` :
-  inspection.value && !inspection.value.state.writable ? readOnlyReason(inspection.value.state.reason) : detailLoading.value ? 'Checking conversation admission before sending.' : '');
 const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined, provenance.value?.runStatus) : 'informational');
 const evidenceMessage = computed(() => messages.value.find((m) => m.id === evidenceOpen.value));
 
@@ -415,7 +411,6 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
   <div class="chat-view relative flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
     <div class="chat-admission-announcement sr-only" role="status" aria-live="polite" aria-atomic="true">{{ detailLoading ? 'Checking conversation admission…' : '' }}</div>
     <div v-if="projects.length" class="mb-2 flex items-center gap-2 text-xs"><label for="chat-project-selector" class="font-bold">Project</label><select id="chat-project-selector" :value="projectId" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.displayName }}</option></select></div>
-    <div v-if="showConnectionNotice && (loading || error || missingScope)" class="chat-offline-banner pointer-events-none absolute right-3 top-16 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
       <div class="h-8 w-52 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
       <div v-for="i in 4" :key="i" class="h-16 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
@@ -473,9 +468,8 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
         <div v-else-if="archivedDirectAgent" class="chat-readonly-banner border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><Icon name="alert" :size="14" /> Agent @{{ archivedDirectAgent.displayName }} is archived. History is preserved for review; restore the Agent before sending new messages.</div>
         <div v-if="actionError" class="p-3 text-xs text-[var(--red-action)]" role="alert">{{ actionError }}</div>
         <div class="relative flex min-h-0 flex-1 flex-col">
-          <!-- Both notices cover messages without allocating a row or intercepting input. -->
-          <div v-if="showConnectionNotice" class="chat-offline-banner pointer-events-none absolute inset-x-3 top-2 z-20 rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
-          <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" :class="showConnectionNotice ? 'top-20' : 'top-2'" aria-hidden="true">Checking conversation admission…</div>
+          <!-- Admission covers messages without allocating a row or intercepting input. -->
+          <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
           <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading">
           <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"
@@ -515,10 +509,9 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
           </div>
         </div>
         <form class="chat-composer flex items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
-          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :aria-describedby="!canSend && unavailableReason ? 'chat-send-reason' : undefined" :placeholder="unavailableReason || (activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)')" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
+          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)'" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
           <Button variant="primary" size="sm" class="min-h-11" type="submit" :disabled="!canSend || !newMessage.trim()">Send</Button>
         </form>
-        <p v-if="!canSend && unavailableReason" id="chat-send-reason" class="px-3 pb-2 text-xs text-[var(--text-muted)]">{{ unavailableReason }}</p>
       </section>
     </div>
     <ChatDialog :open="infoOpen" :title="`Conversation Details — ${activeScope ? title(activeScope) : ''}`" description="Scope identity, admission and routing policy" @update:open="infoOpen = $event">

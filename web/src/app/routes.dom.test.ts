@@ -662,8 +662,9 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
   } finally { await loadingHarness.cleanup(); }
 });
 
-test('Chat floating notice waits five continuous seconds, clears on recovery, and never resizes the detail', async () => {
-  const { vite, doc, mount, cleanup } = await setupHarness();
+test('Chat keeps only the raw connection pill, normal placeholder and no reason line through sustained staleness', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  let unmount = () => {};
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const { createShellConnectionController, OFFLINE_CONNECTION } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
@@ -682,32 +683,58 @@ test('Chat floating notice waits five continuous seconds, clears on recovery, an
     });
     const before = geometry();
     const bodyClasses = body.className;
-    assert.equal(body.classList.contains('pt-32'), false, 'hidden notices reserve no message lane');
-    controller.set(OFFLINE_CONNECTION);
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    const placeholder = input.placeholder;
+    assert.match(placeholder, /^Message @.*deterministic direct wake/);
+    unmount = () => app.unmount();
+    input.value = 'Retained draft';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false);
+    const pill = doc.querySelector('header[class~="md:hidden"] .operator-pill');
+    assert.ok(pill);
+    const assertSingleSurface = (label: string) => {
+      assert.equal(notice(), null, 'Chat never renders a floating connection notice');
+      assert.equal(doc.querySelector('.shell-connection-banner'), null, 'the shell does not overlay another notice on Chat');
+      assert.equal(input.placeholder, placeholder, 'unavailability never replaces the normal placeholder');
+      assert.equal(doc.querySelector('#chat-send-reason'), null, 'no under-composer reason is rendered');
+      assert.equal(input.hasAttribute('aria-describedby'), false, 'no dangling removed reason reference');
+      // DesktopSidebar is hidden below md; the phone header is the sole visible pill there.
+      assert.equal(doc.querySelectorAll('header[class~="md:hidden"] .operator-pill').length, 1);
+      assert.equal(pill.textContent?.trim(), label);
+    };
+    controller.set({ status: 'stale', connection: 'stale', loading: false });
     await settle(150);
-    assert.equal(notice(), null);
+    assertSingleSurface('Stale Connection');
+    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /Connection is stale/i,
+      'assistive connection announcements remain immediate');
+    assert.equal(input.disabled, false, 'stale permits draft entry');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
-      'Send refuses immediately despite display debounce');
-    controller.set({ status: 'online', connection: 'online', loading: false });
-    await settle(50);
+      'Send refuses immediately from raw state');
+    await settle(5100);
+    assertSingleSurface('Stale Connection');
+    assert.equal(body.classList.contains('pt-32'), false, 'no reserved message lane');
+    assert.equal(body.className, bodyClasses, 'connection changes never alter message layout classes');
+    assert.deepEqual(geometry(), before);
     controller.set(OFFLINE_CONNECTION);
-    await settle(4900);
-    assert.equal(notice(), null, 'the recovered interval does not count toward five seconds');
-    await settle(180);
-    assert.match(notice()?.textContent ?? '', /Offline.*disabled, not queued/s);
-    assert.equal(notice()?.getAttribute('role'), 'status');
-    assert.ok(notice()?.classList.contains('absolute'));
-    assert.equal(body.classList.contains('pt-32'), false, 'visible notices reserve no message lane');
-    assert.equal(body.className, bodyClasses, 'connection visibility never changes message padding or layout classes');
-    assert.ok(notice()?.classList.contains('pointer-events-none'));
-    assert.ok(notice()?.classList.contains('bg-[var(--bg-surface)]'), 'the overlay is readable over messages');
-    assert.ok(notice()?.classList.contains('z-20'));
-    assert.deepEqual(geometry(), before, 'mounting an overlay does not change detail or message geometry');
+    await settle(30);
+    assertSingleSurface('Offline');
+    assert.equal(input.disabled, true, 'offline still disables entry');
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(30);
-    assert.equal(notice(), null, 'recovery clears the visible notice immediately');
-    app.unmount();
-  } finally { await cleanup(); }
+    assertSingleSurface('Operator Online');
+    assert.equal(input.value, 'Retained draft');
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false,
+      'recovery restores raw Send authority without losing the draft');
+    await router.push('/manage/agents');
+    controller.set(OFFLINE_CONNECTION);
+    await settle(5100);
+    assert.ok(doc.querySelector('.shell-connection-banner'), 'the shared shell notice remains on non-Chat routes');
+    await router.push('/project/chat');
+    await settle(150);
+    assert.equal(doc.querySelector('.shell-connection-banner'), null, 'entering Chat also suppresses an already-visible shell notice');
+  } finally { unmount(); await cleanup(); }
 });
 
 test('conversation admission gates Send immediately but only floats after five continuous seconds', async () => {
@@ -749,7 +776,8 @@ test('conversation admission gates Send immediately but only floats after five c
     await settle(20);
     assert.equal(input.disabled, false, 'the admission check does not interrupt typing');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
-    assert.match(doc.querySelector('#chat-send-reason')?.textContent ?? '', /Checking conversation admission before sending/);
+    assert.equal(doc.querySelector('#chat-send-reason'), null, 'admission does not add an under-composer reason');
+    assert.match(input.placeholder, /^Message @.*deterministic direct wake/, 'pending admission keeps the normal placeholder');
     await settle(4500);
     assert.equal(notice(), null, 'a still-pending short check has no visible status');
     assert.match(status.textContent ?? '', /Checking conversation admission/, 'the live status does not wait for visual persistence');
