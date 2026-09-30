@@ -5,7 +5,7 @@ import { ProductionSettingsService } from './production-adapter.ts';
 import type { BrowserTransport, BrowserTransportState } from '../../../transport/browser-transport.ts';
 import { createOperatorBrowserAdapter } from '../../../adapters/operator-api.ts';
 import { createOperatorSessionBrowserAdapter, type BrowserSessionView } from '../../../adapters/operator-session-api.ts';
-import type { OperatorSettings, WebDiagnostic } from '../../../../src/operations/contract.ts';
+import type { OperatorSettings, WebDiagnostic } from '../../../../../src/operations/contract.ts';
 
 function createMockTransport(options?: {
   initialState?: BrowserTransportState;
@@ -112,6 +112,7 @@ test('ProductionSettingsService reads settings, sessions, diagnostics and respec
   const settings = await service.loadSettings();
   assert.equal(settings.session.authenticated, true);
   assert.equal(settings.session.activeCount, 2);
+  assert.deepEqual(settings, mockSettings, 'Adapter preserves only reported authority facts, without compatibility or copy assurances');
 
   // 3. Load sessions
   const sessions = await service.loadSessions();

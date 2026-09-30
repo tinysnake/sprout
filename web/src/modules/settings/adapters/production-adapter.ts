@@ -27,6 +27,7 @@ export class ProductionSettingsService implements SettingsService {
     return this.transport.subscribeState(listener);
   }
 
+  // Preserve the authoritative DTO; do not synthesize compatibility or safety-copy status.
   async loadSettings(): Promise<OperatorSettings> {
     return this.operatorApi.settings();
   }

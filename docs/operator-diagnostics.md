@@ -15,6 +15,10 @@ without completing that page.
 - `GET /api/operator/settings`: product versions, authenticated session state,
   active-session count, private-access boundary, and Web/host responsibilities.
   The existing session API lists current browser sessions and permits revocation.
+  Version ranges are supported protocol majors, not negotiated compatibility.
+  Settings does not report schema support limits or safety-copy retention; Web must
+  not infer those assurances from a successful read or migration event. The
+  production page labels safety-copy status as requiring host verification.
 - `GET /api/operator/diagnostics`: versioned Web JSON export with schema version,
   service and durable-data access facts, independent Environment enrollment,
   accepted Worker connection/reachability, protocol compatibility, engine

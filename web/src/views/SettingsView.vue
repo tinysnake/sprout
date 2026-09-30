@@ -343,10 +343,10 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
             @click="activeSubTab = 'system'"
             @keydown="handleStatusKey($event, 'system')"
           >
-            <Icon name="server" :size="16" class="text-[var(--green-ready)] shrink-0" />
+            <Icon name="server" :size="16" class="text-[var(--text-muted)] shrink-0" />
             <div class="min-w-0">
               <strong class="text-xs text-[var(--text-primary)] block truncate">Instance & Protocol</strong>
-              <span class="text-[11px] text-[var(--text-muted)] block truncate">Compatible (v{{ settingsData?.versions.workerProtocol.minMajor ?? 2 }}.{{ settingsData?.versions.workerProtocol.maxMajor ?? 1 }})</span>
+              <span class="text-[11px] text-[var(--text-muted)] block truncate">Supported protocol majors: {{ settingsData?.versions.workerProtocol.minMajor ?? 'Unknown' }}–{{ settingsData?.versions.workerProtocol.maxMajor ?? 'Unknown' }}</span>
             </div>
           </button>
 
@@ -362,7 +362,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
             <Icon name="warning" :size="16" class="text-[var(--yellow-attention)] shrink-0" />
             <div class="min-w-0">
               <strong class="text-xs text-[var(--text-primary)] block truncate">Migration Guard</strong>
-              <span class="text-[11px] text-[var(--text-muted)] block truncate">Safety copy retained</span>
+              <span class="text-[11px] text-[var(--text-muted)] block truncate">Verify safety copy on host</span>
             </div>
           </button>
         </section>
@@ -593,38 +593,38 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
                 <Icon name="server" :size="14" />
                 <span>Sprout instance and compatibility</span>
               </h3>
-              <Badge variant="success">Compatible</Badge>
+              <Badge variant="info">Version facts</Badge>
             </div>
             <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
-              Platform & Protocol Compatibility version facts explain whether routine Web operation is safe to continue.
+              Installed version facts and the supported protocol range are shown below. Worker compatibility is a separate Environment fact, not an assurance inferred from these versions.
             </p>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
               <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
                 <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Sprout</span>
-                <strong class="text-[var(--text-primary)] font-mono">{{ settingsData?.versions.sprout ?? '0.2.0-m2' }}</strong>
+                <strong class="text-[var(--text-primary)] font-mono">{{ settingsData?.versions.sprout ?? 'Unknown' }}</strong>
                 <span class="block text-[10px] text-[var(--text-muted)]">Local instance build</span>
               </div>
               <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
                 <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Worker protocol</span>
-                <strong class="text-[var(--green-ready)] font-mono">v{{ settingsData?.versions.workerProtocol.minMajor ?? 2 }}.{{ settingsData?.versions.workerProtocol.maxMajor ?? 1 }}</strong>
-                <span class="block text-[10px] text-[var(--text-muted)]">Negotiated compatibility</span>
+                <strong class="text-[var(--text-primary)] font-mono">{{ settingsData?.versions.workerProtocol.minMajor ?? 'Unknown' }}–{{ settingsData?.versions.workerProtocol.maxMajor ?? 'Unknown' }}</strong>
+                <span class="block text-[10px] text-[var(--text-muted)]">Supported protocol majors (inclusive)</span>
               </div>
               <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
                 <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Durable schema</span>
-                <strong class="text-[var(--text-primary)] font-mono">schema {{ diagnosticsData?.schema ?? 24 }}</strong>
+                <strong class="text-[var(--text-primary)] font-mono">{{ diagnosticsData?.schema == null ? 'Unknown' : `schema ${diagnosticsData.schema}` }}</strong>
                 <span class="block text-[10px] text-[var(--text-muted)]">Forward migration only</span>
               </div>
               <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
-                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Supported range</span>
-                <strong class="text-[var(--text-primary)] font-mono">schema 0 to {{ diagnosticsData?.schema ?? 24 }}</strong>
-                <span class="block text-[10px] text-[var(--text-muted)]">Outside range is refused</span>
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Schema support range</span>
+                <strong class="text-[var(--text-primary)]">Not reported by Web</strong>
+                <span class="block text-[10px] text-[var(--text-muted)]">Check host-local upgrade guidance</span>
               </div>
             </div>
 
             <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs flex items-center gap-2">
-              <Icon name="check" :size="14" class="text-[var(--green-ready)] shrink-0" />
-              <span>This instance and its enrolled Workers are within the supported protocol and schema range.</span>
+              <Icon name="info" :size="14" class="text-[var(--text-muted)] shrink-0" />
+              <span>Inspect each Worker’s authoritative compatibility in Manage / Environments. Installed versions alone do not establish compatibility.</span>
             </div>
 
             <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs flex flex-col gap-1">
@@ -645,15 +645,15 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
                   <span>Migration safety and failure visibility</span>
                 </div>
                 <div class="flex items-center gap-2">
-                  <Badge variant="warning">Safety copy retained</Badge>
+                  <Badge variant="warning">Host verification required</Badge>
                   <Icon name="chevron-down" :size="14" class="text-[var(--text-muted)]" />
                 </div>
               </summary>
               <div class="p-3 border-t border-[var(--border-subtle)] text-[var(--text-secondary)] leading-relaxed space-y-2">
-                <p>Local pre-migration safety copy is retained until a later migration succeeds or the host operator removes it.</p>
+                <p>Safety-copy status is not available in Web. Verify the local pre-migration safety copy on the host; a migration event alone does not establish that a copy is retained.</p>
                 <p>Migration runs on the stopped host. Web does not restore, downgrade, or serve partially migrated state.</p>
                 <div class="p-2.5 rounded bg-[var(--red-action-bg)] border border-[var(--red-action-border)] text-[var(--red-action)] text-[11px]">
-                  <strong>Failure state example:</strong> If the safety copy cannot be created, including because of insufficient space, migration stops before serving data. The original store and safety copy remain intact.
+                  <strong>Failure state example:</strong> If the safety copy cannot be created, including because of insufficient space, migration stops before serving data. The original store is preserved; do not assume a safety copy exists.
                 </div>
                 <div class="p-2.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-muted)] text-[11px]">
                   <strong>Unavailable state example:</strong> A schema newer than the supported range is refused with host-local update guidance. Web does not guess across an unsupported protocol.

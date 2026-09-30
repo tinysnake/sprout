@@ -204,7 +204,16 @@ test('Settings F4: protocol range and migration guidance never imply verified co
     await settle();
     assert.doesNotMatch(doc.body.textContent!, /Safety copy retained|Negotiated compatibility/);
     assert.match(doc.body.textContent!, /Safety-copy status is not available in Web/);
-    assert.equal(doc.querySelector('[data-settings-section="compatibility"] .badge-success'), null);
+    assert.doesNotMatch(doc.querySelector('[data-settings-section="compatibility"]')!.textContent!, /This instance and its enrolled Workers are within|schema 0 to/);
+    assert.match(doc.body.textContent!, /schema Unknown|Unknown/);
+  }, service => {
+    const loadSettings = service.loadSettings.bind(service);
+    service.loadSettings = async () => {
+      const settings = await loadSettings();
+      return { ...settings, versions: { ...settings.versions, workerProtocol: { minMajor: 3, maxMajor: 5 } } };
+    };
+    const loadDiagnostics = service.loadDiagnostics.bind(service);
+    service.loadDiagnostics = async () => ({ ...await loadDiagnostics(), schema: null });
   });
 });
 
