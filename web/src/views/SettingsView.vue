@@ -41,7 +41,7 @@ const diagnosticsData = ref<WebDiagnostic | null>(null);
 let unsubscribeTransport: (() => void) | null = null;
 
 function syncTransportState(state: BrowserTransportState) {
-  isStale.value = state.connection === 'stale' || state.connection === 'reconnecting';
+  isStale.value = state.connection !== 'online';
   if (state.connection === 'offline' && !settingsData.value) {
     isLoading.value = false;
   }
@@ -107,7 +107,16 @@ onUnmounted(() => {
 
 const activeSessions = computed(() => sessionsData.value);
 const activeSessionCount = computed(() => activeSessions.value.length);
-const canRevokeOthers = computed(() => activeSessionCount.value > 1 && !isStale.value && !isLoading.value);
+const canMutateSessions = computed(() => hasAuthority.value && !isStale.value && !isLoading.value);
+const canRevokeOthers = computed(() => activeSessionCount.value > 1 && canMutateSessions.value);
+
+// A dialog can outlive its live transport snapshot. Never submit or queue offline.
+function hasLiveMutationAuthority() {
+  const service = activeService.value;
+  if (!service) return false;
+  syncTransportState(service.state());
+  return canMutateSessions.value;
+}
 
 // Time formatter (relative and fallback timestamp)
 function formatRelativeTime(timestamp: number): string {
@@ -124,17 +133,17 @@ function formatRelativeTime(timestamp: number): string {
 
 // Revoke One Session flow
 function promptRevokeSession(session: BrowserSessionView) {
-  if (session.current || isStale.value) return;
+  if (session.current || !hasLiveMutationAuthority()) return;
   sessionToRevoke.value = session;
   isRevokeOneDialogOpen.value = true;
 }
 
 async function confirmRevokeSession() {
-  if (!sessionToRevoke.value || !activeService.value) return;
+  if (!sessionToRevoke.value || !hasLiveMutationAuthority() || isRevokingOne.value) return;
   isRevokingOne.value = true;
   failureMessage.value = null;
   try {
-    await activeService.value.revokeSession(sessionToRevoke.value.id);
+    await activeService.value!.revokeSession(sessionToRevoke.value.id);
     isRevokeOneDialogOpen.value = false;
     sessionToRevoke.value = null;
     await loadData();
@@ -147,16 +156,16 @@ async function confirmRevokeSession() {
 
 // Revoke All Others flow
 function promptRevokeOthers() {
-  if (!canRevokeOthers.value) return;
+  if (!hasLiveMutationAuthority() || !canRevokeOthers.value) return;
   isRevokeOthersDialogOpen.value = true;
 }
 
 async function confirmRevokeOthers() {
-  if (!activeService.value) return;
+  if (!hasLiveMutationAuthority() || !canRevokeOthers.value || isRevokingOthers.value) return;
   isRevokingOthers.value = true;
   failureMessage.value = null;
   try {
-    await activeService.value.revokeOtherSessions();
+    await activeService.value!.revokeOtherSessions();
     isRevokeOthersDialogOpen.value = false;
     await loadData();
   } catch (err) {
@@ -486,7 +495,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
                         size="sm"
                         class="session-revoke-btn min-h-[44px] text-xs"
                         :data-session-id="sess.id"
-                        :disabled="isStale"
+                        :disabled="!canMutateSessions"
                         @click="promptRevokeSession(sess)"
                       >
                         Revoke
@@ -851,7 +860,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
           variant="danger"
           size="sm"
           class="confirm-revoke-one-btn min-h-[44px] text-xs"
-          :disabled="isRevokingOne"
+          :disabled="isRevokingOne || !canMutateSessions"
           @click="confirmRevokeSession"
         >
           Confirm Revocation
@@ -895,7 +904,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
           variant="danger"
           size="sm"
           class="confirm-revoke-others-btn min-h-[44px] text-xs"
-          :disabled="isRevokingOthers"
+          :disabled="isRevokingOthers || !canRevokeOthers"
           @click="confirmRevokeOthers"
         >
           Confirm Revoke Others

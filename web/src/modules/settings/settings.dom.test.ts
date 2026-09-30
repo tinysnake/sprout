@@ -92,6 +92,122 @@ async function setupProductionDom() {
 
 const settle = (ms = 90) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// F1–F4: observe production DOM, including controls teleported outside the view.
+async function withSettings(run: (context: {
+  doc: Document;
+  service: import('./adapters/fixture-adapter.ts').FixtureSettingsService;
+}) => Promise<void>, configure?: (service: import('./adapters/fixture-adapter.ts').FixtureSettingsService) => void) {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: import('vue').App | undefined;
+  try {
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts');
+    const { FixtureSettingsService } = await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts');
+    const service = new FixtureSettingsService();
+    configure?.(service);
+    const mounted = createSproutApp({ routerBase: '/app/', settingsService: service });
+    app = mounted.app;
+    app!.mount(dom.window.document.getElementById('app')!);
+    await mounted.router.push('/manage/settings');
+    await mounted.router.isReady();
+    await settle(100);
+    await run({ doc: dom.window.document, service });
+  } finally {
+    app?.unmount();
+    await cleanup();
+  }
+}
+
+for (const flow of ['one', 'others'] as const) {
+  test(`Settings F1: open revoke-${flow} dialog freezes throughout disconnect and never queues`, async () => {
+    await withSettings(async ({ doc, service }) => {
+      let calls = 0;
+      service.revokeSession = async () => { calls++; };
+      service.revokeOtherSessions = async () => { calls++; return 1; };
+      (doc.querySelector(flow === 'one' ? '.session-revoke-btn' : '.revoke-others-btn') as HTMLButtonElement).click();
+      await settle();
+      const confirm = doc.querySelector(`.confirm-revoke-${flow}-btn`) as HTMLButtonElement;
+      assert.ok(confirm);
+      for (const connection of ['stale', 'reconnecting', 'offline'] as const) {
+        service.setState({ status: connection, connection, loading: false });
+        await settle();
+        assert.ok(doc.querySelector('.settings-stale-notice'), `${connection} visibly marks cached facts`);
+        assert.equal(confirm.disabled, true, `${connection} freezes the open confirmation`);
+        confirm.click();
+        // Synthetic dispatch bypasses native disabled click suppression: handler must guard too.
+        confirm.dispatchEvent(new initialDom.window.MouseEvent('click', { bubbles: true }));
+        await settle();
+        assert.equal(calls, 0, 'No disconnected mutation is submitted');
+        for (const button of doc.querySelectorAll<HTMLButtonElement>('.session-revoke-btn, .revoke-others-btn')) {
+          assert.equal(button.disabled, true);
+        }
+      }
+      service.setState({ status: 'online', connection: 'online', loading: false });
+      await settle();
+      assert.equal(calls, 0, 'Reconnection does not replay a queued command');
+      assert.equal(confirm.disabled, false);
+      confirm.click();
+      await settle();
+      assert.equal(calls, 1, 'Only a new live confirmation submits');
+    });
+  });
+}
+
+test('Settings F2: every portaled dialog button has the touch floor', async () => {
+  await withSettings(async ({ doc }) => {
+    for (const flow of ['one', 'others']) {
+      (doc.querySelector(flow === 'one' ? '.session-revoke-btn' : '.revoke-others-btn') as HTMLButtonElement).click();
+      await settle();
+      const dialog = doc.querySelector(`[role="dialog"]`)!;
+      assert.ok(dialog, 'Portaled dialog exists');
+      assert.equal(doc.querySelector('.settings-view')!.contains(dialog), false);
+      const buttons = dialog.querySelectorAll<HTMLButtonElement>('button');
+      assert.equal(buttons.length, 3, 'Inventory close, cancel, confirm');
+      for (const button of buttons) {
+        assert.match(button.className, /min-h-\[44px\]|min-h-11/, `${button.getAttribute('aria-label') ?? button.textContent} touch floor`);
+      }
+      const close = dialog.querySelector<HTMLButtonElement>('[aria-label="Close dialog"]')!;
+      assert.match(close.className, /min-w-\[44px\]|min-w-11/);
+      close.click();
+      await settle();
+      assert.equal(doc.querySelector('[role="dialog"]'), null);
+    }
+  });
+});
+
+for (const read of ['loadSettings', 'loadSessions', 'loadDiagnostics'] as const) {
+  test(`Settings F3: rejected ${read} is a visible load failure, not loaded empty`, async () => {
+    await withSettings(async ({ doc }) => {
+      assert.ok(doc.querySelector('.settings-failure-alert'), 'Read failure is surfaced');
+      assert.ok(doc.querySelector('.settings-read-unavailable'), 'Unavailable facts are explicit');
+      assert.equal(doc.querySelector('[aria-label="Browser sessions"]'), null, 'No successful empty session panel');
+      assert.equal(doc.querySelector('.session-revoke-btn, .revoke-others-btn'), null);
+    }, service => { service[read] = async () => { throw new Error('Read unavailable'); }; });
+  });
+}
+
+test('Settings F3: a successfully loaded empty session list is not a failure', async () => {
+  await withSettings(async ({ doc }) => {
+    assert.equal(doc.querySelector('.settings-failure-alert'), null);
+    assert.equal(doc.querySelector('.settings-read-unavailable'), null);
+    assert.ok(doc.querySelector('[aria-label="Browser sessions"]'));
+    assert.match(doc.body.textContent!, /0 active sessions/);
+  }, service => { service.loadSessions = async () => []; });
+});
+
+test('Settings F4: protocol range and migration guidance never imply verified compatibility or a retained copy', async () => {
+  await withSettings(async ({ doc, service }) => {
+    const settings = await service.loadSettings();
+    const range = settings.versions.workerProtocol;
+    assert.match(doc.querySelector('.settings-status-strip')!.textContent!, new RegExp(`Supported protocol majors: ${range.minMajor}–${range.maxMajor}`));
+    assert.doesNotMatch(doc.body.textContent!, /Safety copy retained|Compatible \(v/i);
+    (doc.querySelector('.settings-tab-system') as HTMLButtonElement).click();
+    await settle();
+    assert.doesNotMatch(doc.body.textContent!, /Safety copy retained|Negotiated compatibility/);
+    assert.match(doc.body.textContent!, /Safety-copy status is not available in Web/);
+    assert.equal(doc.querySelector('[data-settings-section="compatibility"] .badge-success'), null);
+  });
+});
+
 test('Settings: renders normal state with prototype IA, status strip, tabs, and boundary explanations', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
