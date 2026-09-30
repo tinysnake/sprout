@@ -441,6 +441,9 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
     await settle(120);
     const name = doc.querySelector('#chat-wg-name') as HTMLInputElement;
     assert.ok(name, 'the Working Group composer opens');
+    const members = doc.querySelector('#chat-wg-name')?.closest('[role="dialog"]')?.querySelector('fieldset');
+    assert.match(members?.textContent ?? '', /@Programmer.*Implement verified changes/s);
+    assert.doesNotMatch(members?.textContent ?? '', /@programmer\b/, 'a raw agent ID is not a display name');
     name.value = 'Focused Review';
     name.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     await settle(20);
@@ -649,6 +652,78 @@ test('a refused Message response reuses its delivery key when the unchanged draf
     assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Please inspect the evidence/);
     app.unmount();
   } finally { await cleanup(); }
+});
+
+test('background connection checks never interrupt a typed draft or focus, but Send remains refused', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { createShellConnectionController, OFFLINE_CONNECTION } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), connectionSource: controller });
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(150);
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    input.focus();
+    input.value = 'Draft';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    controller.set({ status: 'loading', connection: 'online', loading: true });
+    await settle(30);
+    assert.equal(input.disabled, false);
+    assert.equal(doc.activeElement, input);
+    input.value += ' still typing';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
+    assert.match(doc.querySelector('.chat-offline-banner')?.textContent ?? '', /Checking Connection.*disabled, not queued/s);
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await settle(25);
+    assert.equal(input.value, 'Draft still typing');
+    assert.equal(doc.activeElement, input);
+    controller.set(OFFLINE_CONNECTION);
+    await settle(25);
+    assert.equal(input.disabled, true, 'a genuine offline state can disable text entry');
+    assert.equal(input.value, 'Draft still typing', 'offline does not erase the draft');
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Send uses a random-values UUID when randomUUID is unavailable on an insecure entry', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  try {
+    const nativeCrypto = globalThis.crypto;
+    let randomValuesUsed = false;
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {
+      getRandomValues(bytes: Uint8Array) { randomValuesUsed = true; return nativeCrypto.getRandomValues(bytes); },
+      randomUUID: undefined,
+    } });
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const fixture = new FixtureChatService();
+    const post = fixture.postMessage.bind(fixture);
+    let deliveryKey = '';
+    fixture.postMessage = async (input) => { deliveryKey = input.deliveryKey; return post(input); };
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(150);
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    input.value = 'Sent without secure context';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    (doc.querySelector('.chat-composer button') as HTMLButtonElement).click();
+    await settle(90);
+    assert.equal(randomValuesUsed, true);
+    assert.match(deliveryKey, /^web-[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Sent without secure context/);
+    app.unmount();
+  } finally {
+    if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto);
+    else Reflect.deleteProperty(globalThis, 'crypto');
+    await cleanup();
+  }
 });
 
 test('a disconnected inspector never presents an unverified batch as not found or substitutes Chat', async () => {

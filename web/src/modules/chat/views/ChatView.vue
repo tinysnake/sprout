@@ -15,13 +15,14 @@ import Icon from '../../../primitives/Icon.vue';
 import Button from '../../../primitives/Button.vue';
 import ChatDialog from './ChatDialog.vue';
 import EmptyState from '../../../primitives/EmptyState.vue';
+import { newDeliveryKey } from '../../../utils/delivery-key.ts';
 
 const route = useRoute();
 const router = useRouter();
 const service = inject(CHAT_SERVICE, null);
 const projectService = inject(PROJECT_SERVICE, null);
 const agentService = inject(AGENT_SERVICE, null);
-const { presentation } = useShellConnection();
+const { presentation, state: connectionState } = useShellConnection();
 const announcer = useAnnouncer();
 const projects = ref<readonly ProjectAuthorityView[]>([]);
 const agents = ref<readonly AgentInstance[]>([]);
@@ -89,6 +90,8 @@ const timeline = computed<ChatTimelineItem[]>(() => [
   ...(activeScope.value?.kind === 'project' ? events.value.map((event) => ({ kind: 'event' as const, event })) : []),
 ].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
+// A background read may refuse Send, but must not interrupt draft entry.
+const canEnterText = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && inspection.value?.state.writable !== false && connectionState.value.connection !== 'offline');
 const unavailableReason = computed(() => !presentation.value.controlAvailable ? `${presentation.value.label}. Shown facts may be stale; control actions are disabled, not queued.` :
   archivedDirectAgent.value ? `Agent @${archivedDirectAgent.value.displayName} is archived. History is preserved for review; restore the Agent before sending new messages.` :
   inspection.value && !inspection.value.state.writable ? readOnlyReason(inspection.value.state.reason) : detailLoading.value ? 'Checking conversation admission before sending.' : '');
@@ -298,14 +301,14 @@ async function sendMessage() {
   // A transport refusal can follow durable delivery. Retrying the unchanged
   // draft uses the same key so the server deduplicates rather than re-waking.
   const deliveryKey = pendingDelivery?.scopeId === scopeId && pendingDelivery.body === body
-    ? pendingDelivery.deliveryKey : `web-${crypto.randomUUID()}`;
+    ? pendingDelivery.deliveryKey : newDeliveryKey();
   pendingDelivery = { scopeId, body, deliveryKey };
   sending.value = true;
   actionError.value = '';
   try {
     await service.postMessage(pendingDelivery);
     pendingDelivery = null;
-    newMessage.value = '';
+    if (newMessage.value.trim() === body) newMessage.value = '';
     await refreshMessages();
     announcer.announce(`Message sent to ${title(activeScope.value)}.`);
   } catch { actionError.value = 'Message was not sent. Check the connection and retry; it was not queued.'; announcer.announce(actionError.value); }
@@ -469,9 +472,10 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
           </div>
         </div>
         <form class="chat-composer flex items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
-          <input v-model="newMessage" type="text" :disabled="!canSend" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="unavailableReason || (activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)')" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
+          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :aria-describedby="!canSend && unavailableReason ? 'chat-send-reason' : undefined" :placeholder="unavailableReason || (activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)')" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
           <Button variant="primary" size="sm" class="min-h-11" type="submit" :disabled="!canSend || !newMessage.trim()">Send</Button>
         </form>
+        <p v-if="!canSend && unavailableReason" id="chat-send-reason" class="px-3 pb-2 text-xs text-[var(--text-muted)]">{{ unavailableReason }}</p>
       </section>
     </div>
     <ChatDialog :open="infoOpen" :title="`Conversation Details — ${activeScope ? title(activeScope) : ''}`" description="Scope identity, admission and routing policy" @update:open="infoOpen = $event">
@@ -503,7 +507,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
       <form class="flex flex-col gap-3 text-xs" @submit.prevent="createGroup">
         <label for="chat-wg-name" class="font-bold">Working Group Name *</label><input id="chat-wg-name" v-model="groupName" type="text" required class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3" />
         <label for="chat-wg-goal" class="font-bold">Working Group Goal (Optional)</label><input id="chat-wg-goal" v-model="groupGoal" type="text" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3" />
-        <fieldset><legend class="font-bold">Initial Agent Members</legend><label v-for="member in activeAgentMembers" :key="member.memberId" class="flex min-h-11 items-center gap-2"><input v-model="groupMembers" type="checkbox" :value="member.memberId" />@{{ member.memberId }} · {{ member.responsibilities.join('; ') }}</label></fieldset>
+        <fieldset><legend class="font-bold">Initial Agent Members</legend><label v-for="member in activeAgentMembers" :key="member.memberId" class="flex min-h-11 items-center gap-2"><input v-model="groupMembers" type="checkbox" :value="member.memberId" /><span><strong class="block">@{{ agentName(member.memberId) }}</strong><span v-if="member.responsibilities.length" class="block text-[var(--text-muted)]">{{ member.responsibilities.join('; ') }}</span></span></label></fieldset>
         <p v-if="actionError" role="alert">{{ actionError }}</p>
       </form>
       <template #footer><Button variant="secondary" size="sm" class="min-h-11" @click="createGroupOpen = false">Cancel</Button><Button variant="primary" size="sm" class="chat-create-wg-submit min-h-11" :disabled="!groupName.trim() || managingGroup || !presentation.controlAvailable" @click="createGroup">Create Working Group</Button></template>
