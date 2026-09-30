@@ -213,6 +213,9 @@ export class MigrationSafetyCopyError extends SchemaError {
   }
 }
 
+/** Only fixed, non-sensitive validation guidance may cross the migration error boundary. */
+class UsageMigrationValidationError extends Error {}
+
 /** Error thrown when forward migration fails during execution. */
 export class SchemaMigrationError extends SchemaError {
   readonly fromVersion: number;
@@ -224,6 +227,7 @@ export class SchemaMigrationError extends SchemaError {
     readonly safetyCopyPath?: string | undefined;
     readonly fromVersion: number;
     readonly toVersion: number;
+    readonly validationGuidance?: string | undefined;
   }) {
     const sanitizedDb = sanitizePath(input.databasePath);
     const sanitizedCopy = input.safetyCopyPath ? sanitizePath(input.safetyCopyPath) : undefined;
@@ -234,6 +238,7 @@ export class SchemaMigrationError extends SchemaError {
     const guidance =
       `Schema migration from v${input.fromVersion} to v${input.toVersion} failed and was rolled back. ` +
       `The database was not modified.${copyNotice} ` +
+      (input.validationGuidance ? `${input.validationGuidance} ` : '') +
       `Please ensure the service is stopped, inspect host diagnostics, verify database integrity, and resolve the issue or restore from the pre-migration safety copy before restarting Sprout.`;
     super(message, { guidance, databasePath: input.databasePath });
     this.name = 'SchemaMigrationError';
@@ -1153,7 +1158,34 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
     fromVersion: 25,
     toVersion: 26,
     name: 'usage_activity_attribution_constraints',
-    migrate: (db) => db.exec(`
+    migrate: (db) => {
+      // Reject rather than silently rewrite durable attribution or append-only
+      // monetary history. A reviewed repair must preserve correction provenance.
+      const invalidActivity = db.prepare(`SELECT 1 FROM usage_activities WHERE NOT (
+        (kind = 'agent_run' AND run_id IS NOT NULL AND length(run_id) > 0
+          AND agent_id IS NOT NULL AND length(agent_id) > 0 AND attempt_id IS NULL AND batch_id IS NULL)
+        OR
+        (kind = 'routing_attempt' AND run_id IS NULL AND attempt_id IS NOT NULL AND length(attempt_id) > 0
+          AND batch_id IS NOT NULL AND length(batch_id) > 0 AND project_id IS NOT NULL AND length(project_id) > 0
+          AND task_id IS NULL AND agent_id IS NULL AND environment_instance_id IS NULL)
+      ) LIMIT 1`).get();
+      if (invalidActivity !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage activity attribution. Arrange a reviewed data repair of usage_activities before retrying; do not discard durable history.');
+      }
+      const invalidCost = db.prepare(`SELECT 1 FROM usage_observations WHERE
+        (cost_estimate_status = 'available' AND (
+          cost_estimate_usd_micros IS NULL OR typeof(cost_estimate_usd_micros) != 'integer'
+          OR cost_estimate_usd_micros < 0 OR cost_estimate_usd_micros > 9007199254740991
+          OR valuation_provenance IS NULL
+          OR valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+        )) OR (billed_cost_status = 'available' AND (
+          billed_usd_micros IS NULL OR typeof(billed_usd_micros) != 'integer'
+          OR billed_usd_micros < 0 OR billed_usd_micros > 9007199254740991
+        )) LIMIT 1`).get();
+      if (invalidCost !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage observation cost facts. Arrange a reviewed data repair of usage_observations preserving source and correction history before retrying.');
+      }
+      db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_run_id_unique
         ON usage_activities (run_id) WHERE run_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_attempt_id_unique
@@ -1211,7 +1243,8 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
       ))
       BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
-    `),
+      `);
+    },
   },
 ];
 
@@ -1387,7 +1420,7 @@ export function migrateOrInitializeDatabase(
     }
     options.recordSchemaTransition?.(db, { kind: 'migrated', fromVersion: currentVersion, toVersion: targetVersion });
     db.exec('COMMIT');
-  } catch {
+  } catch (error) {
     try {
       db.exec('ROLLBACK');
     } catch {
@@ -1398,6 +1431,7 @@ export function migrateOrInitializeDatabase(
       safetyCopyPath: options.filename !== ':memory:' ? safetyCopyPath : undefined,
       fromVersion: currentVersion,
       toVersion: targetVersion,
+      validationGuidance: error instanceof UsageMigrationValidationError ? error.message : undefined,
     });
   }
 }

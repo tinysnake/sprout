@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
 
-import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
 
 import { SqliteStore } from './db.ts';
 
@@ -503,5 +503,86 @@ test('a failed workspace_binding migration rolls back the column and preserves i
     const safety = new DatabaseSync(safetyPath);
     assert.equal(getSchemaVersion(safety), 9);
     safety.close();
+  });
+});
+
+// Seed the actual v25 schema, not a hand-built approximation of its columns.
+async function withV25Usage(fn: (path: string, legacy: DatabaseSync) => Promise<void>): Promise<void> {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'usage.db');
+    const seed = new DatabaseSync(path);
+    seed.exec('CREATE TABLE legacy_marker (id TEXT); PRAGMA user_version = 24;');
+    seed.close();
+    const legacy = new DatabaseSync(path);
+    migrateOrInitializeDatabase(legacy, { filename: path, targetVersion: 25 });
+    try {
+      legacy.exec(`INSERT INTO usage_activities
+        (id, kind, attempt_id, batch_id, project_id, engine, model, status, created_at, settled_at)
+        VALUES ('routing', 'routing_attempt', 'attempt', 'batch', 'project', 'routing', 'wake', 'completed', 1, 2);
+        INSERT INTO usage_observations
+        (id, activity_id, observed_at, source, source_version, completeness, wall_duration_ms,
+         billed_cost_status, cost_estimate_status, cost_estimate_usd_micros, valuation_provenance, billing_basis)
+        VALUES ('observation', 'routing', 2, 'routing', '1', 'unavailable', 1,
+          'unavailable', 'available', 0, 'provider_estimated', 'unknown');`);
+      await fn(path, legacy);
+    } finally { legacy.close(); }
+  });
+}
+
+for (const [shape, mutation, reason] of [
+  ['Routing ownership', "UPDATE usage_activities SET agent_id = 'agent', task_id = 'task'", 'Invalid legacy usage activity attribution'],
+  ['available cost without facts', 'UPDATE usage_observations SET cost_estimate_usd_micros = NULL, valuation_provenance = NULL', 'Invalid legacy usage observation cost facts'],
+] as const) {
+  test(`v25 migration rejects ${shape} without rewriting durable facts`, async () => {
+    await withV25Usage(async (path, legacy) => {
+      legacy.exec(mutation);
+      const before = legacy.prepare('SELECT * FROM usage_activities').all();
+      const observations = legacy.prepare('SELECT * FROM usage_observations').all();
+      let refusal: unknown;
+      try {
+        const upgraded = new SqliteStore({ filename: path });
+        upgraded.close();
+      } catch (error) { refusal = error; }
+      if (refusal === undefined) {
+        const reopened = new SqliteStore({ filename: path });
+        try {
+          if (shape === 'Routing ownership') {
+            await reopened.usage.listActivities();
+          } else {
+            const aggregate = await reopened.usage.getAggregate({});
+            assert.equal(aggregate.costCoverage.available, 0, 'missing cost facts must not count as available');
+          }
+        } finally { reopened.close(); }
+      }
+      assert.ok(refusal instanceof SchemaMigrationError && refusal.guidance.includes(reason), 'invalid facts must refuse migration with actionable guidance');
+      // Reopen the rejected database: the schema, rows, and safety copy remain v25.
+      const retained = new DatabaseSync(path);
+      try {
+        assert.equal(getSchemaVersion(retained), 25);
+        assert.deepEqual(retained.prepare('SELECT * FROM usage_activities').all(), before);
+        assert.deepEqual(retained.prepare('SELECT * FROM usage_observations').all(), observations);
+        assert.equal(retained.prepare("SELECT name FROM sqlite_master WHERE name = 'usage_activity_attribution_insert'").get(), undefined);
+      } finally { retained.close(); }
+      const safety = new DatabaseSync(defaultSafetyCopyPath(path));
+      try { assert.equal(getSchemaVersion(safety), 25); } finally { safety.close(); }
+    });
+  });
+}
+
+test('valid v25 usage migrates unchanged and reads truthfully after reopen', async () => {
+  await withV25Usage(async (path, legacy) => {
+    const before = legacy.prepare('SELECT * FROM usage_activities').all();
+    const observations = legacy.prepare('SELECT * FROM usage_observations').all();
+    const upgraded = new SqliteStore({ filename: path });
+    upgraded.close();
+    const reopened = new SqliteStore({ filename: path });
+    try {
+      assert.deepEqual(reopened.db.prepare('SELECT * FROM usage_activities').all(), before);
+      assert.deepEqual(reopened.db.prepare('SELECT * FROM usage_observations').all(), observations);
+      assert.equal((await reopened.usage.listActivities()).length, 1);
+      const aggregate = await reopened.usage.getAggregate({});
+      assert.deepEqual(aggregate.costCoverage, { available: 1, pending: 0, unavailable: 0 });
+      assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0);
+    } finally { reopened.close(); }
   });
 });
