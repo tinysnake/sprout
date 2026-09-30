@@ -9,7 +9,7 @@ import { createRunApi } from './api.ts';
 import { createUsageRouter } from './usage-router.ts';
 import { InMemoryUsageStore } from '../usage/store.ts';
 import { UsageService } from '../usage/service.ts';
-import type { UsageActivity, UsageObservation } from '../usage/model.ts';
+import type { UsageActivity, UsageObservation, UsageAggregate } from '../usage/model.ts';
 
 interface UsageTestHarness {
   readonly api: Awaited<ReturnType<typeof createRunApi>>;
@@ -325,9 +325,10 @@ test('HTTP serialization omits smuggled Routing ownership in aggregate identitie
     const identity = {
       activityId: 'routing', kind: 'routing_attempt', attemptId: 'attempt', batchId: 'batch',
       projectId: 'project', agentId: 'agent', taskId: 'task', runId: 'run', environmentInstanceId: 'environment',
+      model: 'wake', status: 'completed', createdAt: 1,
     };
     const aggregate = await h.usage.getAggregate({});
-    h.usage.getAggregate = async () => ({ ...aggregate, activityIdentities: [identity] });
+    h.usage.getAggregate = async () => ({ ...aggregate, activityIdentities: [identity] } as unknown as UsageAggregate);
     h.usage.listActivities = async () => [{
       id: 'routing', kind: 'routing_attempt', correlation: { ...identity },
       engine: 'routing', model: 'wake', status: 'completed', createdAt: 1,
@@ -335,8 +336,11 @@ test('HTTP serialization omits smuggled Routing ownership in aggregate identitie
     for (const route of ['aggregate', 'activities']) {
       const response = await fetch(`${h.base}/api/usage/${route}`);
       assert.equal(response.status, 200);
-      const payload = await response.json() as Record<string, any>;
-      const exported = route === 'aggregate' ? payload.activityIdentities[0] : payload.activities[0].correlation;
+      const payload = await response.json() as {
+        activityIdentities: Record<string, unknown>[];
+        activities: { correlation: Record<string, unknown> }[];
+      };
+      const exported = route === 'aggregate' ? payload.activityIdentities[0]! : payload.activities[0]!.correlation;
       assert.equal(exported.attemptId, 'attempt');
       assert.equal(exported.batchId, 'batch');
       assert.equal(exported.projectId, 'project');
