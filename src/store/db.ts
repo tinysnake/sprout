@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import { SqliteRunStore, SqliteSessionKeyStore } from '../run/sqlite-store.ts';
+import { SqliteRunStore, SqliteSessionKeyStore, SqliteRunReconnectRetryStore } from '../run/sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteProjectAuthorityStore } from '../project/sqlite-authority-store.ts';
@@ -61,7 +61,9 @@ export {
  *
  * Domain stores own the SQL for their respective tables:
  * - run domain: `agent_runs` (including recovered turn attribution),
- *   `agent_session_keys` (`run/sqlite-store.ts`)
+ *   `agent_session_keys`, and the bounded reconnect-retry state
+ *   (`run_reconnect_gates`, `run_reconnect_triggers`,
+ *   `run_reconnect_retries`) (`run/sqlite-store.ts`)
  * - environment domain: `environment_leases` (`environment/sqlite-store.ts`)
  * - project domain: `projects` (`project/sqlite-store.ts`)
  * - project authority domain: `project_authorities`
@@ -119,6 +121,7 @@ export class SqliteStore {
   readonly conversationScopes: SqliteConversationScopeStore;
   readonly projectCreation: SqliteProjectCreationStore;
   readonly sessionKeys: SqliteSessionKeyStore;
+  readonly runReconnectRetries: SqliteRunReconnectRetryStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
   readonly operatorSessions: SqliteOperatorSessionStore;
@@ -159,6 +162,7 @@ export class SqliteStore {
     this.conversationScopes = new SqliteConversationScopeStore({ db: this.db });
     this.projectCreation = new SqliteProjectCreationStore({ db: this.db, transactions: this.transactions });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
+    this.runReconnectRetries = new SqliteRunReconnectRetryStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });
     this.agents = new SqliteAgentStore({ db: this.db });

@@ -107,6 +107,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'workspace_binding', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'recovery_settlement', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'recovered_events', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'retry_of_run_id', type: 'TEXT', notnull: 0, pk: 0 },
   ],
   environment_leases: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
@@ -132,6 +133,28 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'working_directory', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'session_key', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  run_reconnect_gates: [
+    { name: 'project_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'armed', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'armed_at', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  run_reconnect_triggers: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'eligibility_settled', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  run_reconnect_retries: [
+    { name: 'original_run_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'trigger_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'retry_run_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'queued_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'dispatched_at', type: 'INTEGER', notnull: 0, pk: 0 },
+    { name: 'settled_at', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
   collaboration_messages: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },

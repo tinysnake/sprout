@@ -28,6 +28,13 @@ export interface IdFactory {
   routingWindow?(): string;
   routingBatch?(): string;
   routingAttempt?(): string;
+  /**
+   * Ids for durable reconnect-retry triggers (#181).
+   *
+   * Optional so a hand factory that predates the retry seam stays valid; the
+   * retry service falls back to its own factory when the supplied one has none.
+   */
+  retryTrigger?(): string;
 }
 
 export function createIdFactory(): IdFactory {
@@ -40,5 +47,6 @@ export function createIdFactory(): IdFactory {
     routingWindow: () => `win-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     routingBatch: () => `bat-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     routingAttempt: () => `att-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    retryTrigger: () => `trigger-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
   };
 }

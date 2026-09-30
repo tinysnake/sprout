@@ -41,7 +41,13 @@ export interface AgentRun {
    * project at submission. Persisted so the choice survives a restart.
    */
   readonly environmentInstanceId: string;
-  /** The project whose environment set produced `environmentInstanceId`. */
+  /**
+   * The project whose environment set produced `environmentInstanceId`.
+   *
+   * A run that failed before environment resolution records the Project scope
+   * its submission named instead (#181), so an environment-disconnected
+   * admission failure still durably belongs to a Project.
+   */
   readonly projectId?: string;
   /**
    * The durable Task this run advances, when it is a Task run (#28).
@@ -87,6 +93,14 @@ export interface AgentRun {
    * there was no prior run to summarise.
    */
   readonly handOff?: RunHandOff;
+  /**
+   * The original run this run is the bounded reconnect retry of (#181).
+   *
+   * Present on exactly the one linked retry run and absent on every original,
+   * so "has this run already used its one retry?" is a durable fact on the run
+   * record itself and a retry run can never re-enter the retry set.
+   */
+  readonly retryOfRunId?: string;
   readonly leaseId?: string;
   readonly failure?: string;
   readonly result?: EngineTurnResult;

@@ -12,6 +12,7 @@ import {
   type RuntimeStores,
 } from './runtime.ts';
 import { InMemoryRunStore } from './run/store.ts';
+import { InMemoryRunReconnectRetryStore } from './run/reconnect-retry-store.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
@@ -281,6 +282,7 @@ test('runtime construction failure closes environment and worker resources witho
   let storesClosed = 0;
   const failingStores: RuntimeStores = {
     runs: new InMemoryRunStore(),
+    runReconnectRetries: new InMemoryRunReconnectRetryStore(),
     leases: new InMemoryLeaseStore(),
     projects: {
       async save() {},

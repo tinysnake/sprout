@@ -16,6 +16,7 @@ import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
+  ADMISSION_CAPABILITY,
   EnvironmentCatalog,
   projectCatalogEntry,
   type EnvironmentCatalogEntry,
@@ -62,6 +63,11 @@ import {
 import type { ConversationScopeStore } from './conversation/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
+import {
+  RunReconnectRetry,
+  type RunReconnectRetryReconcileResult,
+} from './run/reconnect-retry.ts';
+import type { RunReconnectRetryStore } from './run/reconnect-retry-store.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
 import { SqliteStore } from './store/db.ts';
 import type { OperatorSessionStore } from './auth/store.ts';
@@ -139,6 +145,8 @@ export type { TaskContextWorker };
  */
 export interface RuntimeStores {
   readonly runs: RunStore;
+  /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
+  readonly runReconnectRetries: RunReconnectRetryStore;
   readonly leases: LeaseStore;
   readonly projects: ProjectStore;
   readonly sessionKeys: SessionKeyStore;
@@ -254,6 +262,8 @@ export interface SproutReconciliation {
   readonly admittedRunIds: readonly string[];
   /** Input Message ids whose reply the collaboration pass (re)projected. */
   readonly projectedMessageIds: readonly string[];
+  /** What the bounded reconnect-retry pass armed, triggered, queued, dispatched, and settled (#181). */
+  readonly reconnectRetries: RunReconnectRetryReconcileResult;
 }
 
 /** The wired runtime graph, plus the two lifecycle commands over it. */
@@ -1212,7 +1222,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       publishCatalogMembership();
       return environmentCatalog.entries();
     };
-    const publishCatalogMembership = (): void => {
+    // Late-bound so every catalog publication — connection accept, channel
+    // loss, readiness commit, authority change — hands the bounded reconnect
+    // retry one observation without ordering the graph backwards (#181).
+    let noteRunReconnectRetry: (acceptedInstanceId?: string) => Promise<void> = async () => undefined;
+    const publishCatalogMembership = (acceptedInstanceId?: string): void => {
       if (configuredCarrierPresent) {
         // An injected test/development carrier keeps exactly its one static
         // instance and immediate eligibility; the enrollment catalog is not its
@@ -1222,12 +1236,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
         });
+        void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
+          process.stderr.write(
+            '[run-retry] environment state observation failed; durable retry state is unchanged\n',
+          );
+        });
         return;
       }
       pool.synchronize({
         definitions: environmentCatalog.entries().map((entry) => entry.definition),
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+      });
+      void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
+        process.stderr.write(
+          '[run-retry] environment state observation failed; durable retry state is unchanged\n',
+        );
       });
     };
     // Authority decisions now schedule a catalog re-projection, so approval,
@@ -1272,6 +1296,33 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workerGateway.verifyObservationAuthority(authority, scope);
     currentWorkerConnectionEpoch = (enrollmentId) =>
       workerGateway.currentConnectionEpoch(enrollmentId);
+    // The bounded reconnect retry for environment-disconnected run admissions
+    // (#181): one durable gate/trigger/retry state machine over the run,
+    // Project, pool, and gateway facts this graph already keeps. Every catalog
+    // publication feeds it one observation through `noteRunReconnectRetry`
+    // above; it never dials a Worker, never touches routing, and submits at
+    // most one linked retry per failed run.
+    const runReconnectRetry = new RunReconnectRetry({
+      store: durableStores.runReconnectRetries,
+      runs: orchestrator,
+      projects: () =>
+        projects.list().map((project) => ({
+          projectId: project.id,
+          instanceIds: project.availableEnvironmentInstanceIds,
+        })),
+      // Under an injected test/development carrier the one static instance
+      // cannot disconnect; under the enrollment catalog only a live accepted
+      // Worker connection counts (ADR-0012).
+      isConnected: (instanceId) =>
+        (configuredCarrierPresent && configuredInstance.id === instanceId) ||
+        workerGateway.liveFor(instanceId) !== undefined,
+      canAdmitWork: (instanceId) =>
+        (configuredCarrierPresent && configuredInstance.id === instanceId) ||
+        pool.requiresLease(instanceId, ADMISSION_CAPABILITY) !== undefined,
+      onRetrySettled: (input) => collaboration.projectRetryReply(input),
+    });
+    noteRunReconnectRetry = (acceptedInstanceId) =>
+      runReconnectRetry.noteEnvironmentState(acceptedInstanceId).then(() => undefined);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1308,7 +1359,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // republish until some later event (#162).
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
-      publishCatalogMembership();
+      publishCatalogMembership(acceptance.enrollment.environmentInstanceId);
       void refreshEnvironmentCatalog().catch(() => undefined);
       // The Worker's own readiness is observed over the accepted inbound channel
       // (never by dialing one), so the catalog can reach eligibility once the
@@ -1738,10 +1789,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // pass is idempotent, so a healthy restart changes nothing.
         await conversationScopes.syncAll();
         const reconciled = await collaboration.reconcile();
+        // Runs last: the bounded reconnect retry rebuilds any interrupted
+        // eligibility set, dispatches queued retries under their durable ids,
+        // and settles finished ones — never a second retry for one run (#181).
+        const reconnectRetries = await runReconnectRetry.reconcile();
         const result: SproutReconciliation = {
           recoveredRuns,
           admittedRunIds: reconciled.admittedRunIds,
           projectedMessageIds: reconciled.projectedMessageIds,
+          reconnectRetries,
         };
         lastReconciliation = result;
         return result;

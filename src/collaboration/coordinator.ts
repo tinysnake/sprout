@@ -641,9 +641,12 @@ export class CollaborationCoordinator {
   async #projectReply(
     wake: WakeRequest,
     source: ResolvedRoutingSource,
-    options: { readonly awaitSettlement: boolean } = { awaitSettlement: true },
+    options: { readonly awaitSettlement: boolean; readonly runId?: string } = { awaitSettlement: true },
   ): Promise<boolean> {
-    const runId = wake.runId;
+    // A bounded reconnect retry (#181) projects through the same wake, keyed
+    // by the same reply identity: the original run id unless the caller names
+    // the linked retry run that actually produced the answer.
+    const runId = options.runId ?? wake.runId;
     if (runId === undefined) return false;
     // The deliver/admit path awaits the run's terminal state, because a reply must
     // not be projected from a half-finished run. Reconciliation instead reads the
@@ -687,6 +690,32 @@ export class CollaborationCoordinator {
       now: this.#clock.now(),
     });
     return !stored.duplicate;
+  }
+
+  /**
+   * Project the reply of a bounded reconnect retry (#181) for the wake whose
+   * original run failed before an engine could accept it.
+   *
+   * The reply keeps the wake's own identity and delivery key, so at most one
+   * reply per wake can ever exist no matter how often reconciliation or a
+   * repeated settle runs this. A retry that failed again (or a wake with no
+   * causal source) projects nothing — an answer that was never produced is
+   * never fabricated. Returns whether this call created the reply.
+   */
+  async projectRetryReply(input: {
+    readonly originalRunId: string;
+    readonly retryRunId: string;
+  }): Promise<boolean> {
+    const wake = (await this.#store.listWakeRequests()).find(
+      (candidate) => candidate.runId === input.originalRunId,
+    );
+    if (wake === undefined || wake.status !== 'admitted') return false;
+    const source = await this.#resolveWakeSource(wake);
+    if (source === undefined) return false;
+    return this.#projectReply(wake, source, {
+      awaitSettlement: false,
+      runId: input.retryRunId,
+    });
   }
 
   /**
