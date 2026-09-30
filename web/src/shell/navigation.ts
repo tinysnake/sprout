@@ -190,7 +190,7 @@ export function buildNavigation(
 ): NavigationModel {
   const destination = destinationOf(route);
   const tab = tabOf(route);
-  const projectQuery = typeof route.query['project'] === 'string' ? { project: route.query['project'] } : {};
+  const projectQuery = typeof route.query?.['project'] === 'string' ? { project: route.query['project'] } : {};
   const withProject = (item: NavigationItemView): NavigationItemView =>
     Object.keys(projectQuery).length && (item.key === 'overview' || item.key === 'tasks' || item.key === 'chat')
       ? { ...item, to: { name: (item.to as { name: string }).name, query: projectQuery } } : item;

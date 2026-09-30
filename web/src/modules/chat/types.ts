@@ -13,6 +13,10 @@ export interface ChatService {
   inspectScope(scopeId: string): Promise<ScopeInspectionView>;
   openDirectConversation(projectId: string, participants: readonly string[]): Promise<ConversationScopeView>;
   createWorkingGroup(projectId: string, input: CreateWorkingGroupInput): Promise<WorkingGroupScopeView>;
+  updateWorkingGroupContent(id: string, input: { readonly displayName: string; readonly goal: string | null; readonly rules: readonly string[] }): Promise<WorkingGroupScopeView>;
+  addWorkingGroupMember(id: string, memberId: string): Promise<WorkingGroupScopeView>;
+  endWorkingGroupMember(id: string, memberId: string): Promise<WorkingGroupScopeView>;
+  disbandWorkingGroup(id: string): Promise<WorkingGroupScopeView>;
   restoreWorkingGroup(id: string): Promise<WorkingGroupScopeView>;
   listMessages(scopeId?: string): ReturnType<MessageBrowserAdapter['listMessages']>;
   postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }): ReturnType<MessageBrowserAdapter['postMessage']>;
@@ -22,7 +26,7 @@ export interface ChatService {
   listRoutingBatches(projectId: string): Promise<{ readonly windows: readonly RoutingWindowView[]; readonly batches: readonly RoutingBatchSummaryView[] }>;
   getRoutingBatch(id: string): Promise<RoutingBatchDetailView>;
   getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
-  subscribeRuns(listener: (run: RunView) => void): () => void;
+  subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void): () => void;
 }
 
 export const CHAT_SERVICE: InjectionKey<ChatService> = Symbol('sprout.chat.service');

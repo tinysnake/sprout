@@ -18,7 +18,7 @@ import {
 /** Minimal route stand-in: the model reads meta, params, and matched only. */
 function routeOf(
   path: string,
-  options: { destination?: string; tab?: string; params?: Record<string, string> } = {}
+  options: { destination?: string; tab?: string; params?: Record<string, string>; project?: string } = {}
 ): RouteLocationNormalizedLoaded {
   const meta: Record<string, unknown> = {};
   if (options.destination) meta['destination'] = options.destination;
@@ -26,12 +26,21 @@ function routeOf(
   return {
     path,
     params: options.params ?? {},
+    query: options.project ? { project: options.project } : {},
     meta,
     matched: [{ meta }],
   } as unknown as RouteLocationNormalizedLoaded;
 }
 
 const INDICATORS: NavigationIndicators = { attention: 4, activeWork: 3, degradedEnvironments: 2 };
+
+test('Project tabs retain the selected Project across Overview, Tasks, and Chat', () => {
+  const navigation = buildNavigation(routeOf('/project/overview', { destination: 'project', tab: 'overview', project: 'second-project' }));
+  for (const item of navigation.nested) {
+    assert.deepEqual((item.to as { query?: unknown }).query, { project: 'second-project' });
+  }
+  assert.deepEqual((navigation.sections[1]?.items.find((item) => item.key === 'chat')?.to as { query?: unknown }).query, { project: 'second-project' });
+});
 
 test('destination and tab come from the matched route record', () => {
   assert.equal(destinationOf(routeOf('/feed', { destination: 'feed' })), 'feed');

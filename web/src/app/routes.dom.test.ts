@@ -466,6 +466,41 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
   } finally { await cleanup(); }
 });
 
+test('Working Group details edit content and disband without erasing history', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat/wg-frontend?project=project-sprout');
+    app.mount(mount);
+    await settle(160);
+    assert.equal((doc.querySelector('#chat-project-selector') as HTMLSelectElement).value, 'project-sprout');
+    (doc.querySelector('.chat-info-btn') as HTMLButtonElement).click();
+    await settle(30);
+    ([...doc.querySelectorAll('button')].find((button) => button.textContent?.includes('Edit Working Group')) as HTMLButtonElement).click();
+    await settle(30);
+    const name = doc.querySelector('#chat-edit-name') as HTMLInputElement;
+    name.value = 'Revised group';
+    name.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    ([...doc.querySelectorAll('button')].find((button) => button.textContent?.includes('Save Changes')) as HTMLButtonElement).click();
+    await settle(100);
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Focus ring contrast/);
+    assert.match(doc.querySelector('.chat-scope-card[aria-current="page"]')?.textContent ?? '', /Revised group/);
+    (doc.querySelector('.chat-info-btn') as HTMLButtonElement).click();
+    await settle(30);
+    ([...doc.querySelectorAll('button')].find((button) => button.textContent?.includes('Edit Working Group')) as HTMLButtonElement).click();
+    await settle(30);
+    ([...doc.querySelectorAll('button')].find((button) => button.textContent?.includes('Disband Working Group')) as HTMLButtonElement).click();
+    await settle(20);
+    ([...doc.querySelectorAll('button')].find((button) => button.textContent?.includes('Confirm Disband')) as HTMLButtonElement).click();
+    await settle(100);
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /disbanded.*read-only/i);
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Focus ring contrast/);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
 test('Project Chat distinguishes pending, suppressed, failed and projected evidence; batch and attempt URLs never substitute Chat', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   try {
@@ -525,6 +560,7 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
     await settle(160);
     await fixture.pushIncoming('wg-frontend', 'New agent update');
     await settle(80);
+    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /1 new message in /i);
     assert.match(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.textContent ?? '', /1 new/);
     (doc.querySelector('[data-scope-id="wg-frontend"]') as HTMLButtonElement).click();
     await settle(90);

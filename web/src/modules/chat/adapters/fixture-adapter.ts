@@ -53,7 +53,7 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 export class FixtureChatService implements ChatService {
   readonly #scopes = [...scopes];
   readonly #messages = [...fixtureMessages];
-  readonly #listeners = new Set<(run: RunView) => void>();
+  readonly #listeners = new Set<(run: { readonly id: string; readonly status: RunView['status'] }) => void>();
   private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
   constructor(options: { readonly archived?: boolean; readonly loading?: boolean } = {}) { this.options = options; }
   state(): BrowserTransportState { return { status: 'online', connection: 'online', loading: false }; }
@@ -90,6 +90,25 @@ export class FixtureChatService implements ChatService {
     this.#scopes[index] = restored;
     return restored;
   }
+  async updateWorkingGroupContent(id: string, input: { readonly displayName: string; readonly goal: string | null; readonly rules: readonly string[] }) {
+    return this.#changeGroup(id, (before) => ({ ...before, content: { currentVersion: before.content.currentVersion + 1, versions: [...before.content.versions, { ...before.content.versions.at(-1)!, version: before.content.currentVersion + 1, displayName: input.displayName, goal: input.goal ?? '', rules: input.rules }] } }));
+  }
+  async addWorkingGroupMember(id: string, memberId: string) {
+    return this.#changeGroup(id, (before) => ({ ...before, memberships: [...before.memberships, { memberId, memberKind: 'agent', addedAt: at, addedBy: 'operator' }] }));
+  }
+  async endWorkingGroupMember(id: string, memberId: string) {
+    return this.#changeGroup(id, (before) => ({ ...before, memberships: before.memberships.map((m) => m.memberId === memberId && !m.endedAt ? { ...m, endedAt: at + 60, endedBy: 'operator' } : m) }));
+  }
+  async disbandWorkingGroup(id: string) {
+    return this.#changeGroup(id, (before) => ({ ...before, status: 'disbanded', lifecycle: [...before.lifecycle, { action: 'disband', at: at + 60, actorMemberId: 'operator', reason: 'Disbanded' }] }));
+  }
+  #changeGroup(id: string, change: (before: WorkingGroupScopeView) => WorkingGroupScopeView) {
+    const index = this.#scopes.findIndex((scope) => scope.id === id && scope.kind === 'working-group');
+    if (index < 0) throw new Error('Working Group unavailable');
+    const updated = change(this.#scopes[index] as WorkingGroupScopeView);
+    this.#scopes[index] = updated;
+    return updated;
+  }
   async listMessages(scopeId?: string) { return this.#messages.filter((message) => !scopeId || message.scopeId === scopeId); }
   async postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }) {
     const message = makeMessage(`msg-sent-${input.deliveryKey}`, input.scopeId, input.body, at + 50 + this.#messages.length);
@@ -103,10 +122,10 @@ export class FixtureChatService implements ChatService {
   async getRoutingBatch(id: string) { const detail = batches.find((entry) => entry.batch.id === id); if (!detail) throw new BrowserRequestError('rejected', 404); return detail; }
   async getRun(id: string): Promise<RunView> { return { id, agentId: 'programmer', prompt: '', status: 'completed', events: [], handOffAttached: false, createdAt: at, completedAt: at + 30_300 }; }
   async getRunStatus(id: string) { return { id, status: 'completed' as const }; }
-  subscribeRuns(listener: (run: RunView) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
+  subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async pushIncoming(scopeId: string, body: string) {
     this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, at + 100 + this.#messages.length, 'programmer', 'agent'));
-    const run = await this.getRun('run-projected');
+    const run = await this.getRunStatus('run-projected');
     for (const listener of this.#listeners) listener(run);
   }
 }

@@ -39,6 +39,12 @@ let pendingDelivery: { readonly scopeId: string; readonly body: string; readonly
 const sending = ref(false);
 const infoOpen = ref(false);
 const createGroupOpen = ref(false);
+const editGroupOpen = ref(false);
+const disbandConfirm = ref(false);
+const editName = ref('');
+const editGoal = ref('');
+const editRules = ref('');
+const editMembers = ref<string[]>([]);
 const groupName = ref('');
 const groupGoal = ref('');
 const groupMembers = ref<string[]>([]);
@@ -49,6 +55,7 @@ const evidenceLoading = ref(false);
 const provenance = ref<{ runId?: string; runStatus?: string; inputIds: readonly string[]; batchId?: string } | null>(null);
 const evidenceTrigger = ref<HTMLElement | null>(null);
 const seen = new Set<string>();
+const knownEvents = new Set<string>();
 const unreadVersion = ref(0);
 let generation = 0;
 let detailGeneration = 0;
@@ -66,6 +73,7 @@ const unopenedAgents = computed(() => {
 });
 const missingScope = computed(() => !!requestedScopeId.value && !loading.value && !scopes.value.some((s) => s.id === requestedScopeId.value));
 const activeScope = computed(() => requestedScopeId.value ? scopes.value.find((s) => s.id === requestedScopeId.value) : channelScopes.value[0] ?? scopes.value[0]);
+const activeGroup = computed(() => activeScope.value?.kind === 'working-group' ? activeScope.value : null);
 const archivedDirectAgent = computed(() => {
   const scope = activeScope.value;
   return scope?.kind === 'direct' ? agents.value.find((agent) => agent.status === 'archived' && scope.participants.includes(agent.id)) : undefined;
@@ -137,6 +145,7 @@ async function loadProject() {
     scopes.value = scopeList;
     messages.value = allMessages.filter((m) => m.projectId === selectedId);
     events.value = projectEvents;
+    for (const event of projectEvents) knownEvents.add(event.id);
     batches.value = routing.batches;
     for (const m of messages.value) seen.add(m.id); // No server read-marker port: baseline existing history as seen this session.
     unreadVersion.value++;
@@ -150,8 +159,15 @@ async function refreshMessages() {
   try {
     const [all, projectEvents] = await Promise.all([projectMessages(scopes.value), service.listProjectEvents(id)]);
     if (token !== generation || id !== projectId.value) return;
+    const incoming = all.filter((m) => m.projectId === id && !messages.value.some((old) => old.id === m.id) && m.authorKind !== 'human');
+    const newEvents = projectEvents.filter((event) => !knownEvents.has(event.id));
     messages.value = all.filter((m) => m.projectId === id);
     events.value = projectEvents;
+    for (const event of newEvents) knownEvents.add(event.id);
+    if (incoming.length || newEvents.length) {
+      const inCurrent = incoming.filter((m) => m.scopeId === activeScope.value?.id);
+      announcer.announce(`${incoming.length ? `${incoming.length} new ${incoming.length === 1 ? 'message' : 'messages'}` : ''}${incoming.length && newEvents.length ? ' and ' : ''}${newEvents.length ? `${newEvents.length} new Project ${newEvents.length === 1 ? 'event' : 'events'}` : ''} in ${project.value?.displayName ?? 'Project'}${inCurrent.length ? `; ${inCurrent.length} in ${activeScope.value ? title(activeScope.value) : 'current conversation'}` : ''}.`);
+    }
     markVisible();
   } catch { actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
 }
@@ -207,6 +223,50 @@ async function restoreGroup() {
     await loadScope();
     announcer.announce('Working Group restored; conversation is writable.');
   } catch { actionError.value = 'Working Group cannot be restored until its members are eligible.'; announcer.announce(actionError.value); }
+  finally { managingGroup.value = false; }
+}
+function beginEditGroup() {
+  const group = activeGroup.value;
+  if (!group) return;
+  const version = group.content.versions.find((v) => v.version === group.content.currentVersion);
+  editName.value = version?.displayName ?? '';
+  editGoal.value = version?.goal ?? '';
+  editRules.value = version?.rules.join('\n') ?? '';
+  editMembers.value = group.memberships.filter((m) => !m.endedAt && m.memberKind === 'agent').map((m) => m.memberId);
+  infoOpen.value = false;
+  editGroupOpen.value = true;
+}
+async function saveGroup() {
+  const group = activeGroup.value;
+  if (!service || !group || group.status !== 'active' || project.value?.status !== 'active' || !presentation.value.controlAvailable || managingGroup.value || !editName.value.trim()) return;
+  managingGroup.value = true;
+  actionError.value = '';
+  try {
+    const current = group.content.versions.find((v) => v.version === group.content.currentVersion);
+    const rules = editRules.value.split('\n').map((rule) => rule.trim()).filter(Boolean);
+    if (current?.displayName !== editName.value.trim() || current.goal !== editGoal.value.trim() || JSON.stringify(current.rules) !== JSON.stringify(rules))
+      await service.updateWorkingGroupContent(group.id, { displayName: editName.value.trim(), goal: editGoal.value.trim() || null, rules });
+    const members = group.memberships.filter((m) => !m.endedAt && m.memberKind === 'agent').map((m) => m.memberId);
+    for (const id of editMembers.value.filter((id) => !members.includes(id))) await service.addWorkingGroupMember(group.id, id);
+    for (const id of members.filter((id) => !editMembers.value.includes(id))) await service.endWorkingGroupMember(group.id, id);
+    scopes.value = await service.listScopes(projectId.value);
+    await loadScope();
+    editGroupOpen.value = false;
+    announcer.announce('Working Group updated.');
+  } catch { actionError.value = 'Working Group update was refused. Review current membership and retry; some changes may have been saved.'; announcer.announce(actionError.value); scopes.value = await service.listScopes(projectId.value).catch(() => scopes.value); }
+  finally { managingGroup.value = false; }
+}
+async function disbandGroup() {
+  if (!service || !activeGroup.value || activeGroup.value.status !== 'active' || project.value?.status !== 'active' || !presentation.value.controlAvailable || managingGroup.value) return;
+  managingGroup.value = true;
+  try {
+    await service.disbandWorkingGroup(activeGroup.value.id);
+    scopes.value = await service.listScopes(projectId.value);
+    await loadScope();
+    disbandConfirm.value = false;
+    editGroupOpen.value = false;
+    announcer.announce('Working Group disbanded. Its conversation is read-only; history is retained.');
+  } catch { actionError.value = 'Working Group could not be disbanded.'; announcer.announce(actionError.value); }
   finally { managingGroup.value = false; }
 }
 async function closeScope() {
@@ -282,7 +342,7 @@ watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
-  unsubRuns = service?.subscribeRuns(() => {
+  unsubRuns = service?.subscribeRunStatuses(() => {
     void refreshMessages();
     // Run settlement can reach the event stream just before its reply projection.
     for (const delay of [400, 1500]) {
@@ -402,8 +462,25 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong class="block text-sm">{{ title(activeScope) }} · {{ kindLabel(activeScope) }}</strong><span>Project: {{ project?.displayName }} · {{ projectId }}</span><p v-if="inspection?.context.workingGroup">Goal: {{ inspection.context.workingGroup.goal }} · Rules: {{ inspection.context.workingGroup.rules.join('; ') }}</p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Project Wake Policy</strong><p>{{ project && currentVersion(project)?.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (fixed collection window)' : 'Explicit Mentions Only' }}</p><p>Direct messages, exact mentions, and @all use deterministic addressing.</p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Recent routing batches</strong><p v-if="!batches.length">No routing batches recorded for this Project.</p><button v-for="batch in batches" :key="batch.id" class="block min-h-11 text-left text-[var(--accent-primary)]" @click="inspectBatch(batch.id)">Inspect Causal Routing Chain · {{ batch.id }} · {{ batch.status }}</button></div>
+        <Button v-if="activeGroup" variant="secondary" size="sm" class="min-h-11" :disabled="!presentation.controlAvailable || project?.status !== 'active' || activeGroup.status !== 'active'" @click="beginEditGroup">Edit Working Group</Button>
       </div>
       <template #footer><Button variant="primary" size="sm" class="close-chat-info-btn min-h-11" @click="infoOpen = false">Close</Button></template>
+    </ChatDialog>
+    <ChatDialog :open="editGroupOpen" title="Manage Working Group" description="Edit the current group or make its channel read-only without deleting history." @update:open="editGroupOpen = $event; disbandConfirm = false">
+      <form class="flex flex-col gap-3 text-xs" @submit.prevent="saveGroup">
+        <label for="chat-edit-name">Working Group Name *</label><input id="chat-edit-name" v-model="editName" required class="min-h-11 rounded border p-2" />
+        <label for="chat-edit-goal">Goal</label><input id="chat-edit-goal" v-model="editGoal" class="min-h-11 rounded border p-2" />
+        <label for="chat-edit-rules">Rules (one per line)</label><textarea id="chat-edit-rules" v-model="editRules" class="min-h-20 rounded border p-2" />
+        <fieldset><legend>Agent Members</legend><label v-for="member in activeAgentMembers" :key="member.memberId" class="flex min-h-11 items-center gap-2"><input v-model="editMembers" type="checkbox" :value="member.memberId" />@{{ agentName(member.memberId) }}</label></fieldset>
+        <p v-if="actionError" role="alert">{{ actionError }}</p>
+        <p v-if="disbandConfirm">Disband this Working Group? Messages and membership history remain available, but the channel becomes read-only.</p>
+      </form>
+      <template #footer>
+        <Button variant="secondary" size="sm" class="min-h-11" @click="editGroupOpen = false; disbandConfirm = false">Cancel</Button>
+        <Button v-if="!disbandConfirm" variant="secondary" size="sm" class="min-h-11" :disabled="managingGroup || !presentation.controlAvailable" @click="disbandConfirm = true">Disband Working Group</Button>
+        <Button v-if="disbandConfirm" variant="secondary" size="sm" class="min-h-11" :disabled="managingGroup || !presentation.controlAvailable" @click="disbandGroup">Confirm Disband</Button>
+        <Button variant="primary" size="sm" class="min-h-11" :disabled="managingGroup || !presentation.controlAvailable || !editName.trim()" @click="saveGroup">Save Changes</Button>
+      </template>
     </ChatDialog>
     <ChatDialog :open="createGroupOpen" title="Create Working Group" description="Create a focused Project collaboration channel. The Human creator is included automatically." @update:open="createGroupOpen = $event">
       <form class="flex flex-col gap-3 text-xs" @submit.prevent="createGroup">
