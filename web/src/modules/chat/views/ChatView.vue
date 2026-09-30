@@ -241,7 +241,7 @@ async function resolveProvenance(message: MessageView) {
     let batch = detail;
     if (!batch) { try { batch = await service.getRoutingBatch(hint); } catch { /* not a batch */ } }
     const wake = (batch?.wakes ?? trigger?.deterministicWakes ?? []).find((w) => w.agentId === message.authorId);
-    const run = wake?.runId ? await service.getRun(wake.runId).catch(() => undefined) : undefined;
+    const run = wake?.runId ? await service.getRunStatus(wake.runId).catch(() => undefined) : undefined;
     provenance.value = { inputIds: batch?.inputs.map((item) => item.inputId) ?? (trigger ? [hint] : []), ...(batch ? { batchId: batch.batch.id } : {}), ...(wake?.runId ? { runId: wake.runId } : {}), ...(run ? { runStatus: run.status } : {}) };
   } catch { provenance.value = { inputIds: [] }; }
 }

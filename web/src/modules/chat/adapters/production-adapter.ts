@@ -28,6 +28,6 @@ export class ProductionChatService implements ChatService {
   eventRouting: ChatService['eventRouting'] = (id) => this.ports.routing.eventRouting(id);
   listRoutingBatches: ChatService['listRoutingBatches'] = (id) => this.ports.routing.listRoutingBatches(id);
   getRoutingBatch: ChatService['getRoutingBatch'] = (id) => this.ports.routing.getRoutingBatch(id);
-  getRun: ChatService['getRun'] = (id) => this.ports.runs.getRun(id);
+  getRunStatus: ChatService['getRunStatus'] = (id) => this.ports.runs.getRunStatus(id);
   subscribeRuns: ChatService['subscribeRuns'] = (listener) => this.ports.runs.subscribeRuns(listener);
 }

@@ -21,7 +21,7 @@ export interface ChatService {
   eventRouting(id: string): Promise<RoutingEvidenceView>;
   listRoutingBatches(projectId: string): Promise<{ readonly windows: readonly RoutingWindowView[]; readonly batches: readonly RoutingBatchSummaryView[] }>;
   getRoutingBatch(id: string): Promise<RoutingBatchDetailView>;
-  getRun(id: string): Promise<RunView>;
+  getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
   subscribeRuns(listener: (run: RunView) => void): () => void;
 }
 
