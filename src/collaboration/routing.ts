@@ -321,6 +321,11 @@ export interface RoutingInputOutcome {
  * with no model therefore fails every attempt as `model-unavailable`, which
  * ADR-0007 defines as a retried-then-failed-closed attempt with visible
  * per-input failures: never silence, never fail-open fan-out.
+ * A future adapter must inject its provider key out of band (environment or OS
+ * secret store), never through `id`, `judge` request fields, exceptions,
+ * manifests, Messages, Project contracts, evidence, or logs. `id` is a public
+ * model identity, not a provider credential. The coordinator records only a
+ * constrained model identifier and product-owned failure text.
  */
 export interface RoutingModelPort {
   readonly id: string;

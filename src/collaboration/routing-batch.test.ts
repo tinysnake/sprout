@@ -481,6 +481,30 @@ test('a failed first attempt retries once on the identical snapshot and can stil
   assert.equal(harness.submits.length, 1);
 });
 
+test('provider error prose and adapter credential-shaped identity never enter routing evidence', async () => {
+  const opaque = 'SYNTHETIC_OPAQUE_PROVIDER_VALUE_ABC123';
+  const harness = build({
+    routingModel: {
+      id: `api_key=${opaque}`,
+      async judge() { throw new Error(`request failed: ${opaque}`); },
+    },
+  });
+  const scopeId = await channel(harness);
+  const delivered = await harness.coordinator.deliver({
+    scopeId, author: { id: 'operator', kind: 'human' }, body: 'route safely', deliveryKey: 'opaque-error',
+  });
+  harness.advance(60_000);
+  await harness.coordinator.sweepRouting();
+  const batch = (await harness.coordinator.listRoutingBatches('project-sprout'))[0]!;
+  const attempts = await harness.store.listRoutingAttempts(batch.id);
+  const outcomes = await harness.store.listRoutingOutcomes(batch.id);
+  const observations = await harness.store.listObservations(delivered.message.id);
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts.every((attempt) => attempt.modelId === 'unknown-model' && attempt.errorDetail === 'wake model request failed'));
+  assert.equal(batch.status, 'failed');
+  assert.ok(!JSON.stringify({ attempts, outcomes, observations, batch }).includes(opaque));
+});
+
 test('a missing wake model fails closed with two visible unavailable attempts', async () => {
   const harness = build();
   const scopeId = await channel(harness);

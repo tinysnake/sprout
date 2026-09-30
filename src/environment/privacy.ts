@@ -8,15 +8,19 @@
  * Worker compatibility detail, and a readiness-probe summary — so they pass
  * through this Module before they reach durable state or the wire contract.
  *
- * The redaction is **structural**: it removes the sensitive categories and keeps
- * the decisive operator-facing remainder, so a reason stays useful ("host
+ * Redaction is pattern-based defence in depth: it removes recognized sensitive
+ * categories and keeps the decisive operator-facing remainder, so a reason stays useful ("host
  * retired", "worker protocol 3.0 is newer than the maximum v2") while a leaked
  * path or credential is replaced by a bounded category placeholder. Coverage is
  * general rather than a list of known host roots: any absolute POSIX path, any
  * dotted or machine-style hostname, and any `credential=value` assignment is
  * removed, because the boundary exists precisely for the text nobody
- * anticipated. This Module is deliberately free of `node:*` so the browser wire
- * contract can import it.
+ * anticipated. For routing-context free text, the owner accepted best-effort
+ * value-level detection at this stage (#97 acceptance amendment). Unlabelled
+ * opaque values can survive; #179 revisits this before a real production wake
+ * model is configured or full M2 acceptance. Sprout-owned keys must never be
+ * put in prose for this scanner to discover. This Module is deliberately free
+ * of `node:*` so the browser wire contract can import it.
  */
 
 /**
@@ -237,7 +241,8 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
 ];
 
 /**
- * Remove every sensitive category from one text value.
+ * Remove recognized sensitive patterns from one text value. This is not proof
+ * that arbitrary free text is secret-free (see #97 amendment and #179).
  *
  * Exported so a caller that must test the boundary can assert the categories
  * directly rather than reconstructing them through a record.

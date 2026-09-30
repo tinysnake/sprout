@@ -7,7 +7,7 @@
  * rendered context snapshot, and the manifest that records what the model will
  * see. It never reads a store and never calls a model.
  *
- * The privacy hard gate combines a source whitelist with redaction of every
+ * The structural privacy gate combines a source whitelist with redaction of every
  * free-text field before rendering: the builder only receives batch inputs
  * (eligible unaddressed Messages and `wake-eligible` Project events), the
  * Project contract (goal and rules; Tasks are omitted without a relevance rule),
@@ -17,7 +17,11 @@
  * Messages, credentials, private memory, raw reasoning, sessions, tool output,
  * host facts, and transient Environment availability have no independent
  * source here. Shared text still requires redaction; the exclusion list alone
- * is evidence, not enforcement.
+ * is evidence, not enforcement. By the #97 owner acceptance amendment,
+ * value-level detection in free text is best-effort for this stage: unlabelled
+ * opaque values may reach the wake model. #179 requires a revisit before a real
+ * production wake model is configured or full M2 acceptance. Sprout-owned
+ * credentials must never enter these prose sources in the first place.
  *
  * Sizing rules:
  *

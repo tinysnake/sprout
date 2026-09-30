@@ -91,7 +91,7 @@
 import type { AgentRun } from '../run/model.ts';
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
-import { redactSensitiveText } from '../environment/privacy.ts';
+import { redactSensitiveText, sanitizeIdentifier } from '../environment/privacy.ts';
 import {
   ConversationScopeError,
   projectChannelScopeId,
@@ -1034,6 +1034,11 @@ export class CollaborationCoordinator {
     };
 
     const previous = await this.#store.listRoutingAttempts(current.id);
+    // The port identity is evidence, not an injection channel for provider
+    // credentials. Never persist a raw adapter-supplied identifier.
+    const modelId = this.#routingModel === undefined
+      ? 'unavailable'
+      : sanitizeIdentifier(this.#routingModel.id, { kind: 'model', fallback: 'unknown-model' });
     const successful = previous.find((attempt) => attempt.status === 'succeeded');
     if (successful?.judgement !== undefined) {
       await this.#settleBatchRouted(current, batchInputs, successful.judgement);
@@ -1056,7 +1061,7 @@ export class CollaborationCoordinator {
       const attemptId = this.#newRoutingId('routingAttempt');
       await this.#store.recordRoutingAttempt({
         id: attemptId, batchId: current.id, attemptNumber,
-        modelId: this.#routingModel?.id ?? 'unavailable',
+        modelId,
         startedAt, finishedAt: startedAt, status: 'started',
       });
       let judgement: RoutingJudgement | undefined;
@@ -1088,9 +1093,9 @@ export class CollaborationCoordinator {
               }
             : {
                 kind: 'model-unavailable',
-                detail: redactSensitiveText(
-                  error instanceof Error ? error.message : String(error),
-                ).slice(0, 400),
+                // Provider errors can embed an arbitrary unlabelled key. Do
+                // not copy their prose into attempts, evidence, or logs.
+                detail: 'wake model request failed',
               };
         }
       }
@@ -1099,7 +1104,7 @@ export class CollaborationCoordinator {
         id: attemptId,
         batchId: current.id,
         attemptNumber,
-        modelId: this.#routingModel?.id ?? 'unavailable',
+        modelId,
         startedAt,
         finishedAt: this.#clock.now(),
         status: judgement !== undefined ? 'succeeded' : 'failed',

@@ -81,7 +81,7 @@ test('a selection naming a non-candidate fails as unknown-agent', () => {
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.kind, 'unknown-agent');
-  assert.match(result.detail, /scout.*msg-2/);
+  assert.match(result.detail, /not eligible/);
 });
 
 test('a judgement naming a foreign input fails as unknown-input', () => {
@@ -118,6 +118,19 @@ test('malformed answers fail as malformed-output without echoing arbitrary outpu
     if (result.ok) continue;
     assert.equal(result.kind, 'malformed-output', `kind for ${raw}`);
     assert.ok(result.detail.length <= 400, 'failure details stay bounded');
+  }
+});
+
+test('invalid model output never copies caller-controlled identifiers or parser excerpts into failure evidence', () => {
+  const opaque = 'SYNTHETIC_OPAQUE_PROVIDER_VALUE_ABC123';
+  for (const raw of [
+    `{"selections":${opaque}`,
+    JSON.stringify({ selections: [{ agentId: opaque, inputIds: ['msg-1'] }] }),
+    JSON.stringify({ selections: [], suppressions: [{ inputId: opaque }] }),
+  ]) {
+    const result = parseRoutingJudgement(raw, expectation);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.ok(!result.detail.includes(opaque));
   }
 });
 

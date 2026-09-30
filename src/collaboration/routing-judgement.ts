@@ -69,16 +69,13 @@ export function parseRoutingJudgement(
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (error) {
+  } catch {
     return {
       ok: false,
       kind: 'malformed-output',
-      // Validation evidence only: the parser's own bounded message, never the
-      // raw answer (ADR-0007: "validation errors, without raw private
-      // reasoning").
-      detail: `model output is not valid JSON: ${
-        (error instanceof Error ? error.message : String(error)).slice(0, 200)
-      }`.slice(0, MAX_DETAIL),
+      // Parser errors may quote the raw model answer, including provider or
+      // caller secrets. Persist a product-owned classification instead.
+      detail: 'model output is not valid JSON',
     };
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -107,18 +104,18 @@ export function parseRoutingJudgement(
       return { ok: false, kind: 'malformed-output', detail: 'a selection is missing its agentId' };
     }
     if (!Array.isArray(inputIds) || inputIds.length === 0 || !inputIds.every((id) => typeof id === 'string' && id !== '')) {
-      return { ok: false, kind: 'malformed-output', detail: `selection for ${agentId} has no input ids` };
+      return { ok: false, kind: 'malformed-output', detail: 'a selection has no input ids' };
     }
     if (rationale !== undefined && typeof rationale !== 'string') {
-      return { ok: false, kind: 'malformed-output', detail: `selection rationale for ${agentId} is not text` };
+      return { ok: false, kind: 'malformed-output', detail: 'a selection rationale is not text' };
     }
     for (const inputId of inputIds as readonly string[]) {
       if (!inputSet.has(inputId)) {
-        return { ok: false, kind: 'unknown-input', detail: `selection names unknown input ${inputId}` };
+        return { ok: false, kind: 'unknown-input', detail: 'selection names an unknown input' };
       }
       const candidates = expected.candidatesByInput.get(inputId);
       if (candidates === undefined || !candidates.includes(agentId)) {
-        return { ok: false, kind: 'unknown-agent', detail: `selection names ${agentId}, which is not a candidate for ${inputId}` };
+        return { ok: false, kind: 'unknown-agent', detail: 'selection names an agent not eligible for an input' };
       }
       const assignments = selectedByInput.get(inputId) ?? [];
       const existing = assignments.find((assignment) => assignment.agentId === agentId);
@@ -138,16 +135,16 @@ export function parseRoutingJudgement(
       return { ok: false, kind: 'malformed-output', detail: 'a suppression is missing its inputId' };
     }
     if (rationale !== undefined && typeof rationale !== 'string') {
-      return { ok: false, kind: 'malformed-output', detail: `suppression rationale for ${inputId} is not text` };
+      return { ok: false, kind: 'malformed-output', detail: 'a suppression rationale is not text' };
     }
     if (!inputSet.has(inputId)) {
-      return { ok: false, kind: 'unknown-input', detail: `suppression names unknown input ${inputId}` };
+      return { ok: false, kind: 'unknown-input', detail: 'suppression names an unknown input' };
     }
     if (selectedByInput.has(inputId)) {
-      return { ok: false, kind: 'invalid-output', detail: `input ${inputId} is both selected and suppressed` };
+      return { ok: false, kind: 'invalid-output', detail: 'an input is both selected and suppressed' };
     }
     if (suppressedByInput.has(inputId)) {
-      return { ok: false, kind: 'invalid-output', detail: `input ${inputId} is suppressed more than once` };
+      return { ok: false, kind: 'invalid-output', detail: 'an input is suppressed more than once' };
     }
     suppressedByInput.set(inputId, redactSensitiveText(String(rationale ?? '')).slice(0, MAX_DETAIL));
   }
