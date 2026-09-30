@@ -20,6 +20,7 @@ import { SqliteWorkerConnectionEpochStore } from '../environment/worker-epoch-st
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
 import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
 import { SqliteProjectCreationStore } from '../project/creation-store.ts';
+import { SqliteUsageStore } from '../usage/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
@@ -96,6 +97,7 @@ export {
  * - recovery domain: `environment_recovery`, `environment_force_releases`,
  *   `worker_recovery_receipts`, `worker_recovery_events`, `worker_recovery_contexts`
  *   (`environment/sqlite-recovery-store.ts`)
+ * - usage domain: `usage_activities`, `usage_observations` (`usage/sqlite-store.ts`)
  */
 
 function recordMigrationFact(db: DatabaseSync, state: 'initialized' | 'migrated' | 'unchanged'): void {
@@ -145,6 +147,7 @@ export class SqliteStore {
   readonly environmentReadiness: SqliteEnvironmentReadinessStore;
   readonly workerConnectionEpochs: SqliteWorkerConnectionEpochStore;
   readonly recovery: SqliteRecoveryStore;
+  readonly usage: SqliteUsageStore;
   readonly schemaVersion: number;
   readonly operations: SqliteOperationalStore;
 
@@ -200,6 +203,7 @@ export class SqliteStore {
     // issuing `environment_leases` statements itself.
     this.taskProposals = new SqliteTaskProposalStore(this.db);
     this.tasks = new SqliteTaskStore({ db: this.db, leases: this.leases, transactions: this.transactions });
+    this.usage = new SqliteUsageStore({ db: this.db });
   }
 
   close(): void {

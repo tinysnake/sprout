@@ -196,6 +196,18 @@ test('a Pi turn totals token usage reported for each completed assistant message
     status: 'completed',
     text: 'Done.',
     tokenUsage: { promptTokens: 280, completionTokens: 55, totalTokens: 335 },
+    detailedTokens: {
+      inputTokens: 280,
+      uncachedInputTokens: 280,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 55,
+      reasoningOutputTokens: 0,
+      totalTokens: 335,
+    },
+    billingBasis: 'unknown',
+    source: 'pi-protocol:message_end',
+    sourceVersion: 'pi 0.85.1',
   });
 });
 

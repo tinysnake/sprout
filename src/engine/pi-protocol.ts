@@ -1,4 +1,5 @@
-import type { AgentRunEvent, EngineTurnResult, TokenUsage } from './port.ts';
+import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from './port.ts';
+import { extractPiCostEstimate } from '../usage/valuation.ts';
 import { sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
@@ -30,8 +31,14 @@ export interface PiTurnState {
   failure: string | undefined;
   /** Sum of completed assistant and compaction calls in this Agent run. */
   tokenUsage: TokenUsage | undefined;
+  detailedTokens: DetailedTokenDimensions | undefined;
+  cost: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number } | undefined;
   /** The latest cumulative usage for the assistant message now streaming. */
-  pendingMessageUsage: TokenUsage | undefined;
+  pendingDetailedUsage: {
+    readonly tokenUsage: TokenUsage;
+    readonly detailedTokens: DetailedTokenDimensions;
+    readonly cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+  } | undefined;
 }
 
 export function newPiTurnState(): PiTurnState {
@@ -40,7 +47,9 @@ export function newPiTurnState(): PiTurnState {
     finalText: '',
     failure: undefined,
     tokenUsage: undefined,
-    pendingMessageUsage: undefined,
+    detailedTokens: undefined,
+    cost: undefined,
+    pendingDetailedUsage: undefined,
   };
 }
 
@@ -75,8 +84,8 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       // Pi reports a cumulative metric while a message streams. It becomes a
       // run metric only when that assistant message ends, avoiding one count
       // for every streamed delta.
-      const usage = readPiTokenUsage(message['usage']);
-      if (usage !== undefined) state.pendingMessageUsage = usage;
+      const detailed = readPiDetailedUsage(message['usage']);
+      if (detailed !== undefined) state.pendingDetailedUsage = detailed;
       return mapAssistantUpdate(message, state);
     }
 
@@ -114,8 +123,8 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       if (msg.stopReason === 'error') return failTurn(state, 'error-stop-reason');
       const text = extractText(msg.content);
       if (text !== '') state.finalText = text;
-      addTokenUsage(state, readPiTokenUsage(msg.usage) ?? state.pendingMessageUsage);
-      state.pendingMessageUsage = undefined;
+      addPiDetailedUsage(state, readPiDetailedUsage(msg.usage) ?? state.pendingDetailedUsage);
+      state.pendingDetailedUsage = undefined;
       return { events: [] };
     }
 
@@ -131,11 +140,11 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
 
     case 'compaction_end': {
       const result = message['result'];
-      const usage =
+      const detailed =
         typeof result === 'object' && result !== null
-          ? readPiTokenUsage((result as Record<string, unknown>)['usage'])
+          ? readPiDetailedUsage((result as Record<string, unknown>)['usage'])
           : undefined;
-      addTokenUsage(state, usage);
+      addPiDetailedUsage(state, detailed);
       return { events: [] };
     }
 
@@ -146,20 +155,16 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       // empty successful turn (#182). An already-classified failure keeps its
       // own class rather than being re-labelled.
       if (state.failure !== undefined) {
-        return { events: [], finish: { status: 'failed', message: state.failure } };
+        return { events: [], finish: createPiTurnResult(state, 'failed', state.failure) };
       }
       if (message['stopReason'] === 'error') return failTurn(state, 'error-stop-reason');
       // A malformed or interrupted stream may omit message_end. Keep a valid
       // final update observable rather than failing the otherwise healthy run.
-      addTokenUsage(state, state.pendingMessageUsage);
-      state.pendingMessageUsage = undefined;
+      addPiDetailedUsage(state, state.pendingDetailedUsage);
+      state.pendingDetailedUsage = undefined;
       return {
         events: [],
-        finish: {
-          status: 'completed',
-          text: state.finalText || state.text,
-          ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
-        },
+        finish: createPiTurnResult(state, 'completed'),
       };
     }
 
@@ -184,7 +189,7 @@ function failTurn(state: PiTurnState, cause: EngineTurnFailureCause): PiOutcome 
   // stable reason for the same turn.
   const failure = state.failure ?? sanitizedTurnFailure('pi', cause);
   state.failure = failure;
-  return { events: [], finish: { status: 'failed', message: failure } };
+  return { events: [], finish: createPiTurnResult(state, 'failed', failure) };
 }
 
 function mapAssistantUpdate(message: Record<string, unknown>, state: PiTurnState): PiOutcome {
@@ -248,8 +253,47 @@ function extractContent(payload: unknown): string {
   return extractText((payload as { content?: unknown }).content);
 }
 
-/** Map Pi's provider-neutral usage shape to Sprout's neutral turn metric. */
-function readPiTokenUsage(raw: unknown): TokenUsage | undefined {
+function createPiTurnResult(
+  state: PiTurnState,
+  status: 'completed' | 'failed',
+  errorMessage?: string,
+): EngineTurnResult {
+  const hasUsage = state.tokenUsage !== undefined || state.detailedTokens !== undefined;
+  const costEstimate = state.cost?.total !== undefined ? extractPiCostEstimate({ cost: state.cost, valuedAt: Date.now() }) : undefined;
+  if (status === 'failed') {
+    return {
+      status: 'failed',
+      message: errorMessage ?? 'failed',
+      ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+      ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
+      ...(costEstimate !== undefined ? { costEstimate } : {}),
+      ...(hasUsage ? {
+        billingBasis: 'unknown' as const,
+        source: 'pi-protocol:message_end',
+        sourceVersion: 'pi 0.85.1',
+      } : {}),
+    };
+  }
+  return {
+    status: 'completed',
+    text: state.finalText || state.text,
+    ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+    ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
+    ...(costEstimate !== undefined ? { costEstimate } : {}),
+    ...(hasUsage ? {
+      billingBasis: 'unknown' as const,
+      source: 'pi-protocol:message_end',
+      sourceVersion: 'pi 0.85.1',
+    } : {}),
+  };
+}
+
+/** Map Pi's provider-neutral usage shape to Sprout's detailed metrics. */
+function readPiDetailedUsage(raw: unknown): {
+  readonly tokenUsage: TokenUsage;
+  readonly detailedTokens: DetailedTokenDimensions;
+  readonly cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+} | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const usage = raw as Record<string, unknown>;
   const input = usage['input'];
@@ -257,23 +301,88 @@ function readPiTokenUsage(raw: unknown): TokenUsage | undefined {
   const total = usage['totalTokens'];
   if (!isTokenCount(input) || !isTokenCount(output)) return undefined;
   if (total !== undefined && !isTokenCount(total)) return undefined;
-  return {
-    promptTokens: input,
-    completionTokens: output,
+
+  const cacheRead = isTokenCount(usage['cacheRead']) ? usage['cacheRead'] : 0;
+  const cacheWrite = isTokenCount(usage['cacheWrite']) ? usage['cacheWrite'] : 0;
+  const reasoning = isTokenCount(usage['reasoning']) ? usage['reasoning'] : undefined;
+  const uncachedInput = typeof cacheRead === 'number' ? Math.max(0, input - cacheRead) : undefined;
+
+  const detailedTokens: DetailedTokenDimensions = {
+    inputTokens: input,
+    ...(uncachedInput !== undefined ? { uncachedInputTokens: uncachedInput } : {}),
+    cachedInputTokens: cacheRead,
+    cacheWriteInputTokens: cacheWrite,
+    outputTokens: output,
+    ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
     totalTokens: total ?? input + output,
+  };
+
+  let cost: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number } | undefined;
+  if (typeof usage['cost'] === 'object' && usage['cost'] !== null) {
+    const rawCost = usage['cost'] as Record<string, unknown>;
+    cost = {
+      ...(typeof rawCost['input'] === 'number' ? { input: rawCost['input'] } : {}),
+      ...(typeof rawCost['output'] === 'number' ? { output: rawCost['output'] } : {}),
+      ...(typeof rawCost['cacheRead'] === 'number' ? { cacheRead: rawCost['cacheRead'] } : {}),
+      ...(typeof rawCost['cacheWrite'] === 'number' ? { cacheWrite: rawCost['cacheWrite'] } : {}),
+      ...(typeof rawCost['total'] === 'number' ? { total: rawCost['total'] } : {}),
+    };
+  }
+
+  return {
+    tokenUsage: {
+      promptTokens: input,
+      completionTokens: output,
+      totalTokens: total ?? input + output,
+    },
+    detailedTokens,
+    ...(cost !== undefined ? { cost } : {}),
   };
 }
 
-function addTokenUsage(state: PiTurnState, next: TokenUsage | undefined): void {
+function addPiDetailedUsage(
+  state: PiTurnState,
+  next: {
+    readonly tokenUsage: TokenUsage;
+    readonly detailedTokens: DetailedTokenDimensions;
+    readonly cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+  } | undefined,
+): void {
   if (next === undefined) return;
-  const previous = state.tokenUsage;
-  state.tokenUsage = previous === undefined
-    ? next
+  const prevTokens = state.tokenUsage;
+  state.tokenUsage = prevTokens === undefined
+    ? next.tokenUsage
     : {
-        promptTokens: previous.promptTokens + next.promptTokens,
-        completionTokens: previous.completionTokens + next.completionTokens,
-        totalTokens: previous.totalTokens + next.totalTokens,
+        promptTokens: prevTokens.promptTokens + next.tokenUsage.promptTokens,
+        completionTokens: prevTokens.completionTokens + next.tokenUsage.completionTokens,
+        totalTokens: prevTokens.totalTokens + next.tokenUsage.totalTokens,
       };
+
+  const prevDetailed = state.detailedTokens;
+  state.detailedTokens = prevDetailed === undefined
+    ? next.detailedTokens
+    : {
+        inputTokens: (prevDetailed.inputTokens ?? 0) + (next.detailedTokens.inputTokens ?? 0),
+        uncachedInputTokens: (prevDetailed.uncachedInputTokens ?? 0) + (next.detailedTokens.uncachedInputTokens ?? 0),
+        cachedInputTokens: (prevDetailed.cachedInputTokens ?? 0) + (next.detailedTokens.cachedInputTokens ?? 0),
+        cacheWriteInputTokens: (prevDetailed.cacheWriteInputTokens ?? 0) + (next.detailedTokens.cacheWriteInputTokens ?? 0),
+        outputTokens: (prevDetailed.outputTokens ?? 0) + (next.detailedTokens.outputTokens ?? 0),
+        reasoningOutputTokens: (prevDetailed.reasoningOutputTokens ?? 0) + (next.detailedTokens.reasoningOutputTokens ?? 0),
+        totalTokens: (prevDetailed.totalTokens ?? 0) + (next.detailedTokens.totalTokens ?? 0),
+      };
+
+  if (next.cost !== undefined) {
+    const prevCost = state.cost;
+    state.cost = prevCost === undefined
+      ? next.cost
+      : {
+          input: (prevCost.input ?? 0) + (next.cost.input ?? 0),
+          output: (prevCost.output ?? 0) + (next.cost.output ?? 0),
+          cacheRead: (prevCost.cacheRead ?? 0) + (next.cost.cacheRead ?? 0),
+          cacheWrite: (prevCost.cacheWrite ?? 0) + (next.cost.cacheWrite ?? 0),
+          total: (prevCost.total ?? 0) + (next.cost.total ?? 0),
+        };
+  }
 }
 
 function isTokenCount(value: unknown): value is number {

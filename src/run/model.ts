@@ -1,8 +1,8 @@
-import type { AgentRunEvent, EngineTurnResult, TokenUsage } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { WorkspaceSelectionKind } from '../project/access.ts';
 
-export type { TokenUsage } from '../engine/port.ts';
+export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 
 /**
  * The durable workspace facts one run was admitted under (#93, ADR-0008).
@@ -115,6 +115,8 @@ export interface AgentRun {
   readonly recoveredEvents?: readonly { readonly turnId: string; readonly sequence: number; readonly event: AgentRunEvent }[];
   /** Provider-reported consumption for this run, when the engine exposes it. */
   readonly tokenUsage?: TokenUsage;
+  /** Detailed token dimensions preserving input, cached, cache write, output, reasoning detail. */
+  readonly detailedTokens?: DetailedTokenDimensions;
   readonly createdAt: number;
   readonly completedAt?: number;
 }

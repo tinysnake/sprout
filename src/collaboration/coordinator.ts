@@ -269,6 +269,8 @@ export interface CollaborationCoordinatorOptions {
    * (docs/roadmap.md M2 evidence note).
    */
   readonly routingModel?: RoutingModelPort;
+  /** Awaited after durable settlement, with the coordinator's actual attempt identity. */
+  readonly onRoutingAttempt?: (attempt: RoutingAttempt, projectId: string) => Promise<void>;
   /** Per-attempt wake-model timeout; defaults to 30 seconds. */
   readonly routingAttemptTimeoutMs?: number;
   /** Bounds overrides; defaults to `DEFAULT_ROUTING_BOUNDS`. Tests shrink them. */
@@ -402,6 +404,7 @@ export class CollaborationCoordinator {
   readonly #clock: { now(): number };
   readonly #onObservation: CollaborationCoordinatorOptions['onObservation'];
   readonly #routingModel: RoutingModelPort | undefined;
+  readonly #onRoutingAttempt: CollaborationCoordinatorOptions['onRoutingAttempt'];
   readonly #attemptTimeoutMs: number;
   readonly #routingBounds: Partial<RoutingBounds> | undefined;
   /** Routing ids for an injected factory that predates routing (#97). */
@@ -419,6 +422,7 @@ export class CollaborationCoordinator {
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#onObservation = options.onObservation;
     this.#routingModel = options.routingModel;
+    this.#onRoutingAttempt = options.onRoutingAttempt;
     this.#attemptTimeoutMs = options.routingAttemptTimeoutMs ?? 30_000;
     this.#routingBounds = options.routingBounds;
 
@@ -819,6 +823,15 @@ export class CollaborationCoordinator {
    * same window twice or judges one batch twice.
    */
   async reconcile(): Promise<ReconcileResult> {
+    // Repair the crash boundary between durable attempt settlement and its
+    // usage observer. Replaying facts never invokes the model or invents tokens.
+    if (this.#onRoutingAttempt !== undefined) {
+      for (const batch of await this.#store.listRoutingBatches()) {
+        for (const attempt of await this.#store.listRoutingAttempts(batch.id)) {
+          if (attempt.status !== 'started') await this.#onRoutingAttempt(attempt, batch.projectId);
+        }
+      }
+    }
     await this.sweepRouting();
     const admittedRunIds: string[] = [];
     // A set: several wakes (for example an `@all` broadcast) can answer the same
@@ -1196,6 +1209,7 @@ export class CollaborationCoordinator {
         try {
           const raw = await withRoutingTimeout(
             this.#routingModel.judge({
+              attemptId,
               batchId: current.id,
               projectId: current.projectId,
               attempt: attemptNumber,
@@ -1220,7 +1234,7 @@ export class CollaborationCoordinator {
         }
       }
       judgement = parsed !== undefined && parsed.ok ? parsed.judgement : undefined;
-      await this.#store.recordRoutingAttempt({
+      const settledAttempt: RoutingAttempt = {
         id: attemptId,
         batchId: current.id,
         attemptNumber,
@@ -1232,7 +1246,9 @@ export class CollaborationCoordinator {
         ...(failure !== undefined
           ? { errorKind: failure.kind, errorDetail: failure.detail }
           : {}),
-      });
+      };
+      await this.#store.recordRoutingAttempt(settledAttempt);
+      await this.#onRoutingAttempt?.(settledAttempt, current.projectId);
       if (judgement !== undefined) {
         await this.#settleBatchRouted(current, batchInputs, judgement);
         return;

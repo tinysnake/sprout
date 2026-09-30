@@ -9,6 +9,18 @@
  * granularity is a declared capability (ADR-0001), never an assumed guarantee.
  */
 
+import type {
+  DetailedTokenDimensions,
+  ApiEquivalentCostEstimate,
+  BillingBasis,
+} from '../usage/model.ts';
+
+export type {
+  DetailedTokenDimensions,
+  ApiEquivalentCostEstimate,
+  BillingBasis,
+} from '../usage/model.ts';
+
 /**
  * How an adapter attempted to deliver standing instructions, and what happened.
  *
@@ -212,13 +224,38 @@ export interface EngineTurn {
   readonly completion: Promise<EngineTurnResult>;
 }
 
-export type EngineTurnResult =
-  | { readonly status: 'completed'; readonly text: string; readonly tokenUsage?: TokenUsage }
-  | { readonly status: 'interrupted'; readonly tokenUsage?: TokenUsage }
+export type EngineTurnResult = { readonly pricingContext?: import('../usage/valuation.ts').LocalPricingContext } & (
+  | {
+      readonly status: 'completed';
+      readonly text: string;
+      readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
+    }
+  | {
+      readonly status: 'interrupted';
+      readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
+    }
   | {
       readonly status: 'failed';
       readonly message: string;
       readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
       /**
        * The engine refused the supplied `resumeSessionKey` and did no work.
        *
@@ -230,7 +267,8 @@ export type EngineTurnResult =
        * never mistaken for a stale key and never discards a usable key.
        */
       readonly resumeRefused?: boolean;
-    };
+    }
+);
 
 export interface EngineAdapter {
   readonly id: string;
