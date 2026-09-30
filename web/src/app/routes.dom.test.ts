@@ -504,7 +504,7 @@ test('Working Group details edit content and disband without erasing history', a
   } finally { await cleanup(); }
 });
 
-test('Project Chat distinguishes pending, suppressed, failed and projected evidence; batch and attempt URLs never substitute Chat', async () => {
+test('Project Chat distinguishes pending, suppressed and failed evidence; batch and attempt URLs never substitute Chat', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
@@ -516,7 +516,6 @@ test('Project Chat distinguishes pending, suppressed, failed and projected evide
       ['msg-pending', 'pending', /window open|judgement is pending/i],
       ['msg-suppressed', 'suppressed', /Suppressed — durable decision/],
       ['msg-failed', 'failed', /Routing failed closed/],
-      ['reply-msg-addressed:programmer', 'projected', /Projected Reply · Non-Routing/],
     ] as const) {
       const trigger = doc.querySelector(`[data-message-id="${id}"] .chat-evidence-trigger`) as HTMLButtonElement;
       assert.ok(trigger, `evidence trigger exists for ${id}`);
@@ -545,6 +544,28 @@ test('Project Chat distinguishes pending, suppressed, failed and projected evide
     await settle(80);
     assert.ok(doc.querySelector('.routing-not-found-state'));
     assert.equal(doc.querySelector('[data-scope-id]'), null);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('a colon-bearing Agent reply opens projected evidence and its provenance', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(160);
+    const trigger = doc.querySelector('[data-message-id="reply-msg-addressed:programmer"] .chat-evidence-trigger') as HTMLButtonElement;
+    assert.ok(trigger, 'the projected reply is available for inspection');
+    trigger.click();
+    await settle(100);
+    const popup = doc.querySelector('.chat-evidence-popup') as HTMLElement;
+    assert.equal(popup?.dataset['evidenceState'], 'projected');
+    assert.match(popup.textContent ?? '', /Projected Reply · Non-Routing/);
+    assert.match(popup.textContent ?? '', /Triggered by:.*msg-addressed/);
+    assert.match(popup.textContent ?? '', /Run:.*run-projected/);
+    assert.doesNotMatch(popup.textContent ?? '', /Routing evidence unavailable/);
     app.unmount();
   } finally { await cleanup(); }
 });

@@ -178,7 +178,15 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
-    const segments = url.pathname.split('/').filter((part) => part !== '');
+    let segments: string[];
+    try {
+      // Split before decoding so an encoded slash remains inside one path id.
+      // Decode exactly once at the dispatcher, not independently in each route.
+      segments = url.pathname.split('/').filter((part) => part !== '').map((part) => decodeURIComponent(part));
+    } catch {
+      sendJson(response, 400, { error: 'invalid URL path encoding' });
+      return;
+    }
     // A request stream is one-shot. Routers and preserved routes share this
     // memoized reader so an exploratory router cannot consume another route's
     // command payload.

@@ -201,6 +201,23 @@ test('the routing API reports the durable window, batch, and per-input causal ch
     assert.equal(routed.wakes[0]?.agentId, 'agent-scout');
     assert.equal(routed.wakes[0]?.reason, 'routing-model');
     assert.equal(routed.replies.length, 1, 'the projected reply is part of the chain');
+    const replyId = routed.replies[0]!.messageId;
+    assert.match(replyId, /:/, 'a projected reply carries a colon-bearing durable id');
+    const replyResponse = await fetch(`${base}/api/messages/${encodeURIComponent(replyId)}/routing`);
+    assert.equal(replyResponse.status, 200, 'the encoded reply id resolves to its evidence');
+    const replyEvidence = (await replyResponse.json()) as {
+      routing: { input: { kind: string; message: { id: string } }; batches: unknown[]; deterministicWakes: unknown[] };
+    };
+    assert.equal(replyEvidence.routing.input.kind, 'message');
+    assert.equal(replyEvidence.routing.input.message.id, replyId);
+    assert.deepEqual(replyEvidence.routing.batches, []);
+    assert.deepEqual(replyEvidence.routing.deterministicWakes, []);
+    assert.equal((await fetch(`${base}/api/messages/${encodeURIComponent(`${replyId}-absent`)}/routing`)).status, 404,
+      'an unknown encoded id still returns 404');
+    assert.equal((await fetch(`${base}/api/messages/${encodeURIComponent(encodeURIComponent(replyId))}/routing`)).status, 404,
+      'one decode is enough; double-encoded ids cannot alias an existing reply');
+    assert.equal((await fetch(`${base}/api/messages/%ZZ/routing`)).status, 400,
+      'malformed escapes are refused without throwing from the dispatcher');
 
     // The Message-level causal route: window + batch, no deterministic wakes.
     const evidence = (await (
