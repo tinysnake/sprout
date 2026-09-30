@@ -161,6 +161,13 @@ export interface SubmitRunRequest {
   /** Fixed Task binding, supplied only by TaskEnvironmentLifecycle. */
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
+  /**
+   * The original run this submission re-admits as its one bounded reconnect
+   * retry (#181). Recorded on the new run's durable record, so "already
+   * retried" is a fact on the run itself and a retry run can never become
+   * eligible for another retry.
+   */
+  readonly retryOfRunId?: string;
   /** Portable Worker workspace reference supplied by the Task lifecycle. */
   readonly projectWorkspaceId?: string;
   /** Worker-root-relative registered repository location for this Project. */
@@ -268,6 +275,13 @@ export class RunOrchestrator {
       status: 'queued',
       events: [],
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
+      // The caller's Project scope is recorded from the first line of the
+      // run's life, so a pre-admission failure (`no available environment`)
+      // still names the Project whose Environments were absent — the durable
+      // fact the bounded reconnect retry reads (#181). On success the resolved
+      // Project below reasserts the same id.
+      ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
+      ...(request.retryOfRunId !== undefined ? { retryOfRunId: request.retryOfRunId } : {}),
       createdAt: this.#clock.now(),
     };
 
