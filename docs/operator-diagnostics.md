@@ -40,11 +40,14 @@ hosting remains unsupported.
 ## Journal and restart
 
 Schema v22 adds `operational_events`; the existing transactional migration and
-pre-migration safety-copy boundary owns its installation. Migration completion
-records distinguish initialized, migrated and same-version opens. Schema refusal
-or migration failure still happens before normal startup: no diagnostic endpoint
-opens a refused database, and the existing typed host-local schema errors remain
-its failure contract.
+pre-migration safety-copy boundary owns its installation. Initialization and
+migration transition facts are written inside the transaction that sets the
+schema version, so a failed journal write rolls back the schema change and a
+restart after commit retains the `initialized` or `migrated` fact. Same-version
+opens are recorded separately as `unchanged`. Schema refusal or migration failure
+still happens before normal startup: no diagnostic endpoint opens a refused
+database, and the existing typed host-local schema errors remain its failure
+contract.
 
 Each runtime composition records a startup-ready fact. Catalog publication
 captures enrollment decisions, connection and compatibility transitions, and
