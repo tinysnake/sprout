@@ -629,11 +629,11 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
 
             <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-xs flex flex-col gap-1">
               <strong class="text-[var(--text-primary)] flex items-center gap-1.5">
-                <Icon name="shield" :size="14" />
-                <span>Carrier & Transport Security</span>
+                <Icon name="info" :size="14" />
+                <span>Worker connection facts</span>
               </strong>
               <p class="text-[var(--text-secondary)] text-[11px] leading-relaxed">
-                Worker daemons connect over authenticated TLS/WSS streams. Local processes use unix domain sockets with strict permissions.
+                Web diagnostics report Worker connection and reachability states. Transport carrier and socket permissions are not reported.
               </p>
             </div>
 

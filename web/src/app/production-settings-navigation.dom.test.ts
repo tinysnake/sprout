@@ -220,7 +220,8 @@ test('Production Web: settings view tabs and responsive visibility', async () =>
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.match(doc.body.textContent ?? '', /Platform & Protocol Compatibility/);
-    assert.match(doc.body.textContent ?? '', /Carrier & Transport Security/);
+    assert.match(doc.body.textContent ?? '', /Worker connection facts/);
+    assert.match(doc.body.textContent ?? '', /Transport carrier and socket permissions are not reported/);
 
     // 3. Click Status Strip card to switch back to Access & Security
     const accessCard = doc.querySelector('.settings-status-card') as HTMLButtonElement;

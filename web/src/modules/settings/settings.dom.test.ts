@@ -92,7 +92,16 @@ async function setupProductionDom() {
 
 const settle = (ms = 90) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// F1–F4: observe production DOM, including controls teleported outside the view.
+// Contract fields expose Worker connection/reachability, not carrier or socket-security facts.
+const unverifiedTransportSecurityClaims = [
+  /\b(?:TLS|WSS)\b/i,
+  /\bUnix(?:\s+domain)?\s+sockets?\b/i,
+  /\b(?:authenticated|encrypted|secure)\b.{0,80}\b(?:transport|connection|carrier|socket|stream|channel)s?\b/i,
+  /\b(?:transport|connection|carrier|socket|stream|channel)s?\b.{0,80}\b(?:authenticated|encrypted|secure)\b/i,
+  /\bstrict(?:ly)?\s+permission(?:s|ed)?\b/i,
+];
+
+// F1–F5: observe production DOM, including controls teleported outside the view.
 async function withSettings(run: (context: {
   doc: Document;
   service: import('./adapters/fixture-adapter.ts').FixtureSettingsService;
@@ -223,6 +232,24 @@ test('Settings F4: protocol range and migration guidance never imply verified co
     };
     const loadDiagnostics = service.loadDiagnostics.bind(service);
     service.loadDiagnostics = async () => ({ ...await loadDiagnostics(), schema: null });
+  });
+});
+
+test('Settings F5: DOM text contains no transport-security assurance absent from the contract', async () => {
+  await withSettings(async ({ doc }) => {
+    for (const tabSelector of ['.settings-tab-access', '.settings-tab-system', '.settings-tab-data']) {
+      (doc.querySelector(tabSelector) as HTMLButtonElement).click();
+      await settle();
+      const view = doc.querySelector('.settings-view');
+      assert.ok(view, 'Production Settings view is rendered');
+      if (tabSelector === '.settings-tab-system') {
+        assert.ok(view.querySelector('[data-settings-section="compatibility"]'), 'Worker compatibility and connection facts are visible');
+      }
+      const text = view.textContent ?? '';
+      for (const claimPattern of unverifiedTransportSecurityClaims) {
+        assert.doesNotMatch(text, claimPattern, `unverified transport-security claim inventory: ${claimPattern}`);
+      }
+    }
   });
 });
 
