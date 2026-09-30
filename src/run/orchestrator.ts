@@ -1121,6 +1121,7 @@ export class RunOrchestrator {
       status,
       result,
       ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
+      ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
       completedAt: this.#clock.now(),
       ...(result.status === 'failed' ? { failure: result.message, failureClass } : {}),
     });

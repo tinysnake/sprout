@@ -355,6 +355,15 @@ test('a turn attaches the per-turn Codex token usage notification on completion'
     status: 'completed',
     text: '',
     tokenUsage: { promptTokens: 120, completionTokens: 40, totalTokens: 160 },
+    detailedTokens: {
+      inputTokens: 120,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+    },
+    billingBasis: 'metered_api',
+    source: 'codex-protocol:thread/tokenUsage/updated',
+    sourceVersion: 'codex-cli 0.154.0',
   });
 });
 

@@ -153,6 +153,17 @@ test('assistant usage is captured once from a completed message', () => {
     status: 'completed',
     text: 'done',
     tokenUsage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+    detailedTokens: {
+      inputTokens: 100,
+      uncachedInputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 20,
+      totalTokens: 120,
+    },
+    billingBasis: 'metered_api',
+    source: 'pi-protocol:message_end',
+    sourceVersion: 'pi 0.85.1',
   });
 });
 

@@ -87,6 +87,7 @@ import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
 import { createProjectRouter } from './web/project-router.ts';
 import { createConversationRouter } from './web/conversation-router.ts';
+import { createUsageRouter } from './web/usage-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
@@ -98,6 +99,9 @@ import { effectiveWorkOptions } from './agent/model.ts';
 import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
+import type { UsageStore } from './usage/store.ts';
+import { InMemoryUsageStore } from './usage/store.ts';
+import { UsageService } from './usage/service.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
 import { workSafetyFromRecovery } from './environment/recovery.ts';
@@ -172,6 +176,8 @@ export interface RuntimeStores {
   readonly projectAccess: ProjectAccessStore;
   /** The durable conversation scopes and Working groups (#95). */
   readonly conversationScopes: ConversationScopeStore;
+  /** The durable usage activities and append-only observations (#105). */
+  readonly usage?: UsageStore;
   /** Atomic insert boundary for first Project + Environment/workspace setup. */
   readonly projectCreation?: ProjectCreationStore;
   close(): void;
@@ -302,6 +308,8 @@ export interface SproutRuntime {
   readonly projectAccess: ProjectAccessService;
   /** The conversation scope and Working group capability (#95). */
   readonly conversationScopes: ConversationScopeService;
+  /** The truthful Usage and cost observation capability (#105). */
+  readonly usage: UsageService;
   /**
    * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
    * `configured` is the M1 carrier path retained only for an injected
@@ -1028,6 +1036,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       leaseTtlMs,
     });
 
+    const usageStore = stores.usage ?? new InMemoryUsageStore();
+    const usageService = new UsageService({
+      store: usageStore,
+    });
+    orchestrator.subscribe((run) => {
+      void usageService.recordRunActivity(run);
+    });
+
     taskLifecycle = new TaskEnvironmentLifecycle({
       store: stores.tasks,
       pool,
@@ -1654,6 +1670,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // one implementation; the routes sit behind the operator browser
         // boundary, so their actor is the authenticated Human by construction.
         createConversationRouter({ scopes: conversationScopes }),
+        createUsageRouter({ usage: usageService }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -1760,6 +1777,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       projectService,
       projectAccess: projectAccessService,
       conversationScopes,
+      usage: usageService,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,

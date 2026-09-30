@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 21;
+export const CURRENT_SCHEMA_VERSION = 22;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 21;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 22;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1032,6 +1032,80 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       `);
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
         ON collaboration_routing_attempts(batch_id, attempt_number);`);
+    },
+  },
+  {
+    fromVersion: 21,
+    toVersion: 22,
+    name: 'usage_activities_and_observations',
+    migrate: (db) => {
+      // Usage activities represent work-model runs and wake-model routing attempts.
+      // Observations are append-only facts with detailed token dimensions, Sprout
+      // wall duration, independent billed cost and API-equivalent estimates,
+      // valuation provenance, and supersession history (ADR-0010, #105).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_activities (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          run_id TEXT,
+          attempt_id TEXT,
+          batch_id TEXT,
+          project_id TEXT,
+          task_id TEXT,
+          agent_id TEXT,
+          environment_instance_id TEXT,
+          engine TEXT NOT NULL,
+          model TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          settled_at INTEGER,
+          wall_duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS usage_activities_kind_idx ON usage_activities (kind);
+        CREATE INDEX IF NOT EXISTS usage_activities_run_id_idx ON usage_activities (run_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_attempt_id_idx ON usage_activities (attempt_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_project_id_idx ON usage_activities (project_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_task_id_idx ON usage_activities (task_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_agent_id_idx ON usage_activities (agent_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_model_idx ON usage_activities (model);
+        CREATE INDEX IF NOT EXISTS usage_activities_settled_at_idx ON usage_activities (settled_at);
+
+        CREATE TABLE IF NOT EXISTS usage_observations (
+          id TEXT PRIMARY KEY,
+          activity_id TEXT NOT NULL,
+          observed_at INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          source_version TEXT NOT NULL,
+          completeness TEXT NOT NULL,
+          input_tokens INTEGER,
+          uncached_input_tokens INTEGER,
+          cached_input_tokens INTEGER,
+          cache_write_input_tokens INTEGER,
+          output_tokens INTEGER,
+          reasoning_output_tokens INTEGER,
+          total_tokens INTEGER,
+          wall_duration_ms INTEGER NOT NULL,
+          engine_turn_duration_ms INTEGER,
+          billed_cost_status TEXT NOT NULL,
+          billed_usd_micros INTEGER,
+          billed_reason TEXT,
+          cost_estimate_status TEXT NOT NULL,
+          cost_estimate_usd_micros INTEGER,
+          valuation_provenance TEXT,
+          price_source TEXT,
+          price_source_version TEXT,
+          price_dimensions TEXT,
+          valued_at INTEGER,
+          cost_estimate_reason TEXT,
+          billing_basis TEXT NOT NULL,
+          supersedes_observation_id TEXT,
+          superseded_at INTEGER,
+          supersession_reason TEXT,
+          is_effective INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS usage_observations_activity_idx ON usage_observations (activity_id);
+        CREATE INDEX IF NOT EXISTS usage_observations_effective_idx ON usage_observations (activity_id, is_effective);
+      `);
     },
   },
 ];

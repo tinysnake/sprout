@@ -32,13 +32,34 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 21);
+  assert.equal(CURRENT_SCHEMA_VERSION, 22);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 21);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 22);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 21,
-    current: 21,
+    max: 22,
+    current: 22,
+  });
+});
+
+test('v21 migration creates usage_activities and usage_observations tables', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sprout.db');
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE dummy (id TEXT PRIMARY KEY);
+      PRAGMA user_version = 21;
+    `);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: path });
+    try {
+      assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
+      assert.ok(store.db.prepare("SELECT name FROM sqlite_master WHERE name = 'usage_activities'").get());
+      assert.ok(store.db.prepare("SELECT name FROM sqlite_master WHERE name = 'usage_observations'").get());
+    } finally {
+      store.close();
+    }
   });
 });
 

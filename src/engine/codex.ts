@@ -9,7 +9,11 @@ import type {
   EngineTurnResult,
   StartSessionRequest,
   TokenUsage,
+  DetailedTokenDimensions,
+  ApiEquivalentCostEstimate,
+  BillingBasis,
 } from './port.ts';
+import { extractProviderCostEstimate } from '../usage/valuation.ts';
 import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
@@ -239,6 +243,15 @@ function spawnCodex(
   };
 }
 
+interface CodexTurnUsageEntry {
+  readonly turnId: string;
+  readonly tokenUsage: TokenUsage;
+  readonly detailedTokens: DetailedTokenDimensions;
+  readonly engineTurnDurationMs?: number;
+  readonly costEstimate?: ApiEquivalentCostEstimate;
+  readonly billingBasis?: BillingBasis;
+}
+
 interface CodexSessionOptions {
   readonly transport: JsonRpcTransport;
   readonly process: CodexProcess;
@@ -259,7 +272,7 @@ export class CodexSession implements EngineSession {
   readonly #threadId: string;
   #turnId: string | undefined;
   /** Usage updates are keyed by turn because Codex emits them separately. */
-  readonly #tokenUsageByTurnId = new Map<string, TokenUsage>();
+  readonly #tokenUsageByTurnId = new Map<string, CodexTurnUsageEntry>();
   #closed = false;
   /**
    * Settles the turn that is currently in flight.
@@ -293,9 +306,18 @@ export class CodexSession implements EngineSession {
       if (settled) return;
       settled = true;
       this.#settleTurn = undefined;
-      const tokenUsage = completedTurnId === undefined ? undefined : this.#tokenUsageByTurnId.get(completedTurnId);
+      const usageEntry = completedTurnId === undefined ? undefined : this.#tokenUsageByTurnId.get(completedTurnId);
       if (completedTurnId !== undefined) this.#tokenUsageByTurnId.delete(completedTurnId);
-      const completed = tokenUsage === undefined ? result : { ...result, tokenUsage };
+      const completed: EngineTurnResult = usageEntry === undefined ? result : {
+        ...result,
+        tokenUsage: usageEntry.tokenUsage,
+        detailedTokens: usageEntry.detailedTokens,
+        ...(usageEntry.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: usageEntry.engineTurnDurationMs } : {}),
+        ...(usageEntry.costEstimate !== undefined ? { costEstimate: usageEntry.costEstimate } : {}),
+        billingBasis: usageEntry.billingBasis ?? 'metered_api',
+        source: 'codex-protocol:thread/tokenUsage/updated',
+        sourceVersion: 'codex-cli 0.154.0',
+      };
       if (completed.status === 'failed') queue.fail(new Error(completed.message));
       else queue.end();
       resolveCompletion(completed);
@@ -308,7 +330,7 @@ export class CodexSession implements EngineSession {
         // for this turn; `total` belongs to the whole resumed thread and would
         // overstate a single AgentRun.
         const update = readCodexTokenUsage(notification.params);
-        if (update !== undefined) this.#tokenUsageByTurnId.set(update.turnId, update.tokenUsage);
+        if (update !== undefined) this.#tokenUsageByTurnId.set(update.turnId, update);
         return;
       }
       const outcome = mapCodexNotification(notification, state);
@@ -396,7 +418,7 @@ export class CodexSession implements EngineSession {
 }
 
 /** Read Codex's per-turn `last` breakdown without trusting arbitrary JSON-RPC. */
-function readCodexTokenUsage(params: unknown): { readonly turnId: string; readonly tokenUsage: TokenUsage } | undefined {
+function readCodexTokenUsage(params: unknown): CodexTurnUsageEntry | undefined {
   if (typeof params !== 'object' || params === null) return undefined;
   const update = params as Record<string, unknown>;
   if (typeof update['turnId'] !== 'string') return undefined;
@@ -417,6 +439,42 @@ function readCodexTokenUsage(params: unknown): { readonly turnId: string; readon
   ) {
     return undefined;
   }
+
+  const cachedInputTokens = isTokenCount(breakdown['cachedInputTokens']) ? breakdown['cachedInputTokens'] : undefined;
+  const cacheWriteInputTokens = isTokenCount(breakdown['cacheWriteInputTokens']) ? breakdown['cacheWriteInputTokens'] : undefined;
+  const uncachedInputTokens = cachedInputTokens !== undefined ? Math.max(0, inputTokens - cachedInputTokens) : undefined;
+
+  const detailedTokens: DetailedTokenDimensions = {
+    inputTokens,
+    ...(uncachedInputTokens !== undefined ? { uncachedInputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+    outputTokens,
+    ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
+    totalTokens,
+  };
+
+  const durationMs = typeof update['durationMs'] === 'number'
+    ? update['durationMs']
+    : typeof breakdown['durationMs'] === 'number'
+      ? breakdown['durationMs']
+      : undefined;
+
+  let costEstimate: ApiEquivalentCostEstimate | undefined;
+  const estimatedUsd = typeof update['estimatedUsd'] === 'number'
+    ? update['estimatedUsd']
+    : typeof breakdown['estimatedUsd'] === 'number'
+      ? breakdown['estimatedUsd']
+      : undefined;
+  if (estimatedUsd !== undefined) {
+    costEstimate = extractProviderCostEstimate({
+      estimatedUsd,
+      source: 'codex.turn_cost',
+      sourceVersion: '0.154.0',
+      valuedAt: Date.now(),
+    });
+  }
+
   return {
     turnId: update['turnId'],
     tokenUsage: {
@@ -424,6 +482,10 @@ function readCodexTokenUsage(params: unknown): { readonly turnId: string; readon
       completionTokens: outputTokens + (reasoningOutputTokens ?? 0),
       totalTokens,
     },
+    detailedTokens,
+    ...(durationMs !== undefined ? { engineTurnDurationMs: durationMs } : {}),
+    ...(costEstimate !== undefined ? { costEstimate } : {}),
+    billingBasis: 'metered_api',
   };
 }
 
