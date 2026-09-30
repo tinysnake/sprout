@@ -67,6 +67,33 @@ export interface ActivityDetailView {
   }[];
 }
 
+function equivalentUsageObservation(
+  left: UsageObservation,
+  right: UsageObservation,
+  provisional: boolean,
+): boolean {
+  const facts = (observation: UsageObservation) => JSON.stringify({
+    source: observation.source,
+    sourceVersion: observation.sourceVersion,
+    completeness: observation.completeness,
+    tokens: observation.tokens,
+    ...(provisional ? {} : { durations: observation.durations }),
+    billedCost: observation.billedCost,
+    costEstimate: {
+      status: observation.costEstimate.status,
+      currency: observation.costEstimate.currency,
+      apiEquivalentUsdMicros: observation.costEstimate.apiEquivalentUsdMicros,
+      valuationProvenance: observation.costEstimate.valuationProvenance,
+      priceSource: observation.costEstimate.priceSource,
+      priceSourceVersion: observation.costEstimate.priceSourceVersion,
+      priceDimensions: observation.costEstimate.priceDimensions,
+      reason: observation.costEstimate.reason,
+    },
+    billingBasis: observation.billingBasis,
+  });
+  return facts(left) === facts(right);
+}
+
 export class UsageService {
   readonly #store: UsageStore;
   readonly #clock: { now(): number };
@@ -103,8 +130,9 @@ export class UsageService {
       status = 'failed';
     }
 
-    const wallDurationMs =
-      run.completedAt !== undefined ? Math.max(0, run.completedAt - run.createdAt) : undefined;
+    const wallDurationMs = run.completedAt !== undefined
+      ? Math.max(0, run.completedAt - run.createdAt)
+      : status === 'active' ? Math.max(0, now - run.createdAt) : undefined;
 
     const activity: UsageActivity = {
       id: activityId,
@@ -124,30 +152,34 @@ export class UsageService {
       ...(wallDurationMs !== undefined ? { wallDurationMs } : {}),
     };
 
+    const priorActivity = await this.#store.getActivity(activityId);
     await this.#store.recordActivity(activity);
 
-    // If run is settled, record its initial observation if none exists yet
-    if (run.completedAt !== undefined) {
+    const hasObservedUsage = run.detailedTokens !== undefined || run.tokenUsage !== undefined ||
+      run.result?.detailedTokens !== undefined || run.result?.costEstimate !== undefined;
+    if (run.completedAt === undefined ? hasObservedUsage : true) {
       const existing = await this.#store.getEffectiveObservation(activityId);
-      if (existing === undefined) {
-        await this.#recordInitialRunObservation(activity, run, wallDurationMs ?? 0, now);
+      const mayFinalizeProvisional = priorActivity?.settledAt === undefined;
+      if (existing === undefined || run.completedAt === undefined || mayFinalizeProvisional) {
+        await this.#recordRunObservation(activity, run, wallDurationMs ?? 0, now, existing);
       }
     }
 
     return activity;
   }
 
-  async #recordInitialRunObservation(
+  async #recordRunObservation(
     activity: UsageActivity,
     run: AgentRun,
     wallDurationMs: number,
     now: number,
+    prior?: UsageObservation,
   ): Promise<void> {
     const engine = run.workOption?.engine ?? 'unknown';
     const model = run.workOption?.workModel ?? 'unknown';
     const result = run.result;
 
-    const detailedTokens = run.detailedTokens ?? (
+    const reportedTokens = run.detailedTokens ?? result?.detailedTokens ?? (
       run.tokenUsage !== undefined
         ? {
             inputTokens: run.tokenUsage.promptTokens,
@@ -156,47 +188,61 @@ export class UsageService {
           }
         : undefined
     );
+    const detailedTokens = reportedTokens ?? prior?.tokens;
 
     let completeness: MeasurementCompleteness;
-    if (detailedTokens !== undefined) {
+    if (reportedTokens !== undefined) {
       completeness = run.status === 'completed' ? 'complete' : 'partial';
     } else {
-      completeness = 'unavailable';
+      completeness = prior?.completeness ?? 'unavailable';
     }
 
     let costEstimate: ApiEquivalentCostEstimate;
     if (result?.costEstimate !== undefined) {
       costEstimate = result.costEstimate;
     } else if (engine === 'codex' || engine === 'openai') {
-      costEstimate = calculateLocalEstimate({
+      const localEstimate = calculateLocalEstimate({
         engine,
         model,
         tokens: detailedTokens,
         pricingContext: result?.pricingContext,
         valuedAt: now,
       });
+      costEstimate = localEstimate.status === 'available' ? localEstimate :
+        prior?.costEstimate ?? localEstimate;
     } else {
-      costEstimate = defaultUnavailableCostEstimate(`no price calculation available for engine '${engine}'`);
+      costEstimate = prior?.costEstimate ??
+        defaultUnavailableCostEstimate(`no price calculation available for engine '${engine}'`);
     }
 
     const observation: UsageObservation = {
-      id: `uobs_run_${run.id}_initial`,
+      id: prior === undefined ? `uobs_run_${run.id}_initial` : `uobs_run_${run.id}_${randomUUID()}`,
       activityId: activity.id,
       observedAt: now,
-      source: result?.source ?? `${engine}:turn`,
-      sourceVersion: result?.sourceVersion ?? '1.0',
+      source: result?.source ?? prior?.source ?? `${engine}:turn`,
+      sourceVersion: result?.sourceVersion ?? prior?.sourceVersion ?? '1.0',
       completeness,
       ...(detailedTokens !== undefined ? { tokens: detailedTokens } : {}),
       durations: {
         sproutWallDurationMs: wallDurationMs,
-        ...(result?.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: result.engineTurnDurationMs } : {}),
+        ...(result?.engineTurnDurationMs !== undefined
+          ? { engineTurnDurationMs: result.engineTurnDurationMs }
+          : prior?.durations.engineTurnDurationMs !== undefined
+            ? { engineTurnDurationMs: prior.durations.engineTurnDurationMs }
+            : {}),
       },
-      billedCost: defaultUnavailableBilledCost(),
+      billedCost: prior?.billedCost ?? defaultUnavailableBilledCost(),
       costEstimate,
-      billingBasis: result?.billingBasis ?? 'unknown',
+      billingBasis: result?.billingBasis ?? prior?.billingBasis ?? 'unknown',
+      ...(prior !== undefined ? {
+        supersedesObservationId: prior.id,
+        supersessionReason: run.completedAt === undefined
+          ? 'Provisional usage observation updated from run telemetry'
+          : 'Run usage finalized at settlement',
+      } : {}),
       isEffective: true,
     };
-
+    if (prior !== undefined && equivalentUsageObservation(prior, observation, activity.status === 'active')) return;
     await this.#store.recordObservation(observation);
   }
 
@@ -221,8 +267,11 @@ export class UsageService {
   ): Promise<UsageActivity> {
     const activityId = `ua_att_${attempt.id}`;
     const now = this.#clock.now();
-    const wallDurationMs =
-      context.durationMs ?? Math.max(0, attempt.finishedAt - attempt.startedAt);
+    const settled = attempt.status !== 'started';
+    const wallDurationMs = context.durationMs ?? Math.max(
+      0,
+      (settled ? attempt.finishedAt : now) - attempt.startedAt,
+    );
 
     let status: UsageActivityStatus;
     if (attempt.status === 'started') {
@@ -245,42 +294,46 @@ export class UsageService {
       model: attempt.modelId,
       status,
       createdAt: attempt.startedAt,
-      settledAt: attempt.finishedAt,
+      ...(settled ? { settledAt: attempt.finishedAt } : {}),
       wallDurationMs,
     };
 
+    const priorActivity = await this.#store.getActivity(activityId);
     await this.#store.recordActivity(activity);
 
-    if (attempt.status !== 'started') {
-      const existing = await this.#store.getEffectiveObservation(activityId);
-      if (existing === undefined) {
-        let completeness: MeasurementCompleteness;
-        if (context.tokens !== undefined) {
-          completeness = attempt.status === 'succeeded' ? 'complete' : 'partial';
-        } else {
-          completeness = 'unavailable';
-        }
-
-        const costEstimate =
-          context.cost ?? defaultUnavailableCostEstimate('wake-model telemetry unavailable');
-
-        const observation: UsageObservation = {
-          id: `uobs_att_${attempt.id}_initial`,
-          activityId: activity.id,
-          observedAt: now,
-          source: context.source ?? 'routing-model:judge',
-          sourceVersion: context.sourceVersion ?? '1.0',
-          completeness,
-          ...(context.tokens !== undefined ? { tokens: context.tokens } : {}),
-          durations: {
-            sproutWallDurationMs: wallDurationMs,
-          },
-          billedCost: defaultUnavailableBilledCost('wake model does not supply attributable invoice facts'),
-          costEstimate,
-          billingBasis: context.billingBasis ?? 'unknown',
-          isEffective: true,
-        };
-
+    const existing = await this.#store.getEffectiveObservation(activityId);
+    const hasObservedUsage = context.tokens !== undefined || context.cost !== undefined;
+    const shouldRecordObservation = attempt.status === 'started'
+      ? hasObservedUsage
+      : existing === undefined || priorActivity?.settledAt === undefined;
+    if (shouldRecordObservation) {
+      const tokens = context.tokens ?? existing?.tokens;
+      const completeness: MeasurementCompleteness = tokens === undefined
+        ? 'unavailable'
+        : !settled || attempt.status === 'failed' ? 'partial' : 'complete';
+      const costEstimate = context.cost ?? existing?.costEstimate ??
+        defaultUnavailableCostEstimate('wake-model telemetry unavailable');
+      const observation: UsageObservation = {
+        id: existing === undefined ? `uobs_att_${attempt.id}_initial` : `uobs_att_${attempt.id}_${randomUUID()}`,
+        activityId: activity.id,
+        observedAt: now,
+        source: context.source ?? existing?.source ?? 'routing-model:judge',
+        sourceVersion: context.sourceVersion ?? existing?.sourceVersion ?? '1.0',
+        completeness,
+        ...(tokens !== undefined ? { tokens } : {}),
+        durations: { sproutWallDurationMs: wallDurationMs },
+        billedCost: existing?.billedCost ?? defaultUnavailableBilledCost('wake model does not supply attributable invoice facts'),
+        costEstimate,
+        billingBasis: context.billingBasis ?? existing?.billingBasis ?? 'unknown',
+        ...(existing !== undefined ? {
+          supersedesObservationId: existing.id,
+          supersessionReason: settled
+            ? 'Routing attempt usage finalized at settlement'
+            : 'Provisional Routing telemetry updated from the attempt',
+        } : {}),
+        isEffective: true,
+      };
+      if (existing === undefined || !equivalentUsageObservation(existing, observation, !settled)) {
         await this.#store.recordObservation(observation);
       }
     }
@@ -390,29 +443,29 @@ export class UsageService {
   /**
    * View: Task usage aggregate (includes nested Agent runs, grouped by Agent and model).
    */
-  async getTaskUsage(taskId: string): Promise<UsageAggregate> {
-    return this.getAggregate({ taskId, groupBy: 'agent' });
+  async getTaskUsage(taskId: string, filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
+    return this.getAggregate({ ...filter, taskId, kind: 'agent_run', groupBy: filter.groupBy ?? 'agent' });
   }
 
   /**
    * View: Project usage aggregate (includes Agent runs and Routing attempts,
    * with separate work-model and routing-model subtotals).
    */
-  async getProjectUsage(projectId: string): Promise<UsageAggregate> {
-    return this.getAggregate({ projectId, groupBy: 'task' });
+  async getProjectUsage(projectId: string, filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
+    return this.getAggregate({ ...filter, projectId, groupBy: filter.groupBy ?? 'task' });
   }
 
   /**
    * View: Agent usage aggregate (across Projects, does not absorb Routing attempts).
    */
-  async getAgentUsage(agentId: string): Promise<UsageAggregate> {
-    return this.getAggregate({ agentId, kind: 'agent_run', groupBy: 'project' });
+  async getAgentUsage(agentId: string, filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
+    return this.getAggregate({ ...filter, agentId, kind: 'agent_run', groupBy: filter.groupBy ?? 'project' });
   }
 
   /**
    * View: Model usage aggregate (attributes usage to model, separates work & routing).
    */
-  async getModelUsage(model: string): Promise<UsageAggregate> {
-    return this.getAggregate({ model, groupBy: 'project' });
+  async getModelUsage(model: string, filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
+    return this.getAggregate({ ...filter, model, groupBy: filter.groupBy ?? 'project' });
   }
 }

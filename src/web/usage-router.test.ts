@@ -88,7 +88,7 @@ test('GET /api/usage/activities/:id returns activity detail with observations an
     await h.store.recordActivity({
       id: 'act-run-1',
       kind: 'agent_run',
-      correlation: { runId: 'run-1', projectId: 'proj-1' },
+      correlation: { runId: 'run-1', projectId: 'proj-1', agentId: 'agent-1' },
       engine: 'codex',
       model: 'gpt-4o',
       status: 'completed',
@@ -136,7 +136,7 @@ test('Human HTTP cannot append provider or billed facts even with a correction-s
     await h.store.recordActivity({
       id: 'act-1',
       kind: 'agent_run',
-      correlation: { runId: 'run-1' },
+      correlation: { runId: 'run-1', agentId: 'agent-1' },
       engine: 'codex',
       model: 'gpt-4o',
       status: 'completed',
@@ -199,6 +199,60 @@ test('POST /api/usage/activities/:id/observations rejects invalid payload', asyn
       body: JSON.stringify({ missingRequiredFields: true }),
     });
     assert.equal(res.status, 405);
+  } finally {
+    await h.api.close();
+  }
+});
+
+test('scope and time-range queries return settlement-attributed run and attempt identities', async () => {
+  const h = await openUsageHarness();
+  try {
+    await h.store.recordActivity({
+      id: 'settled-in-range', kind: 'agent_run',
+      correlation: { runId: 'run-in-range', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 500, settledAt: 1500, wallDurationMs: 1000,
+    });
+    await h.store.recordActivity({
+      id: 'routing-in-range', kind: 'routing_attempt',
+      correlation: { attemptId: 'attempt-in-range', batchId: 'batch-1', projectId: 'p1' },
+      engine: 'routing-model', model: 'wake-v1', status: 'completed', createdAt: 1600, settledAt: 1900, wallDurationMs: 300,
+    });
+    await h.store.recordActivity({
+      id: 'settled-at-end', kind: 'agent_run',
+      correlation: { runId: 'run-at-end', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1700, settledAt: 2000, wallDurationMs: 300,
+    });
+
+    const projectResponse = await fetch(`${h.base}/api/usage/projects/p1?from=1000&to=2000&timeZone=America%2FNew_York`);
+    assert.equal(projectResponse.status, 200);
+    const project = await projectResponse.json() as {
+      totalActivities: number;
+      workModelSubtotal: { activityIdentities: readonly { runId?: string }[] };
+      routingModelSubtotal: { activityIdentities: readonly { attemptId?: string }[] };
+      timeRange: { from: number; to: number; timeZone: string; bounds: string; attribution: string };
+    };
+    assert.equal(project.totalActivities, 2);
+    assert.deepEqual(project.workModelSubtotal.activityIdentities.map((item) => item.runId), ['run-in-range']);
+    assert.deepEqual(project.routingModelSubtotal.activityIdentities.map((item) => item.attemptId), ['attempt-in-range']);
+    assert.deepEqual(project.timeRange, {
+      from: 1000, to: 2000, timeZone: 'America/New_York', bounds: '[start, end)', attribution: 'settlement',
+    });
+
+    const attemptResponse = await fetch(`${h.base}/api/usage/attempts/attempt-in-range`);
+    assert.equal(attemptResponse.status, 200);
+    const attemptDetail = await attemptResponse.json() as { activity: { correlation: { attemptId?: string } } };
+    assert.equal(attemptDetail.activity.correlation.attemptId, 'attempt-in-range');
+
+    const taskResponse = await fetch(`${h.base}/api/usage/tasks/t1?from=1000&to=2000&timeZone=UTC`);
+    const task = await taskResponse.json() as { totalActivities: number; activityIdentities: readonly { kind: string; runId?: string }[] };
+    assert.equal(taskResponse.status, 200);
+    assert.equal(task.totalActivities, 1);
+    assert.deepEqual(task.activityIdentities.map((item) => [item.kind, item.runId]), [['agent_run', 'run-in-range']]);
+
+    for (const query of ['from=invalid', 'from=2000&to=1000', 'timeZone=Not%2FAZone']) {
+      const invalid = await fetch(`${h.base}/api/usage/aggregate?${query}`);
+      assert.equal(invalid.status, 400, query);
+    }
   } finally {
     await h.api.close();
   }

@@ -8,6 +8,7 @@
  * through UsageService with source, reason, and current-head supersession.
  * - GET /api/usage/aggregate (and /api/usage/summary)
  * - GET /api/usage/runs/:runId
+ * - GET /api/usage/attempts/:attemptId
  * - GET /api/usage/tasks/:taskId
  * - GET /api/usage/projects/:projectId
  * - GET /api/usage/agents/:agentId
@@ -21,10 +22,7 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
 import type { UsageService } from '../usage/service.ts';
-import type {
-  UsageActivityKind,
-  UsageActivityStatus,
-} from '../usage/model.ts';
+import type { UsageActivityFilter, UsageAggregateFilter } from '../usage/store.ts';
 
 export interface UsageRouterOptions {
   readonly usage: UsageService;
@@ -86,6 +84,89 @@ export function sanitizeUsagePayload<T>(value: T, keyName?: string): T {
   return value;
 }
 
+interface ParsedUsageFilters {
+  readonly activity: UsageActivityFilter;
+  readonly aggregate: UsageAggregateFilter;
+  readonly error?: string | undefined;
+}
+
+function parseUsageFilters(searchParams: URLSearchParams): ParsedUsageFilters {
+  const filters: Record<string, string | number | boolean> = {};
+  const kind = searchParams.get('kind');
+  if (kind !== null) {
+    if (kind !== 'agent_run' && kind !== 'routing_attempt') return { activity: {}, aggregate: {}, error: 'invalid kind' };
+    filters.kind = kind;
+  }
+  const status = searchParams.get('status');
+  if (status !== null) {
+    if (!['active', 'completed', 'failed', 'interrupted', 'stopped'].includes(status)) {
+      return { activity: {}, aggregate: {}, error: 'invalid status' };
+    }
+    filters.status = status;
+  }
+  for (const key of ['runId', 'attemptId', 'batchId', 'projectId', 'taskId', 'agentId', 'model'] as const) {
+    const value = searchParams.get(key);
+    if (value !== null && value.length > 0) filters[key] = value;
+  }
+  const provisional = searchParams.get('provisional');
+  if (provisional !== null) {
+    if (provisional !== 'true' && provisional !== 'false') return { activity: {}, aggregate: {}, error: 'invalid provisional flag' };
+    filters.provisional = provisional === 'true';
+  }
+  for (const key of ['from', 'to'] as const) {
+    const value = searchParams.get(key);
+    if (value === null) continue;
+    if (!/^-?\d+$/.test(value)) return { activity: {}, aggregate: {}, error: `invalid ${key} instant` };
+    const instant = Number(value);
+    if (!Number.isSafeInteger(instant)) return { activity: {}, aggregate: {}, error: `invalid ${key} instant` };
+    filters[key] = instant;
+  }
+  const from = filters.from as number | undefined;
+  const to = filters.to as number | undefined;
+  if (from !== undefined && to !== undefined && from >= to) {
+    return { activity: {}, aggregate: {}, error: 'time range must have from < to' };
+  }
+  const timeZone = searchParams.get('timeZone');
+  if (timeZone !== null) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+    } catch {
+      return { activity: {}, aggregate: {}, error: 'invalid timeZone; expected an IANA time zone' };
+    }
+    filters.timeZone = timeZone;
+  } else {
+    filters.timeZone = 'UTC';
+  }
+  const limit = searchParams.get('limit');
+  if (limit !== null) {
+    if (!/^\d+$/.test(limit) || !Number.isSafeInteger(Number(limit)) || Number(limit) > 500) {
+      return { activity: {}, aggregate: {}, error: 'limit must be an integer from 0 to 500' };
+    }
+    filters.limit = Number(limit);
+  }
+  const offset = searchParams.get('offset');
+  if (offset !== null) {
+    if (!/^\d+$/.test(offset) || !Number.isSafeInteger(Number(offset))) {
+      return { activity: {}, aggregate: {}, error: 'offset must be a non-negative integer' };
+    }
+    filters.offset = Number(offset);
+  }
+  const groupBy = searchParams.get('groupBy');
+  if (groupBy !== null) {
+    if (!['run', 'task', 'project', 'agent', 'model'].includes(groupBy)) {
+      return { activity: {}, aggregate: {}, error: 'invalid groupBy' };
+    }
+    filters.groupBy = groupBy;
+  }
+  const aggregateFilters = Object.fromEntries(
+    Object.entries(filters).filter(([key]) => key !== 'limit' && key !== 'offset'),
+  );
+  return {
+    activity: filters as unknown as UsageActivityFilter,
+    aggregate: aggregateFilters as unknown as UsageAggregateFilter,
+  };
+}
+
 export function createUsageRouter(options: UsageRouterOptions): ApiRouter {
   const { usage } = options;
 
@@ -106,42 +187,9 @@ export function createUsageRouter(options: UsageRouterOptions): ApiRouter {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
-        const kind = searchParams.get('kind') as UsageActivityKind | null;
-        const runId = searchParams.get('runId') ?? undefined;
-        const attemptId = searchParams.get('attemptId') ?? undefined;
-        const batchId = searchParams.get('batchId') ?? undefined;
-        const projectId = searchParams.get('projectId') ?? undefined;
-        const taskId = searchParams.get('taskId') ?? undefined;
-        const agentId = searchParams.get('agentId') ?? undefined;
-        const model = searchParams.get('model') ?? undefined;
-        const status = searchParams.get('status') as UsageActivityStatus | null;
-        const provisionalParam = searchParams.get('provisional');
-        const provisional = provisionalParam !== null ? provisionalParam === 'true' : undefined;
-        const fromParam = searchParams.get('from');
-        const from = fromParam !== null ? Number(fromParam) : undefined;
-        const toParam = searchParams.get('to');
-        const to = toParam !== null ? Number(toParam) : undefined;
-        const limitParam = searchParams.get('limit');
-        const limit = limitParam !== null ? Number(limitParam) : undefined;
-        const offsetParam = searchParams.get('offset');
-        const offset = offsetParam !== null ? Number(offsetParam) : undefined;
-
-        const activities = await usage.listActivities({
-          ...(kind ? { kind } : {}),
-          ...(runId ? { runId } : {}),
-          ...(attemptId ? { attemptId } : {}),
-          ...(batchId ? { batchId } : {}),
-          ...(projectId ? { projectId } : {}),
-          ...(taskId ? { taskId } : {}),
-          ...(agentId ? { agentId } : {}),
-          ...(model ? { model } : {}),
-          ...(status ? { status } : {}),
-          ...(provisional !== undefined ? { provisional } : {}),
-          ...(from !== undefined ? { from } : {}),
-          ...(to !== undefined ? { to } : {}),
-          ...(limit !== undefined ? { limit } : {}),
-          ...(offset !== undefined ? { offset } : {}),
-        });
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
+        const activities = await usage.listActivities(filters.activity);
 
         return json(context, 200, { activities });
       }
@@ -170,36 +218,9 @@ export function createUsageRouter(options: UsageRouterOptions): ApiRouter {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
-        const kind = searchParams.get('kind') as UsageActivityKind | null;
-        const runId = searchParams.get('runId') ?? undefined;
-        const attemptId = searchParams.get('attemptId') ?? undefined;
-        const batchId = searchParams.get('batchId') ?? undefined;
-        const projectId = searchParams.get('projectId') ?? undefined;
-        const taskId = searchParams.get('taskId') ?? undefined;
-        const agentId = searchParams.get('agentId') ?? undefined;
-        const model = searchParams.get('model') ?? undefined;
-        const groupBy = searchParams.get('groupBy') as 'run' | 'task' | 'project' | 'agent' | 'model' | null;
-        const provisionalParam = searchParams.get('provisional');
-        const provisional = provisionalParam !== null ? provisionalParam === 'true' : undefined;
-        const fromParam = searchParams.get('from');
-        const from = fromParam !== null ? Number(fromParam) : undefined;
-        const toParam = searchParams.get('to');
-        const to = toParam !== null ? Number(toParam) : undefined;
-
-        const aggregate = await usage.getAggregate({
-          ...(kind ? { kind } : {}),
-          ...(runId ? { runId } : {}),
-          ...(attemptId ? { attemptId } : {}),
-          ...(batchId ? { batchId } : {}),
-          ...(projectId ? { projectId } : {}),
-          ...(taskId ? { taskId } : {}),
-          ...(agentId ? { agentId } : {}),
-          ...(model ? { model } : {}),
-          ...(groupBy ? { groupBy } : {}),
-          ...(provisional !== undefined ? { provisional } : {}),
-          ...(from !== undefined ? { from } : {}),
-          ...(to !== undefined ? { to } : {}),
-        });
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
+        const aggregate = await usage.getAggregate(filters.aggregate);
 
         return json(context, 200, aggregate);
       }
@@ -217,43 +238,64 @@ export function createUsageRouter(options: UsageRouterOptions): ApiRouter {
         return json(context, 200, detail);
       }
 
-      // 6. GET /api/usage/tasks/:taskId
+      // 6. GET /api/usage/attempts/:attemptId
+      if (sub === 'attempts' && segments.length === 4) {
+        if (method !== 'GET') {
+          return json(context, 405, { error: 'method not allowed' });
+        }
+        const attemptId = segments[3]!;
+        const detail = await usage.getActivityByAttemptId(attemptId);
+        if (!detail) {
+          return json(context, 404, { error: `usage for Routing attempt not found: ${attemptId}` });
+        }
+        return json(context, 200, detail);
+      }
+
+      // 7. GET /api/usage/tasks/:taskId
       if (sub === 'tasks' && segments.length === 4) {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
         const taskId = segments[3]!;
-        const aggregate = await usage.getTaskUsage(taskId);
+        const aggregate = await usage.getTaskUsage(taskId, filters.aggregate);
         return json(context, 200, aggregate);
       }
 
-      // 7. GET /api/usage/projects/:projectId
+      // 8. GET /api/usage/projects/:projectId
       if (sub === 'projects' && segments.length === 4) {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
         const projectId = segments[3]!;
-        const aggregate = await usage.getProjectUsage(projectId);
+        const aggregate = await usage.getProjectUsage(projectId, filters.aggregate);
         return json(context, 200, aggregate);
       }
 
-      // 8. GET /api/usage/agents/:agentId
+      // 9. GET /api/usage/agents/:agentId
       if (sub === 'agents' && segments.length === 4) {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
         const agentId = segments[3]!;
-        const aggregate = await usage.getAgentUsage(agentId);
+        const aggregate = await usage.getAgentUsage(agentId, filters.aggregate);
         return json(context, 200, aggregate);
       }
 
-      // 9. GET /api/usage/models/:model
+      // 10. GET /api/usage/models/:model
       if (sub === 'models' && segments.length === 4) {
         if (method !== 'GET') {
           return json(context, 405, { error: 'method not allowed' });
         }
+        const filters = parseUsageFilters(searchParams);
+        if (filters.error) return json(context, 400, { error: filters.error });
         const model = segments[3]!;
-        const aggregate = await usage.getModelUsage(model);
+        const aggregate = await usage.getModelUsage(model, filters.aggregate);
         return json(context, 200, aggregate);
       }
 

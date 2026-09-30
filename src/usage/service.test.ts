@@ -317,6 +317,38 @@ test('routing attempt records as usage activity belonging to Project but not Age
   });
 });
 
+test('in-progress Routing attempt telemetry is provisional and settles without Agent or Task ownership', async () => {
+  await withService(async (service) => {
+    const attempt: RoutingAttempt = {
+      id: 'attempt-provisional', batchId: 'batch-provisional', attemptNumber: 1,
+      modelId: 'wake-v1', startedAt: 500, finishedAt: 500, status: 'started',
+    };
+    const active = await service.recordRoutingAttemptActivity(attempt, {
+      batchId: 'batch-provisional', projectId: 'project-1', tokens: { inputTokens: 8 },
+    });
+    assert.equal(active.settledAt, undefined);
+    assert.equal(active.wallDurationMs, 500);
+    const provisional = await service.getAggregate();
+    assert.equal(provisional.totalActivities, 0);
+    assert.equal(provisional.provisionalTotals?.tokens.inputTokens, 8);
+    assert.equal(provisional.provisionalTotals?.totalSproutWallDurationMs, 500);
+
+    await service.recordRoutingAttemptActivity({ ...attempt, status: 'succeeded', finishedAt: 700 }, {
+      batchId: 'batch-provisional', projectId: 'project-1', tokens: { inputTokens: 8, outputTokens: 2 }, durationMs: 200,
+    });
+    const settled = await service.getAggregate({ projectId: 'project-1' });
+    assert.equal(settled.totalActivities, 1);
+    assert.equal(settled.activityIdentities[0]?.attemptId, 'attempt-provisional');
+    assert.equal(settled.activityIdentities[0]?.agentId, undefined);
+    assert.equal(settled.activityIdentities[0]?.taskId, undefined);
+    assert.equal(settled.provisionalTotals, undefined);
+    assert.equal(settled.routingModelSubtotal?.tokens.outputTokens, 2);
+    const detail = await service.getActivity('ua_att_attempt-provisional');
+    assert.equal(detail?.observations.length, 2);
+    assert.equal(detail?.effectiveObservation?.completeness, 'complete');
+  });
+});
+
 test('Human stops retain stopped outcome and observed partial tokens', async () => {
   await withService(async (service) => {
     await service.recordRunActivity({
@@ -329,6 +361,48 @@ test('Human stops retain stopped outcome and observed partial tokens', async () 
     assert.equal(detail?.activity.status, 'stopped');
     assert.equal(detail?.effectiveObservation?.completeness, 'partial');
     assert.equal(detail?.effectiveObservation?.tokens?.inputTokens, 100);
+  });
+});
+
+test('in-progress run usage stays provisional and final updates remain in settlement range', async () => {
+  await withService(async (service) => {
+    const activeRun: AgentRun = {
+      id: 'run-provisional', agentId: 'agent-1', environmentInstanceId: 'env-1', projectId: 'project-1',
+      prompt: 'work', status: 'running', events: [], createdAt: 900,
+      workOption: { id: 'option-1', engine: 'pi', workModel: 'work-v1', effort: 'low' },
+      detailedTokens: { inputTokens: 12 },
+    };
+    await service.recordRunActivity(activeRun);
+    const activeDetail = await service.getActivityByRunId('run-provisional');
+    assert.equal(activeDetail?.activity.status, 'active');
+    assert.equal(activeDetail?.activity.settledAt, undefined);
+    assert.equal(activeDetail?.effectiveObservation?.completeness, 'partial');
+
+    const observed = await service.getAggregate();
+    assert.equal(observed.totalActivities, 0, 'provisional work is not mixed into finalized totals');
+    assert.equal(observed.provisionalTotals?.totalActivities, 1);
+    assert.equal(observed.provisionalTotals?.tokens.inputTokens, 12);
+    assert.equal(observed.provisionalTotals?.totalSproutWallDurationMs, 100);
+    const provisionalOnly = await service.getAggregate({ provisional: true });
+    assert.equal(provisionalOnly.totalActivities, 1);
+    assert.equal(provisionalOnly.provisionalTotals, undefined);
+    const finalizedOnly = await service.getAggregate({ provisional: false });
+    assert.equal(finalizedOnly.totalActivities, 0);
+    assert.equal(finalizedOnly.provisionalTotals, undefined);
+
+    await service.recordRunActivity({
+      ...activeRun, status: 'completed', completedAt: 1200,
+      detailedTokens: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
+    });
+    const settledDetail = await service.getActivityByRunId('run-provisional');
+    assert.equal(settledDetail?.activity.settledAt, 1200);
+    assert.equal(settledDetail?.observations.length, 2);
+    assert.equal(settledDetail?.effectiveObservation?.completeness, 'complete');
+    assert.equal(settledDetail?.effectiveObservation?.supersedesObservationId, activeDetail?.effectiveObservation?.id);
+    assert.equal((await service.getAggregate({ from: 1000, to: 1200 })).totalActivities, 0);
+    const settlementRange = await service.getAggregate({ from: 1200, to: 1300 });
+    assert.equal(settlementRange.totalActivities, 1);
+    assert.equal(settlementRange.tokens.totalTokens, 15);
   });
 });
 
@@ -410,6 +484,8 @@ test('views: getTaskUsage, getProjectUsage, getAgentUsage, getModelUsage', async
     assert.equal(taskUsage.tokens.totalTokens, 850);
     assert.ok(taskUsage.groups?.['agent-1']);
     assert.ok(taskUsage.groups?.['agent-2']);
+    assert.deepEqual(taskUsage.activityIdentities.map((item) => item.runId), ['run-t1-a1', 'run-t1-a2']);
+    assert.ok(taskUsage.activityIdentities.every((item) => item.kind === 'agent_run'));
 
     // 2. Project usage includes runs and routing attempt with separate subtotals
     const projectUsage = await service.getProjectUsage('proj-1');
@@ -418,15 +494,20 @@ test('views: getTaskUsage, getProjectUsage, getAgentUsage, getModelUsage', async
     assert.equal(projectUsage.workModelSubtotal?.tokens.totalTokens, 850);
     assert.equal(projectUsage.routingModelSubtotal?.totalActivities, 1);
     assert.equal(projectUsage.routingModelSubtotal?.totalSproutWallDurationMs, 200);
+    assert.deepEqual(projectUsage.activityIdentities.map((item) => item.kind), ['agent_run', 'agent_run', 'routing_attempt']);
+    assert.ok(projectUsage.routingModelSubtotal?.activityIdentities[0]?.attemptId === 'att-p1');
 
     // 3. Agent usage does NOT absorb routing attempts
     const agentUsage = await service.getAgentUsage('agent-1');
     assert.equal(agentUsage.totalActivities, 1);
     assert.equal(agentUsage.tokens.totalTokens, 600);
+    assert.deepEqual(agentUsage.activityIdentities.map((item) => item.runId), ['run-t1-a1']);
+    assert.ok(agentUsage.activityIdentities.every((item) => item.kind === 'agent_run'));
 
     // 4. Model usage attributes to model
     const modelUsage = await service.getModelUsage('gpt-4o');
     assert.equal(modelUsage.totalActivities, 1);
     assert.equal(modelUsage.tokens.totalTokens, 600);
+    assert.deepEqual(modelUsage.activityIdentities.map((item) => item.runId), ['run-t1-a1']);
   });
 });

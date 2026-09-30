@@ -11,8 +11,14 @@ import type {
   UsageActivityStatus,
   UsageObservation,
   UsageAggregate,
+  UsageTimeRange,
 } from './model.ts';
-import { aggregateObservations } from './model.ts';
+import {
+  aggregateObservations,
+  assertUsageActivityAttribution,
+  assertUsageActivityIdentityUnchanged,
+  assertUsageObservation,
+} from './model.ts';
 
 export interface UsageActivityFilter {
   readonly kind?: UsageActivityKind | undefined;
@@ -26,16 +32,19 @@ export interface UsageActivityFilter {
   readonly status?: UsageActivityStatus | undefined;
   /** True for in-progress (active) activities, false for finalized settled activities. */
   readonly provisional?: boolean | undefined;
-  /** Inclusive lower bound for createdAt / settledAt (epoch ms). */
+  /** Inclusive instant bound: settledAt for finalized activity, createdAt while active (epoch ms). */
   readonly from?: number | undefined;
-  /** Exclusive upper bound for createdAt / settledAt (epoch ms). */
+  /** Exclusive instant bound: settledAt for finalized activity, createdAt while active (epoch ms). */
   readonly to?: number | undefined;
+  /** IANA display zone used by the caller to derive these absolute boundaries; defaults explicitly to UTC. */
+  readonly timeZone?: string | undefined;
   readonly limit?: number | undefined;
   readonly offset?: number | undefined;
 }
 
 export interface UsageAggregateFilter {
   readonly kind?: UsageActivityKind | undefined;
+  readonly status?: UsageActivityStatus | undefined;
   readonly runId?: string | undefined;
   readonly attemptId?: string | undefined;
   readonly batchId?: string | undefined;
@@ -43,8 +52,12 @@ export interface UsageAggregateFilter {
   readonly taskId?: string | undefined;
   readonly agentId?: string | undefined;
   readonly model?: string | undefined;
+  /** Inclusive settlement instant; active provisional totals use createdAt instead (epoch ms). */
   readonly from?: number | undefined;
+  /** Exclusive settlement instant; active provisional totals use createdAt instead (epoch ms). */
   readonly to?: number | undefined;
+  /** IANA display zone used by the caller to derive these absolute boundaries; defaults to UTC. */
+  readonly timeZone?: string | undefined;
   readonly provisional?: boolean | undefined;
   readonly groupBy?: 'run' | 'task' | 'project' | 'agent' | 'model' | undefined;
 }
@@ -94,6 +107,15 @@ export class InMemoryUsageStore implements UsageStore {
   readonly #observationsByActivity = new Map<string, string[]>();
 
   async recordActivity(activity: UsageActivity): Promise<void> {
+    assertUsageActivityAttribution(activity);
+    const prior = this.#activities.get(activity.id);
+    if (prior !== undefined) assertUsageActivityIdentityUnchanged(prior, activity);
+    for (const existing of this.#activities.values()) {
+      if (existing.id !== activity.id && (
+        (activity.kind === 'agent_run' && existing.kind === 'agent_run' && existing.correlation.runId === activity.correlation.runId) ||
+        (activity.kind === 'routing_attempt' && existing.kind === 'routing_attempt' && existing.correlation.attemptId === activity.correlation.attemptId)
+      )) throw new Error('Usage activity run/attempt correlation must be unique');
+    }
     this.#activities.set(activity.id, activity);
   }
 
@@ -145,6 +167,7 @@ export class InMemoryUsageStore implements UsageStore {
   }
 
   async recordObservation(observation: UsageObservation): Promise<void> {
+    assertUsageObservation(observation);
     if (this.#observations.has(observation.id)) throw new Error('Observation already exists');
     if (observation.isEffective) {
       const head = (this.#observationsByActivity.get(observation.activityId) ?? [])
@@ -199,6 +222,7 @@ export class InMemoryUsageStore implements UsageStore {
   async getAggregate(filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
     const finalizedActivities = await this.listActivities({
       kind: filter.kind,
+      status: filter.status,
       runId: filter.runId,
       attemptId: filter.attemptId,
       batchId: filter.batchId,
@@ -251,6 +275,7 @@ export class InMemoryUsageStore implements UsageStore {
 
     const provisionalActivities = await this.listActivities({
       kind: filter.kind,
+      status: filter.status,
       runId: filter.runId,
       attemptId: filter.attemptId,
       batchId: filter.batchId,
@@ -267,11 +292,42 @@ export class InMemoryUsageStore implements UsageStore {
       const observation = await this.getEffectiveObservation(activity.id);
       provisionalItems.push({ activity, observation });
     }
-    const provisionalTotals =
-      provisionalItems.length > 0 ? aggregateObservations(provisionalItems) : undefined;
-
+    const timeRange: UsageTimeRange = {
+      ...(filter.from !== undefined ? { from: filter.from } : {}),
+      ...(filter.to !== undefined ? { to: filter.to } : {}),
+      timeZone: filter.timeZone ?? 'UTC',
+      bounds: '[start, end)',
+      attribution: 'settlement',
+    };
+    if (filter.provisional === true) {
+      const provisionalGroups: Record<string, UsageAggregate> = {};
+      if (filter.groupBy !== undefined) {
+        const grouped = new Map<string, typeof provisionalItems>();
+        for (const item of provisionalItems) {
+          const correlation = item.activity.correlation;
+          const key = filter.groupBy === 'task' ? correlation.taskId
+            : filter.groupBy === 'agent' ? correlation.agentId
+              : filter.groupBy === 'project' ? correlation.projectId
+                : filter.groupBy === 'model' ? item.activity.model : correlation.runId;
+          const group = grouped.get(key ?? '(none)') ?? [];
+          group.push(item);
+          grouped.set(key ?? '(none)', group);
+        }
+        for (const [key, group] of grouped) provisionalGroups[key] = aggregateObservations(group);
+      }
+      return {
+        ...aggregateObservations(provisionalItems),
+        timeRange,
+        workModelSubtotal: aggregateObservations(provisionalItems.filter((item) => item.activity.kind === 'agent_run')),
+        routingModelSubtotal: aggregateObservations(provisionalItems.filter((item) => item.activity.kind === 'routing_attempt')),
+        ...(filter.groupBy !== undefined ? { groups: provisionalGroups } : {}),
+      };
+    }
+    const provisionalTotals = filter.provisional === false || provisionalItems.length === 0
+      ? undefined : aggregateObservations(provisionalItems);
     return {
       ...overall,
+      timeRange,
       workModelSubtotal,
       routingModelSubtotal,
       ...(groups !== undefined ? { groups } : {}),

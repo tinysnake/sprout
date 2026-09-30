@@ -71,6 +71,7 @@ test('HTTP routes enforce privacy on emitted JSON responses', async () => {
       correlation: {
         runId: 'run-leak-1',
         projectId: 'proj-leak',
+        agentId: 'agent-leak',
       },
       engine: 'codex',
       model: 'gpt-4o',
@@ -107,6 +108,13 @@ test('HTTP routes enforce privacy on emitted JSON responses', async () => {
 
     assert.ok(!text.includes('/synthetic-dir/sprout'));
     assert.ok(!text.includes(sentinelHost));
+
+    const aggregateResponse = await fetch(`${base}/api/usage/aggregate?projectId=proj-leak`);
+    assert.equal(aggregateResponse.status, 200);
+    const aggregateText = await aggregateResponse.text();
+    assert.ok(aggregateText.includes('run-leak-1'), 'aggregate exposes a safe run identity for drill-down');
+    assert.ok(!aggregateText.includes('/synthetic-dir/sprout'));
+    assert.ok(!aggregateText.includes(sentinelHost));
   } finally {
     await api.close();
   }

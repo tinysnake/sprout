@@ -20,8 +20,14 @@ import type {
   ValuationProvenance,
   BillingBasis,
   DetailedTokenDimensions,
+  UsageTimeRange,
 } from './model.ts';
-import { aggregateObservations } from './model.ts';
+import {
+  aggregateObservations,
+  assertUsageActivityAttribution,
+  assertUsageActivityIdentityUnchanged,
+  assertUsageObservation,
+} from './model.ts';
 import type {
   UsageActivityFilter,
   UsageAggregateFilter,
@@ -81,7 +87,7 @@ interface ObservationRow {
 }
 
 function toActivity(row: ActivityRow): UsageActivity {
-  return {
+  const activity = {
     id: row.id,
     kind: row.kind as UsageActivityKind,
     correlation: {
@@ -99,7 +105,9 @@ function toActivity(row: ActivityRow): UsageActivity {
     createdAt: row.created_at,
     ...(row.settled_at !== null ? { settledAt: row.settled_at } : {}),
     ...(row.wall_duration_ms !== null ? { wallDurationMs: row.wall_duration_ms } : {}),
-  };
+  } as unknown as UsageActivity;
+  assertUsageActivityAttribution(activity);
+  return activity;
 }
 
 function toObservation(row: ObservationRow): UsageObservation {
@@ -210,6 +218,8 @@ export class SqliteUsageStore implements UsageStore {
       CREATE INDEX IF NOT EXISTS usage_activities_agent_id_idx ON usage_activities (agent_id);
       CREATE INDEX IF NOT EXISTS usage_activities_model_idx ON usage_activities (model);
       CREATE INDEX IF NOT EXISTS usage_activities_settled_at_idx ON usage_activities (settled_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_run_id_unique ON usage_activities (run_id) WHERE run_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_attempt_id_unique ON usage_activities (attempt_id) WHERE attempt_id IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS usage_observations (
         id TEXT PRIMARY KEY,
@@ -246,10 +256,66 @@ export class SqliteUsageStore implements UsageStore {
       );
       CREATE INDEX IF NOT EXISTS usage_observations_activity_idx ON usage_observations (activity_id);
       CREATE INDEX IF NOT EXISTS usage_observations_effective_idx ON usage_observations (activity_id, is_effective);
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
+      BEFORE INSERT ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
+          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
+          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
+      BEFORE UPDATE ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
+          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
+          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_identity_immutable
+      BEFORE UPDATE ON usage_activities
+      WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.run_id IS NOT NEW.run_id
+        OR OLD.attempt_id IS NOT NEW.attempt_id OR OLD.batch_id IS NOT NEW.batch_id
+        OR OLD.project_id IS NOT NEW.project_id OR OLD.task_id IS NOT NEW.task_id
+        OR OLD.agent_id IS NOT NEW.agent_id OR OLD.environment_instance_id IS NOT NEW.environment_instance_id
+        OR OLD.engine IS NOT NEW.engine OR OLD.model IS NOT NEW.model OR OLD.created_at IS NOT NEW.created_at
+      BEGIN SELECT RAISE(ABORT, 'usage activity identity is immutable'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_insert
+      BEFORE INSERT ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
+        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_update
+      BEFORE UPDATE ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
+        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
     `);
   }
 
   async recordActivity(activity: UsageActivity): Promise<void> {
+    assertUsageActivityAttribution(activity);
+    const prior = await this.getActivity(activity.id);
+    if (prior !== undefined) assertUsageActivityIdentityUnchanged(prior, activity);
     const stmt = this.#db.prepare(`
       INSERT INTO usage_activities
         (id, kind, run_id, attempt_id, batch_id, project_id, task_id, agent_id,
@@ -376,6 +442,9 @@ export class SqliteUsageStore implements UsageStore {
         sql += ' OFFSET ?';
         params.push(filter.offset);
       }
+    } else if (filter.offset !== undefined) {
+      sql += ' LIMIT -1 OFFSET ?';
+      params.push(filter.offset);
     }
 
     const rows = this.#db.prepare(sql).all(...params) as unknown as readonly ActivityRow[];
@@ -383,6 +452,7 @@ export class SqliteUsageStore implements UsageStore {
   }
 
   async recordObservation(observation: UsageObservation): Promise<void> {
+    assertUsageObservation(observation);
     // No await inside the savepoint: checking the head, selecting its successor,
     // and inserting are one atomic write, including when callers race.
     this.#db.exec('SAVEPOINT usage_observation_record');
@@ -503,6 +573,7 @@ export class SqliteUsageStore implements UsageStore {
     // 1. Finalized activities (default unless provisional requested)
     const finalizedActivities = await this.listActivities({
       kind: filter.kind,
+      status: filter.status,
       runId: filter.runId,
       attemptId: filter.attemptId,
       batchId: filter.batchId,
@@ -558,6 +629,7 @@ export class SqliteUsageStore implements UsageStore {
     // Provisional activities
     const provisionalActivities = await this.listActivities({
       kind: filter.kind,
+      status: filter.status,
       runId: filter.runId,
       attemptId: filter.attemptId,
       batchId: filter.batchId,
@@ -574,11 +646,42 @@ export class SqliteUsageStore implements UsageStore {
       const observation = await this.getEffectiveObservation(activity.id);
       provisionalItems.push({ activity, observation });
     }
-    const provisionalTotals =
-      provisionalItems.length > 0 ? aggregateObservations(provisionalItems) : undefined;
-
+    const timeRange: UsageTimeRange = {
+      ...(filter.from !== undefined ? { from: filter.from } : {}),
+      ...(filter.to !== undefined ? { to: filter.to } : {}),
+      timeZone: filter.timeZone ?? 'UTC',
+      bounds: '[start, end)',
+      attribution: 'settlement',
+    };
+    if (filter.provisional === true) {
+      const provisionalGroups: Record<string, UsageAggregate> = {};
+      if (filter.groupBy !== undefined) {
+        const grouped = new Map<string, typeof provisionalItems>();
+        for (const item of provisionalItems) {
+          const correlation = item.activity.correlation;
+          const key = filter.groupBy === 'task' ? correlation.taskId
+            : filter.groupBy === 'agent' ? correlation.agentId
+              : filter.groupBy === 'project' ? correlation.projectId
+                : filter.groupBy === 'model' ? item.activity.model : correlation.runId;
+          const group = grouped.get(key ?? '(none)') ?? [];
+          group.push(item);
+          grouped.set(key ?? '(none)', group);
+        }
+        for (const [key, group] of grouped) provisionalGroups[key] = aggregateObservations(group);
+      }
+      return {
+        ...aggregateObservations(provisionalItems),
+        timeRange,
+        workModelSubtotal: aggregateObservations(provisionalItems.filter((item) => item.activity.kind === 'agent_run')),
+        routingModelSubtotal: aggregateObservations(provisionalItems.filter((item) => item.activity.kind === 'routing_attempt')),
+        ...(filter.groupBy !== undefined ? { groups: provisionalGroups } : {}),
+      };
+    }
+    const provisionalTotals = filter.provisional === false || provisionalItems.length === 0
+      ? undefined : aggregateObservations(provisionalItems);
     return {
       ...overall,
+      timeRange,
       workModelSubtotal,
       routingModelSubtotal,
       ...(groups !== undefined ? { groups } : {}),

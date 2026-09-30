@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 25;
+export const CURRENT_SCHEMA_VERSION = 26;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 25;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 26;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1148,6 +1148,70 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         CREATE INDEX IF NOT EXISTS usage_observations_effective_idx ON usage_observations (activity_id, is_effective);
       `);
     },
+  },
+  {
+    fromVersion: 25,
+    toVersion: 26,
+    name: 'usage_activity_attribution_constraints',
+    migrate: (db) => db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_run_id_unique
+        ON usage_activities (run_id) WHERE run_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_attempt_id_unique
+        ON usage_activities (attempt_id) WHERE attempt_id IS NOT NULL;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
+      BEFORE INSERT ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
+          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
+          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
+      BEFORE UPDATE ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
+          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
+          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_identity_immutable
+      BEFORE UPDATE ON usage_activities
+      WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.run_id IS NOT NEW.run_id
+        OR OLD.attempt_id IS NOT NEW.attempt_id OR OLD.batch_id IS NOT NEW.batch_id
+        OR OLD.project_id IS NOT NEW.project_id OR OLD.task_id IS NOT NEW.task_id
+        OR OLD.agent_id IS NOT NEW.agent_id OR OLD.environment_instance_id IS NOT NEW.environment_instance_id
+        OR OLD.engine IS NOT NEW.engine OR OLD.model IS NOT NEW.model OR OLD.created_at IS NOT NEW.created_at
+      BEGIN SELECT RAISE(ABORT, 'usage activity identity is immutable'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_insert
+      BEFORE INSERT ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
+        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_update
+      BEFORE UPDATE ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
+        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+    `),
   },
 ];
 
