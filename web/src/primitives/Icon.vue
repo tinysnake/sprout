@@ -99,6 +99,27 @@ const iconSvg = computed(() => {
     case 'desktop':
       return `<svg ${common}><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>`;
 
+    case 'phone':
+      return `<svg ${common}><rect x="5" y="2" width="14" height="20" rx="2" ry="2" /><line x1="12" y1="18" x2="12.01" y2="18" /></svg>`;
+
+    case 'key':
+      return `<svg ${common}><circle cx="8" cy="15" r="4" /><path d="m11 12 9-9" /><path d="m17 6 2 2" /><path d="m14 9 2 2" /></svg>`;
+
+    case 'clipboard':
+      return `<svg ${common}><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" /></svg>`;
+
+    case 'info':
+      return `<svg ${common}><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>`;
+
+    case 'layers':
+      return `<svg ${common}><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" /></svg>`;
+
+    case 'split':
+      return `<svg ${common}><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="12" y1="3" x2="12" y2="21" /></svg>`;
+
+    case 'eye':
+      return `<svg ${common}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>`;
+
     case 'chevron-left':
       return `<svg ${common}><polyline points="15 18 9 12 15 6" /></svg>`;
 

@@ -19,6 +19,9 @@ import { createRunBrowserAdapter } from '../adapters/run-api.js';
 import { createProjectAccessBrowserAdapter, createProjectBrowserAdapter } from '../adapters/project-api.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
 import { createOperatorSessionBrowserAdapter } from '../adapters/operator-session-api.js';
+import { createOperatorBrowserAdapter } from '../adapters/operator-api.js';
+import { SETTINGS_SERVICE, type SettingsService } from '../modules/settings/ports.js';
+import { ProductionSettingsService } from '../modules/settings/adapters/production-adapter.js';
 import { OPERATOR_SESSION } from './auth.js';
 import type { RunView } from '../../../src/web/views.ts';
 import type { ShellConnectionSource } from '../shell/connection.js';
@@ -59,6 +62,7 @@ export interface SproutAppOptions {
    */
   connectionSource?: ShellConnectionSource;
   operatorSession?: ReturnType<typeof createOperatorSessionBrowserAdapter>;
+  settingsService?: SettingsService;
 }
 
 export function createSproutApp(options: SproutAppOptions = {}) {
@@ -94,6 +98,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.operatorSession) {
     app.provide(OPERATOR_SESSION, options.operatorSession);
+  }
+  if (options.settingsService) {
+    app.provide(SETTINGS_SERVICE, options.settingsService);
   }
 
   return { app, pinia, router };
@@ -137,6 +144,12 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       routing: createRoutingBrowserAdapter(transport),
       runs: createRunBrowserAdapter(transport),
     });
+    const operatorApi = createOperatorBrowserAdapter(transport);
+    const settingsService = new ProductionSettingsService(
+      operatorApi,
+      operatorSession,
+      transport,
+    );
     const { app, router } = createSproutApp({
       environmentService,
       agentService,
@@ -144,6 +157,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       chatService,
       connectionSource: transport,
       operatorSession,
+      settingsService,
     });
     router.isReady().then(() => {
       app.mount(mountEl);
