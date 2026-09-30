@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mapPiEvent, newPiTurnState, type PiTurnState } from './pi-protocol.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 import type { AgentRunEvent } from './port.ts';
 
 /**
@@ -188,10 +189,69 @@ test('a malformed line does not break the mapping', () => {
   assert.deepEqual(mapPiEvent({}, state).events, []);
 });
 
-test('an error event fails the turn with its message', () => {
+test('an error event fails the turn with a sanitized reason, never the engine text', () => {
   const state = newPiTurnState();
-  const outcome = mapPiEvent({ type: 'error', message: 'model unavailable' }, state);
-  assert.deepEqual(outcome.finish, { status: 'failed', message: 'model unavailable' });
+  const raw = '400 Model is unavailable raw-upstream-body';
+  const outcome = mapPiEvent({ type: 'error', message: raw }, state);
+  const expected = sanitizedTurnFailure('pi', 'engine-error');
+  assert.deepEqual(outcome.finish, { status: 'failed', message: expected });
+  assert.equal(state.failure, expected, 'state keeps the class, not the detail');
+  assert.ok(!JSON.stringify(outcome).includes(raw));
+});
+
+test('an assistant message ending with an error stop reason fails the turn', () => {
+  // The observed live failure signature (#182): the engine reports the error
+  // as the message's stop reason, with the raw upstream body in `errorMessage`.
+  const state = newPiTurnState();
+  const raw = '400 Model is unavailable raw-upstream-body';
+  const outcome = mapPiEvent(
+    {
+      type: 'message_end',
+      message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: raw },
+    },
+    state,
+  );
+  const expected = sanitizedTurnFailure('pi', 'error-stop-reason');
+  assert.deepEqual(outcome.finish, { status: 'failed', message: expected });
+  assert.equal(state.failure, expected);
+  assert.ok(!JSON.stringify(outcome).includes(raw));
+});
+
+test('a turn_end carrying an error stop reason fails the turn', () => {
+  const state = newPiTurnState();
+  const outcome = mapPiEvent(
+    {
+      type: 'turn_end',
+      message: { role: 'assistant', content: [], stopReason: 'error' },
+    },
+    state,
+  );
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('pi', 'error-stop-reason'),
+  });
+});
+
+test('an agent_settled after a classified error settles as failed, not completed', () => {
+  const state = newPiTurnState();
+  mapPiEvent({ type: 'error', message: 'ignored raw detail' }, state);
+  const outcome = mapPiEvent({ type: 'agent_settled' }, state);
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('pi', 'engine-error'),
+  });
+});
+
+test('a successful turn that produced no text still completes with empty text', () => {
+  // The other half of the #182 contract: a genuinely empty-but-successful
+  // turn (no error stop reason) is not reclassified as a failure.
+  const state = newPiTurnState();
+  mapPiEvent(
+    { type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'stop' } },
+    state,
+  );
+  const outcome = mapPiEvent({ type: 'agent_settled' }, state);
+  assert.deepEqual(outcome.finish, { status: 'completed', text: '' });
 });
 
 test('the recorded probe stream maps to tool progress before the final answer', () => {

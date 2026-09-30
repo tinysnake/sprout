@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 
 import { EngineResumeRefusedError } from './port.ts';
 
@@ -391,6 +392,7 @@ test('interrupting a turn is reported as interrupted, not as a failure', async (
 
 
 test('a turn error from the engine becomes a failed terminal state', async () => {
+  const raw = 'sandbox denied raw-upstream-body';
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
     if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
@@ -398,7 +400,7 @@ test('a turn error from the engine becomes a failed terminal state', async () =>
       self.respond(request.id, { turn: { id: 'turn-1' } });
       queueMicrotask(() => {
         self.notify('turn/completed', {
-          turn: { id: 'turn-1', status: 'failed', error: { message: 'sandbox denied' } },
+          turn: { id: 'turn-1', status: 'failed', error: { message: raw } },
         });
       });
     }
@@ -410,7 +412,12 @@ test('a turn error from the engine becomes a failed terminal state', async () =>
   await collect(turn);
   const result = await turn.completion;
 
-  assert.deepEqual(result, { status: 'failed', message: 'sandbox denied' });
+  // The durable reason is the stable failure class, never the engine's body (#182).
+  assert.deepEqual(result, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'turn-error'),
+  });
+  assert.ok(!JSON.stringify(result).includes(raw));
 });
 
 
