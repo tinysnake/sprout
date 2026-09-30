@@ -1,7 +1,7 @@
 import type { MessageView, ProjectEventView, RunView } from '../../../../../src/web/views.ts';
 import type { ConversationScopeView, ScopeInspectionView, WorkingGroupScopeView } from '../../../adapters/conversation-api.ts';
 import type { RoutingBatchDetailView, RoutingEvidenceView } from '../../../adapters/routing-api.ts';
-import type { BrowserTransportState } from '../../../transport/browser-transport.ts';
+import { BrowserRequestError, type BrowserTransportState } from '../../../transport/browser-transport.ts';
 import type { ChatService } from '../types.ts';
 
 const at = 1_800_000_000_000;
@@ -100,7 +100,7 @@ export class FixtureChatService implements ChatService {
   async messageRouting(id: string) { const message = this.#messages.find((item) => item.id === id); if (!message) throw new Error('Message not found'); return evidence({ kind: 'message', message: { ...message } }, id); }
   async eventRouting(id: string): Promise<RoutingEvidenceView> { if (id !== event.id) throw new Error('Event not found'); return evidence({ kind: 'event', event: { ...event } }, id); }
   async listRoutingBatches(id: string) { return { windows: batches.map((detail) => detail.window!), batches: id === projectId ? batches.map((detail) => detail.batch) : [] }; }
-  async getRoutingBatch(id: string) { const detail = batches.find((entry) => entry.batch.id === id); if (!detail) throw new Error('Batch not found'); return detail; }
+  async getRoutingBatch(id: string) { const detail = batches.find((entry) => entry.batch.id === id); if (!detail) throw new BrowserRequestError('rejected', 404); return detail; }
   async getRun(id: string): Promise<RunView> { return { id, agentId: 'programmer', prompt: '', status: 'completed', events: [], handOffAttached: false, createdAt: at, completedAt: at + 30_300 }; }
   subscribeRuns(listener: (run: RunView) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async pushIncoming(scopeId: string, body: string) {

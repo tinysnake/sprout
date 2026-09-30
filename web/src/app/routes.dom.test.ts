@@ -426,11 +426,17 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
     assert.ok(doc.querySelector('[data-scope-id="dm-programmer"]'));
     await router.push('/project/chat');
     await settle(70);
-    (doc.querySelector('.chat-info-btn') as HTMLButtonElement).click();
+    const infoButton = doc.querySelector('.chat-info-btn') as HTMLButtonElement;
+    infoButton.focus();
+    infoButton.click();
     await settle(60);
     assert.match(doc.body.textContent ?? '', /Conversation Details —/, 'info dialog works after navigating back');
-    (doc.querySelector('.close-chat-info-btn') as HTMLButtonElement).click();
+    const infoDialog = doc.querySelector('[role="dialog"]') as HTMLElement;
+    assert.ok(infoDialog.contains(doc.activeElement), 'dialog owns focus');
+    infoDialog.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await settle(60);
+    assert.equal(doc.querySelector('[role="dialog"]'), null, 'Escape closes the dialog');
+    assert.equal(doc.activeElement, infoButton, 'closing returns focus to the opener');
     (doc.querySelector('.chat-create-wg') as HTMLButtonElement).click();
     await settle(120);
     const name = doc.querySelector('#chat-wg-name') as HTMLInputElement;
@@ -574,6 +580,25 @@ test('a refused Message response reuses its delivery key when the unchanged draf
     assert.equal(keys.length, 2);
     assert.equal(keys[0], keys[1], 'retry cannot create a second delivery/wake');
     assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Please inspect the evidence/);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('a disconnected inspector never presents an unverified batch as not found or substitutes Chat', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const { BrowserRequestError } = (await vite.ssrLoadModule('/src/transport/browser-transport.ts')) as typeof import('../transport/browser-transport.ts');
+    const fixture = new FixtureChatService();
+    fixture.getRoutingBatch = async () => { throw new BrowserRequestError('unavailable'); };
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    await router.push('/project/chat/routing/batch-failed');
+    app.mount(mount);
+    await settle(100);
+    assert.ok(doc.querySelector('.routing-unavailable-state'));
+    assert.equal(doc.querySelector('.routing-not-found-state'), null);
+    assert.equal(doc.querySelector('[data-scope-id]'), null);
     app.unmount();
   } finally { await cleanup(); }
 });

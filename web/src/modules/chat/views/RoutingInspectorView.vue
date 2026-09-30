@@ -2,6 +2,8 @@
 import { computed, inject, nextTick, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { RoutingBatchDetailView, RoutingBatchSummaryView } from '../../../adapters/routing-api.ts';
+import { BrowserRequestError } from '../../../transport/browser-transport.ts';
+import { useShellConnection } from '../../../shell/use-shell-connection.ts';
 import { CHAT_SERVICE } from '../types.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
 import Button from '../../../primitives/Button.vue';
@@ -11,8 +13,11 @@ const service = inject(CHAT_SERVICE, null);
 const route = useRoute();
 const router = useRouter();
 const announcer = useAnnouncer();
+const { presentation } = useShellConnection();
 const loading = ref(true);
 const notFound = ref(false);
+const unavailable = ref(false);
+const siblingsError = ref(false);
 const detail = ref<RoutingBatchDetailView | null>(null);
 const siblings = ref<readonly RoutingBatchSummaryView[]>([]);
 let generation = 0;
@@ -25,19 +30,28 @@ async function load() {
   const token = ++generation;
   loading.value = true;
   notFound.value = false;
+  unavailable.value = false;
+  siblingsError.value = false;
   detail.value = null;
-  if (!service || !batchId.value) { notFound.value = true; loading.value = false; return; }
+  if (!service) { unavailable.value = true; loading.value = false; return; }
+  if (!batchId.value) { notFound.value = true; loading.value = false; return; }
   try {
     const record = await service.getRoutingBatch(batchId.value);
     if (token !== generation) return;
     // Never substitute the first or most recent batch for the URL's identity.
     if (record.batch.id !== batchId.value) { notFound.value = true; return; }
     detail.value = record;
-    siblings.value = (await service.listRoutingBatches(record.batch.projectId)).batches;
+    try { siblings.value = (await service.listRoutingBatches(record.batch.projectId)).batches; }
+    catch { siblings.value = []; siblingsError.value = true; }
     announcer.announce(`Causal routing inspector for ${batchId.value}.`);
     await nextTick();
     (document.querySelector('.routing-inspector-heading') as HTMLElement | null)?.focus();
-  } catch { if (token === generation) notFound.value = true; }
+  } catch (error) {
+    if (token === generation) {
+      if (error instanceof BrowserRequestError && error.status === 404) notFound.value = true;
+      else unavailable.value = true;
+    }
+  }
   finally { if (token === generation) loading.value = false; }
 }
 watch(batchId, () => { void load(); }, { immediate: true });
@@ -48,11 +62,15 @@ function statusLabel(status: string) { return status === 'failed' ? 'Failed clos
 </script>
 
 <template>
-  <main class="routing-inspector-view h-full overflow-y-auto bg-[var(--bg-app)] p-3 sm:p-6" :data-inspector-state="loading ? 'loading' : notFound ? 'not-found' : attemptMissing ? 'attempt-not-found' : 'ready'">
+  <main class="routing-inspector-view h-full overflow-y-auto bg-[var(--bg-app)] p-3 sm:p-6" :data-inspector-state="loading ? 'loading' : notFound ? 'not-found' : unavailable ? 'unavailable' : attemptMissing ? 'attempt-not-found' : 'ready'">
     <div v-if="loading" role="status" aria-busy="true" class="p-6 text-sm">Loading causal routing evidence…</div>
     <div v-else-if="notFound" class="routing-not-found-state m-auto max-w-xl rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-8 text-center">
       <EmptyState icon="alert" title="Routing Batch Not Found" description="No authoritative routing batch matches this URL. Nothing else has been substituted." />
       <Button variant="primary" size="sm" class="min-h-11" @click="back">Back to Conversations</Button>
+    </div>
+    <div v-else-if="unavailable" class="routing-unavailable-state m-auto max-w-xl rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-8 text-center" role="status">
+      <h1 class="text-base font-bold">Routing Evidence Unavailable</h1><p class="my-3">{{ presentation.label }}. The requested batch could not be verified; it has not been replaced by another batch. Shown facts may be stale.</p>
+      <Button variant="secondary" size="sm" class="min-h-11" @click="load">Retry inspection</Button>
     </div>
     <div v-else-if="detail" class="mx-auto flex max-w-3xl flex-col gap-3 text-xs text-[var(--text-secondary)]">
       <header class="flex flex-wrap items-center justify-between gap-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
@@ -61,8 +79,10 @@ function statusLabel(status: string) { return status === 'failed' ? 'Failed clos
       </header>
       <div v-if="attemptMissing" class="routing-attempt-not-found rounded border border-[var(--red-action)] bg-[var(--bg-surface)] p-3" role="alert">Attempt {{ attempt }} was not found in batch {{ detail.batch.id }}. The batch below is shown without substituting another attempt.</div>
       <div v-if="siblings.length" class="flex items-center gap-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3"><label for="routing-batch-select" class="font-bold">Select Batch:</label><select id="routing-batch-select" :value="detail.batch.id" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2" @change="selectBatch"><option v-for="item in siblings" :key="item.id" :value="item.id">{{ item.id }} ({{ statusLabel(item.status) }})</option></select></div>
+      <p v-if="siblingsError" role="status" class="rounded border border-[var(--border-subtle)] p-3">The Project batch list is unavailable; this exact batch remains inspectable.</p>
       <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" aria-label="Batch execution summary">
         <h2 class="font-bold text-[var(--text-primary)]">Batch ID: <code>{{ detail.batch.id }}</code></h2>
+        <p>Project: <code>{{ detail.batch.projectId }}</code></p>
         <p class="font-semibold">{{ statusLabel(detail.batch.status) }}</p>
         <p>Collection Window: {{ timestamp(detail.window?.openedAt) }} → {{ timestamp(detail.window?.closedAt) }} ({{ detail.window?.intervalMs ?? 0 }} ms fixed window)</p>
         <p>Split {{ detail.batch.splitIndex + 1 }} of {{ detail.batch.splitCount }} · Inputs: {{ detail.inputs.length }} · Attempts: {{ detail.attempts.length }}</p>

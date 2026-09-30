@@ -5,6 +5,7 @@ import type { MessageView, ProjectEventView } from '../../../../../src/web/views
 import type { ConversationScopeView, ScopeInspectionView } from '../../../adapters/conversation-api.ts';
 import type { RoutingBatchSummaryView, RoutingEvidenceView } from '../../../adapters/routing-api.ts';
 import type { ProjectAuthorityView } from '../../../adapters/project-api.ts';
+import { AGENT_SERVICE, type AgentInstance } from '../../agents/types.ts';
 import { PROJECT_SERVICE } from '../../projects/types.ts';
 import { CHAT_SERVICE, type ChatTimelineItem } from '../types.ts';
 import { evidenceState, readOnlyReason } from '../evidence.ts';
@@ -19,9 +20,11 @@ const route = useRoute();
 const router = useRouter();
 const service = inject(CHAT_SERVICE, null);
 const projectService = inject(PROJECT_SERVICE, null);
+const agentService = inject(AGENT_SERVICE, null);
 const { presentation } = useShellConnection();
 const announcer = useAnnouncer();
 const projects = ref<readonly ProjectAuthorityView[]>([]);
+const agents = ref<readonly AgentInstance[]>([]);
 const scopes = ref<readonly ConversationScopeView[]>([]);
 const messages = ref<readonly MessageView[]>([]);
 const events = ref<readonly ProjectEventView[]>([]);
@@ -79,8 +82,9 @@ function title(scope: ConversationScopeView): string {
   if (scope.kind === 'project') return '#general';
   if (scope.kind === 'working-group') return scope.content.versions.find((v) => v.version === scope.content.currentVersion)?.displayName ?? scope.id;
   const humanIds = new Set(project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'human').map((m) => m.memberId));
-  return `@${scope.participants.find((p) => !humanIds.has(p)) ?? scope.participants[1] ?? scope.id}`;
+  return `@${agentName(scope.participants.find((p) => !humanIds.has(p)) ?? scope.participants[1] ?? scope.id)}`;
 }
+function agentName(id: string) { return agents.value.find((agent) => agent.id === id)?.displayName ?? id; }
 function kindLabel(scope: ConversationScopeView) { return scope.kind === 'project' ? 'Project channel' : scope.kind === 'working-group' ? 'Working group' : 'Direct message'; }
 function icon(scope: ConversationScopeView) { return scope.kind === 'project' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'; }
 function preview(scope: ConversationScopeView) {
@@ -92,7 +96,14 @@ function time(at: number) { return new Date(at).toLocaleTimeString([], { hour: '
 function unread(scope: ConversationScopeView) { void unreadVersion.value; return messages.value.filter((m) => m.scopeId === scope.id && !seen.has(m.id) && scope.id !== activeScope.value?.id).length; }
 function markVisible() { for (const m of activeMessages.value) seen.add(m.id); unreadVersion.value++; }
 function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : 'working-group'; }
-function scopePill(scope: ConversationScopeView) { return scope.kind === 'working-group' && scope.status === 'disbanded' ? 'Disbanded' : ''; }
+function scopePill(scope: ConversationScopeView) {
+  if (scope.kind === 'working-group') return scope.status === 'disbanded' ? 'Disbanded' : '';
+  if (scope.kind !== 'direct' || !project.value) return '';
+  const member = currentVersion(project.value)?.memberships.find((item) => scope.participants.includes(item.memberId) && item.memberKind === 'agent');
+  if (member?.endedAt) return 'Ended';
+  if (member && agents.value.find((agent) => agent.id === member.memberId)?.status === 'archived') return 'Archived';
+  return '';
+}
 function safeError() { return 'Could not load current Chat facts. Retry when the connection is available.'; }
 
 async function loadProject() {
@@ -151,7 +162,7 @@ async function selectScope(scope: ConversationScopeView) {
 }
 async function openAgentDirect(agentId: string) {
   const humanId = project.value && currentVersion(project.value)?.memberships.find((member) => member.memberKind === 'human' && member.endedAt === undefined)?.memberId;
-  if (!service || !presentation.value.controlAvailable || !humanId || !projectId.value) return;
+  if (!service || !presentation.value.controlAvailable || project.value?.status !== 'active' || !humanId || !projectId.value) return;
   actionError.value = '';
   try {
     const scope = await service.openDirectConversation(projectId.value, [humanId, agentId]);
@@ -174,7 +185,7 @@ async function createGroup() {
   finally { managingGroup.value = false; }
 }
 async function restoreGroup() {
-  if (!service || !activeScope.value || activeScope.value.kind !== 'working-group' || !presentation.value.controlAvailable || managingGroup.value) return;
+  if (!service || !activeScope.value || activeScope.value.kind !== 'working-group' || project.value?.status !== 'active' || !presentation.value.controlAvailable || managingGroup.value) return;
   managingGroup.value = true;
   try {
     await service.restoreWorkingGroup(activeScope.value.id);
@@ -256,7 +267,7 @@ async function inspectBatch(id: string, attempt?: number) {
 watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
-onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
+onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
   unsubRuns = service?.subscribeRuns(() => {
     void refreshMessages();
     // Run settlement can reach the event stream just before its reply projection.
@@ -270,6 +281,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
 
 <template>
   <div class="chat-view flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
+    <div v-if="!presentation.controlAvailable && (loading || error || missingScope)" class="chat-offline-banner mb-2 rounded border border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
       <div class="h-8 w-52 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
       <div v-for="i in 4" :key="i" class="h-16 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
@@ -306,8 +318,8 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
               </span>
             </button>
             <template v-if="section.label.startsWith('Direct Messages')">
-              <button v-for="member in unopenedAgents" :key="member.memberId" type="button" :disabled="!presentation.controlAvailable" class="chat-direct-unopened mb-1 flex min-h-[64px] w-full items-center gap-2 rounded border border-transparent p-2.5 text-left text-xs hover:border-[var(--border-strong)] disabled:opacity-60" @click="openAgentDirect(member.memberId)">
-                <Icon name="agents" :size="17" class="text-[var(--accent-primary)]" /><span><strong class="block">@{{ member.memberId }}</strong><span class="block text-[10px] text-[var(--text-muted)]">Direct message · Open conversation</span><span class="block truncate text-[var(--text-secondary)]">{{ member.responsibilities.join('; ') || 'No messages yet with agent.' }}</span></span>
+              <button v-for="member in unopenedAgents" :key="member.memberId" type="button" :disabled="!presentation.controlAvailable || project?.status !== 'active' || agents.some((agent) => agent.id === member.memberId && agent.status === 'archived')" class="chat-direct-unopened mb-1 flex min-h-[64px] w-full items-center gap-2 rounded border border-transparent p-2.5 text-left text-xs hover:border-[var(--border-strong)] disabled:opacity-60" @click="openAgentDirect(member.memberId)">
+                <Icon name="agents" :size="17" class="text-[var(--accent-primary)]" /><span><strong class="block">@{{ agentName(member.memberId) }} <span v-if="agents.some((agent) => agent.id === member.memberId && agent.status === 'archived')">· Archived</span></strong><span class="block text-[10px] text-[var(--text-muted)]">Direct message · {{ agents.some((agent) => agent.id === member.memberId && agent.status === 'archived') ? 'Read-only' : 'Open conversation' }}</span><span class="block truncate text-[var(--text-secondary)]">{{ member.responsibilities.join('; ') || 'No messages yet with agent.' }}</span></span>
               </button>
             </template>
           </div>
@@ -332,7 +344,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"
             class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start'">
             <div class="flex items-center justify-between gap-3">
-              <strong class="text-[var(--text-primary)]">{{ entry.kind === 'event' ? 'Project event' : entry.message.authorKind === 'human' ? 'Human Operator' : `@${entry.message.authorId}` }}</strong>
+              <strong class="text-[var(--text-primary)]">{{ entry.kind === 'event' ? 'Project event' : entry.message.authorKind === 'human' ? 'Human Operator' : `@${agentName(entry.message.authorId)}` }}</strong>
               <div class="chat-evidence-wrap relative flex items-center gap-1">
                 <button type="button" class="chat-evidence-trigger flex h-9 w-9 items-center justify-center rounded focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :aria-label="`Routing and delivery evidence for ${entry.kind === 'message' ? entry.message.id : entry.event.id}`" :aria-expanded="evidenceOpen === (entry.kind === 'message' ? entry.message.id : entry.event.id)" @click.stop="openEvidence(entry.kind === 'message' ? entry.message.id : entry.event.id, entry.kind, $event)"><Icon name="info" :size="14" /></button>
                 <span class="text-[10px] text-[var(--text-muted)]">{{ time(entry.kind === 'message' ? entry.message.createdAt : entry.event.createdAt) }}</span>
