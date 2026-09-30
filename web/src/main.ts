@@ -1,5 +1,6 @@
 import { refreshRecipientsOnProjectChange } from './recipient-refresh';
 import { eligibleTaskAgents, taskActivity, taskContextState, taskFailureMessage } from './task-controls';
+import { newDeliveryKey } from './utils/delivery-key';
 
 /**
  * The M1 Web client.
@@ -886,14 +887,6 @@ function formatTime(timestamp: number): string {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-function newDeliveryKey(): string {
-  const random =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `web-${random}`;
 }
 
 function showMessageError(text: string): void {

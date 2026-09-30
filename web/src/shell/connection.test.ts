@@ -39,6 +39,7 @@ test('offline says facts are cached and actions are not queued', () => {
   assert.equal(offline.status, 'red');
   assert.match(offline.announce, /cached/i);
   assert.match(offline.announce, /queued/i);
+  assert.equal(describeConnection(state('offline', true)).label, 'Offline', 'an in-flight retry cannot mask a known offline state');
 });
 
 test('a subscriber observes the current state immediately and every later change', () => {
