@@ -44,17 +44,25 @@ async function load() {
     try { siblings.value = (await service.listRoutingBatches(record.batch.projectId)).batches; }
     catch { siblings.value = []; siblingsError.value = true; }
     announcer.announce(`Causal routing inspector for ${batchId.value}.`);
-    await nextTick();
-    (document.querySelector('.routing-inspector-heading') as HTMLElement | null)?.focus();
   } catch (error) {
     if (token === generation) {
       if (error instanceof BrowserRequestError && error.status === 404) notFound.value = true;
       else unavailable.value = true;
     }
   }
-  finally { if (token === generation) loading.value = false; }
+  finally { if (token === generation) { loading.value = false; if (detail.value) await focusTarget(); } }
 }
 watch(batchId, () => { void load(); }, { immediate: true });
+watch(attempt, () => { if (!loading.value) void focusTarget(); });
+async function focusTarget() {
+  await nextTick();
+  const target = selectedAttempt.value
+    ? [...document.querySelectorAll<HTMLElement>('[data-attempt-id]')].find((item) => item.dataset['attemptId'] === selectedAttempt.value?.id)
+    : attemptMissing.value ? document.querySelector<HTMLElement>('.routing-attempt-not-found') : undefined;
+  const focused = target ?? document.querySelector<HTMLElement>('.routing-inspector-heading');
+  focused?.focus();
+  target?.scrollIntoView?.({ block: 'nearest' });
+}
 function selectBatch(event: Event) { const id = (event.target as HTMLSelectElement).value; if (id) void router.push({ name: 'project-chat-routing', params: { batchId: id }, query: { ...route.query, attempt: undefined } }); }
 function back() { void router.push(returnLocation.value); }
 function timestamp(at?: number) { return at ? new Date(at).toLocaleString() : 'not settled'; }
@@ -77,7 +85,7 @@ function statusLabel(status: string) { return status === 'failed' ? 'Failed clos
         <div><h1 tabindex="-1" class="routing-inspector-heading text-base font-bold text-[var(--text-primary)]">Causal Wake Routing Inspector</h1><p>Durable causal evidence &amp; privacy boundaries</p></div>
         <Button variant="secondary" size="sm" class="min-h-11" @click="back">Back to Conversations</Button>
       </header>
-      <div v-if="attemptMissing" class="routing-attempt-not-found rounded border border-[var(--red-action)] bg-[var(--bg-surface)] p-3" role="alert">Attempt {{ attempt }} was not found in batch {{ detail.batch.id }}. The batch below is shown without substituting another attempt.</div>
+      <div v-if="attemptMissing" tabindex="-1" class="routing-attempt-not-found rounded border border-[var(--red-action)] bg-[var(--bg-surface)] p-3" role="alert">Attempt {{ attempt }} was not found in batch {{ detail.batch.id }}. The batch below is shown without substituting another attempt.</div>
       <div v-if="siblings.length" class="flex items-center gap-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3"><label for="routing-batch-select" class="font-bold">Select Batch:</label><select id="routing-batch-select" :value="detail.batch.id" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2" @change="selectBatch"><option v-for="item in siblings" :key="item.id" :value="item.id">{{ item.id }} ({{ statusLabel(item.status) }})</option></select></div>
       <p v-if="siblingsError" role="status" class="rounded border border-[var(--border-subtle)] p-3">The Project batch list is unavailable; this exact batch remains inspectable.</p>
       <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" aria-label="Batch execution summary">
@@ -96,7 +104,7 @@ function statusLabel(status: string) { return status === 'failed' ? 'Failed clos
       <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" aria-label="Frozen batch inputs"><h2 class="font-bold text-[var(--text-primary)]">Inputs in Batch</h2><div v-for="input in detail.inputs" :key="input.inputId" class="mt-2 rounded border border-[var(--border-subtle)] p-2"><code>{{ input.inputId }}</code> · {{ input.excerptChars }} of {{ input.contentChars }} characters<span v-if="input.truncated"> · Bounded excerpt (truncated)</span><p class="whitespace-pre-wrap break-words">{{ input.excerpt }}</p></div></section>
       <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" aria-label="Attempt history"><h2 class="font-bold text-[var(--text-primary)]">Attempt History &amp; Automatic Retry ({{ detail.attempts.length }})</h2>
         <p v-if="!detail.attempts.length">No judgement attempt has been recorded; this batch is pending.</p>
-        <div v-for="item in detail.attempts" :key="item.id" :data-attempt-id="item.id" class="mt-2 rounded border p-2" :class="selectedAttempt?.id === item.id ? 'border-[var(--accent-primary)] ring-2 ring-[var(--accent-primary)]' : 'border-[var(--border-subtle)]'">
+        <div v-for="item in detail.attempts" :key="item.id" tabindex="-1" :data-attempt-id="item.id" class="mt-2 rounded border p-2" :class="selectedAttempt?.id === item.id ? 'border-[var(--accent-primary)] ring-2 ring-[var(--accent-primary)]' : 'border-[var(--border-subtle)]'">
           <strong>Attempt #{{ item.attemptNumber }} · {{ item.status }}</strong><p>Model: {{ item.modelId }} · {{ timestamp(item.startedAt) }} → {{ timestamp(item.finishedAt) }}</p><p v-if="item.errorKind">{{ item.errorKind }}<span v-if="item.errorDetail"> · {{ item.errorDetail }}</span></p>
         </div>
       </section>

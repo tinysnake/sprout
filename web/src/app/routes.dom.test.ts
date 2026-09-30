@@ -497,10 +497,12 @@ test('Project Chat distinguishes pending, suppressed, failed and projected evide
     assert.equal(doc.querySelector('.routing-inspector-view')?.getAttribute('data-inspector-state'), 'ready');
     assert.match(doc.body.textContent ?? '', /Batch ID: batch-failed/);
     assert.ok(doc.querySelector('[data-attempt-id="attempt-batch-failed-1"]'));
+    assert.equal(doc.activeElement?.getAttribute('data-attempt-id'), 'attempt-batch-failed-1', 'attempt deep links focus the exact attempt');
     assert.equal(doc.querySelector('[data-scope-id]'), null, 'the inspector is not generic Chat');
     await router.push('/project/chat/routing/batch-failed?attempt=999');
     await settle(60);
     assert.ok(doc.querySelector('.routing-attempt-not-found'));
+    assert.ok(doc.activeElement?.classList.contains('routing-attempt-not-found'), 'a missing attempt is announced and focused');
     await router.push('/project/chat/routing/missing-batch');
     await settle(80);
     assert.ok(doc.querySelector('.routing-not-found-state'));
