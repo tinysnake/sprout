@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 22;
+export const CURRENT_SCHEMA_VERSION = 23;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 22;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 23;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1048,6 +1048,22 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         );
         CREATE INDEX IF NOT EXISTS task_proposals_project ON task_proposals(project_id);
       `);
+    },
+  },
+  {
+    fromVersion: 22,
+    toVersion: 23,
+    name: 'task_proposal_working_group_provenance',
+    migrate(db) {
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_proposals'").get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(task_proposals)').all() as unknown as readonly { name: string }[];
+      if (!columns.some(column => column.name === 'working_group_id')) {
+        db.exec('ALTER TABLE task_proposals ADD COLUMN working_group_id TEXT;');
+      }
+      if (!columns.some(column => column.name === 'source_message_id')) {
+        db.exec('ALTER TABLE task_proposals ADD COLUMN source_message_id TEXT;');
+      }
     },
   },
 ];

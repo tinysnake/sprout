@@ -17,6 +17,7 @@ test('proposal adapter encodes Project and proposal identities and retains optim
   await browser.contentVersion('proposal/with space', 3);
   await browser.validate('project/with space', content);
   await browser.propose('project/with space', content);
+  await browser.propose('project/with space', content, { workingGroupId: 'group/1', sourceMessageId: 'message/2' });
   await browser.revise('proposal/with space', { ...content, ...decision });
   await browser.withdraw('proposal/with space', decision);
   await browser.reject('proposal/with space', decision);
@@ -26,13 +27,16 @@ test('proposal adapter encodes Project and proposal identities and retains optim
     '/api/task-proposals/proposal%2Fwith%20space/versions/3',
     '/api/projects/project%2Fwith%20space/task-proposals/validate',
     '/api/projects/project%2Fwith%20space/task-proposals',
+    '/api/projects/project%2Fwith%20space/task-proposals',
     '/api/task-proposals/proposal%2Fwith%20space/content',
     '/api/task-proposals/proposal%2Fwith%20space/withdraw',
     '/api/task-proposals/proposal%2Fwith%20space/reject',
   ]);
   for (const call of calls.slice(3)) assert.equal(call.method, 'POST');
-  assert.deepEqual(JSON.parse(calls[5]!.body!), { ...content, ...decision });
-  assert.deepEqual(JSON.parse(calls[7]!.body!), decision);
+  assert.deepEqual(JSON.parse(calls[4]!.body!), { ...content, origin: null });
+  assert.deepEqual(JSON.parse(calls[5]!.body!), { ...content, origin: { workingGroupId: 'group/1', sourceMessageId: 'message/2' } });
+  assert.deepEqual(JSON.parse(calls[6]!.body!), { ...content, ...decision });
+  assert.deepEqual(JSON.parse(calls[8]!.body!), decision);
 });
 
 test('disconnected proposal command rejects once, exposes offline state and is never replayed', async () => {

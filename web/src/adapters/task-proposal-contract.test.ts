@@ -30,6 +30,17 @@ test('production transport and browser adapter deliver proposal authority withou
     const transport = createBrowserTransport({ fetch: ((url: string | URL | Request, init?: RequestInit) => fetch(`${base}${String(url)}`, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), cookie } })) as typeof fetch });
     transport.setCsrfToken(csrfToken);
     const browser = createTaskProposalBrowserAdapter(transport);
+    const group = await runtime.conversationScopes.createWorkingGroup({
+      projectId: PROJECT_ID, displayName: 'Proposal source', creator: { memberId: 'operator', kind: 'human' }, memberIds: ['scout'],
+    });
+    const sourceMessage = {
+      id: 'proposal-source-message', projectId: PROJECT_ID, scopeId: group.id, channel: 'working-group' as const,
+      author: { id: 'operator', kind: 'human' as const }, body: 'Please propose this work', recipients: [],
+      deliveryKey: 'proposal-source-message', createdAt: group.createdAt + 1,
+    };
+    await stores.collaboration.postMessage({
+      message: sourceMessage, plan: { inputId: sourceMessage.id, decisions: [], observations: [] }, now: sourceMessage.createdAt,
+    });
     const callsBefore = [...contextCalls];
     assert.deepEqual(await browser.validate(PROJECT_ID, content), content);
     assert.deepEqual(await browser.list(PROJECT_ID), []);
@@ -37,6 +48,10 @@ test('production transport and browser adapter deliver proposal authority withou
     assert.equal(forged.status, 201);
     const { proposal: human } = await forged.json() as { proposal: TaskProposal };
     assert.deepEqual(human.proposer, { memberId: 'operator', memberKind: 'human' });
+    assert.equal(human.origin, null, 'direct Human creation explicitly records no origin');
+    const spoofedOrigin = await fetch(`${base}${path}`, { method: 'POST', headers,
+      body: JSON.stringify({ ...content, origin: { workingGroupId: group.id, sourceMessageId: 'foreign-message' } }) });
+    assert.equal(spoofedOrigin.status, 400, 'a caller cannot attach an unrelated source Message');
     const agent = await runtime.taskProposals.propose(PROJECT_ID, { memberId: 'scout', memberKind: 'agent' }, content);
     const heldVersion = await browser.contentVersion(agent.id, 1);
     const revised = await browser.revise(agent.id, { ...content, goal: 'Corrected by Human', expectedRevision: 1, reason: 'Narrow scope' });
@@ -49,7 +64,10 @@ test('production transport and browser adapter deliver proposal authority withou
     assert.equal((await browser.withdraw(human.id, { expectedRevision: 1, reason: 'Superseded' })).status, 'withdrawn');
     const own = await browser.propose(PROJECT_ID, content);
     assert.equal(own.currentContentVersion, 1);
-    assert.equal((await browser.list(PROJECT_ID)).length, 3);
+    assert.equal(own.origin, null, 'direct Agent/Human adapter creation explicitly records no origin');
+    const groupProposal = await browser.propose(PROJECT_ID, content, { workingGroupId: group.id, sourceMessageId: sourceMessage.id });
+    assert.deepEqual(groupProposal.origin, { workingGroupId: group.id, sourceMessageId: sourceMessage.id });
+    assert.equal((await browser.list(PROJECT_ID)).length, 4);
     await assert.rejects(browser.get('missing'), { status: 404, code: 'unknown-proposal' });
     await assert.rejects(browser.validate(PROJECT_ID, { ...content, constraints: 'invalid' as unknown as string[] }), { status: 400, code: 'invalid-content' });
     for (const body of ['null', '[]', '{bad json']) {

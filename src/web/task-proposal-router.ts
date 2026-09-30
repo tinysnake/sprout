@@ -1,6 +1,6 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import type { TaskProposalService } from '../task/proposal-service.ts';
-import { TaskProposalError, type TaskProposalContent, type ReviseTaskProposal, type ProposalDecision } from '../task/proposal-model.ts';
+import { TaskProposalError, type TaskProposalInput, type TaskProposalContent, type ReviseTaskProposal, type ProposalDecision } from '../task/proposal-model.ts';
 
 function json(context: ApiRequestContext, status: number, body: unknown): boolean {
   context.response.writeHead(status, { 'content-type': 'application/json' });
@@ -34,7 +34,7 @@ export function createTaskProposalRouter(options: { proposals: TaskProposalServi
         const actor = await proposals.humanAuthority(projectId);
         const body = await context.readBody();
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TaskProposalError('invalid-content');
-        if (collection) return json(context, 201, { proposal: await proposals.propose(id, actor, body as unknown as TaskProposalContent) });
+        if (collection) return json(context, 201, { proposal: await proposals.propose(id, actor, body as unknown as TaskProposalInput) });
         if (validation) return json(context, 200, { content: await proposals.validate(id, actor, body as unknown as TaskProposalContent) });
         const decision = body as unknown as ProposalDecision;
         const proposal = segments[3] === 'content'

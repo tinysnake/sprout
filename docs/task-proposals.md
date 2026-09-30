@@ -11,9 +11,14 @@ mounts `createTaskProposalRouter`; the typed Web port is
 
 ## Contract
 
-- `propose(projectId, actor, content)` records one Human- or Agent-created
-  proposal. `actor` is a trusted internal caller identity, not browser input.
-  It must match an active Project membership in both identity and kind.
+- `propose(projectId, actor, content + origin?)` records one Human- or
+  Agent-created proposal. `actor` is a trusted internal caller identity, not
+  browser input. It must match an active Project membership in both identity
+  and kind. A Working-group origin records both `workingGroupId` and
+  `sourceMessageId`; the service verifies that the durable Message belongs to
+  that Working group and Project and that its author participated in the group
+  when it was sent. Direct creation stores `origin: null` explicitly. This
+  provenance does not grant authority or affect validation.
 - `validate(projectId, actor, content)` checks membership, Project writability,
   and bounded content, returning sanitized content. It writes nothing.
 - `get(id)` and `list(projectId)` preserve history, including rejected/withdrawn
@@ -42,8 +47,10 @@ from content version, which increments only on revision. A stale command refuses
 rather than overwriting another accepted change. SQLite read/mutate/conditional
 write is synchronous and fenced by both revision and prior document; memory
 storage has the same snapshot-isolation and failure contract. The shared schema
-advances from v21 to v22 with the existing transactional migration/safety-copy
-protocol. Fresh databases initialize the table through the domain adapter.
+advances from v21 to v22 for proposals and from v22 to v23 for nullable
+Working-group/source-Message provenance columns, using the existing transactional
+migration/safety-copy protocol. Historical rows read as `origin: null`. Fresh
+databases initialize the table through the domain adapter.
 
 ## HTTP and Web
 
@@ -62,9 +69,10 @@ actor/proposer fields cannot impersonate an Agent or grant authority.
 | POST | `/api/task-proposals/:id/withdraw` | `{ proposal }` |
 | POST | `/api/task-proposals/:id/reject` | `{ proposal }` |
 
-Creation/validation accept content. Revision accepts full replacement content,
-`reason`, and positive integer `expectedRevision`; decisions accept the latter
-two fields. Domain failures carry stable `code`: unknown targets are 404,
+Creation accepts content and optional `origin`; validation accepts content
+only. Revision accepts full replacement content, `reason`, and positive integer
+`expectedRevision`; decisions accept the latter two fields. Domain failures
+carry stable `code`: unknown targets are 404,
 invalid content is 400, authority/membership refusal is 403, and stale/lifecycle
 conflicts are 409. Unexpected failures expose no raw diagnostics.
 
@@ -91,7 +99,7 @@ adds no implicit bridge that could bypass Human approval.
 - Shared model and authority loss/spoofing: `src/task/proposal.test.ts`.
 - Stale edits, caller aliasing, rollback and adapter parity:
   `src/task/proposal-contract.test.ts` and proposal service tests.
-- Durable attribution and restart: proposal service SQLite reopen test.
+- Durable attribution and restart, including Working-group/source-Message provenance: proposal service SQLite reopen test and v22-to-v23 migration test.
 - Migration and old facts: `src/task/proposal-migration.test.ts` plus schema tests.
 - Authentication, CSRF, real runtime composition, Human override, browser wire
   compatibility, invalid bodies and absence of execution side effects:

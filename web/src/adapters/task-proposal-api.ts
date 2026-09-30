@@ -1,8 +1,8 @@
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.js';
-import type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision } from '../../../src/task/proposal-model.ts';
+import type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin } from '../../../src/task/proposal-model.ts';
 
 // Shared portable types, not a second wire vocabulary. No backend runtime import.
-export type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision } from '../../../src/task/proposal-model.ts';
+export type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin } from '../../../src/task/proposal-model.ts';
 export interface TaskProposalBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
@@ -10,7 +10,7 @@ export interface TaskProposalBrowserAdapter {
   get(id: string): Promise<TaskProposal>;
   contentVersion(id: string, version: number): Promise<TaskContentVersion>;
   validate(projectId: string, content: TaskProposalContent): Promise<TaskProposalContent>;
-  propose(projectId: string, content: TaskProposalContent): Promise<TaskProposal>;
+  propose(projectId: string, content: TaskProposalContent, origin?: TaskProposalOrigin | null): Promise<TaskProposal>;
   revise(id: string, input: ReviseTaskProposal): Promise<TaskProposal>;
   withdraw(id: string, input: ProposalDecision): Promise<TaskProposal>;
   reject(id: string, input: ProposalDecision): Promise<TaskProposal>;
@@ -29,7 +29,7 @@ export function createTaskProposalBrowserAdapter(transport: BrowserTransport): T
     get: async id => (await transport.request<{ proposal: TaskProposal }>(detail(id))).proposal,
     contentVersion: async (id, version) => (await transport.request<{ contentVersion: TaskContentVersion }>(`${detail(id)}/versions/${version}`)).contentVersion,
     validate: async (id, content) => (await transport.request<{ content: TaskProposalContent }>(`${collection(id)}/validate`, post(content))).content,
-    propose: (id, content) => command(collection(id), content),
+    propose: (id, content, origin = null) => command(collection(id), { ...content, origin }),
     revise: (id, input) => command(`${detail(id)}/content`, input),
     withdraw: (id, input) => command(`${detail(id)}/withdraw`, input),
     reject: (id, input) => command(`${detail(id)}/reject`, input),

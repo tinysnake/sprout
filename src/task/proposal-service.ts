@@ -1,10 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import type { ProjectAgentAuthorityPort } from '../project/authority-service.ts';
 import type { ConversationProjectPort } from '../conversation/service.ts';
+import type { WorkingGroupScope } from '../conversation/model.ts';
+import type { Message } from '../collaboration/model.ts';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
 import { TaskProposalError, type ProposalActor, type TaskProposal, type TaskProposalContent,
-  type TaskContentVersion, type ProposalDecision, type ReviseTaskProposal } from './proposal-model.ts';
+  type TaskContentVersion, type ProposalDecision, type ReviseTaskProposal, type TaskProposalInput,
+  type TaskProposalOrigin } from './proposal-model.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
+
+export interface ProposalOriginFactsPort {
+  getWorkingGroup(id: string): Promise<WorkingGroupScope | undefined>;
+  getMessage(id: string): Promise<Message | undefined>;
+}
 
 /**
  * Public proposal capability (#99). Only read-only membership/identity ports and storage:
@@ -16,12 +24,14 @@ export class TaskProposalService {
   readonly #store: TaskProposalStore;
   readonly #projects: ConversationProjectPort;
   readonly #agents: ProjectAgentAuthorityPort;
+  readonly #origins: ProposalOriginFactsPort | undefined;
   readonly #now: () => number;
   readonly #id: () => string;
-  constructor(options: { store: TaskProposalStore; projects: ConversationProjectPort; agents: ProjectAgentAuthorityPort; now?: () => number; id?: () => string }) {
+  constructor(options: { store: TaskProposalStore; projects: ConversationProjectPort; agents: ProjectAgentAuthorityPort; origins?: ProposalOriginFactsPort; now?: () => number; id?: () => string }) {
     this.#store = options.store;
     this.#projects = options.projects;
     this.#agents = options.agents;
+    this.#origins = options.origins;
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? (() => `proposal-${randomUUID()}`);
   }
@@ -35,12 +45,14 @@ export class TaskProposalService {
     await this.#authorize(projectId, actorSnapshot(actor));
     return validatedContent(input);
   }
-  async propose(projectId: string, actor: ProposalActor, input: TaskProposalContent): Promise<TaskProposal> {
+  async propose(projectId: string, actor: ProposalActor, input: TaskProposalInput): Promise<TaskProposal> {
     actor = actorSnapshot(actor);
+    const originInput = snapshotOriginInput(input && typeof input === 'object' ? input.origin : undefined);
     const content = await this.validate(projectId, actor, input);
+    const origin = await this.#proposalOrigin(projectId, originInput);
     const now = this.#now();
     const proposal: TaskProposal = {
-      id: this.#id(), projectId, proposer: actorSnapshot(actor), status: 'proposed', revision: 1,
+      id: this.#id(), projectId, proposer: actorSnapshot(actor), origin, status: 'proposed', revision: 1,
       currentContentVersion: 1, versions: [{ ...content, version: 1, actor: actorSnapshot(actor), at: now, reason: 'Proposed' }],
       lifecycle: [], createdAt: now, updatedAt: now,
     };
@@ -96,6 +108,28 @@ export class TaskProposalService {
         lifecycle: [...current.lifecycle, { action, actor: actorSnapshot(actor), at: now, reason, contentVersion: current.currentContentVersion }] };
     });
   }
+  async #proposalOrigin(projectId: string, input: unknown): Promise<TaskProposalOrigin | null> {
+    if (input === undefined || input === null) return null;
+    if (typeof input !== 'object' || Array.isArray(input)) throw new TaskProposalError('invalid-content', 'invalid proposal origin');
+    const candidate = input as Partial<TaskProposalOrigin>;
+    if (typeof candidate.workingGroupId !== 'string' || !candidate.workingGroupId.trim()
+      || typeof candidate.sourceMessageId !== 'string' || !candidate.sourceMessageId.trim()) {
+      throw new TaskProposalError('invalid-content', 'invalid proposal origin');
+    }
+    const workingGroupId = candidate.workingGroupId;
+    const sourceMessageId = candidate.sourceMessageId;
+    const group = await this.#origins?.getWorkingGroup(workingGroupId);
+    const message = await this.#origins?.getMessage(sourceMessageId);
+    const authorWasParticipant = group?.memberships.some(member =>
+      member.memberId === message?.author.id && member.memberKind === message.author.kind
+      && member.addedAt <= message.createdAt && (member.endedAt === undefined || member.endedAt >= message.createdAt));
+    if (!group || group.id !== workingGroupId || group.kind !== 'working-group' || group.projectId !== projectId
+      || !message || message.id !== sourceMessageId || message.projectId !== projectId
+      || message.channel !== 'working-group' || message.scopeId !== group.id || !authorWasParticipant) {
+      throw new TaskProposalError('invalid-content', 'proposal origin does not identify a Working-group Message');
+    }
+    return { workingGroupId, sourceMessageId };
+  }
   #open(proposal: TaskProposal): void {
     if (proposal.status !== 'proposed') throw new TaskProposalError('proposal-closed');
   }
@@ -112,6 +146,11 @@ export class TaskProposalService {
     }
     if (actor.memberKind === 'agent' && !await this.#agents.agentIsActive(actor.memberId)) throw new TaskProposalError('agent-read-only');
   }
+}
+function snapshotOriginInput(input: unknown): unknown {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return input;
+  const candidate = input as Record<string, unknown>;
+  return { workingGroupId: candidate.workingGroupId, sourceMessageId: candidate.sourceMessageId };
 }
 function actorSnapshot(actor: ProposalActor): ProposalActor {
   if (!actor || typeof actor !== 'object') throw new TaskProposalError('membership-required');

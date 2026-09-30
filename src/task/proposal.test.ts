@@ -7,6 +7,8 @@ import { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
 import { InMemoryTaskProposalStore } from './proposal-store.ts';
 import { SqliteStore } from '../store/db.ts';
+import type { WorkingGroupScope } from '../conversation/model.ts';
+import type { Message } from '../collaboration/model.ts';
 
 const human = { memberId: 'operator', memberKind: 'human' as const };
 const agent = { memberId: 'author', memberKind: 'agent' as const };
@@ -109,4 +111,76 @@ test('SQLite restart preserves version and lifecycle attribution using the same 
     assert.equal((await service.contentVersion(proposal.id, 1)).goal, content.goal);
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Working-group and source-Message provenance survives SQLite restart; direct origins are explicitly null', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'proposal-origin-'));
+  const origin = { workingGroupId: 'group-1', sourceMessageId: 'message-1' };
+  const group: WorkingGroupScope = {
+    id: origin.workingGroupId, projectId: 'project', kind: 'working-group', creatorId: agent.memberId,
+    memberships: [{ ...agent, addedAt: 1, addedBy: agent.memberId }], lifecycle: [],
+    content: { currentVersion: 1, versions: [{ version: 1, at: 1, actorMemberId: agent.memberId, reason: 'Created', displayName: 'Group', goal: '', rules: [] }] },
+    createdAt: 1, updatedAt: 1,
+  };
+  const message: Message = {
+    id: origin.sourceMessageId, projectId: 'project', scopeId: group.id, channel: 'working-group',
+    author: { id: agent.memberId, kind: agent.memberKind }, body: 'Source', recipients: [], deliveryKey: 'source', createdAt: 2,
+  };
+  let db = new SqliteStore({ filename: join(dir, 'state.sqlite') });
+  const { facts, activeAgents } = fixture(db.taskProposals);
+  const origins = {
+    getWorkingGroup: async (id: string) => id === group.id ? group : undefined,
+    getMessage: async (id: string) => id === message.id ? message : undefined,
+  };
+  const createService = (store: TaskProposalStore) => new TaskProposalService({
+    store, agents: { agentIsActive: id => activeAgents.has(id) },
+    projects: { projectFacts: async id => id === 'project' ? facts : undefined }, origins,
+  });
+  try {
+    let service = createService(db.taskProposals);
+    const mutableInput = { ...content, origin: { ...origin } };
+    const creating = service.propose('project', agent, mutableInput);
+    mutableInput.origin.workingGroupId = 'foreign-group';
+    const fromGroup = await creating;
+    assert.deepEqual(fromGroup.origin, origin);
+    assert.deepEqual((await service.get(fromGroup.id)).origin, origin);
+    const directHuman = await service.propose('project', human, content);
+    const directAgent = await service.propose('project', agent, content);
+    assert.equal(directHuman.origin, null);
+    assert.equal(directAgent.origin, null);
+    db.close();
+    db = new SqliteStore({ filename: join(dir, 'state.sqlite') });
+    service = createService(db.taskProposals);
+    assert.deepEqual((await service.get(fromGroup.id)).origin, origin);
+    assert.equal((await service.get(directHuman.id)).origin, null);
+    assert.equal((await service.get(directAgent.id)).origin, null);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('foreign or mismatched Working-group and Message provenance is refused', async () => {
+  const { store, facts, activeAgents } = fixture();
+  const group: WorkingGroupScope = {
+    id: 'group-1', projectId: 'project', kind: 'working-group', creatorId: agent.memberId,
+    memberships: [{ ...agent, addedAt: 1, addedBy: agent.memberId }], lifecycle: [],
+    content: { currentVersion: 1, versions: [{ version: 1, at: 1, actorMemberId: agent.memberId, reason: 'Created', displayName: 'Group', goal: '', rules: [] }] },
+    createdAt: 1, updatedAt: 1,
+  };
+  let message: Message = {
+    id: 'message-1', projectId: 'project', scopeId: group.id, channel: 'working-group',
+    author: { id: agent.memberId, kind: agent.memberKind }, body: 'Source', recipients: [], deliveryKey: 'source', createdAt: 2,
+  };
+  const service = new TaskProposalService({
+    store, agents: { agentIsActive: id => activeAgents.has(id) },
+    projects: { projectFacts: async id => id === 'project' ? facts : undefined },
+    origins: {
+      getWorkingGroup: async id => id === group.id ? group : undefined,
+      getMessage: async id => id === message.id ? message : undefined,
+    },
+  });
+  await assert.rejects(service.propose('project', agent, { ...content, origin: { workingGroupId: 'foreign-group', sourceMessageId: message.id } }), { code: 'invalid-content' });
+  message = { ...message, projectId: 'another-project' };
+  await assert.rejects(service.propose('project', agent, { ...content, origin: { workingGroupId: group.id, sourceMessageId: message.id } }), { code: 'invalid-content' });
+  message = { ...message, projectId: 'project', scopeId: 'foreign-group' };
+  await assert.rejects(service.propose('project', agent, { ...content, origin: { workingGroupId: group.id, sourceMessageId: message.id } }), { code: 'invalid-content' });
+  assert.deepEqual(await store.listForProject('project'), []);
 });

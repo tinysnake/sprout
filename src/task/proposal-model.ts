@@ -9,6 +9,12 @@ export interface TaskProposalContent {
   readonly constraints: readonly string[];
   readonly validationCriteria: readonly string[];
 }
+export interface TaskProposalOrigin {
+  readonly workingGroupId: string;
+  readonly sourceMessageId: string;
+}
+/** Provenance is optional on input and always explicit (`null`) on a saved record. */
+export type TaskProposalInput = TaskProposalContent & { readonly origin?: TaskProposalOrigin | null };
 export interface TaskContentVersion extends TaskProposalContent {
   readonly version: number;
   readonly actor: ProposalActor;
@@ -19,6 +25,7 @@ export interface TaskProposal {
   readonly id: string;
   readonly projectId: string;
   readonly proposer: ProposalActor;
+  readonly origin: TaskProposalOrigin | null;
   readonly status: 'proposed' | 'withdrawn' | 'rejected';
   /** All mutations, including lifecycle decisions, increment this stale-command fence. */
   readonly revision: number;
