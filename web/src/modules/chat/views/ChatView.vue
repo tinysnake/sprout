@@ -61,6 +61,11 @@ let generation = 0;
 let detailGeneration = 0;
 let unsubRuns: (() => void) | undefined;
 const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
+// The Message port has no arrival signal. Observe the selected Project at a
+// bounded cadence while visible; run-coupled replies keep their fast follow-ups.
+const CHAT_POLL_MS = 15000;
+let pollTimer: ReturnType<typeof setInterval> | undefined;
+let refreshInFlight = false;
 const requestedScopeId = computed(() => typeof route.params['scopeId'] === 'string' ? route.params['scopeId'] as string : '');
 const projectId = computed(() => typeof route.query['project'] === 'string' ? route.query['project'] as string : projects.value.find((p) => p.status === 'active')?.id ?? projects.value[0]?.id ?? '');
 const project = computed(() => projects.value.find((p) => p.id === projectId.value));
@@ -153,14 +158,17 @@ async function loadProject() {
   finally { if (token === generation) loading.value = false; }
 }
 async function refreshMessages() {
-  if (!service || !projectId.value) return;
+  if (!service || !projectId.value || loading.value || error.value || refreshInFlight) return;
+  refreshInFlight = true;
   const id = projectId.value;
   const token = generation;
   try {
-    const [all, projectEvents] = await Promise.all([projectMessages(scopes.value), service.listProjectEvents(id)]);
-    if (token !== generation || id !== projectId.value) return;
+    const scopeList = await service.listScopes(id);
+    const [all, projectEvents] = await Promise.all([projectMessages(scopeList), service.listProjectEvents(id)]);
+    if (token !== generation || id !== projectId.value || document.visibilityState === 'hidden') return;
     const incoming = all.filter((m) => m.projectId === id && !messages.value.some((old) => old.id === m.id) && m.authorKind !== 'human');
     const newEvents = projectEvents.filter((event) => !knownEvents.has(event.id));
+    scopes.value = scopeList;
     messages.value = all.filter((m) => m.projectId === id);
     events.value = projectEvents;
     for (const event of newEvents) knownEvents.add(event.id);
@@ -169,7 +177,14 @@ async function refreshMessages() {
       announcer.announce(`${incoming.length ? `${incoming.length} new ${incoming.length === 1 ? 'message' : 'messages'}` : ''}${incoming.length && newEvents.length ? ' and ' : ''}${newEvents.length ? `${newEvents.length} new Project ${newEvents.length === 1 ? 'event' : 'events'}` : ''} in ${project.value?.displayName ?? 'Project'}${inCurrent.length ? `; ${inCurrent.length} in ${activeScope.value ? title(activeScope.value) : 'current conversation'}` : ''}.`);
     }
     markVisible();
-  } catch { actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
+  } catch { if (token === generation) actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
+  finally { refreshInFlight = false; }
+}
+function onVisibilityChange() {
+  if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
+  if (document.visibilityState === 'hidden') return;
+  void refreshMessages(); // Catch up after a hidden interval without polling it.
+  pollTimer = setInterval(() => { void refreshMessages(); }, CHAT_POLL_MS);
 }
 async function loadScope() {
   const token = ++detailGeneration;
@@ -342,6 +357,8 @@ watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  onVisibilityChange();
   unsubRuns = service?.subscribeRunStatuses(() => {
     void refreshMessages();
     // Run settlement can reach the event stream just before its reply projection.
@@ -350,7 +367,7 @@ onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); 
       refreshTimers.add(timer);
     }
   }); });
-onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
+onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTimer !== undefined) clearInterval(pollTimer); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('visibilitychange', onVisibilityChange); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
 </script>
 
 <template>

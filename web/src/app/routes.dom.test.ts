@@ -588,6 +588,35 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
   } finally { await loadingHarness.cleanup(); }
 });
 
+test('idle Message and Project-event arrivals announce without run status; hidden Chat catches up on return', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const fixture = new FixtureChatService();
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(170);
+    fixture.pushIdleMessage('wg-frontend', 'Unrouted conversation update');
+    await settle(15100); // The bounded idle poll, not an injected run-status notification.
+    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /1 new message in /i);
+    assert.match(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.textContent ?? '', /1 new/);
+
+    Object.defineProperty(doc, 'visibilityState', { configurable: true, value: 'hidden' });
+    doc.dispatchEvent(new dom.window.Event('visibilitychange'));
+    fixture.pushIdleEvent('Review is awaiting Human action.');
+    await settle(100);
+    assert.equal(doc.querySelector('[data-event-id="idle-event-1"]'), null, 'hidden Chat does not fetch');
+    Object.defineProperty(doc, 'visibilityState', { configurable: true, value: 'visible' });
+    doc.dispatchEvent(new dom.window.Event('visibilitychange'));
+    await settle(100);
+    assert.ok(doc.querySelector('[data-event-id="idle-event-1"]'), 'visibility restores Project-event observation');
+    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /1 new Project event in /i);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
 test('a refused Message response reuses its delivery key when the unchanged draft is retried', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   try {

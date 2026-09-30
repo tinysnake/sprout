@@ -53,6 +53,7 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 export class FixtureChatService implements ChatService {
   readonly #scopes = [...scopes];
   readonly #messages = [...fixtureMessages];
+  readonly #events = [event];
   readonly #listeners = new Set<(run: { readonly id: string; readonly status: RunView['status'] }) => void>();
   private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
   constructor(options: { readonly archived?: boolean; readonly loading?: boolean } = {}) { this.options = options; }
@@ -115,7 +116,7 @@ export class FixtureChatService implements ChatService {
     this.#messages.push(message);
     return { message, duplicate: false, wakes: [], admittedRunIds: [] };
   }
-  async listProjectEvents(id: string) { return id === projectId ? [event] : []; }
+  async listProjectEvents(id: string) { return id === projectId ? [...this.#events] : []; }
   async messageRouting(id: string) { const message = this.#messages.find((item) => item.id === id); if (!message) throw new Error('Message not found'); return evidence({ kind: 'message', message: { ...message } }, id); }
   async eventRouting(id: string): Promise<RoutingEvidenceView> { if (id !== event.id) throw new Error('Event not found'); return evidence({ kind: 'event', event: { ...event } }, id); }
   async listRoutingBatches(id: string) { return { windows: batches.map((detail) => detail.window!), batches: id === projectId ? batches.map((detail) => detail.batch) : [] }; }
@@ -127,5 +128,12 @@ export class FixtureChatService implements ChatService {
     this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, at + 100 + this.#messages.length, 'programmer', 'agent'));
     const run = await this.getRunStatus('run-projected');
     for (const listener of this.#listeners) listener(run);
+  }
+  // Idle arrivals are durable but have no run-status signal.
+  pushIdleMessage(scopeId: string, body: string) {
+    this.#messages.push(makeMessage(`idle-${this.#messages.length}`, scopeId, body, at + 200 + this.#messages.length, 'programmer', 'agent'));
+  }
+  pushIdleEvent(summary: string) {
+    this.#events.push({ ...event, id: `idle-event-${this.#events.length}`, summary, createdAt: at + 300 + this.#events.length });
   }
 }
