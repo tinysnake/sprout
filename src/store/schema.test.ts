@@ -32,13 +32,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 21);
+  assert.equal(CURRENT_SCHEMA_VERSION, 23);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 21);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 23);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 21,
-    current: 21,
+    max: 23,
+    current: 23,
   });
 });
 

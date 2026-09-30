@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { CURRENT_SCHEMA_VERSION } from './store/schema.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
@@ -26,6 +27,7 @@ import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
 import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
+import { InMemoryTaskProposalStore } from './task/proposal-store.ts';
 import { InMemoryConversationScopeStore } from './conversation/store.ts';
 import {
   build,
@@ -306,6 +308,7 @@ test('runtime construction failure closes environment and worker resources witho
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
+    taskProposals: new InMemoryTaskProposalStore(),
     close() {
       storesClosed++;
     },
@@ -330,7 +333,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 22; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION + 1}; CREATE TABLE retained_data (id TEXT PRIMARY KEY);`);
   database.close();
 
   let environmentClosed = 0;
