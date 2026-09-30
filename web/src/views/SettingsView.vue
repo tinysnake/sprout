@@ -22,6 +22,7 @@ const activeSubTab = ref<SettingsCategoryTab>('access');
 const isLoading = ref(true);
 const isStale = ref(false);
 const failureMessage = ref<string | null>(null);
+const readFailed = ref(false);
 const exportSuccessMessage = ref<string | null>(null);
 const copySuccess = ref(false);
 
@@ -61,15 +62,17 @@ async function loadData() {
     syncTransportState(service.state());
 
     const [settings, sessions, diag] = await Promise.all([
-      service.loadSettings().catch(() => null),
-      service.loadSessions().catch(() => []),
-      service.loadDiagnostics().catch(() => null),
+      service.loadSettings(),
+      service.loadSessions(),
+      service.loadDiagnostics(),
     ]);
 
-    if (settings) settingsData.value = settings;
+    settingsData.value = settings;
     sessionsData.value = sessions;
-    if (diag) diagnosticsData.value = diag;
+    diagnosticsData.value = diag;
+    readFailed.value = false;
   } catch (err) {
+    readFailed.value = true;
     failureMessage.value = err instanceof Error ? err.message : 'Failed to load operator settings';
   } finally {
     isLoading.value = false;
@@ -107,7 +110,7 @@ onUnmounted(() => {
 
 const activeSessions = computed(() => sessionsData.value);
 const activeSessionCount = computed(() => activeSessions.value.length);
-const canMutateSessions = computed(() => hasAuthority.value && !isStale.value && !isLoading.value);
+const canMutateSessions = computed(() => hasAuthority.value && !isStale.value && !isLoading.value && !readFailed.value);
 const canRevokeOthers = computed(() => activeSessionCount.value > 1 && canMutateSessions.value);
 
 // A dialog can outlive its live transport snapshot. Never submit or queue offline.
@@ -300,6 +303,15 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
         <Icon name="refresh" class="animate-spin text-[var(--accent-primary)]" :size="28" />
         <span class="text-sm font-semibold text-[var(--text-primary)]">Loading Operator Settings</span>
         <span class="text-xs text-[var(--text-muted)]">Querying session authority, compatibility facts, and diagnostic status...</span>
+      </div>
+
+      <div v-else-if="readFailed" class="settings-read-unavailable p-8" role="status">
+        <EmptyState
+          icon="warning"
+          title="Operator Settings Could Not Be Loaded"
+          description="Operational facts are unavailable because a required read failed. No command is queued. Use host-local diagnostics if Web remains unavailable."
+        />
+        <Button variant="secondary" class="min-h-[44px] mt-4" @click="loadData">Retry reads</Button>
       </div>
 
       <!-- Normal / Live Content Layout -->
