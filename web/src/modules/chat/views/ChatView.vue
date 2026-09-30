@@ -110,6 +110,13 @@ function scopePill(scope: ConversationScopeView) {
   return '';
 }
 function safeError() { return 'Could not load current Chat facts. Retry when the connection is available.'; }
+async function projectMessages(scopeList: readonly ConversationScopeView[]) {
+  if (!service) return [];
+  return (await Promise.all(scopeList.map((scope) => service.listMessages(scope.id)))).flat();
+}
+function selectProject(id: string) {
+  if (id !== projectId.value) void router.push({ name: 'project-chat', query: { ...route.query, project: id } });
+}
 
 async function loadProject() {
   if (!service || !projectService) { loading.value = false; error.value = 'Project Chat is unavailable: production authority is not connected.'; return; }
@@ -121,12 +128,14 @@ async function loadProject() {
     if (token !== generation) return;
     projects.value = listed;
     if (!projectId.value || !listed.some((p) => p.id === projectId.value)) { error.value = 'Project Not Found. Choose a Project from Overview.'; scopes.value = []; return; }
-    const [scopeList, allMessages, projectEvents, routing] = await Promise.all([
-      service.listScopes(projectId.value), service.listMessages(), service.listProjectEvents(projectId.value), service.listRoutingBatches(projectId.value),
+    const selectedId = projectId.value;
+    const scopeList = await service.listScopes(selectedId);
+    const [allMessages, projectEvents, routing] = await Promise.all([
+      projectMessages(scopeList), service.listProjectEvents(selectedId), service.listRoutingBatches(selectedId),
     ]);
     if (token !== generation) return;
     scopes.value = scopeList;
-    messages.value = allMessages.filter((m) => m.projectId === projectId.value || scopeList.some((s) => s.id === m.scopeId));
+    messages.value = allMessages.filter((m) => m.projectId === selectedId);
     events.value = projectEvents;
     batches.value = routing.batches;
     for (const m of messages.value) seen.add(m.id); // No server read-marker port: baseline existing history as seen this session.
@@ -139,9 +148,9 @@ async function refreshMessages() {
   const id = projectId.value;
   const token = generation;
   try {
-    const [all, projectEvents] = await Promise.all([service.listMessages(), service.listProjectEvents(id)]);
+    const [all, projectEvents] = await Promise.all([projectMessages(scopes.value), service.listProjectEvents(id)]);
     if (token !== generation || id !== projectId.value) return;
-    messages.value = all.filter((m) => m.projectId === id || scopes.value.some((s) => s.id === m.scopeId));
+    messages.value = all.filter((m) => m.projectId === id);
     events.value = projectEvents;
     markVisible();
   } catch { actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
@@ -286,6 +295,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const 
 
 <template>
   <div class="chat-view flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
+    <div v-if="projects.length" class="mb-2 flex items-center gap-2 text-xs"><label for="chat-project-selector" class="font-bold">Project</label><select id="chat-project-selector" :value="projectId" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.displayName }}</option></select></div>
     <div v-if="!presentation.controlAvailable && (loading || error || missingScope)" class="chat-offline-banner mb-2 rounded border border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
       <div class="h-8 w-52 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />

@@ -190,11 +190,15 @@ export function buildNavigation(
 ): NavigationModel {
   const destination = destinationOf(route);
   const tab = tabOf(route);
+  const projectQuery = typeof route.query['project'] === 'string' ? { project: route.query['project'] } : {};
+  const withProject = (item: NavigationItemView): NavigationItemView =>
+    Object.keys(projectQuery).length && (item.key === 'overview' || item.key === 'tasks' || item.key === 'chat')
+      ? { ...item, to: { name: (item.to as { name: string }).name, query: projectQuery } } : item;
   const on = (key: DestinationKey): boolean => destination === key;
 
   const sections: NavigationSection[] = [
     { label: 'Operations', items: [toView(FEED_ITEM, { current: on('feed'), indicators })] },
-    { label: 'Project', items: projectItems(tab, indicators) },
+    { label: 'Project', items: projectItems(tab, indicators).map(withProject) },
     { label: 'Manage', items: manageItems(tab, indicators) },
   ];
 
@@ -205,7 +209,7 @@ export function buildNavigation(
   ];
 
   const nestedSource = on('project') ? PROJECT_ITEMS : on('manage') ? MANAGE_ITEMS : [];
-  const nested = nestedSource.map((item) => toView(item, { current: tab === item.key, indicators }));
+  const nested = nestedSource.map((item) => withProject(toView(item, { current: tab === item.key, indicators })));
 
   return {
     destination,
