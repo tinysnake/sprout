@@ -662,7 +662,7 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
   } finally { await loadingHarness.cleanup(); }
 });
 
-test('Chat keeps only the raw connection pill, normal placeholder and no reason line through sustained staleness', async () => {
+test('Chat keeps the delayed corner connection banner and raw pill without redundant composer notices', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   let unmount = () => {};
   try {
@@ -693,9 +693,18 @@ test('Chat keeps only the raw connection pill, normal placeholder and no reason 
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false);
     const pill = doc.querySelector('header[class~="md:hidden"] .operator-pill');
     assert.ok(pill);
-    const assertSingleSurface = (label: string) => {
-      assert.equal(notice(), null, 'Chat never renders a floating connection notice');
-      assert.equal(doc.querySelector('.shell-connection-banner'), null, 'the shell does not overlay another notice on Chat');
+    const assertConnectionSurfaces = (label: string, cornerVisible: boolean) => {
+      assert.equal(notice(), null, 'Chat never renders a title-under connection notice');
+      const corner = doc.querySelector('.shell-connection-banner');
+      if (cornerVisible) {
+        assert.ok(corner, 'the wanted top-right connection banner remains on Chat');
+        assert.equal(corner.textContent?.trim(), pill.getAttribute('title'));
+        assert.ok(corner.classList.contains('absolute'), 'the corner notice reserves no layout space');
+        assert.ok(corner.classList.contains('right-3'));
+        assert.ok(corner.classList.contains('top-2'));
+      } else {
+        assert.equal(corner, null, 'the corner banner waits five seconds and clears immediately on recovery');
+      }
       assert.equal(input.placeholder, placeholder, 'unavailability never replaces the normal placeholder');
       assert.equal(doc.querySelector('#chat-send-reason'), null, 'no under-composer reason is rendered');
       assert.equal(input.hasAttribute('aria-describedby'), false, 'no dangling removed reason reference');
@@ -705,25 +714,27 @@ test('Chat keeps only the raw connection pill, normal placeholder and no reason 
     };
     controller.set({ status: 'stale', connection: 'stale', loading: false });
     await settle(150);
-    assertSingleSurface('Stale Connection');
+    assertConnectionSurfaces('Stale Connection', false);
     assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /Connection is stale/i,
       'assistive connection announcements remain immediate');
     assert.equal(input.disabled, false, 'stale permits draft entry');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
       'Send refuses immediately from raw state');
-    await settle(5100);
-    assertSingleSurface('Stale Connection');
+    await settle(4700);
+    assertConnectionSurfaces('Stale Connection', false);
+    await settle(400);
+    assertConnectionSurfaces('Stale Connection', true);
     assert.equal(body.classList.contains('pt-32'), false, 'no reserved message lane');
     assert.equal(body.className, bodyClasses, 'connection changes never alter message layout classes');
     assert.deepEqual(geometry(), before);
     controller.set(OFFLINE_CONNECTION);
     await settle(30);
-    assertSingleSurface('Offline');
+    assertConnectionSurfaces('Offline', true);
     assert.equal(input.disabled, true, 'offline still disables entry');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(30);
-    assertSingleSurface('Operator Online');
+    assertConnectionSurfaces('Operator Online', false);
     assert.equal(input.value, 'Retained draft');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false,
       'recovery restores raw Send authority without losing the draft');
@@ -733,7 +744,9 @@ test('Chat keeps only the raw connection pill, normal placeholder and no reason 
     assert.ok(doc.querySelector('.shell-connection-banner'), 'the shared shell notice remains on non-Chat routes');
     await router.push('/project/chat');
     await settle(150);
-    assert.equal(doc.querySelector('.shell-connection-banner'), null, 'entering Chat also suppresses an already-visible shell notice');
+    const corner = doc.querySelector('.shell-connection-banner');
+    assert.ok(corner, 'entering Chat preserves an already-visible shell notice');
+    assert.equal(corner.textContent?.trim(), pill.getAttribute('title'));
   } finally { unmount(); await cleanup(); }
 });
 
