@@ -8,10 +8,11 @@
  * context changes through the shared channel, so streamed state stays readable
  * instead of being interleaved across several live regions.
  */
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
+import { useConnectionNotice } from './use-connection-notice.js';
 import { buildNavigation, type NavigationIndicators } from './navigation.js';
 import { useAnnouncer, useAnnouncerMessage } from '../primitives/announcer.js';
 import DesktopSidebar from './DesktopSidebar.vue';
@@ -37,32 +38,7 @@ const { announcer, message } = { announcer: useAnnouncer(), message: useAnnounce
 const presentation = computed(() => connection.presentation.value);
 const navigation = computed(() => buildNavigation(route, props.indicators));
 
-// Background connection checks briefly mark control unavailable. Avoid adding
-// a new row to the shell for those transient checks, but keep genuine stalls
-// visible to the operator.
-const CONNECTION_WARNING_GRACE_MS = 700;
-const showConnectionWarning = ref(false);
-let connectionWarningTimer: ReturnType<typeof setTimeout> | undefined;
-watch(
-  () => presentation.value.controlAvailable,
-  (available) => {
-    if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
-    connectionWarningTimer = undefined;
-    if (available) {
-      showConnectionWarning.value = false;
-      return;
-    }
-    showConnectionWarning.value = false;
-    connectionWarningTimer = setTimeout(() => {
-      showConnectionWarning.value = true;
-      connectionWarningTimer = undefined;
-    }, CONNECTION_WARNING_GRACE_MS);
-  },
-  { immediate: true }
-);
-onScopeDispose(() => {
-  if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
-});
+const showConnectionWarning = useConnectionNotice(computed(() => presentation.value.controlAvailable));
 
 // Connection changes are the one shell fact the operator must not be able to
 // miss, so they are announced through the shared region rather than a second
@@ -124,27 +100,18 @@ onMounted(() => {
         </div>
       </header>
 
-      <!-- Warn before acting on facts that may no longer be live. -->
-      <div
-        v-if="showConnectionWarning"
-        class="shell-connection-banner flex items-center gap-2 px-4 py-1.5 border-b text-[11px] font-semibold"
-        :class="
-          presentation.status === 'red'
-            ? 'bg-[var(--red-action-bg)] border-[var(--red-action-border)] text-[var(--red-action)]'
-            : 'bg-[var(--yellow-attention-bg)] border-[var(--yellow-attention-border)] text-[var(--yellow-attention)]'
-        "
-      >
-        <Icon name="warning" :size="13" />
-        <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
+      <div class="relative flex min-h-0 flex-1 flex-col">
+        <!-- This reserved top lane is permanent; the notice itself is out of flow. -->
+        <div v-if="showConnectionWarning" role="status"
+          class="shell-connection-banner pointer-events-none absolute right-3 top-2 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] items-start gap-2 rounded border border-[var(--yellow-attention-border)] bg-[var(--yellow-attention-bg)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] shadow-lg">
+          <Icon name="warning" :size="13" class="shrink-0" />
+          <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
+        </div>
+        <main id="sprout-main-content" tabindex="-1"
+          class="flex-1 overflow-y-auto pb-16 pt-16 md:pb-0 focus-visible:outline-none">
+          <slot />
+        </main>
       </div>
-
-      <main
-        id="sprout-main-content"
-        tabindex="-1"
-        class="flex-1 overflow-y-auto pb-16 md:pb-0 focus-visible:outline-none"
-      >
-        <slot />
-      </main>
     </div>
 
     <MobileBottomNav :indicators="indicators" />

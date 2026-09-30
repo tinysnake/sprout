@@ -193,8 +193,9 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(60);
     assert.equal(notice(), null, 'a brief connection check does not insert a shell row');
-    await settle(700);
+    await settle(5050);
     assert.match(notice()?.textContent ?? '', /Checking connection/i, 'loading is announced as a pending check');
+    assert.equal(notice()?.closest('[role="status"]')?.classList.contains('absolute'), true);
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
     await settle(60);
@@ -246,14 +247,18 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
     assert.deepEqual(geometry(), before, 'main/header positions and app-shell dimensions stay constant');
 
     controller.set({ status: 'online', connection: 'online', loading: false });
-    await settle(750);
+    await settle(100);
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the transient warning timer is cancelled when the connection returns');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
-    await settle(750);
+    await settle(5050);
     assert.match(doc.querySelector('[data-testid="shell-connection-notice"]')?.textContent ?? '', /Reconnecting/i,
       'a prolonged connection stall still surfaces the warning');
+    assert.equal(doc.querySelector('.shell-connection-banner')?.classList.contains('absolute'), true,
+      'the floating status is out of flow at both breakpoints');
+    assert.ok(main.classList.contains('pt-16'), 'the notice lane is reserved even when hidden');
+    assert.deepEqual(geometry(), before, 'revealing the overlay leaves shell and content box geometry unchanged');
     app.unmount();
   } finally {
     await cleanup();
