@@ -39,8 +39,6 @@ const presentation = computed(() => connection.presentation.value);
 const navigation = computed(() => buildNavigation(route, props.indicators));
 
 const showConnectionWarning = useConnectionNotice(computed(() => presentation.value.controlAvailable));
-// Chat uses only the raw connection pill; other pages retain the shared notice.
-const isChatSurface = computed(() => route.name === 'project-chat' || route.name === 'project-chat-scope');
 
 // Connection changes are the one shell fact the operator must not be able to
 // miss, so they are announced through the shared region rather than a second
@@ -104,7 +102,7 @@ onMounted(() => {
 
       <div class="relative flex min-h-0 flex-1 flex-col">
         <!-- A notice overlays the page only while visible; the page reserves no space. -->
-        <div v-if="showConnectionWarning && !isChatSurface" role="status"
+        <div v-if="showConnectionWarning" role="status"
           class="shell-connection-banner pointer-events-none absolute right-3 top-2 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] items-start gap-2 rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] shadow-lg">
           <Icon name="warning" :size="13" class="shrink-0" />
           <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
