@@ -83,6 +83,9 @@ const unopenedAgents = computed(() => {
 });
 const missingScope = computed(() => !!requestedScopeId.value && !loading.value && !scopes.value.some((s) => s.id === requestedScopeId.value));
 const activeScope = computed(() => requestedScopeId.value ? scopes.value.find((s) => s.id === requestedScopeId.value) : channelScopes.value[0] ?? scopes.value[0]);
+// The selection identity the admission read follows: a background refresh that
+// replaces the scope list with the same records is not a selection change.
+const activeScopeId = computed(() => activeScope.value?.id ?? '');
 const activeGroup = computed(() => activeScope.value?.kind === 'working-group' ? activeScope.value : null);
 const archivedDirectAgent = computed(() => {
   const scope = activeScope.value;
@@ -179,11 +182,20 @@ async function refreshMessages() {
     messages.value = all.filter((m) => m.projectId === id);
     events.value = projectEvents;
     for (const event of newEvents) knownEvents.add(event.id);
+    markVisible();
+    let sentence: string | undefined;
     if (incoming.length || newEvents.length) {
       const inCurrent = incoming.filter((m) => m.scopeId === activeScope.value?.id);
-      announcer.announce(`${incoming.length ? `${incoming.length} new ${incoming.length === 1 ? 'message' : 'messages'}` : ''}${incoming.length && newEvents.length ? ' and ' : ''}${newEvents.length ? `${newEvents.length} new Project ${newEvents.length === 1 ? 'event' : 'events'}` : ''} in ${project.value?.displayName ?? 'Project'}${inCurrent.length ? `; ${inCurrent.length} in ${activeScope.value ? title(activeScope.value) : 'current conversation'}` : ''}.`);
+      sentence = `${incoming.length ? `${incoming.length} new ${incoming.length === 1 ? 'message' : 'messages'}` : ''}${incoming.length && newEvents.length ? ' and ' : ''}${newEvents.length ? `${newEvents.length} new Project ${newEvents.length === 1 ? 'event' : 'events'}` : ''} in ${project.value?.displayName ?? 'Project'}${inCurrent.length ? `; ${inCurrent.length} in ${activeScope.value ? title(activeScope.value) : 'current conversation'}` : ''}.`;
     }
-    markVisible();
+    // A refresh replaces the scope list, so the active scope's admission is
+    // re-checked here; the selection watcher keys on the scope id and does not
+    // fire for an unchanged selection. Announcing *after* that read settles is
+    // what carries an arrival to the live region: the connection state
+    // announces the start and the settle of every read, and inside the same
+    // flush those would overwrite the arrival sentence before it renders.
+    await loadScope();
+    if (sentence !== undefined && token === generation && document.visibilityState !== 'hidden') announcer.announce(sentence);
   } catch { if (token === generation) actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
   finally { refreshInFlight = false; }
 }
@@ -383,7 +395,7 @@ async function inspectBatch(id: string, attempt?: number) {
   await router.push({ name: 'project-chat-routing', params: { batchId: id }, query: { ...route.query, ...(attempt ? { attempt: String(attempt) } : {}), ...(activeScope.value ? { from: activeScope.value.id } : {}) } });
 }
 watch(projectId, () => { if (projectId.value) void loadProject(); });
-watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
+watch([activeScopeId, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
   document.addEventListener('visibilitychange', onVisibilityChange);

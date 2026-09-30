@@ -73,6 +73,24 @@ async function listScopeMessages(api: ReplyProjectionApi, scopeId: string): Prom
   return body.messages;
 }
 
+interface FailureEventWire {
+  readonly kind: string;
+  readonly disposition: string;
+  readonly summary: string;
+  readonly detail: string;
+  readonly producerId: string;
+  readonly producerKind: string;
+}
+
+async function listProjectEvents(api: ReplyProjectionApi): Promise<readonly FailureEventWire[]> {
+  const response = await fetch(`${api.base}/api/projects/${encodeURIComponent(api.projectId)}/events`, {
+    headers: { cookie: api.cookie },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json() as { readonly events: readonly FailureEventWire[] };
+  return body.events;
+}
+
 async function readEvidence(api: ReplyProjectionApi, messageId: string): Promise<EvidenceWire> {
   const response = await fetch(
     `${api.base}/api/messages/${encodeURIComponent(messageId)}/routing`,
@@ -206,7 +224,7 @@ test('a failed run and an empty #182-style completion never project a phantom re
     turns: [
       {
         events: [{ type: 'message', text: 'engine refused', final: true }],
-        result: { status: 'failed', message: 'model unavailable' },
+        result: { status: 'failed', message: 'arbitrary engine diagnostic MUST NOT SURFACE' },
       },
       {
         events: [],
@@ -229,6 +247,19 @@ test('a failed run and an empty #182-style completion never project a phantom re
     });
     const failedRunStatus = await api.readRun(failedRun.body.admittedRunIds[0]!);
     assert.equal(failedRunStatus.status, 'failed', 'the errored turn settles its run as failed');
+    await waitFor('the #180 Project failure event', async () =>
+      (await listProjectEvents(api)).some((event) => event.kind === 'agent-run-failure'));
+    const failureEvents = await listProjectEvents(api);
+    assert.equal(failureEvents.length, 1, 'one failure entry is produced for the failed run');
+    const event = failureEvents[0]!;
+    assert.equal(event.kind, 'agent-run-failure');
+    assert.equal(event.disposition, 'informational', 'the failure entry cannot route or wake');
+    assert.equal(event.producerId, 'sprout');
+    assert.equal(event.producerKind, 'system');
+    assert.match(event.summary, /Agent run failed \(execution\)/);
+    assert.match(event.detail, /run /);
+    assert.doesNotMatch(`${event.summary} ${event.detail}`, /MUST NOT SURFACE|arbitrary engine diagnostic/,
+      'the failure class and reason are sanitized rather than engine text');
 
     const emptyRun = await postMessage(api, {
       scopeId: api.directScopeId,
@@ -246,6 +277,7 @@ test('a failed run and an empty #182-style completion never project a phantom re
     // none exists: neither outcome may ever render as a reply.
     await new Promise((resolve) => setTimeout(resolve, 700));
     const messages = await listScopeMessages(api, api.directScopeId);
+    assert.equal((await listProjectEvents(api)).length, 1, 'empty completion adds no failure event');
     assert.equal(messages.length, 2, 'exactly the two human inputs exist — no reply was fabricated');
     assert.ok(
       messages.every((message) => message.authorKind === 'human'),
