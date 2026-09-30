@@ -12,12 +12,14 @@
  *   model (ADR-0007 "Deterministic addressing"). Determinism is what prevents
  *   the one silent failure mode: an addressed Agent that was never woken
  *   leaves no reply and no run record.
- * - An input with no deterministic address records a durable `suppressed`
- *   observation and stays available: wake-model-assisted judgement of
- *   unaddressed inputs arrives with routing batches (#97), and until then no
- *   model is asked and no member is woken by guesswork. The M1 fail-open
- *   behaviour (wake everyone when the model fails) is a rejected ADR-0007
- *   alternative and no longer exists here.
+ * - An input with no deterministic address stays durable and visible: under
+ *   the Project's `wake-model-assisted` policy it is marked batch-eligible and
+ *   collected into the Project's fixed routing window, where a wake model
+ *   judges the frozen batch (#97); under `explicit-only` (the default) it
+ *   records a durable `suppressed` observation and no model is asked and no
+ *   member is woken by guesswork. The M1 fail-open behaviour (wake everyone
+ *   when the model fails) is a rejected ADR-0007 alternative and no longer
+ *   exists here.
  * - Recipients are **current Project Agents**. The author (or the event's
  *   producer) is never woken by its own input, targets are deduplicated per
  *   input and Agent across every addressing form, and a target that is unknown
@@ -41,6 +43,7 @@ import type {
   WakeObservation,
   WakePlan,
 } from './model.ts';
+import type { WakePolicy } from '../project/authority-model.ts';
 
 /** `@all` is a broadcast; it is matched as a whole token, not as a prefix. */
 const ALL_MENTION = /(?<![\w@])@all(?![\w-])/i;
@@ -71,6 +74,14 @@ export interface WakePlanInput {
   readonly members: readonly WakeMember[];
   /** The scope the Message belongs to. */
   readonly scope: WakeScopeFacts;
+  /**
+   * The Project's wake policy in force for this input (#97). Defaults to
+   * `explicit-only`, the migration and configuration default: an unaddressed
+   * input then records its durable suppressed observation. Under
+   * `wake-model-assisted` the same input instead becomes batch-eligible — no
+   * observation and no model call happen here; the window path owns them.
+   */
+  readonly wakePolicy?: WakePolicy;
 }
 
 /**
@@ -169,8 +180,14 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
   }
 
   // No deterministic address: durable and visible, never silent and never
-  // guessed at. Wake-model-assisted judgement of this input is #97's batch
-  // path, gated by the Project's wake policy.
+  // guessed at. Under `wake-model-assisted` the input is eligible for the
+  // Project's next routing batch (#97) — no suppressed observation here,
+  // because a batch outcome (selected, suppressed, or failed) will be its
+  // durable, richer evidence. Under `explicit-only` it stays durable with the
+  // suppressed observation and no model is ever asked.
+  if (input.wakePolicy === 'wake-model-assisted') {
+    return { inputId: message.id, decisions, observations, batchEligible: true };
+  }
   observations.push({
     agentId: '*',
     status: 'suppressed',
@@ -190,7 +207,10 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
  * exactly like Message targets: deduplicated, producer-excluded, and failing
  * durably per target without blocking the valid ones.
  */
-export function planEventWake(event: ProjectEvent, input: { members: readonly WakeMember[] }): WakePlan {
+export function planEventWake(
+  event: ProjectEvent,
+  input: { members: readonly WakeMember[]; wakePolicy?: WakePolicy },
+): WakePlan {
   const resolver = new TargetResolver({
     projectId: event.projectId,
     excludedId: event.producer.id,
@@ -199,6 +219,14 @@ export function planEventWake(event: ProjectEvent, input: { members: readonly Wa
   const decisions: WakeDecision[] = [];
   const observations: WakeObservation[] = [];
   if (event.disposition !== 'addressed') {
+    // A `wake-eligible` event under wake-model-assisted routing joins the
+    // Project's next routing batch (#97); every other disposition persists as
+    // its own durable evidence with no wake and no eligibility. The field is
+    // present only when the input actually joins a window, exactly as on the
+    // Message path, so callers read one meaning: absent means "not collected".
+    if (event.disposition === 'wake-eligible' && input.wakePolicy === 'wake-model-assisted') {
+      return { inputId: event.id, decisions, observations, batchEligible: true };
+    }
     return { inputId: event.id, decisions, observations };
   }
   for (const target of dedupe(event.responsibleAgentIds)) {

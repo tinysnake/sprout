@@ -23,6 +23,17 @@
 
 import type { Message, WakeRequest } from '../collaboration/model.ts';
 import type { ProjectEvent } from '../collaboration/events.ts';
+import type {
+  RoutingAttempt,
+  RoutingBatch,
+  RoutingBatchInput,
+  RoutingInputOutcome,
+  RoutingWindow,
+} from '../collaboration/routing.ts';
+import type {
+  RoutingBatchEvidence,
+  RoutingInputEvidence,
+} from '../collaboration/coordinator.ts';
 import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
@@ -232,6 +243,8 @@ export interface WakeView {
   readonly reason: string;
   readonly status: string;
   readonly runId?: string;
+  /** The frozen routing batch, for a model-assisted wake (#97). */
+  readonly batchId?: string;
 }
 
 export function toWakeView(wake: WakeRequest): WakeView {
@@ -240,6 +253,7 @@ export function toWakeView(wake: WakeRequest): WakeView {
     reason: wake.reason,
     status: wake.status,
     ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+    ...(wake.batchId !== undefined ? { batchId: wake.batchId } : {}),
   };
 }
 
@@ -277,6 +291,202 @@ export function toProjectEventView(event: ProjectEvent): ProjectEventView {
     disposition: event.disposition,
     responsibleAgentIds: event.responsibleAgentIds,
     createdAt: event.createdAt,
+  };
+}
+
+/**
+ * The client-facing shape of one collection window (#97).
+ *
+ * The fixed deadline, the durable cursor, and the membership count are exactly
+ * the facts that answer "when will these inputs be judged, and were they all
+ * collected?" without consulting internal logs (ADR-0007).
+ */
+export interface RoutingWindowView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly openedAt: number;
+  readonly deadlineAt: number;
+  readonly intervalMs: number;
+  readonly status: string;
+  readonly cursor?: string;
+  readonly inputCount: number;
+  readonly closedAt?: number;
+}
+
+export function toRoutingWindowView(window: RoutingWindow): RoutingWindowView {
+  return {
+    id: window.id,
+    projectId: window.projectId,
+    openedAt: window.openedAt,
+    deadlineAt: window.deadlineAt,
+    intervalMs: window.intervalMs,
+    status: window.status,
+    ...(window.cursor !== undefined ? { cursor: window.cursor } : {}),
+    inputCount: window.inputCount,
+    ...(window.closedAt !== undefined ? { closedAt: window.closedAt } : {}),
+  };
+}
+
+/** One frozen batch input: the bounded excerpt plus its truncation evidence. */
+export interface RoutingBatchInputView {
+  readonly inputId: string;
+  readonly position: number;
+  readonly excerpt: string;
+  readonly truncated: boolean;
+  readonly excerptChars: number;
+  readonly contentChars: number;
+}
+
+export function toRoutingBatchInputView(input: RoutingBatchInput): RoutingBatchInputView {
+  return {
+    inputId: input.inputId,
+    position: input.position,
+    excerpt: input.excerpt,
+    truncated: input.truncated,
+    excerptChars: input.excerptChars,
+    contentChars: input.contentChars,
+  };
+}
+
+/** One settled wake-model attempt: identity, timing, and failure kind. */
+export interface RoutingAttemptView {
+  readonly id: string;
+  readonly batchId: string;
+  readonly attemptNumber: number;
+  readonly modelId: string;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+  readonly status: string;
+  readonly errorKind?: string;
+  readonly errorDetail?: string;
+}
+
+export function toRoutingAttemptView(attempt: RoutingAttempt): RoutingAttemptView {
+  return {
+    id: attempt.id,
+    batchId: attempt.batchId,
+    attemptNumber: attempt.attemptNumber,
+    modelId: attempt.modelId,
+    startedAt: attempt.startedAt,
+    finishedAt: attempt.finishedAt,
+    status: attempt.status,
+    ...(attempt.errorKind !== undefined ? { errorKind: attempt.errorKind } : {}),
+    ...(attempt.errorDetail !== undefined ? { errorDetail: attempt.errorDetail } : {}),
+  };
+}
+
+/** One input's explicit result in a settled batch, with model rationale. */
+export interface RoutingOutcomeView {
+  readonly inputId: string;
+  readonly status: string;
+  readonly assignments: readonly { readonly agentId: string; readonly rationale: string }[];
+  /** Model judgement, not fact — the UI labels it as such. */
+  readonly rationale?: string;
+  readonly detail?: string;
+  readonly settledAt: number;
+}
+
+export function toRoutingOutcomeView(outcome: RoutingInputOutcome): RoutingOutcomeView {
+  return {
+    inputId: outcome.inputId,
+    status: outcome.status,
+    assignments: outcome.assignments.map((assignment) => ({
+      agentId: assignment.agentId,
+      rationale: assignment.rationale,
+    })),
+    ...(outcome.rationale !== undefined ? { rationale: outcome.rationale } : {}),
+    ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+    settledAt: outcome.settledAt,
+  };
+}
+
+/** The complete human-inspectable evidence for one frozen routing batch. */
+export interface RoutingBatchDetailView {
+  readonly batch: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly windowId: string;
+    readonly splitIndex: number;
+    readonly splitCount: number;
+    readonly cutoffAt: number;
+    readonly status: string;
+    readonly error?: string;
+    readonly createdAt: number;
+    readonly settledAt?: number;
+    readonly bounds: RoutingBatch['bounds'];
+    /** The frozen manifest: inputs, candidates, bounds, truncations, exclusions. */
+    readonly manifest: RoutingBatch['manifest'];
+    /** The frozen context snapshot length; the bytes are the batch's own. */
+    readonly contextChars: number;
+  };
+  readonly window?: RoutingWindowView;
+  readonly inputs: readonly RoutingBatchInputView[];
+  readonly attempts: readonly RoutingAttemptView[];
+  readonly outcomes: readonly RoutingOutcomeView[];
+  readonly wakes: readonly WakeView[];
+  readonly replies: readonly { readonly idempotencyKey: string; readonly messageId: string }[];
+}
+
+export function toRoutingBatchDetailView(evidence: RoutingBatchEvidence): RoutingBatchDetailView {
+  return {
+    batch: {
+      id: evidence.batch.id,
+      projectId: evidence.batch.projectId,
+      windowId: evidence.batch.windowId,
+      splitIndex: evidence.batch.splitIndex,
+      splitCount: evidence.batch.splitCount,
+      cutoffAt: evidence.batch.cutoffAt,
+      status: evidence.batch.status,
+      ...(evidence.batch.error !== undefined ? { error: evidence.batch.error } : {}),
+      createdAt: evidence.batch.createdAt,
+      ...(evidence.batch.settledAt !== undefined ? { settledAt: evidence.batch.settledAt } : {}),
+      bounds: evidence.batch.bounds,
+      manifest: evidence.batch.manifest,
+      contextChars: evidence.batch.context.length,
+    },
+    ...(evidence.window !== undefined ? { window: toRoutingWindowView(evidence.window) } : {}),
+    inputs: evidence.inputs.map(toRoutingBatchInputView),
+    attempts: evidence.attempts.map(toRoutingAttemptView),
+    outcomes: evidence.outcomes.map(toRoutingOutcomeView),
+    wakes: evidence.wakes.map(toWakeView),
+    replies: evidence.replies.map((reply) => ({ ...reply })),
+  };
+}
+
+/** The durable non-wake outcome for one input, as exposed on evidence routes. */
+export interface WakeObservationView {
+  readonly agentId: string;
+  readonly status: string;
+  readonly reason: string;
+  readonly detail: string;
+}
+
+/** The complete causal routing evidence for one Message or Project event. */
+export interface RoutingEvidenceView {
+  readonly input:
+    | { readonly kind: 'message'; readonly message: MessageView }
+    | { readonly kind: 'event'; readonly event: ProjectEventView };
+  readonly window?: RoutingWindowView;
+  readonly batches: readonly RoutingBatchDetailView[];
+  readonly deterministicWakes: readonly WakeView[];
+  readonly observations: readonly WakeObservationView[];
+}
+
+export function toRoutingEvidenceView(evidence: RoutingInputEvidence): RoutingEvidenceView {
+  return {
+    input:
+      'disposition' in evidence.input
+        ? { kind: 'event', event: toProjectEventView(evidence.input) }
+        : { kind: 'message', message: toMessageView(evidence.input) },
+    ...(evidence.window !== undefined ? { window: toRoutingWindowView(evidence.window) } : {}),
+    batches: evidence.batches.map(toRoutingBatchDetailView),
+    deterministicWakes: evidence.deterministicWakes.map(toWakeView),
+    observations: evidence.observations.map((observation) => ({
+      agentId: observation.agentId,
+      status: observation.status,
+      reason: observation.reason,
+      detail: observation.detail,
+    })),
   };
 }
 

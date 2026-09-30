@@ -46,15 +46,17 @@
  * direct conversation, the group's active participations for a Working group),
  * so routing can never disagree with scope governance.
  *
- * ## Deterministic routing, no model (#96, ADR-0007)
+ * ## Deterministic routing first, then batches (#96, #97, ADR-0007)
  *
  * `planWake` and `planEventWake` are pure: direct recipients, exact
  * whole-token mentions, exact `@all` broadcasts, and `addressed` Project
  * events resolve against current Project member facts — and, for direct and
  * Working-group scopes, against that scope's current participants — and never
- * consult a wake model or the Project's wake policy. Unaddressed inputs
- * persist with a durable suppressed observation instead of a guessed wake;
- * wake-model-assisted judgement arrives with routing batches (#97).
+ * consult a wake model or the Project's wake policy. An input with no
+ * deterministic address either records a durable suppressed observation
+ * (`explicit-only`) or joins the Project's fixed routing window
+ * (`wake-model-assisted`), where the frozen batch — never the plan — reaches a
+ * wake model (#97).
  *
  * ## Project events (#96)
  *
@@ -89,6 +91,7 @@
 import type { AgentRun } from '../run/model.ts';
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
+import { redactSensitiveText, sanitizeIdentifier } from '../environment/privacy.ts';
 import {
   ConversationScopeError,
   projectChannelScopeId,
@@ -96,6 +99,7 @@ import {
   type ScopeState,
   type ScopeStateReason,
 } from '../conversation/model.ts';
+import type { ConversationProjectFacts } from '../conversation/service.ts';
 import type { ProjectEvent, RoutingDisposition } from './events.ts';
 import {
   ProjectEventError,
@@ -112,8 +116,30 @@ import {
   type WakeRequest,
 } from './model.ts';
 import { planEventWake, planWake, type WakeMember, type WakeScopeFacts } from './wake.ts';
+import {
+  type RoutingAttempt,
+  type RoutingBatch,
+  type RoutingBatchInput,
+  type RoutingBounds,
+  type RoutingFailureKind,
+  type RoutingInputOutcome,
+  type RoutingModelPort,
+  type RoutingWindow,
+} from './routing.ts';
+import {
+  freezeRoutingBatches,
+  type RoutingContractFacts,
+  type RoutingContextMessage,
+  type RoutingInputFact,
+} from './routing-context.ts';
+import {
+  parseRoutingJudgement,
+  type JudgementExpectation,
+  type JudgementParseResult,
+  type RoutingJudgement,
+} from './routing-judgement.ts';
 import type { CollaborationStore } from './store.ts';
-import { wakeIdempotencyKey } from './store.ts';
+import { wakeFromBatch, wakeIdempotencyKey } from './store.ts';
 
 /** The slice of the run orchestrator the coordinator uses. */
 export interface RunAdmitter {
@@ -158,6 +184,20 @@ export interface CollaborationScopePort {
    * Project does not exist. Routing resolves "current Project Agents" here.
    */
   projectMembers(projectId: string): Promise<readonly WakeMember[] | undefined>;
+  /**
+   * The wake policy and fixed routing interval in force (#97). Optional: a
+   * port without it behaves as `explicit-only`, so a missing composition can
+   * never collect inputs into a window by accident.
+   */
+  routingPolicy?(projectId: string): Promise<
+    { readonly wakePolicy: 'explicit-only' | 'wake-model-assisted'; readonly intervalMs: number } | undefined
+  >;
+  /**
+   * The Project-shared contract facts a routing context freezes (#97): goal,
+   * rules, and member responsibilities. Optional like `routingPolicy`; without
+   * it an assisted Project fails closed rather than freezing an empty context.
+   */
+  projectContract?(projectId: string): Promise<ConversationProjectFacts | undefined>;
 }
 
 /**
@@ -190,6 +230,19 @@ export interface CollaborationCoordinatorOptions {
     readonly inputId: string;
     readonly observation: WakeObservation;
   }) => void;
+  /**
+   * The wake model for assisted routing batches (#97). Absent means every
+   * attempt fails as `model-unavailable`, retries once on the identical
+   * snapshot, and fails closed with visible per-input failures — ADR-0007's
+   * rule for a missing model, never silence and never fail-open fan-out.
+   * Configuring a real low-cost wake model is explicit future work
+   * (docs/roadmap.md M2 evidence note).
+   */
+  readonly routingModel?: RoutingModelPort;
+  /** Per-attempt wake-model timeout; defaults to 30 seconds. */
+  readonly routingAttemptTimeoutMs?: number;
+  /** Bounds overrides; defaults to `DEFAULT_ROUTING_BOUNDS`. Tests shrink them. */
+  readonly routingBounds?: Partial<RoutingBounds>;
 }
 
 /** A request to post one durable Message and wake whoever it addresses. */
@@ -272,6 +325,39 @@ function isProjectEvent(input: RoutingInput): input is ProjectEvent {
   return 'disposition' in input;
 }
 
+/**
+ * One wake's resolved causal source (#97).
+ *
+ * A deterministic wake resolves to its Message or Project event; a
+ * model-assisted wake resolves to its frozen batch plus the batch inputs
+ * actually assigned to that wake's Agent — the facts its prompt and reply
+ * placement derive from.
+ */
+type ResolvedRoutingSource =
+  | { readonly kind: 'input'; readonly input: RoutingInput }
+  | {
+      readonly kind: 'batch';
+      readonly batch: RoutingBatch;
+      /** The batch inputs assigned to this wake's Agent, chronological. */
+      readonly assigned: readonly RoutingInput[];
+    };
+
+function sourceProjectId(source: ResolvedRoutingSource): string {
+  return source.kind === 'batch' ? source.batch.projectId : source.input.projectId;
+}
+
+/** The durable causal identity a reply or observation keys on for this source. */
+function sourceCausalId(source: ResolvedRoutingSource): string {
+  return source.kind === 'batch' ? source.batch.id : source.input.id;
+}
+
+function renderSourcePrompt(source: ResolvedRoutingSource, agentId: string): string {
+  if (source.kind === 'batch') {
+    return renderBatchWakePrompt(agentId, source.batch, source.assigned);
+  }
+  return renderWakePrompt(source.input, agentId);
+}
+
 export class CollaborationCoordinator {
   readonly #store: CollaborationStore;
   readonly #runs: RunAdmitter;
@@ -279,6 +365,15 @@ export class CollaborationCoordinator {
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
   readonly #onObservation: CollaborationCoordinatorOptions['onObservation'];
+  readonly #routingModel: RoutingModelPort | undefined;
+  readonly #attemptTimeoutMs: number;
+  readonly #routingBounds: Partial<RoutingBounds> | undefined;
+  /** Routing ids for an injected factory that predates routing (#97). */
+  readonly #fallbackIds = createIdFactory();
+  /** Best-effort in-process deadline timers; durability is the sweep's job. */
+  readonly #windowTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** One sweep at a time: freeze and submit are serialized, never racing. */
+  #sweepInFlight: Promise<void> | undefined;
 
   constructor(options: CollaborationCoordinatorOptions) {
     this.#store = options.store;
@@ -287,6 +382,9 @@ export class CollaborationCoordinator {
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#onObservation = options.onObservation;
+    this.#routingModel = options.routingModel;
+    this.#attemptTimeoutMs = options.routingAttemptTimeoutMs ?? 30_000;
+    this.#routingBounds = options.routingBounds;
   }
 
   /**
@@ -311,7 +409,7 @@ export class CollaborationCoordinator {
       // Admission is a compare-and-set, so this cannot double-admit a wake.
       const admittedRunIds = await this.#admitAll(
         (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === existing.id),
-        existing,
+        { kind: 'input', input: existing },
         input.awaitReply !== false,
       );
       return {
@@ -324,6 +422,7 @@ export class CollaborationCoordinator {
 
     const scope = await this.#requireWritableScope(input.scopeId, input.author.id);
     const members = await this.#requireMembers(scope.projectId);
+    const routingPolicy = await this.#routingPolicyOf(scope.projectId);
 
     const now = this.#clock.now();
     const message: Message = {
@@ -338,15 +437,30 @@ export class CollaborationCoordinator {
       createdAt: now,
     };
 
-    const plan = planWake(message, { members, scope: scopeFacts(scope) });
+    const plan = planWake(message, {
+      members,
+      scope: scopeFacts(scope),
+      wakePolicy: routingPolicy.wakePolicy,
+    });
 
-    const stored = await this.#store.postMessage({ message, plan, now });
+    // A batch-eligible input joins its Project's fixed routing window in the
+    // same store transaction as the Message itself (#97): a crash between the
+    // two can never leave an eligible input outside every window.
+    const collect =
+      plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
+    const stored = await this.#store.postMessage({
+      message,
+      plan,
+      now,
+      ...(collect !== undefined ? { collect } : {}),
+    });
     if (stored.duplicate) {
       return { ...stored, admittedRunIds: [] };
     }
     this.#announce(message.id, plan.observations);
+    if (stored.window !== undefined) this.#afterWindowJoin(stored.window);
 
-    const admittedRunIds = await this.#admitAll(stored.wakes, message, input.awaitReply !== false);
+    const admittedRunIds = await this.#admitAll(stored.wakes, { kind: 'input', input: message }, input.awaitReply !== false);
     // Re-read the wake records after admission so the returned result reports
     // the durable state (status + run id) rather than the pre-admission snapshot.
     const finalWakes = (await this.#store.listWakeRequests()).filter(
@@ -383,7 +497,7 @@ export class CollaborationCoordinator {
     if (existing) {
       const admittedRunIds = await this.#admitAll(
         (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === existing.id),
-        existing,
+        { kind: 'input', input: existing },
         input.awaitReply !== false,
       );
       return {
@@ -395,6 +509,7 @@ export class CollaborationCoordinator {
     }
 
     const members = await this.#requireMembers(input.projectId);
+    const routingPolicy = await this.#routingPolicyOf(input.projectId);
     const now = this.#clock.now();
     const event: ProjectEvent = {
       id: this.#ids.projectEvent(),
@@ -409,18 +524,22 @@ export class CollaborationCoordinator {
       createdAt: now,
     };
 
-    const plan =
-      disposition === 'addressed'
-        ? planEventWake(event, { members })
-        : { inputId: event.id, decisions: [], observations: [] };
-
-    const stored = await this.#store.publishEvent({ event, plan, now });
+    const plan = planEventWake(event, { members, wakePolicy: routingPolicy.wakePolicy });
+    const collect =
+      plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
+    const stored = await this.#store.publishEvent({
+      event,
+      plan,
+      now,
+      ...(collect !== undefined ? { collect } : {}),
+    });
     if (stored.duplicate) {
       return { ...stored, admittedRunIds: [] };
     }
     this.#announce(event.id, plan.observations);
+    if (stored.window !== undefined) this.#afterWindowJoin(stored.window);
 
-    const admittedRunIds = await this.#admitAll(stored.wakes, event, input.awaitReply !== false);
+    const admittedRunIds = await this.#admitAll(stored.wakes, { kind: 'input', input: event }, input.awaitReply !== false);
     const finalWakes = (await this.#store.listWakeRequests()).filter(
       (candidate) => candidate.inputId === event.id,
     );
@@ -436,12 +555,12 @@ export class CollaborationCoordinator {
    */
   async #admitAll(
     wakes: readonly WakeRequest[],
-    input: RoutingInput,
+    source: ResolvedRoutingSource,
     awaitReply: boolean,
   ): Promise<readonly string[]> {
     const admittedRunIds: string[] = [];
     for (const wake of wakes) {
-      const outcome = await this.#admit(wake, input, awaitReply);
+      const outcome = await this.#admit(wake, source, awaitReply);
       if (outcome !== undefined) admittedRunIds.push(outcome.runId);
     }
     return admittedRunIds;
@@ -456,7 +575,7 @@ export class CollaborationCoordinator {
    */
   async #admit(
     wake: WakeRequest,
-    input: RoutingInput,
+    source: ResolvedRoutingSource,
     awaitReply = true,
   ): Promise<{ readonly runId: string; readonly projected: boolean } | undefined> {
     if (wake.status !== 'pending') return undefined;
@@ -466,14 +585,14 @@ export class CollaborationCoordinator {
     // explicitly prefers over a lost one, while an admitted wake always names a
     // run that really exists. The run id is the orchestrator's, never guessed.
     //
-    // The causal input's `projectId` is submitted with every wake, so the run
+    // The causal source's `projectId` is submitted with every wake, so the run
     // can only ever resolve against the Project that owns the input. A target
     // Agent that also belongs to another Project never executes there by
     // accident; the orchestrator refuses a non-member explicitly.
     const submission = await this.#runs.submit({
       agentId: wake.agentId,
-      prompt: renderWakePrompt(input, wake.agentId),
-      projectId: input.projectId,
+      prompt: renderSourcePrompt(source, wake.agentId),
+      projectId: sourceProjectId(source),
     });
 
     const admitted = await this.#store.admitWake({
@@ -494,10 +613,10 @@ export class CollaborationCoordinator {
     if (!awaitReply) {
       // Deliberately retain projection: callers that need to return before a
       // long Agent run settles still receive the normal durable reply later.
-      void this.#projectReply(admitted.wake, input).catch(() => undefined);
+      void this.#projectReply(admitted.wake, source).catch(() => undefined);
       return { runId: submission.id, projected: false };
     }
-    const projected = await this.#projectReply(admitted.wake, input);
+    const projected = await this.#projectReply(admitted.wake, source);
     return { runId: submission.id, projected };
   }
 
@@ -521,7 +640,7 @@ export class CollaborationCoordinator {
    */
   async #projectReply(
     wake: WakeRequest,
-    input: RoutingInput,
+    source: ResolvedRoutingSource,
     options: { readonly awaitSettlement: boolean } = { awaitSettlement: true },
   ): Promise<boolean> {
     const runId = wake.runId;
@@ -542,18 +661,29 @@ export class CollaborationCoordinator {
 
     const base = {
       id: replyMessageId(wake),
-      projectId: input.projectId,
+      projectId: sourceProjectId(source),
       author: { id: wake.agentId, kind: 'agent' as const },
       body: text,
       recipients: [] as readonly string[],
       deliveryKey: replyDeliveryKey(wake),
       createdAt: this.#clock.now(),
     };
+    const placement =
+      source.kind === 'batch'
+        ? batchReplyPlacement(source.batch.projectId, source.assigned)
+        : isProjectEvent(source.input)
+          ? {
+              scopeId: projectChannelScopeId(source.input.projectId),
+              channel: 'project' as const,
+            }
+          : {
+              scopeId: source.input.scopeId,
+              channel: source.input.channel,
+              inReplyTo: source.input.id,
+            };
     const stored = await this.#store.postMessage({
-      message: isProjectEvent(input)
-        ? { ...base, scopeId: projectChannelScopeId(input.projectId), channel: 'project' as const }
-        : { ...base, scopeId: input.scopeId, channel: input.channel, inReplyTo: input.id },
-      plan: { inputId: input.id, decisions: [], observations: [] },
+      message: { ...base, ...placement },
+      plan: { inputId: sourceCausalId(source), decisions: [], observations: [] },
       now: this.#clock.now(),
     });
     return !stored.duplicate;
@@ -572,36 +702,46 @@ export class CollaborationCoordinator {
    *    durable, so the reply is reconstructed from it. The projection is keyed by
    *    the wake idempotency key, so it cannot double-post.
    *
-   * The causal input is resolved as a Message first and a Project event second,
-   * so an event-triggered wake recovers through the same pass. A run that a
-   * restart settled as `failed` or `interrupted` produces no reply: this
-   * method never fabricates an answer. The whole pass is idempotent, so
-   * running it twice — or on a healthy process — changes nothing.
+   * The causal input is resolved as a Message first and a Project event second
+   * for deterministic wakes; a model-assisted wake resolves through its frozen
+   * batch and assigned inputs, so an event- or batch-triggered wake recovers
+   * through the same pass. A run that a restart settled as `failed` or
+   * `interrupted` produces no reply: this method never fabricates an answer.
+   * The whole pass is idempotent, so running it twice — or on a healthy
+   * process — changes nothing.
+   *
+   * Routing is swept first: an elapsed collection window is closed and
+   * submitted immediately, and a frozen batch interrupted before judgement
+   * resumes, both guarded by compare-and-set so a restart never splits the
+   * same window twice or judges one batch twice.
    */
   async reconcile(): Promise<ReconcileResult> {
+    await this.sweepRouting();
     const admittedRunIds: string[] = [];
     // A set: several wakes (for example an `@all` broadcast) can answer the same
-    // input, and reconciliation reports each input once, not once per reply.
+    // input, and reconciliation reports each causal identity once, not once per
+    // reply (a batch wake reports its batch id).
     const projectedMessageIds = new Set<string>();
     for (const wake of await this.#store.listWakeRequests()) {
-      const input = (await this.#store.getMessage(wake.inputId)) ??
-        (await this.#store.getEvent(wake.inputId));
-      // A wake whose input is missing cannot be reconstructed; it is left alone
-      // rather than guessed at, and remains visible in the durable wake list.
-      if (input === undefined) continue;
+      const source = await this.#resolveWakeSource(wake);
+      // A wake whose causal source is missing cannot be reconstructed; it is
+      // left alone rather than guessed at, and remains visible in the durable
+      // wake list.
+      if (source === undefined) continue;
+      const causalId = sourceCausalId(source);
 
       if (wake.status === 'pending') {
-        const outcome = await this.#admit(wake, input);
+        const outcome = await this.#admit(wake, source);
         if (outcome !== undefined) {
           admittedRunIds.push(outcome.runId);
-          if (outcome.projected) projectedMessageIds.add(input.id);
+          if (outcome.projected) projectedMessageIds.add(causalId);
         }
         continue;
       }
       if (wake.status !== 'admitted') continue;
 
-      const projected = await this.#projectReply(wake, input, { awaitSettlement: false });
-      if (projected) projectedMessageIds.add(input.id);
+      const projected = await this.#projectReply(wake, source, { awaitSettlement: false });
+      if (projected) projectedMessageIds.add(causalId);
     }
     return { admittedRunIds, projectedMessageIds: [...projectedMessageIds] };
   }
@@ -634,6 +774,598 @@ export class CollaborationCoordinator {
    */
   listObservations(inputId: string): Promise<readonly WakeObservation[]> {
     return this.#store.listObservations(inputId);
+  }
+
+  // ---------------------------------------------------------------------
+  // Wake-model-assisted routing (#97, ADR-0007)
+  // ---------------------------------------------------------------------
+
+  /**
+   * The routing policy in force for one Project.
+   *
+   * Missing port or facts fail closed to `explicit-only` — a composition that
+   * cannot read a policy never collects inputs into a window.
+   */
+  async #routingPolicyOf(projectId: string): Promise<{
+    readonly wakePolicy: 'explicit-only' | 'wake-model-assisted';
+    readonly intervalMs: number;
+  }> {
+    const policy =
+      this.#scopes.routingPolicy !== undefined
+        ? await this.#scopes.routingPolicy(projectId)
+        : undefined;
+    return policy ?? { wakePolicy: 'explicit-only', intervalMs: 30_000 };
+  }
+
+  /**
+   * Arm the best-effort deadline timer for an open window, or sweep at once
+   * when the deadline already passed (a slow process, an elapsed window).
+   *
+   * The timer is convenience, never authority: the durable deadline is what
+   * `sweepRouting` — also run by `reconcile` after every restart — decides on.
+   */
+  #afterWindowJoin(window: RoutingWindow): void {
+    if (window.deadlineAt <= this.#clock.now()) {
+      void this.sweepRouting().catch(() => undefined);
+      return;
+    }
+    if (this.#windowTimers.has(window.id)) return;
+    const timer = setTimeout(() => {
+      this.#windowTimers.delete(window.id);
+      void this.sweepRouting().catch(() => undefined);
+    }, window.deadlineAt - this.#clock.now());
+    timer.unref();
+    this.#windowTimers.set(window.id, timer);
+  }
+
+  /**
+   * Close every elapsed routing window into frozen batches and submit every
+   * frozen batch to the wake model.
+   *
+   * Idempotent and serialized: the window close and the batch's frozen→settled
+   * transition are compare-and-set guarded in the store, so a timer, a
+   * delivery-time sweep, and a restart sweep can never double-freeze a window
+   * or judge one batch twice. This is what makes "an elapsed window is
+   * submitted immediately" true across a restart without dropping input.
+   */
+  async sweepRouting(): Promise<void> {
+    if (this.#sweepInFlight !== undefined) return this.#sweepInFlight;
+    const sweep = this.#sweep().finally(() => {
+      this.#sweepInFlight = undefined;
+    });
+    this.#sweepInFlight = sweep;
+    return sweep;
+  }
+
+  async #sweep(): Promise<void> {
+    const now = this.#clock.now();
+    for (const window of await this.#store.listRoutingWindows()) {
+      if (window.status === 'open' && window.deadlineAt <= now) {
+        await this.#freezeWindow(window, now);
+      }
+    }
+    // Every still-frozen batch is submitted: the ones this sweep just froze
+    // and the ones an interrupted process froze before it died.
+    for (const batch of await this.#store.listRoutingBatches()) {
+      if (batch.status === 'frozen') await this.#submitBatch(batch);
+    }
+  }
+
+  /**
+   * Freeze one elapsed window into chronological, bounded batches (AC: split
+   * batches and deterministic truncation), or return `[]` when another sweep
+   * already froze it.
+   */
+  async #freezeWindow(window: RoutingWindow, now: number): Promise<readonly RoutingBatch[]> {
+    const inputIds = await this.#store.listRoutingWindowInputs(window.id);
+    const windowInputIds = new Set(inputIds);
+    const facts: RoutingInputFact[] = [];
+    for (const inputId of inputIds) {
+      const message = await this.#store.getMessage(inputId);
+      if (message !== undefined) {
+        facts.push(await this.#messageFact(message));
+        continue;
+      }
+      const event = await this.#store.getEvent(inputId);
+      if (event !== undefined) {
+        facts.push(await this.#eventFact(event));
+      }
+      // A missing input cannot occur: membership and the input itself are one
+      // store transaction. If it somehow does, the surviving facts still freeze
+      // and the durable membership row keeps the gap inspectable.
+    }
+    // Join order *is* the chronology: the durable cursor records arrival
+    // order, and creation timestamps may tie within one millisecond (or under
+    // a controlled clock). Sorting by a tieable timestamp would shuffle a
+    // batch, so the membership order is preserved exactly.
+    const contract = await this.#routingContract(window.projectId);
+    const messages = await this.#store.listMessages();
+    const recentContext = messages.filter(
+      (message) =>
+        message.channel === 'project' &&
+        message.projectId === window.projectId &&
+        !windowInputIds.has(message.id),
+    );
+    // Thread ancestors come from durable Messages only; a direct Message can
+    // never be reached (batch inputs are channel Messages whose inReplyTo chain
+    // stays inside their own scope), and the filter is the second lock.
+    const contextById = new Map<string, RoutingContextMessage>(
+      messages
+        .filter((message) => message.channel !== 'direct')
+        .map((message) => [
+          message.id,
+          {
+            id: message.id,
+            authorId: message.author.id,
+            authorKind: message.author.kind,
+            createdAt: message.createdAt,
+            body: message.body,
+            ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+          },
+        ]),
+    );
+
+    const plans = freezeRoutingBatches({
+      window,
+      inputs: facts,
+      contract,
+      recentContext: recentContext.map((message) => ({
+        id: message.id,
+        authorId: message.author.id,
+        authorKind: message.author.kind,
+        createdAt: message.createdAt,
+        body: message.body,
+        ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+      })),
+      messageById: (id) => contextById.get(id),
+      ...(this.#routingBounds !== undefined ? { bounds: this.#routingBounds } : {}),
+      now,
+      createBatchId: () => this.#newRoutingId('routingBatch'),
+    });
+    const frozen = await this.#store.freezeRoutingWindow({
+      windowId: window.id,
+      now,
+      batches: plans,
+    });
+    const timer = this.#windowTimers.get(window.id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#windowTimers.delete(window.id);
+    }
+    return frozen;
+  }
+
+  /** Eligible candidate Agents for a Message input, scope-gated and author-excluded. */
+  async #messageFact(message: Message): Promise<RoutingInputFact> {
+    const members = await this.#requireMembers(message.projectId);
+    const currentAgents = members
+      .filter((member) => member.memberKind === 'agent' && member.endedAt === undefined)
+      .map((member) => member.memberId);
+    let candidates = currentAgents;
+    if (message.scopeId !== '') {
+      const scope = await this.#scopes.getScope(message.scopeId);
+      if (scope === undefined) {
+        candidates = [];
+      } else {
+        const facts = scopeFacts(scope);
+        // Same fail-closed rule as deterministic routing: a participant-scoped
+        // kind without a participant set resolves to the empty set.
+        const participants =
+          facts.kind === 'project' ? undefined : (facts.participants ?? []);
+        if (participants !== undefined) {
+          candidates = candidates.filter((agentId) => participants.includes(agentId));
+        }
+      }
+    }
+    return {
+      inputId: message.id,
+      kind: 'message',
+      authorId: message.author.id,
+      createdAt: message.createdAt,
+      scopeId: message.scopeId,
+      content: message.body,
+      candidates: candidates.filter((agentId) => agentId !== message.author.id),
+      ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+    };
+  }
+
+  /** Eligible candidate Agents for a `wake-eligible` Project event input. */
+  async #eventFact(event: ProjectEvent): Promise<RoutingInputFact> {
+    const members = await this.#requireMembers(event.projectId);
+    return {
+      inputId: event.id,
+      kind: 'event',
+      authorId: event.producer.id,
+      createdAt: event.createdAt,
+      scopeId: '',
+      content:
+        `${event.kind}: ${event.summary}` + (event.detail !== undefined ? `\n${event.detail}` : ''),
+      candidates: members
+        .filter(
+          (member) =>
+            member.memberKind === 'agent' &&
+            member.endedAt === undefined &&
+            member.memberId !== event.producer.id,
+        )
+        .map((member) => member.memberId),
+    };
+  }
+
+  /** The Project-shared contract facts frozen into the routing context. */
+  async #routingContract(projectId: string): Promise<RoutingContractFacts> {
+    const members = await this.#requireMembers(projectId);
+    const facts =
+      this.#scopes.projectContract !== undefined
+        ? await this.#scopes.projectContract(projectId)
+        : undefined;
+    const details = new Map(
+      (facts?.members ?? []).map((member) => [member.memberId, member] as const),
+    );
+    // No per-input Task relevance rule exists yet. Omitting Tasks is safer
+    // than presenting unrelated open work as routing evidence (ADR-0007).
+    return {
+      projectId,
+      goal: facts?.goal ?? '',
+      rules: facts !== undefined ? [...facts.rules] : [],
+      candidates: members
+        .filter((member) => member.memberKind === 'agent' && member.endedAt === undefined)
+        .map((member) => ({
+          agentId: member.memberId,
+          responsibilities: [...(details.get(member.memberId)?.responsibilities ?? [])],
+          collaborationInstructions: details.get(member.memberId)?.collaborationInstructions ?? '',
+        })),
+    };
+  }
+
+  /**
+   * Judge one frozen batch: up to two attempts on the identical snapshot, then
+   * fail closed with one durable outcome per input (AC: retry once, then fail
+   * closed with visible per-input outcomes).
+   */
+  async #submitBatch(batch: RoutingBatch): Promise<void> {
+    const current = await this.#store.getRoutingBatch(batch.id);
+    if (current === undefined || current.status !== 'frozen') return;
+    const batchInputs = await this.#store.listRoutingBatchInputs(current.id);
+    const expected: JudgementExpectation = {
+      inputIds: batchInputs.map((input) => input.inputId),
+      candidatesByInput: new Map(
+        current.manifest.inputs.map((input) => [input.inputId, [...input.candidates]] as const),
+      ),
+    };
+
+    const previous = await this.#store.listRoutingAttempts(current.id);
+    // The port identity is evidence, not an injection channel for provider
+    // credentials. Never persist a raw adapter-supplied identifier.
+    const modelId = this.#routingModel === undefined
+      ? 'unavailable'
+      : sanitizeIdentifier(this.#routingModel.id, { kind: 'model', fallback: 'unknown-model' });
+    const successful = previous.find((attempt) => attempt.status === 'succeeded');
+    if (successful?.judgement !== undefined) {
+      await this.#settleBatchRouted(current, batchInputs, successful.judgement);
+      return;
+    }
+    if (successful !== undefined) {
+      // A pre-v21 success has no recoverable judgement. Never ask the model
+      // again and pretend the resulting decision was the original one.
+      await this.#failBatchClosed(current, batchInputs, {
+        kind: 'invalid-output', detail: 'legacy successful attempt has no recoverable judgement',
+      });
+      return;
+    }
+    let lastFailure: { readonly kind: RoutingFailureKind; readonly detail: string } =
+      { kind: 'model-unavailable', detail: 'routing attempt interrupted before completion' };
+    const priorFailure = previous.at(-1);
+    if (priorFailure?.errorKind !== undefined) lastFailure = { kind: priorFailure.errorKind, detail: priorFailure.errorDetail ?? '' };
+    for (let attemptNumber = previous.length + 1; attemptNumber <= 2; attemptNumber += 1) {
+      const startedAt = this.#clock.now();
+      const attemptId = this.#newRoutingId('routingAttempt');
+      await this.#store.recordRoutingAttempt({
+        id: attemptId, batchId: current.id, attemptNumber,
+        modelId,
+        startedAt, finishedAt: startedAt, status: 'started',
+      });
+      let judgement: RoutingJudgement | undefined;
+      let parsed: JudgementParseResult | undefined;
+      let failure: { readonly kind: RoutingFailureKind; readonly detail: string } | undefined;
+      if (this.#routingModel === undefined) {
+        failure = {
+          kind: 'model-unavailable',
+          detail: 'no wake model is configured for this instance',
+        };
+      } else {
+        try {
+          const raw = await withRoutingTimeout(
+            this.#routingModel.judge({
+              batchId: current.id,
+              projectId: current.projectId,
+              attempt: attemptNumber,
+              context: current.context,
+            }),
+            this.#attemptTimeoutMs,
+          );
+          parsed = parseRoutingJudgement(raw, expected);
+          if (!parsed.ok) failure = { kind: parsed.kind, detail: parsed.detail };
+        } catch (error) {
+          failure = error instanceof RoutingAttemptTimeoutError
+            ? {
+                kind: 'timeout',
+                detail: `wake model did not answer within ${this.#attemptTimeoutMs}ms`,
+              }
+            : {
+                kind: 'model-unavailable',
+                // Provider errors can embed an arbitrary unlabelled key. Do
+                // not copy their prose into attempts, evidence, or logs.
+                detail: 'wake model request failed',
+              };
+        }
+      }
+      judgement = parsed !== undefined && parsed.ok ? parsed.judgement : undefined;
+      await this.#store.recordRoutingAttempt({
+        id: attemptId,
+        batchId: current.id,
+        attemptNumber,
+        modelId,
+        startedAt,
+        finishedAt: this.#clock.now(),
+        status: judgement !== undefined ? 'succeeded' : 'failed',
+        ...(judgement !== undefined ? { judgement } : {}),
+        ...(failure !== undefined
+          ? { errorKind: failure.kind, errorDetail: failure.detail }
+          : {}),
+      });
+      if (judgement !== undefined) {
+        await this.#settleBatchRouted(current, batchInputs, judgement);
+        return;
+      }
+      lastFailure = failure!;
+    }
+    await this.#failBatchClosed(current, batchInputs, lastFailure);
+  }
+
+  /**
+   * Settle a judged batch: one outcome per input, at most one WakeRequest and
+   * run per selected Agent, all durable before any admission (AC: one frozen
+   * attempt accounts for every input; coalesced fan-out).
+   */
+  async #settleBatchRouted(
+    batch: RoutingBatch,
+    batchInputs: readonly RoutingBatchInput[],
+    judgement: RoutingJudgement,
+  ): Promise<void> {
+    const now = this.#clock.now();
+    const selectionByInput = new Map(judgement.selections.map((s) => [s.inputId, s] as const));
+    const suppressionByInput = new Map(judgement.suppressions.map((s) => [s.inputId, s] as const));
+    const inputIdsByAgent = new Map<string, string[]>();
+    const outcomes: RoutingInputOutcome[] = [];
+    for (const batchInput of batchInputs) {
+      const selection = selectionByInput.get(batchInput.inputId);
+      if (selection !== undefined) {
+        outcomes.push({
+          batchId: batch.id,
+          inputId: batchInput.inputId,
+          status: 'selected',
+          assignments: selection.assignments.map((assignment) => ({
+            agentId: assignment.agentId,
+            rationale: assignment.rationale,
+          })),
+          settledAt: now,
+        });
+        for (const assignment of selection.assignments) {
+          const list = inputIdsByAgent.get(assignment.agentId) ?? [];
+          list.push(batchInput.inputId);
+          inputIdsByAgent.set(assignment.agentId, list);
+        }
+        continue;
+      }
+      const suppression = suppressionByInput.get(batchInput.inputId);
+      if (suppression === undefined) {
+        // Unreachable: the validator guarantees full accounting. Fail closed
+        // defensively rather than settle an unaccounted input.
+        await this.#failBatchClosed(
+          batch,
+          batchInputs,
+          { kind: 'invalid-output', detail: `input ${batchInput.inputId} lost its judgement` },
+        );
+        return;
+      }
+      outcomes.push({
+        batchId: batch.id,
+        inputId: batchInput.inputId,
+        status: 'suppressed',
+        assignments: [],
+        rationale: suppression.rationale,
+        settledAt: now,
+      });
+    }
+
+    const wakes = [...inputIdsByAgent.keys()].map((agentId) =>
+      wakeFromBatch({ batchId: batch.id, projectId: batch.projectId, agentId, now }),
+    );
+    // Persistence-before-wake for the batch path: outcomes and WakeRequests are
+    // durable together before any run admission begins.
+    await this.#store.settleRoutingBatch({
+      batchId: batch.id,
+      status: inputIdsByAgent.size > 0 ? 'routed' : 'suppressed',
+      outcomes,
+      wakes,
+      now,
+    });
+
+    // Deliberate suppression is durable, visible, and never retried: it is
+    // recorded on the causal input exactly like any other non-wake outcome.
+    for (const outcome of outcomes) {
+      if (outcome.status !== 'suppressed') continue;
+      const observation: WakeObservation = {
+        agentId: '*',
+        status: 'suppressed',
+        reason: 'routing-model',
+        detail: `routing model suppressed this input: ${outcome.rationale ?? 'no agent needed'}`,
+      };
+      await this.#store.recordObservation({ inputId: outcome.inputId, observation, now });
+      this.#announce(outcome.inputId, [observation]);
+    }
+
+    for (const wake of wakes) {
+      try {
+        const source = await this.#resolveWakeSource(wake);
+        if (source !== undefined) await this.#admit(wake, source, true);
+      } catch {
+        // Admission failed before a run id existed (submission error or
+        // transient capacity). The wake stays durable and pending — visible,
+        // with admission continuing when the condition clears through
+        // `reconcile` (ADR-0007: pending or waiting, never silent expiry).
+      }
+    }
+  }
+
+  /**
+   * Fail a batch closed after the one permitted retry: zero Agents woken,
+   * every input left intact with a durable, visible failed outcome.
+   */
+  async #failBatchClosed(
+    batch: RoutingBatch,
+    batchInputs: readonly RoutingBatchInput[],
+    failure: { readonly kind: RoutingFailureKind; readonly detail: string },
+  ): Promise<void> {
+    const now = this.#clock.now();
+    const detail = redactSensitiveText(
+      `routing attempt failed after 2 attempts on the identical frozen snapshot: ${failure.kind}: ${failure.detail}`,
+    ).slice(0, 500);
+    const outcomes: RoutingInputOutcome[] = batchInputs.map((batchInput) => ({
+      batchId: batch.id,
+      inputId: batchInput.inputId,
+      status: 'failed',
+      assignments: [],
+      detail,
+      settledAt: now,
+    }));
+    await this.#store.settleRoutingBatch({
+      batchId: batch.id,
+      status: 'failed',
+      error: detail,
+      outcomes,
+      now,
+    });
+    for (const outcome of outcomes) {
+      const observation: WakeObservation = {
+        agentId: '*',
+        status: 'failed',
+        reason: 'routing-model',
+        detail,
+      };
+      await this.#store.recordObservation({ inputId: outcome.inputId, observation, now });
+      this.#announce(outcome.inputId, [observation]);
+    }
+  }
+
+  /** Resolve causal input ids in order, skipping nothing that is durable. */
+  async #resolveInputs(inputIds: readonly string[]): Promise<readonly RoutingInput[]> {
+    const resolved: RoutingInput[] = [];
+    for (const inputId of inputIds) {
+      const message = await this.#store.getMessage(inputId);
+      if (message !== undefined) {
+        resolved.push(message);
+        continue;
+      }
+      const event = await this.#store.getEvent(inputId);
+      if (event !== undefined) resolved.push(event);
+    }
+    return resolved;
+  }
+
+  /** Resolve one wake's causal source: its input, or its batch and assignment. */
+  async #resolveWakeSource(wake: WakeRequest): Promise<ResolvedRoutingSource | undefined> {
+    if (wake.batchId !== undefined) {
+      const batch = await this.#store.getRoutingBatch(wake.batchId);
+      if (batch === undefined) return undefined;
+      const outcomes = await this.#store.listRoutingOutcomes(batch.id);
+      const assignedIds = outcomes
+        .filter((outcome) => outcome.assignments.some((a) => a.agentId === wake.agentId))
+        .map((outcome) => outcome.inputId);
+      return { kind: 'batch', batch, assigned: await this.#resolveInputs(assignedIds) };
+    }
+    const input =
+      (await this.#store.getMessage(wake.inputId)) ?? (await this.#store.getEvent(wake.inputId));
+    return input === undefined ? undefined : { kind: 'input', input };
+  }
+
+  /** Durable routing windows, optionally scoped to one Project. */
+  listRoutingWindows(projectId?: string): Promise<readonly RoutingWindow[]> {
+    return this.#store.listRoutingWindows(projectId);
+  }
+
+  /** Durable frozen routing batches, optionally scoped to one Project. */
+  listRoutingBatches(projectId?: string): Promise<readonly RoutingBatch[]> {
+    return this.#store.listRoutingBatches(projectId);
+  }
+
+  /**
+   * The complete causal evidence for one batch: window, inputs, attempts,
+   * per-input outcomes, batch WakeRequests, and their projected replies — the
+   * ADR-0007 human-inspectable chain without internal logs.
+   */
+  async getRoutingBatchEvidence(batchId: string): Promise<RoutingBatchEvidence | undefined> {
+    const batch = await this.#store.getRoutingBatch(batchId);
+    if (batch === undefined) return undefined;
+    const window = (await this.#store.listRoutingWindows(batch.projectId)).find(
+      (candidate) => candidate.id === batch.windowId,
+    );
+    const inputs = await this.#store.listRoutingBatchInputs(batch.id);
+    const attempts = await this.#store.listRoutingAttempts(batch.id);
+    const outcomes = await this.#store.listRoutingOutcomes(batch.id);
+    const wakes = (await this.#store.listWakeRequests()).filter(
+      (wake) => wake.batchId === batch.id,
+    );
+    const replies: { readonly idempotencyKey: string; readonly messageId: string }[] = [];
+    for (const wake of wakes) {
+      const reply = await this.#store.getMessage(replyMessageId(wake));
+      if (reply !== undefined) replies.push({ idempotencyKey: wake.idempotencyKey, messageId: reply.id });
+    }
+    return { batch, window, inputs, attempts, outcomes, wakes, replies };
+  }
+
+  /**
+   * The complete causal evidence for one input: its collection window, every
+   * batch it joined (with attempts, outcomes, wakes, replies), its
+   * deterministic wakes, and its durable non-wake observations.
+   */
+  async routingEvidenceForInput(inputId: string): Promise<RoutingInputEvidence | undefined> {
+    const message = await this.#store.getMessage(inputId);
+    const event = message === undefined ? await this.#store.getEvent(inputId) : undefined;
+    if (message === undefined && event === undefined) return undefined;
+    const projectId = (message ?? event)!.projectId;
+
+    let window: RoutingWindow | undefined;
+    for (const candidate of await this.#store.listRoutingWindows(projectId)) {
+      const membership = await this.#store.listRoutingWindowInputs(candidate.id);
+      if (membership.includes(inputId)) {
+        window = candidate;
+        break;
+      }
+    }
+
+    const outcomes = await this.#store.listRoutingOutcomesForInput(inputId);
+    const batches: RoutingBatchEvidence[] = [];
+    for (const batchId of [...new Set(outcomes.map((outcome) => outcome.batchId))]) {
+      const evidence = await this.getRoutingBatchEvidence(batchId);
+      if (evidence !== undefined) batches.push(evidence);
+    }
+    const deterministicWakes = (await this.#store.listWakeRequests()).filter(
+      (wake) => wake.batchId === undefined && wake.inputId === inputId,
+    );
+    return {
+      input: message ?? event!,
+      ...(window !== undefined ? { window } : {}),
+      batches,
+      deterministicWakes,
+      observations: await this.#store.listObservations(inputId),
+    };
+  }
+
+  #newRoutingId(kind: 'routingBatch' | 'routingAttempt'): string {
+    const factory = this.#ids[kind];
+    if (factory !== undefined) return factory.call(this.#ids);
+    return this.#fallbackIds[kind]!();
   }
 
   async #requireWritableScope(scopeId: string, actorId: string): Promise<ConversationScope> {
@@ -731,6 +1463,116 @@ export function renderWakePrompt(input: RoutingInput, agentId: string): string {
 }
 
 export { wakeIdempotencyKey };
+
+/**
+ * Render one batch-selected Agent's prompt (#97, ADR-0007).
+ *
+ * The Agent receives exactly its assigned batch inputs in chronological
+ * order — never the whole batch, never another Agent's assignment — with the
+ * batch identity named so the run can be traced back through its causal
+ * chain. The final text becomes the Agent's reply to the batch.
+ */
+export function renderBatchWakePrompt(
+  agentId: string,
+  batch: RoutingBatch,
+  assigned: readonly RoutingInput[],
+): string {
+  const lines = [
+    `Wake-model routing selected you for one routing batch in project ${batch.projectId} (batch ${batch.id}).`,
+    `${assigned.length} input${assigned.length === 1 ? '' : 's'} assigned to you, in chronological order:`,
+  ];
+  assigned.forEach((input, index) => {
+    lines.push('');
+    if (isProjectEvent(input)) {
+      lines.push(
+        `[input ${index + 1} | id=${input.id} | kind=project-event | producer=${input.producer.id} | at=${input.createdAt}]`,
+        `${input.kind}: ${input.summary}`,
+        ...(input.detail !== undefined ? [input.detail] : []),
+      );
+    } else {
+      lines.push(
+        `[input ${index + 1} | id=${input.id} | kind=message | author=${input.author.kind}:${input.author.id} | at=${input.createdAt} | scope=${input.scopeId}]`,
+        input.body,
+      );
+    }
+  });
+  lines.push(
+    '',
+    `You are ${agentId}. Answer in your final message; that answer becomes your reply to this batch. ` +
+      'Keep private reasoning and tool output out of it.',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Where a batch-triggered reply lands (#97).
+ *
+ * One assigned Message keeps the ordinary single `inReplyTo` relationship in
+ * its own scope. Several assigned Messages that share one conversation scope
+ * post there without an `inReplyTo`. Anything else — mixed scopes, or only
+ * Project events — posts to the Project channel, so scope-private content
+ * never migrates into a wider scope through a reply.
+ */
+function batchReplyPlacement(
+  projectId: string,
+  assigned: readonly RoutingInput[],
+): { readonly scopeId: string; readonly channel: Message['channel']; readonly inReplyTo?: string } {
+  const messages = assigned.filter((input): input is Message => !isProjectEvent(input));
+  if (assigned.length === 1 && messages.length === 1) {
+    const only = messages[0]!;
+    return { scopeId: only.scopeId, channel: only.channel, inReplyTo: only.id };
+  }
+  if (assigned.length > 0 && messages.length === assigned.length) {
+    const first = messages[0]!;
+    if (messages.every((message) => message.scopeId === first.scopeId)) {
+      return { scopeId: first.scopeId, channel: first.channel };
+    }
+  }
+  return { scopeId: projectChannelScopeId(projectId), channel: 'project' };
+}
+
+/** One wake-model attempt exceeded its timeout. */
+class RoutingAttemptTimeoutError extends Error {
+  constructor() {
+    super('routing attempt timed out');
+    this.name = 'RoutingAttemptTimeoutError';
+  }
+}
+
+/** Race one model call against the attempt timeout, always clearing the timer. */
+function withRoutingTimeout(promise: Promise<string>, ms: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new RoutingAttemptTimeoutError()), ms);
+    timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/** The complete causal evidence for one frozen routing batch (#97). */
+export interface RoutingBatchEvidence {
+  readonly batch: RoutingBatch;
+  readonly window?: RoutingWindow | undefined;
+  readonly inputs: readonly RoutingBatchInput[];
+  readonly attempts: readonly RoutingAttempt[];
+  readonly outcomes: readonly RoutingInputOutcome[];
+  /** The batch's model-assisted WakeRequests, at most one per selected Agent. */
+  readonly wakes: readonly WakeRequest[];
+  /** Projected replies by wake idempotency key, once a run completed. */
+  readonly replies: readonly { readonly idempotencyKey: string; readonly messageId: string }[];
+}
+
+/** The complete causal evidence for one routing input (#97). */
+export interface RoutingInputEvidence {
+  readonly input: RoutingInput;
+  readonly window?: RoutingWindow;
+  readonly batches: readonly RoutingBatchEvidence[];
+  /** Deterministic per-Message/per-Agent wakes, when the input was addressed. */
+  readonly deterministicWakes: readonly WakeRequest[];
+  readonly observations: readonly WakeObservation[];
+}
 
 /**
  * The reply's stable identity: derived from the wake it answers.

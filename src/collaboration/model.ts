@@ -26,7 +26,8 @@
  *
  * Routing here is deterministic by construction (ADR-0007): the wake contract
  * in `wake.ts` never consults a model. Wake-model-assisted judgement over
- * unaddressed inputs arrives with routing batches (#97), not before.
+ * unaddressed inputs is the routing batch's job (#97): an eligible input
+ * collects into a durable window and only the frozen batch reaches a model.
  */
 
 /**
@@ -95,6 +96,8 @@ export type WakeReason =
   | 'broadcast'
   /** The Project event declared this agent as its responsible target. */
   | 'event-addressed'
+  /** The wake model selected this agent for one frozen routing batch (#97). */
+  | 'routing-model'
   /** No deterministic addressing form applied; the input stayed durable. */
   | 'unaddressed';
 
@@ -113,9 +116,12 @@ export type WakeStatus =
  * The durable per-recipient decision that an input should start a run.
  *
  * `inputId` names the causal input: a Message id, or a Project event id for an
- * `addressed` event. The `(inputId, agentId)` pair is the idempotency
- * identity: a repeated delivery of the same input reuses the existing wake
- * request instead of admitting a second run.
+ * `addressed` event. For a model-assisted wake it is the routing batch id and
+ * `batchId` is set: a batch wake is identified by `(batch, Agent)`, while the
+ * deterministic Message-and-Agent identity stays unchanged (ADR-0007).
+ * The `(inputId, agentId)` pair is the idempotency identity: a repeated
+ * delivery of the same input — or a repeated settlement of the same batch —
+ * reuses the existing wake request instead of admitting a second run.
  */
 export interface WakeRequest {
   readonly id: string;
@@ -126,6 +132,8 @@ export interface WakeRequest {
   readonly status: WakeStatus;
   /** Always `${inputId}:${agentId}`; the store enforces uniqueness. */
   readonly idempotencyKey: string;
+  /** The frozen routing batch this wake came from, when it is model-assisted. */
+  readonly batchId?: string;
   /** The Agent run admitted for this wake, once one was. */
   readonly runId?: string;
   /** Why a wake was suppressed or failed, when there is something to say. */
@@ -158,4 +166,15 @@ export interface WakePlan {
   readonly inputId: string;
   readonly decisions: readonly WakeDecision[];
   readonly observations: readonly WakeObservation[];
+  /**
+   * True when this unaddressed input is eligible for the next routing batch
+   * (#97): no deterministic address applied, the scope is eligible (Project
+   * channel or Working group channel; never a direct conversation), and the
+   * Project's wake policy is `wake-model-assisted`.
+   *
+   * Under `explicit-only` an unaddressed input instead records the durable
+   * suppressed observation, and a deterministically addressed input is never
+   * batch-eligible — explicit addresses bypass the window entirely.
+   */
+  readonly batchEligible?: boolean;
 }

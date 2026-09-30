@@ -200,7 +200,7 @@ test('newer schema version is refused with sanitized host-local guidance', async
     // Create a database newer than the current maximum.
     const seedDb = new DatabaseSync(dbPath);
     seedDb.exec(`
-      PRAGMA user_version = 20;
+      PRAGMA user_version = 22;
       CREATE TABLE future_table (id TEXT PRIMARY KEY);
       INSERT INTO future_table VALUES ('fut-1');
     `);

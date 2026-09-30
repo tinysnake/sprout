@@ -26,6 +26,9 @@ import {
   toMessageView,
   toProjectEventView,
   toProjectView,
+  toRoutingBatchDetailView,
+  toRoutingEvidenceView,
+  toRoutingWindowView,
   toRunView,
   toTaskView,
   toTaskWithRunsView,
@@ -457,6 +460,98 @@ export function createRunApi(options: RunApiOptions): RunApi {
           .filter((wake) => wake.inputId === event.id)
           .map(toWakeView),
       });
+      return;
+    }
+
+    // GET /api/projects/:id/routing-batches — the durable assisted-routing
+    // evidence for one Project: collection windows and frozen batches (#97,
+    // ADR-0007). Read-only; the MVP exposes no routing controls.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'projects' &&
+      segments[3] === 'routing-batches' &&
+      collaboration
+    ) {
+      const projectId = segments[2] ?? '';
+      const [windows, batches] = await Promise.all([
+        collaboration.listRoutingWindows(projectId),
+        collaboration.listRoutingBatches(projectId),
+      ]);
+      sendJson(response, 200, {
+        windows: windows.map(toRoutingWindowView),
+        batches: batches.map((batch) => ({
+          id: batch.id,
+          projectId: batch.projectId,
+          windowId: batch.windowId,
+          splitIndex: batch.splitIndex,
+          splitCount: batch.splitCount,
+          cutoffAt: batch.cutoffAt,
+          status: batch.status,
+          ...(batch.error !== undefined ? { error: batch.error } : {}),
+          createdAt: batch.createdAt,
+          ...(batch.settledAt !== undefined ? { settledAt: batch.settledAt } : {}),
+        })),
+      });
+      return;
+    }
+
+    // GET /api/routing-batches/:id — the complete causal evidence for one
+    // frozen batch: window, inputs (with truncation markers), attempts,
+    // per-input outcomes, WakeRequests, and projected replies.
+    if (
+      request.method === 'GET' &&
+      segments.length === 3 &&
+      segments[0] === 'api' &&
+      segments[1] === 'routing-batches' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.getRoutingBatchEvidence(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown routing batch: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routingBatch: toRoutingBatchDetailView(evidence) });
+      return;
+    }
+
+    // GET /api/messages/:id/routing — the causal routing chain of one Message:
+    // collection window, batches with attempts and outcomes, deterministic
+    // wakes, and durable non-wake observations.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'messages' &&
+      segments[3] === 'routing' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.routingEvidenceForInput(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown message: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routing: toRoutingEvidenceView(evidence) });
+      return;
+    }
+
+    // GET /api/project-events/:id/routing — the same causal chain for one
+    // Project event (`wake-eligible` inputs route through batches).
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'project-events' &&
+      segments[3] === 'routing' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.routingEvidenceForInput(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown project event: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routing: toRoutingEvidenceView(evidence) });
       return;
     }
 

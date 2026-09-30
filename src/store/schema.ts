@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 19;
+export const CURRENT_SCHEMA_VERSION = 21;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 19;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 21;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -901,6 +901,137 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         CREATE INDEX IF NOT EXISTS project_events_project
           ON project_events(project_id);
       `);
+    },
+  },
+  {
+    fromVersion: 19,
+    toVersion: 20,
+    name: 'routing_windows_batches_attempts',
+    migrate: (db) => {
+      // Wake-model-assisted routing (#97): durable collection windows with
+      // cursor/deadline, frozen chronological batches with their bounded
+      // context snapshot and manifest, append-only attempts, and per-input
+      // outcomes. A model-assisted WakeRequest also names its batch, so the
+      // wake table gains a nullable batch_id. No credential, hostname,
+      // address, or path has a column; context and excerpts hold only
+      // Project-shared conversation content already durable in this database.
+      const wakeTable = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_wake_requests'")
+        .get();
+      if (wakeTable !== undefined) {
+        const columns = db
+          .prepare('PRAGMA table_info(collaboration_wake_requests)')
+          .all() as unknown as readonly { name: string }[];
+        if (!columns.some((column) => column.name === 'batch_id')) {
+          db.exec('ALTER TABLE collaboration_wake_requests ADD COLUMN batch_id TEXT;');
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS collaboration_routing_windows (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          opened_at INTEGER NOT NULL,
+          deadline_at INTEGER NOT NULL,
+          interval_ms INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          cursor TEXT,
+          input_count INTEGER NOT NULL DEFAULT 0,
+          closed_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_windows_project
+          ON collaboration_routing_windows(project_id, status);
+        CREATE TABLE IF NOT EXISTS collaboration_window_inputs (
+          window_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          joined_at INTEGER NOT NULL,
+          PRIMARY KEY (window_id, input_id)
+        );
+        CREATE TABLE IF NOT EXISTS collaboration_routing_batches (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          window_id TEXT NOT NULL,
+          split_index INTEGER NOT NULL,
+          split_count INTEGER NOT NULL,
+          cutoff_at INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          bounds TEXT NOT NULL,
+          manifest TEXT NOT NULL,
+          context TEXT NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          settled_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_batches_project
+          ON collaboration_routing_batches(project_id);
+        CREATE TABLE IF NOT EXISTS collaboration_routing_batch_inputs (
+          batch_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          excerpt TEXT NOT NULL,
+          truncated INTEGER NOT NULL,
+          excerpt_chars INTEGER NOT NULL,
+          content_chars INTEGER NOT NULL,
+          PRIMARY KEY (batch_id, input_id)
+        );
+        CREATE TABLE IF NOT EXISTS collaboration_routing_attempts (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          model_id TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          error_kind TEXT,
+          error_detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_attempts_batch
+          ON collaboration_routing_attempts(batch_id);
+        CREATE TABLE IF NOT EXISTS collaboration_routing_outcomes (
+          batch_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          assignments TEXT NOT NULL,
+          rationale TEXT,
+          detail TEXT,
+          settled_at INTEGER NOT NULL,
+          PRIMARY KEY (batch_id, input_id)
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_outcomes_input
+          ON collaboration_routing_outcomes(input_id);
+      `);
+    },
+  },
+  {
+    fromVersion: 20,
+    toVersion: 21,
+    name: 'routing_attempt_recovery',
+    migrate: (db) => {
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_routing_attempts'").get() === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(collaboration_routing_attempts)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'judgement')) {
+        db.exec('ALTER TABLE collaboration_routing_attempts ADD COLUMN judgement TEXT;');
+      }
+      // v20 did not constrain attempt numbers. Repeated restarts could record
+      // several calls with the same number. Preserve every historical call and
+      // its status, assigning chronological ordinals only in affected batches.
+      // Recovery counts rows, so no duplicate can create an unearned retry.
+      db.exec(`
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY batch_id ORDER BY started_at, rowid
+          ) AS ordinal
+          FROM collaboration_routing_attempts
+          WHERE batch_id IN (
+            SELECT batch_id FROM collaboration_routing_attempts
+            GROUP BY batch_id, attempt_number HAVING COUNT(*) > 1
+          )
+        )
+        UPDATE collaboration_routing_attempts
+          SET attempt_number = (SELECT ordinal FROM ranked WHERE ranked.id = collaboration_routing_attempts.id)
+          WHERE id IN (SELECT id FROM ranked);
+      `);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
+        ON collaboration_routing_attempts(batch_id, attempt_number);`);
     },
   },
 ];

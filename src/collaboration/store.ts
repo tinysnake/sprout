@@ -28,6 +28,16 @@ import type {
   WakeRequest,
   WakeStatus,
 } from './model.ts';
+import type {
+  FrozenRoutingBatchPlan,
+} from './routing-context.ts';
+import type {
+  RoutingAttempt,
+  RoutingBatch,
+  RoutingBatchInput,
+  RoutingInputOutcome,
+  RoutingWindow,
+} from './routing.ts';
 
 export interface CollaborationStore {
   /**
@@ -43,6 +53,8 @@ export interface CollaborationStore {
     readonly message: Message;
     readonly plan: WakePlan;
     readonly now: number;
+    /** Present only for a batch-eligible input under assisted routing (#97). */
+    readonly collect?: RoutingWindowCollect;
   }): Promise<PostMessageResult>;
 
   /**
@@ -56,6 +68,8 @@ export interface CollaborationStore {
     readonly event: ProjectEvent;
     readonly plan: WakePlan;
     readonly now: number;
+    /** Present only for a batch-eligible input under assisted routing (#97). */
+    readonly collect?: RoutingWindowCollect;
   }): Promise<PublishEventResult>;
 
   getMessage(messageId: string): Promise<Message | undefined>;
@@ -92,14 +106,72 @@ export interface CollaborationStore {
     readonly now: number;
   }): Promise<void>;
 
-  /**
-   * The durable non-wake outcomes recorded for one input (Message or event).
+  /** The durable non-wake outcomes recorded for one input (Message or event).
    *
    * Suppression and failure are only meaningful if a human can see them, so the
    * contract that records them also exposes them; "nothing happened" must never
    * be the only available answer to "why did this input wake nobody?".
    */
   listObservations(inputId: string): Promise<readonly WakeObservation[]>;
+
+  /** Every routing window on record, optionally scoped to one Project. */
+  listRoutingWindows(projectId?: string): Promise<readonly RoutingWindow[]>;
+
+  /**
+   * Close one open window and freeze its inputs into chronological batches,
+   * atomically.
+   *
+   * The close is a compare-and-set: exactly one caller freezes a window, so a
+   * timer and a restart sweep can never both split the same inputs into two
+   * batch sets. Returns the frozen batches, or `[]` when another caller already
+   * froze (or the window is unknown).
+   */
+  freezeRoutingWindow(input: {
+    readonly windowId: string;
+    readonly now: number;
+    readonly batches: readonly FrozenRoutingBatchPlan[];
+  }): Promise<readonly RoutingBatch[]>;
+
+  /** One window's collected input ids, in join order (the durable cursor). */
+  listRoutingWindowInputs(windowId: string): Promise<readonly string[]>;
+
+  /** Every frozen routing batch on record, optionally scoped to one Project. */
+  listRoutingBatches(projectId?: string): Promise<readonly RoutingBatch[]>;
+  getRoutingBatch(batchId: string): Promise<RoutingBatch | undefined>;
+  /** One batch's inputs, in chronological position order. */
+  listRoutingBatchInputs(batchId: string): Promise<readonly RoutingBatchInput[]>;
+
+  /** Append one settled wake-model attempt of one batch (never rewritten). */
+  recordRoutingAttempt(attempt: RoutingAttempt): Promise<void>;
+  /** The attempts of one batch, in attempt-number order. */
+  listRoutingAttempts(batchId: string): Promise<readonly RoutingAttempt[]>;
+
+  /**
+   * Settle one batch with one durable outcome per input, atomically with its
+   * status change (and its WakeRequests when it routed).
+   *
+   * This is persistence-before-wake for the batch path: the outcomes and the
+   * per-Agent wake requests become durable together, before any run admission.
+   */
+  settleRoutingBatch(input: {
+    readonly batchId: string;
+    readonly status: Extract<RoutingBatch['status'], 'routed' | 'suppressed' | 'failed'>;
+    readonly error?: string;
+    readonly outcomes: readonly RoutingInputOutcome[];
+    readonly wakes?: readonly WakeRequest[];
+    readonly now: number;
+  }): Promise<void>;
+
+  /** Every outcome of one settled batch, in chronological input order. */
+  listRoutingOutcomes(batchId: string): Promise<readonly RoutingInputOutcome[]>;
+  /** Every outcome recorded for one input across batches (evidence reads). */
+  listRoutingOutcomesForInput(inputId: string): Promise<readonly RoutingInputOutcome[]>;
+}
+
+/** How one eligible input joins (or opens) its Project's routing window. */
+export interface RoutingWindowCollect {
+  /** The Project's fixed routing interval for the window about to open. */
+  readonly intervalMs: number;
 }
 
 export interface PostMessageResult {
@@ -107,6 +179,8 @@ export interface PostMessageResult {
   readonly wakes: readonly WakeRequest[];
   /** True when the delivery key had already been stored; nothing was added. */
   readonly duplicate: boolean;
+  /** The Project's open routing window after this input joined it (#97). */
+  readonly window?: RoutingWindow;
 }
 
 export interface PublishEventResult {
@@ -114,6 +188,8 @@ export interface PublishEventResult {
   readonly wakes: readonly WakeRequest[];
   /** True when the delivery key had already been stored; nothing was added. */
   readonly duplicate: boolean;
+  /** The Project's open routing window after this input joined it (#97). */
+  readonly window?: RoutingWindow;
 }
 
 export interface AdmitWakeResult {
@@ -154,6 +230,34 @@ export function wakeFromDecision(input: {
 }
 
 /**
+ * Materialize one model-assisted wake request from a frozen routing batch.
+ *
+ * Identified by `(batch, Agent)` — `inputId` is the batch id and `batchId` is
+ * set — while the idempotency shape stays `${inputId}:${agentId}` so the same
+ * store-level uniqueness and admission compare-and-set govern both wake kinds
+ * (ADR-0007: batch-and-Agent identity beside the unchanged Message-and-Agent
+ * identity).
+ */
+export function wakeFromBatch(input: {
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly agentId: string;
+  readonly now: number;
+}): WakeRequest {
+  return {
+    id: `wake-${input.batchId}-${input.agentId}`,
+    inputId: input.batchId,
+    batchId: input.batchId,
+    projectId: input.projectId,
+    agentId: input.agentId,
+    reason: 'routing-model',
+    status: 'pending' satisfies WakeStatus,
+    idempotencyKey: wakeIdempotencyKey(input.batchId, input.agentId),
+    createdAt: input.now,
+  };
+}
+
+/**
  * In-memory collaboration storage.
  *
  * Sufficient for unit tests. It enforces the same idempotency identities as
@@ -168,11 +272,20 @@ export class InMemoryCollaborationStore implements CollaborationStore {
   readonly #wakes = new Map<string, WakeRequest>();
   /** Every observation recorded, keyed by the input it describes. */
   readonly #observations = new Map<string, WakeObservation[]>();
+  /** Routing windows (#97), keyed by window id. */
+  readonly #windows = new Map<string, RoutingWindow>();
+  /** Window membership (the durable cursor), in join order. */
+  readonly #windowInputs = new Map<string, string[]>();
+  readonly #batches = new Map<string, RoutingBatch>();
+  readonly #batchInputs = new Map<string, RoutingBatchInput[]>();
+  readonly #attempts = new Map<string, RoutingAttempt[]>();
+  readonly #outcomes = new Map<string, RoutingInputOutcome[]>();
 
   async postMessage(input: {
     readonly message: Message;
     readonly plan: WakePlan;
     readonly now: number;
+    readonly collect?: RoutingWindowCollect;
   }): Promise<PostMessageResult> {
     const existingId = this.#byDeliveryKey.get(input.message.deliveryKey);
     if (existingId !== undefined) {
@@ -184,13 +297,23 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     this.#messages.set(input.message.id, input.message);
     this.#byDeliveryKey.set(input.message.deliveryKey, input.message.id);
     this.#storePlan(input.plan, input.message.projectId, input.now);
-    return { message: input.message, wakes: this.#wakesFor(input.message.id), duplicate: false };
+    const window =
+      input.collect !== undefined
+        ? this.#collectWindow(input.message.projectId, input.message.id, input.now, input.collect.intervalMs)
+        : undefined;
+    return {
+      message: input.message,
+      wakes: this.#wakesFor(input.message.id),
+      duplicate: false,
+      ...(window !== undefined ? { window } : {}),
+    };
   }
 
   async publishEvent(input: {
     readonly event: ProjectEvent;
     readonly plan: WakePlan;
     readonly now: number;
+    readonly collect?: RoutingWindowCollect;
   }): Promise<PublishEventResult> {
     const existingId = this.#eventsByDeliveryKey.get(input.event.deliveryKey);
     if (existingId !== undefined) {
@@ -202,7 +325,50 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     this.#events.set(input.event.id, input.event);
     this.#eventsByDeliveryKey.set(input.event.deliveryKey, input.event.id);
     this.#storePlan(input.plan, input.event.projectId, input.now);
-    return { event: input.event, wakes: this.#wakesFor(input.event.id), duplicate: false };
+    const window =
+      input.collect !== undefined
+        ? this.#collectWindow(input.event.projectId, input.event.id, input.now, input.collect.intervalMs)
+        : undefined;
+    return {
+      event: input.event,
+      wakes: this.#wakesFor(input.event.id),
+      duplicate: false,
+      ...(window !== undefined ? { window } : {}),
+    };
+  }
+
+  /**
+   * Join the Project's open routing window, or open the fixed one.
+   *
+   * The first eligible input opens a window whose deadline is fixed at
+   * `now + intervalMs`; later inputs join without moving that deadline — the
+   * no-debounce rule that keeps a busy channel from starving its own routing.
+   */
+  #collectWindow(projectId: string, inputId: string, now: number, intervalMs: number): RoutingWindow {
+    let window = [...this.#windows.values()].find(
+      (candidate) => candidate.projectId === projectId && candidate.status === 'open',
+    );
+    if (window === undefined) {
+      window = {
+        id: `win-${projectId}-${now}-${this.#windows.size}`,
+        projectId,
+        openedAt: now,
+        deadlineAt: now + intervalMs,
+        intervalMs,
+        status: 'open',
+        cursor: inputId,
+        inputCount: 1,
+      };
+      this.#windows.set(window.id, window);
+      this.#windowInputs.set(window.id, [inputId]);
+      return window;
+    }
+    const membership = this.#windowInputs.get(window.id) ?? [];
+    if (!membership.includes(inputId)) membership.push(inputId);
+    this.#windowInputs.set(window.id, membership);
+    window = { ...window, cursor: inputId, inputCount: membership.length };
+    this.#windows.set(window.id, window);
+    return window;
   }
 
   #storePlan(plan: WakePlan, projectId: string, now: number): void {
@@ -287,6 +453,107 @@ export class InMemoryCollaborationStore implements CollaborationStore {
 
   async listObservations(inputId: string): Promise<readonly WakeObservation[]> {
     return this.#observations.get(inputId) ?? [];
+  }
+
+  async listRoutingWindows(projectId?: string): Promise<readonly RoutingWindow[]> {
+    return [...this.#windows.values()]
+      .filter((window) => projectId === undefined || window.projectId === projectId)
+      .sort((a, b) => a.openedAt - b.openedAt);
+  }
+
+  async freezeRoutingWindow(input: {
+    readonly windowId: string;
+    readonly now: number;
+    readonly batches: readonly FrozenRoutingBatchPlan[];
+  }): Promise<readonly RoutingBatch[]> {
+    const window = this.#windows.get(input.windowId);
+    if (window === undefined || window.status !== 'open') return [];
+    this.#windows.set(window.id, { ...window, status: 'closed', closedAt: input.now });
+    const frozen = input.batches.map((plan) => {
+      const batch: RoutingBatch = {
+        id: plan.batchId,
+        projectId: window.projectId,
+        windowId: window.id,
+        splitIndex: plan.splitIndex,
+        splitCount: plan.splitCount,
+        cutoffAt: plan.cutoffAt,
+        status: 'frozen',
+        bounds: plan.bounds,
+        manifest: plan.manifest,
+        context: plan.context,
+        createdAt: input.now,
+      };
+      this.#batches.set(batch.id, batch);
+      this.#batchInputs.set(batch.id, [...plan.inputs]);
+      return batch;
+    });
+    return frozen;
+  }
+
+  async listRoutingBatches(projectId?: string): Promise<readonly RoutingBatch[]> {
+    return [...this.#batches.values()]
+      .filter((batch) => projectId === undefined || batch.projectId === projectId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.splitIndex - b.splitIndex);
+  }
+
+  async listRoutingWindowInputs(windowId: string): Promise<readonly string[]> {
+    return [...(this.#windowInputs.get(windowId) ?? [])];
+  }
+
+  async getRoutingBatch(batchId: string): Promise<RoutingBatch | undefined> {
+    return this.#batches.get(batchId);
+  }
+
+  async listRoutingBatchInputs(batchId: string): Promise<readonly RoutingBatchInput[]> {
+    return [...(this.#batchInputs.get(batchId) ?? [])].sort((a, b) => a.position - b.position);
+  }
+
+  async recordRoutingAttempt(attempt: RoutingAttempt): Promise<void> {
+    const attempts = this.#attempts.get(attempt.batchId) ?? [];
+    const index = attempts.findIndex((row) => row.attemptNumber === attempt.attemptNumber);
+    if (index < 0) attempts.push(attempt);
+    else if (attempts[index]!.id === attempt.id && attempts[index]!.status === 'started') attempts[index] = attempt;
+    else throw new Error('routing attempt already completed');
+    this.#attempts.set(attempt.batchId, attempts);
+  }
+
+  async listRoutingAttempts(batchId: string): Promise<readonly RoutingAttempt[]> {
+    return [...(this.#attempts.get(batchId) ?? [])].sort((a, b) => a.attemptNumber - b.attemptNumber);
+  }
+
+  async settleRoutingBatch(input: {
+    readonly batchId: string;
+    readonly status: Extract<RoutingBatch['status'], 'routed' | 'suppressed' | 'failed'>;
+    readonly error?: string;
+    readonly outcomes: readonly RoutingInputOutcome[];
+    readonly wakes?: readonly WakeRequest[];
+    readonly now: number;
+  }): Promise<void> {
+    const batch = this.#batches.get(input.batchId);
+    if (batch === undefined) throw new Error(`unknown routing batch: ${input.batchId}`);
+    // Same compare-and-set as the SQLite store: the first settle wins, a repeat
+    // is an idempotent no-op (one outcome set, one wake per selected Agent).
+    if (batch.status !== 'frozen') return;
+    this.#batches.set(batch.id, {
+      ...batch,
+      status: input.status,
+      ...(input.error !== undefined ? { error: input.error } : {}),
+      settledAt: input.now,
+    });
+    this.#outcomes.set(input.batchId, [...input.outcomes]);
+    for (const wake of input.wakes ?? []) {
+      this.#wakes.set(wake.idempotencyKey, wake);
+    }
+  }
+
+  async listRoutingOutcomes(batchId: string): Promise<readonly RoutingInputOutcome[]> {
+    return [...(this.#outcomes.get(batchId) ?? [])];
+  }
+
+  async listRoutingOutcomesForInput(inputId: string): Promise<readonly RoutingInputOutcome[]> {
+    return [...this.#outcomes.values()]
+      .flat()
+      .filter((outcome) => outcome.inputId === inputId);
   }
 
   #wakesFor(inputId: string): readonly WakeRequest[] {

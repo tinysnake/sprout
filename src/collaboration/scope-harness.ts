@@ -18,6 +18,7 @@ import { InMemoryConversationScopeStore } from '../conversation/store.ts';
 import type { ConversationProjectPort } from '../conversation/service.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
+import type { WakePolicy } from '../project/authority-model.ts';
 
 export interface CollaborationScopeHarnessOptions {
   /** The M1 projects the fixture routes against (registry or plain list). */
@@ -33,6 +34,13 @@ export interface CollaborationScopeHarnessOptions {
   readonly humanMemberIds?: readonly string[];
   /** Reflect projects as archived (read-only scopes), like the authority bridge. */
   readonly statusOf?: (projectId: string) => 'active' | 'archived';
+  /**
+   * The fixture Projects' wake policy (#97). Defaults to `explicit-only`, the
+   * ADR-0007 default; assisted-routing tests opt in explicitly.
+   */
+  readonly wakePolicy?: WakePolicy;
+  /** The fixture Projects' fixed routing interval; defaults to 30 seconds. */
+  readonly routingIntervalMs?: number;
 }
 
 export interface CollaborationScopeHarness {
@@ -60,11 +68,15 @@ export function buildCollaborationScopes(
         contentVersion: 0,
         goal: project.goal,
         rules: [...project.rules],
+        wakePolicy: options.wakePolicy ?? 'explicit-only',
+        routingIntervalMs: options.routingIntervalMs ?? 30_000,
         members: [
           ...humans.map((memberId) => ({ memberId, memberKind: 'human' as const })),
           ...project.memberships.map((membership) => ({
             memberId: membership.agentId,
             memberKind: 'agent' as const,
+            responsibilities: [...membership.responsibilities],
+            collaborationInstructions: membership.collaborationInstructions,
           })),
         ],
       };
