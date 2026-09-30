@@ -6,12 +6,13 @@ import type { ChatService } from '../types.ts';
 
 /** No fixture fallback, local queue, or independent routing decision. */
 export class ProductionChatService implements ChatService {
-  constructor(private readonly ports: {
+  private readonly ports: {
     readonly conversations: ConversationBrowserAdapter;
     readonly messages: MessageBrowserAdapter;
     readonly routing: RoutingBrowserAdapter;
     readonly runs: RunBrowserAdapter;
-  }) {}
+  };
+  constructor(ports: ProductionChatService['ports']) { this.ports = ports; }
 
   state = () => this.ports.messages.state();
   subscribeState: ChatService['subscribeState'] = (listener) => this.ports.messages.subscribeState(listener);

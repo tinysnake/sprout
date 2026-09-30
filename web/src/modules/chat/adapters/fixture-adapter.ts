@@ -53,7 +53,8 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 export class FixtureChatService implements ChatService {
   readonly #messages = [...fixtureMessages];
   readonly #listeners = new Set<(run: RunView) => void>();
-  constructor(private readonly options: { readonly archived?: boolean; readonly loading?: boolean } = {}) {}
+  private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
+  constructor(options: { readonly archived?: boolean; readonly loading?: boolean } = {}) { this.options = options; }
   state(): BrowserTransportState { return { status: 'online', connection: 'online', loading: false }; }
   subscribeState(listener: (state: BrowserTransportState) => void) { listener(this.state()); return () => {}; }
   async listScopes(id: string): Promise<readonly ConversationScopeView[]> {

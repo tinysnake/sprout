@@ -201,7 +201,7 @@ async function inspectBatch(id: string, attempt?: number) {
 watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
-onMounted(() => { announcer.announce('Project chat view.'); if (projectId.value) void loadProject(); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
+onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
   unsubRuns = service?.subscribeRuns(() => { void refreshMessages(); }); });
 onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
 </script>

@@ -395,3 +395,123 @@ test('the prototype archive is not reachable from any production navigation or p
     await cleanup();
   }
 });
+
+test('Project Chat groups scopes, preserves empty and read-only history, and authors only in a writable scope', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(160);
+    assert.match(doc.body.textContent ?? '', /Project Channels.*Working Groups.*Direct Messages/s);
+    assert.ok(doc.querySelector('[data-event-id="event-review"]'), 'Project events have their own authored, ordered entry');
+    assert.ok(doc.querySelector('[data-message-id="msg-addressed"]'), 'messages render in the channel');
+    await router.push('/project/chat/dm-empty');
+    await settle(100);
+    assert.match(doc.querySelector('.chat-empty-state')?.textContent ?? '', /No messages yet/);
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    assert.equal(input.disabled, false);
+    input.value = 'First message';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    (doc.querySelector('.chat-composer button') as HTMLButtonElement).click();
+    await settle(100);
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /First message/);
+    await router.push('/project/chat/wg-retired');
+    await settle(100);
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /disbanded.*read-only/i);
+    assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, true);
+    await router.push('/project/chat/dm-ended');
+    await settle(100);
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /membership has ended/i);
+    await router.push('/project/chat/channel-project-archived?project=project-archived');
+    await settle(120);
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /Project is archived/);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Chat distinguishes pending, suppressed, failed and projected evidence; batch and attempt URLs never substitute Chat', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(160);
+    for (const [id, state, language] of [
+      ['msg-pending', 'pending', /window open|judgement is pending/i],
+      ['msg-suppressed', 'suppressed', /Suppressed — durable decision/],
+      ['msg-failed', 'failed', /Routing failed closed/],
+      ['reply-msg-addressed:programmer', 'projected', /Projected Reply · Non-Routing/],
+    ] as const) {
+      const trigger = doc.querySelector(`[data-message-id="${id}"] .chat-evidence-trigger`) as HTMLButtonElement;
+      assert.ok(trigger, `evidence trigger exists for ${id}`);
+      trigger.click();
+      await settle(70);
+      const popup = doc.querySelector('.chat-evidence-popup') as HTMLElement;
+      assert.equal(popup?.dataset['evidenceState'], state, id);
+      assert.match(popup.textContent ?? '', language);
+      doc.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await settle(20);
+      assert.equal(doc.querySelector('.chat-evidence-popup'), null);
+      assert.equal(doc.activeElement, trigger, 'Escape restores focus to the evidence trigger');
+    }
+    await router.push('/project/chat/routing/batch-failed?attempt=1');
+    await settle(100);
+    assert.equal(doc.querySelector('.routing-inspector-view')?.getAttribute('data-inspector-state'), 'ready');
+    assert.match(doc.body.textContent ?? '', /Batch ID: batch-failed/);
+    assert.ok(doc.querySelector('[data-attempt-id="attempt-batch-failed-1"]'));
+    assert.equal(doc.querySelector('[data-scope-id]'), null, 'the inspector is not generic Chat');
+    await router.push('/project/chat/routing/batch-failed?attempt=999');
+    await settle(60);
+    assert.ok(doc.querySelector('.routing-attempt-not-found'));
+    await router.push('/project/chat/routing/missing-batch');
+    await settle(80);
+    assert.ok(doc.querySelector('.routing-not-found-state'));
+    assert.equal(doc.querySelector('[data-scope-id]'), null);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Chat marks offline facts stale and disables controls; loading and live unread are distinct', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const { createShellConnectionController, OFFLINE_CONNECTION } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
+    const fixture = new FixtureChatService();
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture, connectionSource: controller });
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(160);
+    await fixture.pushIncoming('wg-frontend', 'New agent update');
+    await settle(80);
+    assert.match(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.textContent ?? '', /1 new/);
+    (doc.querySelector('[data-scope-id="wg-frontend"]') as HTMLButtonElement).click();
+    await settle(90);
+    assert.equal(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge'), null);
+    assert.equal(router.currentRoute.value.params['scopeId'], 'wg-frontend');
+    assert.equal(doc.activeElement?.classList.contains('chat-mobile-back'), true, 'drill-down moves keyboard focus');
+    controller.set(OFFLINE_CONNECTION);
+    await settle(30);
+    assert.match(doc.querySelector('.chat-offline-banner')?.textContent ?? '', /stale.*disabled, not queued/i);
+    assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, true);
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
+    app.unmount();
+  } finally { await cleanup(); }
+
+  const loadingHarness = await setupHarness();
+  try {
+    const { createSproutApp } = (await loadingHarness.vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await loadingHarness.vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(loadingHarness.vite)), chatService: new FixtureChatService({ loading: true }) });
+    await router.push('/project/chat');
+    app.mount(loadingHarness.mount);
+    await settle(90);
+    assert.equal(loadingHarness.doc.querySelector('.chat-loading-state')?.getAttribute('aria-busy'), 'true');
+    app.unmount();
+  } finally { await loadingHarness.cleanup(); }
+});
