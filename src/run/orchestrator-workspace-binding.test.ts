@@ -245,6 +245,7 @@ test('an admission failure still records its Project scope for the run-lifecycle
 
   assert.equal(run.status, 'failed');
   assert.match(run.failure ?? '', /no available environment/i);
+  assert.equal(run.failureClass, 'environment');
   assert.equal(
     run.projectId,
     'project-sprout',
@@ -252,6 +253,14 @@ test('an admission failure still records its Project scope for the run-lifecycle
   );
 });
 
+
+test('unknown Agent refusal records admission independently of its failure text', async () => {
+  const { orchestrator } = build({ turns: [] });
+  const { id } = await orchestrator.submit({ agentId: 'missing-agent', prompt: 'hello', projectId: 'project-sprout' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'admission');
+});
 
 test('a run records the durable workspace binding it was admitted under and uses it for the Worker start', async () => {
   const store = new InMemoryRunStore();

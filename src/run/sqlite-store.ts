@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { AgentRun, AgentRunStatus, RunHandOff, TokenUsage } from './model.ts';
+import type { AgentRun, AgentRunStatus, RunFailureClass, RunHandOff, TokenUsage } from './model.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
@@ -48,6 +48,7 @@ interface RunRow {
   readonly events: string;
   readonly lease_id: string | null;
   readonly failure: string | null;
+  readonly failure_class: string | null;
   readonly result: string | null;
   readonly created_at: number;
   readonly completed_at: number | null;
@@ -94,6 +95,7 @@ export class SqliteRunStore implements RunStore {
         events TEXT NOT NULL,
         lease_id TEXT,
         failure TEXT,
+        failure_class TEXT CHECK(failure_class IN ('admission', 'environment', 'restart', 'execution')),
         result TEXT,
         created_at INTEGER NOT NULL,
         completed_at INTEGER,
@@ -112,6 +114,7 @@ export class SqliteRunStore implements RunStore {
     // has its runs, they simply carry no recorded hand-off.
     this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'failure_class', "TEXT CHECK(failure_class IN ('admission', 'environment', 'restart', 'execution'))");
     this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'token_usage', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'replay_sequence', 'INTEGER');
@@ -156,13 +159,14 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
            lease_id = excluded.lease_id,
            failure = excluded.failure,
+           failure_class = excluded.failure_class,
            result = excluded.result,
            completed_at = excluded.completed_at,
            hand_off = excluded.hand_off,
@@ -186,6 +190,7 @@ export class SqliteRunStore implements RunStore {
         JSON.stringify(run.events),
         run.leaseId ?? null,
         run.failure ?? null,
+        run.failureClass ?? null,
         run.result ? JSON.stringify(run.result) : null,
         run.createdAt,
         run.completedAt ?? null,
@@ -345,6 +350,8 @@ function toRun(row: RunRow): AgentRun {
     ...(handOff !== undefined ? { handOff } : {}),
     ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),
     ...(row.failure !== null ? { failure: row.failure } : {}),
+    ...(row.failure_class === 'admission' || row.failure_class === 'environment' || row.failure_class === 'restart' || row.failure_class === 'execution'
+      ? { failureClass: row.failure_class as RunFailureClass } : {}),
     ...(result !== undefined ? { result } : {}),
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(workOption !== undefined ? { workOption } : {}),

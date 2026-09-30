@@ -162,6 +162,8 @@ test('a run left running by a dead process is reconciled instead of shown as liv
   assert.equal(recovered[0]?.id, 'orphan-1');
   assert.equal(recovered[0]?.status, 'failed');
   assert.match(recovered[0]?.failure ?? '', /restart/i);
+  assert.equal(recovered[0]?.failureClass, 'restart');
+  assert.equal((await store.get('orphan-1'))?.failureClass, 'restart');
 
   const listed = await second.list();
   assert.equal(listed[0]?.status, 'failed');

@@ -482,7 +482,7 @@ test('a run admitted by a collaboration wake is stoppable through the run contro
 });
 
 test('a failed direct run surfaces as one sanitized informational Project event over the API', async () => {
-  const context = buildWithCollaboration({ failing: true });
+  const context = buildWithCollaboration({ failing: true, failureMessage: 'unknown agent: unrelated engine output' });
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
   const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
@@ -537,7 +537,7 @@ test('a failed direct run surfaces as one sanitized informational Project event 
     const serialized = JSON.stringify(event);
     assert.doesNotMatch(serialized, /Please investigate the outage\./);
     assert.doesNotMatch(serialized, /FAILED_RUN_TOOL_OUTPUT_MUST_NOT_LEAK/);
-    assert.doesNotMatch(serialized, /engine turn failed/);
+    assert.doesNotMatch(serialized, /unrelated engine output/);
 
     // Routing exclusion: an informational event owns no WakeRequest at all.
     const evidence = (await (

@@ -22,8 +22,10 @@
  * and completion … do not initiate routing"). The disposition is declared, never
  * inferred: `requireRoutingDisposition` refuses anything else.
  *
- * Privacy: the event carries only the failure class and run identifiers — never
- * the run `failure` text, `prompt`, raw `events`, tool output, or host facts.
+ * Privacy and truthfulness: the event carries only the durable Sprout-set
+ * `failureClass` and run identifiers — never the run `failure` text, `prompt`,
+ * raw `events`, tool output, or host facts. Legacy untyped runs are execution;
+ * no wording in a diagnostic can grant a more specific class.
  * Engine-authored failures can contain arbitrary output; pattern redaction at
  * publication cannot make that text safe. The `{id,status}` privacy projection
  * precedent (#98's `/api/runs/:id/status`) and ADR-0007 apply.
@@ -49,38 +51,6 @@ export function runFailureDeliveryKey(runId: string): string {
 }
 
 /**
- * The sanitized failure class a failed run is filed under.
- *
- * The class is derived only from Sprout-owned reason shapes, so it never
- * depends on engine free text being well-formed; unknown text falls back to
- * `execution` (the run failed while executing) rather than guessing finer.
- */
-export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';
-
-const CLASS_RULES: readonly { readonly failureClass: RunFailureClass; readonly pattern: RegExp }[] = [
-  { failureClass: 'restart', pattern: /^interrupted by a sprout restart before this run finished$/i },
-  {
-    failureClass: 'environment',
-    pattern: /^no available environment|^no project grants .* environment/i,
-  },
-  {
-    failureClass: 'admission',
-    pattern:
-      /^unknown agent:|^agent .* is not a member of project |^no compatible work option|^no configured work option|^task run .* is missing its project scope|^task run .* requires lifecycle lease|^task runs are not configured|^task lease is not active/i,
-  },
-];
-
-/** File one failure reason into its class; unknown shapes are `execution`. */
-export function classifyRunFailure(failure: string | undefined): RunFailureClass {
-  const reason = (failure ?? '').trim();
-  if (reason === '') return 'execution';
-  for (const rule of CLASS_RULES) {
-    if (rule.pattern.test(reason)) return rule.failureClass;
-  }
-  return 'execution';
-}
-
-/**
  * Project one terminal run failure into its durable Project-event input.
  *
  * Returns `undefined` when the run is not a Project-scoped terminal failure:
@@ -92,7 +62,8 @@ export function classifyRunFailure(failure: string | undefined): RunFailureClass
  */
 export function runFailureEventInput(run: AgentRun): PublishEventInput | undefined {
   if (run.status !== 'failed' || run.projectId === undefined) return undefined;
-  const failureClass = classifyRunFailure(run.failure);
+  // Legacy untyped failures are execution, regardless of their free text.
+  const failureClass = run.failureClass ?? 'execution';
   // No failure text crosses this boundary: even a known prefix can be followed
   // by engine output or machine identity that a redactor cannot recognize.
   const summary = `Agent run failed (${failureClass}) for ${run.agentId}`;

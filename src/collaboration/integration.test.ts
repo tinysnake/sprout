@@ -588,7 +588,7 @@ test('a failed Project-scoped run surfaces as one informational system failure e
     turns: [
       {
         events: [{ type: 'tool-output', text: 'RUN_EVENT_MUST_NOT_LEAK' }],
-        result: { status: 'failed', message: 'engine turn failed' },
+        result: { status: 'failed', message: 'no available environment: engine turn failed' },
       },
     ],
   });
@@ -614,6 +614,7 @@ test('a failed Project-scoped run surfaces as one informational system failure e
   assert.equal(event.deliveryKey, `run-failure:${runId}`);
   assert.equal(event.projectId, 'project-sprout');
   assert.equal(event.summary, 'Agent run failed (execution) for scout');
+  assert.equal((await harness.sqlite.runs.get(runId))?.failureClass, 'execution');
   assert.match(event.detail ?? '', new RegExp(`run ${runId}`));
 
   // Privacy: the prompt and the raw run events are structurally excluded.
@@ -672,6 +673,7 @@ test('the no-available-environment admission failure still reaches its Project t
   const [event] = await awaitFailureEvent(harness.coordinator);
   assert.ok(event, 'the admission failure is operator-visible');
   assert.match(event.summary, /Agent run failed \(environment\) for scout/);
+  assert.equal((await harness.sqlite.runs.get(runId))?.failureClass, 'environment');
   assert.doesNotMatch(event.summary, /no available environment for capability: agent-run/);
   assert.equal(event.deliveryKey, `run-failure:${runId}`);
   assert.equal((await harness.coordinator.listEvents('project-sprout')).length, 1);

@@ -25,7 +25,6 @@ import { CollaborationCoordinator, type RunAdmitter } from './coordinator.ts';
 import { buildCollaborationScopes } from './scope-harness.ts';
 import {
   RUN_FAILURE_EVENT_KIND,
-  classifyRunFailure,
   runFailureDeliveryKey,
   runFailureEventInput,
 } from './run-failure-events.ts';
@@ -51,6 +50,7 @@ function failedRun(
     prompt: 'SECRET_PROMPT the full operator request with private context',
     environmentInstanceId: 'mac-mini-1',
     status: 'failed',
+    failureClass: 'environment',
     events: [{ type: 'tool-output', text: 'SECRET_TOOL_OUTPUT from the engine transcript' }],
     createdAt: 1_000,
     ...rest,
@@ -103,6 +103,7 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
   const marker = 'ARBITRARY_OUTPUT_MARKER';
   const input = runFailureEventInput(failedRun({
     failure: `engine error: ${marker} on ${numberedHost} and ${bareHost}`,
+    failureClass: 'execution',
   }));
   assert.ok(input);
   assert.equal(input.summary, 'Agent run failed (execution) for architect');
@@ -138,25 +139,29 @@ test('only Project-scoped terminal failures project an event', () => {
   );
 });
 
-test('failure classes come from Sprout-owned reason shapes, with a decisive fallback', () => {
-  assert.equal(classifyRunFailure('interrupted by a Sprout restart before this run finished'), 'restart');
-  assert.equal(classifyRunFailure('no available environment for capability: agent-run'), 'environment');
-  assert.equal(
-    classifyRunFailure('no project grants agent scout access to an environment for capability: agent-run'),
-    'environment',
-  );
-  assert.equal(classifyRunFailure('unknown agent: ghost'), 'admission');
-  assert.equal(classifyRunFailure('agent scout is not a member of project project-sprout'), 'admission');
-  assert.equal(classifyRunFailure('no compatible work option for agent scout'), 'admission');
-  assert.equal(classifyRunFailure('engine turn exploded'), 'execution', 'unknown engine text never guesses finer');
-  assert.equal(classifyRunFailure('engine output: no available environment'), 'execution',
-    'an embedded Sprout-like phrase must not reclassify an engine error');
-  assert.equal(classifyRunFailure(undefined), 'execution');
-  assert.equal(classifyRunFailure('   '), 'execution');
-
-  const reasonless = runFailureEventInput(failedRun({ failure: undefined }));
-  assert.ok(reasonless);
-  assert.equal(reasonless.summary, 'Agent run failed (execution) for architect');
+test('only structured classes determine the event; prefix spoofs and legacy text default to execution', () => {
+  const spoofed = [
+    'no available environment: engine output',
+    'no available environmentXYZ engine output',
+    'unknown agent: unrelated engine output',
+    'No Available Environment: engine output',
+    ' no available environment: engine output',
+    'no available environment! engine output',
+    'UNKNOWN AGENT: engine output',
+    'unknown  agent: engine output',
+    'interrupted by a Sprout restart before this run finished',
+  ];
+  for (const failure of spoofed) {
+    const legacy = failedRun({ failure });
+    const { failureClass: _class, ...untyped } = legacy;
+    assert.equal(runFailureEventInput(untyped)?.summary, 'Agent run failed (execution) for architect');
+    assert.equal(runFailureEventInput({ ...legacy, failureClass: 'execution' })?.summary,
+      'Agent run failed (execution) for architect');
+  }
+  for (const failureClass of ['admission', 'environment', 'restart'] as const) {
+    assert.equal(runFailureEventInput(failedRun({ failure: 'unrelated text', failureClass }))?.summary,
+      `Agent run failed (${failureClass}) for architect`);
+  }
 });
 
 function harness(admitter: RunAdmitter) {
@@ -192,7 +197,7 @@ function streamlessAdmitter(runs: readonly AgentRun[]): RunAdmitter {
 
 test('restart reconciliation publishes a missed failure event exactly once', async () => {
   const marker = 'ARBITRARY_RECONCILIATION_OUTPUT';
-  const run = failedRun({ failure: `engine failed: ${marker} at ${['fixture', 'node', '12345'].join('')}` });
+  const run = failedRun({ failure: `engine failed: ${marker} at ${['fixture', 'node', '12345'].join('')}`, failureClass: 'execution' });
   const coordinator = harness(streamlessAdmitter([run, { ...run, id: 'run-done', status: 'completed' }]));
 
   const first = await coordinator.reconcile();
@@ -204,6 +209,15 @@ test('restart reconciliation publishes a missed failure event exactly once', asy
   assert.equal(events[0]?.deliveryKey, 'run-failure:run-42');
   assert.equal(events[0]?.summary, 'Agent run failed (execution) for architect');
   assert.equal(JSON.stringify(events).includes(marker), false, 'durable event excludes engine text');
+});
+
+test('reconciliation preserves a genuine admission class from the durable run fact', async () => {
+  const run = failedRun({ failure: 'unknown agent: scout', failureClass: 'admission' });
+  const coordinator = harness(streamlessAdmitter([run]));
+  assert.deepEqual((await coordinator.reconcile()).failureEventRunIds, ['run-42']);
+  assert.equal((await coordinator.listEvents('project-sprout'))[0]?.summary,
+    'Agent run failed (admission) for architect');
+  assert.deepEqual((await coordinator.reconcile()).failureEventRunIds, []);
 });
 
 test('reconciliation survives an unprojectable run and never fabricates an event for it', async () => {

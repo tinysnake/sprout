@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentRun } from './model.ts';
 import { SqliteRunStore } from './sqlite-store.ts';
+import { runFailureEventInput } from '../collaboration/run-failure-events.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteStore } from '../store/db.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
@@ -44,6 +45,45 @@ test('a run survives being written to disk and read back', async () => {
   reader.close();
 
   assert.deepEqual(restored, sampleRun());
+});
+
+test('trusted failure class survives SQLite reopen while legacy free text cannot classify an event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-failure-class-'));
+  const filename = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename });
+  await writer.save(sampleRun({ status: 'failed', projectId: 'project-sprout', failure: 'unknown agent: engine spoof', failureClass: 'execution' }));
+  await writer.save(sampleRun({ id: 'legacy', status: 'failed', projectId: 'project-sprout', failure: 'no available environment: engine spoof' }));
+  await writer.save(sampleRun({ id: 'genuine', status: 'failed', projectId: 'project-sprout', failure: 'unrelated', failureClass: 'environment' }));
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename });
+  for (const [id, expected] of [['run-1', 'execution'], ['legacy', 'execution'], ['genuine', 'environment']] as const) {
+    const run = await reader.get(id);
+    assert.ok(run);
+    assert.equal(runFailureEventInput(run)?.summary, `Agent run failed (${expected}) for agent-scout`);
+  }
+  reader.close();
+});
+
+test('existing agent_runs tables gain a nullable class without reclassifying legacy failure text', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE agent_runs (
+    id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, prompt TEXT NOT NULL,
+    environment_instance_id TEXT NOT NULL, status TEXT NOT NULL, events TEXT NOT NULL,
+    lease_id TEXT, failure TEXT, result TEXT, created_at INTEGER NOT NULL, completed_at INTEGER
+  )`);
+  db.prepare(`INSERT INTO agent_runs
+    (id, agent_id, prompt, environment_instance_id, status, events, failure, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    'legacy', 'agent-scout', 'hello', '', 'failed', '[]', 'no available environment: engine text', 1,
+  );
+  const store = new SqliteRunStore({ db });
+  const run = await store.get('legacy');
+  assert.ok(run);
+  assert.equal(run.failureClass, undefined);
+  assert.equal(runFailureEventInput({ ...run, projectId: 'project-sprout' })?.summary,
+    'Agent run failed (execution) for agent-scout');
+  db.close();
 });
 
 test('token usage survives a SQLite restart', async () => {

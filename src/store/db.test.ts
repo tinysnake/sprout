@@ -87,6 +87,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'events', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'lease_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'failure', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'failure_class', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'result', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'completed_at', type: 'INTEGER', notnull: 0, pk: 0 },

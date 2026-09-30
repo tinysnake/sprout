@@ -170,7 +170,7 @@ export async function signIn(base: string, credential: string): Promise<{ readon
 
 
 export function buildWithCollaboration(
-  options: { body?: string; failing?: boolean } = {},
+  options: { body?: string; failing?: boolean; failureMessage?: string } = {},
   auth?: OperatorSessionService,
 ) {
   const adapter = new ScriptedEngineAdapter({
@@ -178,7 +178,7 @@ export function buildWithCollaboration(
       ? [
           {
             events: [{ type: 'tool-output', text: 'FAILED_RUN_TOOL_OUTPUT_MUST_NOT_LEAK' }],
-            result: { status: 'failed', message: 'engine turn failed' },
+            result: { status: 'failed', message: options.failureMessage ?? 'engine turn failed' },
           },
         ]
       : [
