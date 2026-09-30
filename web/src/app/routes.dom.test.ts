@@ -620,7 +620,7 @@ test('Chat floating notice waits five continuous seconds, clears on recovery, an
     assert.match(notice()?.textContent ?? '', /Offline.*disabled, not queued/s);
     assert.equal(notice()?.getAttribute('role'), 'status');
     assert.ok(notice()?.classList.contains('absolute'));
-    assert.ok(body.classList.contains('pt-20'), 'a permanent lane prevents overlap with message content');
+    assert.ok(body.classList.contains('pt-32'), 'a permanent lane prevents overlap with message content');
     assert.equal(detail.getBoundingClientRect().height, height, 'overlay does not change the detail box height');
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(30);

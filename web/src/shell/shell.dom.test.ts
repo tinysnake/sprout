@@ -257,7 +257,7 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
       'a prolonged connection stall still surfaces the warning');
     assert.equal(doc.querySelector('.shell-connection-banner')?.classList.contains('absolute'), true,
       'the floating status is out of flow at both breakpoints');
-    assert.ok(main.classList.contains('pt-16'), 'the notice lane is reserved even when hidden');
+    assert.ok(main.classList.contains('pt-24'), 'the notice lane is reserved even when hidden');
     assert.deepEqual(geometry(), before, 'revealing the overlay leaves shell and content box geometry unchanged');
     app.unmount();
   } finally {

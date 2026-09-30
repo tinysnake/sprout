@@ -438,7 +438,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
         <div class="relative flex min-h-0 flex-1 flex-col">
           <!-- The message lane stays reserved even when the floating status is hidden. -->
           <div v-if="showConnectionNotice" class="chat-offline-banner pointer-events-none absolute inset-x-3 top-2 z-20 rounded border border-[var(--yellow-attention-border)] bg-[var(--yellow-attention-bg)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
-          <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-20" :aria-busy="detailLoading">
+          <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-32" :aria-busy="detailLoading">
           <div v-if="detailLoading" class="chat-detail-loading text-xs text-[var(--text-muted)]" role="status">Checking conversation admission…</div>
           <div v-if="!timeline.length && !detailLoading" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"

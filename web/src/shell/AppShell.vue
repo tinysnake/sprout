@@ -108,7 +108,7 @@ onMounted(() => {
           <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
         </div>
         <main id="sprout-main-content" tabindex="-1"
-          class="flex-1 overflow-y-auto pb-16 pt-16 md:pb-0 focus-visible:outline-none">
+          class="flex-1 overflow-y-auto pb-16 pt-24 md:pb-0 focus-visible:outline-none">
           <slot />
         </main>
       </div>
