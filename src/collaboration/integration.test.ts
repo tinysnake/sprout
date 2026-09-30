@@ -613,12 +613,14 @@ test('a failed Project-scoped run surfaces as one informational system failure e
   assert.deepEqual(event.producer, { id: 'sprout', kind: 'system' });
   assert.equal(event.deliveryKey, `run-failure:${runId}`);
   assert.equal(event.projectId, 'project-sprout');
-  assert.match(event.summary, /Agent run failed \(execution\) for scout: engine turn failed/);
+  assert.equal(event.summary, 'Agent run failed (execution) for scout');
+  assert.match(event.detail ?? '', new RegExp(`run ${runId}`));
 
   // Privacy: the prompt and the raw run events are structurally excluded.
   const serialized = JSON.stringify(event);
   assert.doesNotMatch(serialized, /Direct request that fails\./);
   assert.doesNotMatch(serialized, /RUN_EVENT_MUST_NOT_LEAK/);
+  assert.doesNotMatch(serialized, /engine turn failed/);
   assert.doesNotMatch(serialized, /wrote:/, 'the wake prompt never enters the event');
 
   // No reply and no fan-out for the failure event itself.
@@ -670,7 +672,7 @@ test('the no-available-environment admission failure still reaches its Project t
   const [event] = await awaitFailureEvent(harness.coordinator);
   assert.ok(event, 'the admission failure is operator-visible');
   assert.match(event.summary, /Agent run failed \(environment\) for scout/);
-  assert.match(event.summary, /no available environment for capability: agent-run/);
+  assert.doesNotMatch(event.summary, /no available environment for capability: agent-run/);
   assert.equal(event.deliveryKey, `run-failure:${runId}`);
   assert.equal((await harness.coordinator.listEvents('project-sprout')).length, 1);
   assert.equal(harness.engine.requests.length, 0, 'the engine was never consulted');

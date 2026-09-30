@@ -530,13 +530,14 @@ test('a failed direct run surfaces as one sanitized informational Project event 
     assert.equal(event.producerKind, 'system');
     assert.equal(event.producerId, 'sprout');
     assert.deepEqual(event.responsibleAgentIds, []);
-    assert.match(event.summary, /engine turn failed/);
+    assert.equal(event.summary, 'Agent run failed (execution) for agent-scout');
     assert.match(event.detail ?? '', new RegExp(`run ${result.admittedRunIds[0]}`), 'the evidence chain links the run');
 
     // Privacy projection: never the run prompt, raw events, or tool output.
     const serialized = JSON.stringify(event);
     assert.doesNotMatch(serialized, /Please investigate the outage\./);
     assert.doesNotMatch(serialized, /FAILED_RUN_TOOL_OUTPUT_MUST_NOT_LEAK/);
+    assert.doesNotMatch(serialized, /engine turn failed/);
 
     // Routing exclusion: an informational event owns no WakeRequest at all.
     const evidence = (await (

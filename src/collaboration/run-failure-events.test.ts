@@ -6,9 +6,9 @@
  * 1. **Projection shape** — one Project-scoped terminal failure projects one
  *    `informational` `agent-run-failure` input attributed to the system
  *    producer, keyed by the run id.
- * 2. **Privacy** — the projection carries the sanitized failure class and
- *    reason plus run identifiers only: never the run prompt, raw events, tool
- *    output, or host facts.
+ * 2. **Privacy** — the projection carries only the failure class and run
+ *    identifiers: never failure text, prompt, raw events, tool output, or host
+ *    facts.
  * 3. **Exactly-once** — the coordinator publishes it live (covered end-to-end
  *    in `integration.test.ts`) and again from restart reconciliation over the
  *    same delivery key, so a missed publication is repaired without a duplicate.
@@ -85,7 +85,7 @@ test('a Project-scoped terminal failure projects an informational system event w
   assert.equal(input.awaitReply, false);
   assert.equal(input.responsibleAgentIds, undefined, 'only addressed events name responsible Agents');
   assert.match(input.summary, /Agent run failed \(environment\) for architect/);
-  assert.match(input.summary, /no available environment for capability: agent-run/);
+  assert.doesNotMatch(input.summary, /no available environment for capability: agent-run/);
   assert.equal(input.detail, 'run run-42 · agent architect');
 
   // Privacy: prompt, raw events, and tool output are structurally absent.
@@ -96,20 +96,30 @@ test('a Project-scoped terminal failure projects an informational system event w
   assert.equal('events' in input, false);
 });
 
-test('a failure reason carrying host facts is redacted before it can become a durable event', () => {
-  const input = runFailureEventInput(
-    failedRun({ failure: 'worker failed to spawn /Users/operator/.local/bin/engine (host7)' }),
-  );
+test('engine-error text and host-shaped facts are excluded, not pattern-redacted', () => {
+  // Construct synthetic names rather than recording any real machine identity.
+  const numberedHost = ['fixture', 'node', '12345'].join('');
+  const bareHost = ['fixture', 'machine'].join('');
+  const marker = 'ARBITRARY_OUTPUT_MARKER';
+  const input = runFailureEventInput(failedRun({
+    failure: `engine error: ${marker} on ${numberedHost} and ${bareHost}`,
+  }));
   assert.ok(input);
-  assert.match(input.summary, /<redacted-path>/);
-  assert.doesNotMatch(input.summary, /\/Users\//);
-  assert.doesNotMatch(input.summary, /operator/);
-  assert.match(input.summary, /Agent run failed \(execution\) for architect/);
+  assert.equal(input.summary, 'Agent run failed (execution) for architect');
+  assert.equal(input.detail, 'run run-42 · agent architect');
+  assert.equal(input.deliveryKey, 'run-failure:run-42');
+  const projected = JSON.stringify(input);
+  for (const unsafe of [marker, numberedHost, bareHost, 'engine error']) {
+    assert.equal(projected.includes(unsafe), false);
+  }
 
-  const credential = runFailureEventInput(failedRun({ failure: 'authentication failed: api_key = sk-abcdef1234567890' }));
-  assert.ok(credential);
-  assert.doesNotMatch(credential.summary, /sk-abcdef1234567890/);
-  assert.match(credential.summary, /<redacted-credential>/);
+  const known = runFailureEventInput(failedRun({
+    failure: `no available environment for capability: agent-run; ${marker} ${numberedHost}`,
+  }));
+  assert.ok(known);
+  assert.equal(known.summary, 'Agent run failed (environment) for architect');
+  assert.equal(JSON.stringify(known).includes(marker), false);
+  assert.equal(JSON.stringify(known).includes(numberedHost), false);
 });
 
 test('only Project-scoped terminal failures project an event', () => {
@@ -139,6 +149,8 @@ test('failure classes come from Sprout-owned reason shapes, with a decisive fall
   assert.equal(classifyRunFailure('agent scout is not a member of project project-sprout'), 'admission');
   assert.equal(classifyRunFailure('no compatible work option for agent scout'), 'admission');
   assert.equal(classifyRunFailure('engine turn exploded'), 'execution', 'unknown engine text never guesses finer');
+  assert.equal(classifyRunFailure('engine output: no available environment'), 'execution',
+    'an embedded Sprout-like phrase must not reclassify an engine error');
   assert.equal(classifyRunFailure(undefined), 'execution');
   assert.equal(classifyRunFailure('   '), 'execution');
 
@@ -179,7 +191,8 @@ function streamlessAdmitter(runs: readonly AgentRun[]): RunAdmitter {
 }
 
 test('restart reconciliation publishes a missed failure event exactly once', async () => {
-  const run = failedRun();
+  const marker = 'ARBITRARY_RECONCILIATION_OUTPUT';
+  const run = failedRun({ failure: `engine failed: ${marker} at ${['fixture', 'node', '12345'].join('')}` });
   const coordinator = harness(streamlessAdmitter([run, { ...run, id: 'run-done', status: 'completed' }]));
 
   const first = await coordinator.reconcile();
@@ -189,6 +202,8 @@ test('restart reconciliation publishes a missed failure event exactly once', asy
   const events = await coordinator.listEvents('project-sprout');
   assert.equal(events.length, 1, 'one event per run terminal transition across restarts');
   assert.equal(events[0]?.deliveryKey, 'run-failure:run-42');
+  assert.equal(events[0]?.summary, 'Agent run failed (execution) for architect');
+  assert.equal(JSON.stringify(events).includes(marker), false, 'durable event excludes engine text');
 });
 
 test('reconciliation survives an unprojectable run and never fabricates an event for it', async () => {

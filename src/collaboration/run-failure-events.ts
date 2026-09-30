@@ -22,12 +22,11 @@
  * and completion … do not initiate routing"). The disposition is declared, never
  * inferred: `requireRoutingDisposition` refuses anything else.
  *
- * Privacy: the event carries the **sanitized failure class and reason plus run
- * identifiers only** — never the run `prompt`, raw `events`, tool output, or
- * host facts. The reason passes this module's defense-in-depth redaction and
- * then the shared privacy boundary again at publication
- * (`sanitizeProjectEventSummary`/`sanitizeProjectEventDetail`). The `{id,status}`
- * privacy projection precedent (#98's `/api/runs/:id/status`) and ADR-0007 apply.
+ * Privacy: the event carries only the failure class and run identifiers — never
+ * the run `failure` text, `prompt`, raw `events`, tool output, or host facts.
+ * Engine-authored failures can contain arbitrary output; pattern redaction at
+ * publication cannot make that text safe. The `{id,status}` privacy projection
+ * precedent (#98's `/api/runs/:id/status`) and ADR-0007 apply.
  *
  * Attention linkage (#103): these events are durable, typed
  * (`agent-run-failure`), sanitized Project events with an `informational`
@@ -39,7 +38,6 @@
  */
 
 import type { AgentRun } from '../run/model.ts';
-import { redactSensitiveText } from '../environment/privacy.ts';
 import type { PublishEventInput } from './coordinator.ts';
 
 /** The stable producer-declared kind of every run-lifecycle failure event. */
@@ -60,15 +58,15 @@ export function runFailureDeliveryKey(runId: string): string {
 export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';
 
 const CLASS_RULES: readonly { readonly failureClass: RunFailureClass; readonly pattern: RegExp }[] = [
-  { failureClass: 'restart', pattern: /interrupted by a sprout restart/i },
+  { failureClass: 'restart', pattern: /^interrupted by a sprout restart before this run finished$/i },
   {
     failureClass: 'environment',
-    pattern: /no available environment|no project grants .* environment/i,
+    pattern: /^no available environment|^no project grants .* environment/i,
   },
   {
     failureClass: 'admission',
     pattern:
-      /unknown agent|not a member of project|no compatible work option|no configured work option|missing its project scope|requires lifecycle lease|task runs are not configured|task lease is not active/i,
+      /^unknown agent:|^agent .* is not a member of project |^no compatible work option|^no configured work option|^task run .* is missing its project scope|^task run .* requires lifecycle lease|^task runs are not configured|^task lease is not active/i,
   },
 ];
 
@@ -82,9 +80,6 @@ export function classifyRunFailure(failure: string | undefined): RunFailureClass
   return 'execution';
 }
 
-/** Bound the reason so the event summary stays the one-line fact it is typed as. */
-const MAX_REASON = 400;
-
 /**
  * Project one terminal run failure into its durable Project-event input.
  *
@@ -92,21 +87,15 @@ const MAX_REASON = 400;
  * only `failed` counts (an intentional Human stop settles `interrupted` and is
  * not reported as a failure), and a run without a Project has no timeline that
  * would be authoritative for the event. Every other field is derived from the
- * durable run record — identifiers, class, redacted reason — and never from
- * the run's prompt, events, or tool output.
+ * durable run record — identifiers and class — and never from the run's
+ * failure text, prompt, events, or tool output.
  */
 export function runFailureEventInput(run: AgentRun): PublishEventInput | undefined {
   if (run.status !== 'failed' || run.projectId === undefined) return undefined;
-  const failure = (run.failure ?? '').trim();
-  const failureClass = classifyRunFailure(failure);
-  const reason =
-    failure === ''
-      ? undefined
-      : redactSensitiveText(failure.slice(0, MAX_REASON)).trim() || undefined;
-  const summary =
-    reason === undefined
-      ? `Agent run failed (${failureClass}) for ${run.agentId}`
-      : `Agent run failed (${failureClass}) for ${run.agentId}: ${reason}`;
+  const failureClass = classifyRunFailure(run.failure);
+  // No failure text crosses this boundary: even a known prefix can be followed
+  // by engine output or machine identity that a redactor cannot recognize.
+  const summary = `Agent run failed (${failureClass}) for ${run.agentId}`;
   const detail = [
     `run ${run.id}`,
     `agent ${run.agentId}`,
