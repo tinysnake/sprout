@@ -31,6 +31,7 @@ const emit = defineEmits<{
   (e: 'edit', agent: AgentInstance): void;
   (e: 'editInstructions', agent: AgentInstance): void;
   (e: 'addOption', agent: AgentInstance): void;
+  (e: 'editOption', payload: { agent: AgentInstance; optionId: string }): void;
   (e: 'moveOption', payload: { agent: AgentInstance; from: number; to: number }): void;
   (e: 'removeOption', payload: { agent: AgentInstance; optionId: string }): void;
   (e: 'archive', agent: AgentInstance): void;
@@ -151,6 +152,7 @@ const agentRuns = computed(() =>
           :total="agent.workOptions.length"
           :editable="editable"
           @move="(payload) => emit('moveOption', { agent, ...payload })"
+          @edit="(optionId) => emit('editOption', { agent, optionId })"
           @remove="(optionId) => emit('removeOption', { agent, optionId })"
         />
       </div>
