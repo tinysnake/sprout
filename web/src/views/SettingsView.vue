@@ -596,7 +596,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
               <Badge variant="info">Version facts</Badge>
             </div>
             <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
-              Installed version facts and the supported protocol range are shown below. Worker compatibility is a separate Environment fact, not an assurance inferred from these versions.
+              Platform & Protocol Compatibility: installed version facts and the supported protocol range are shown below. Worker compatibility is a separate Environment fact, not an assurance inferred from these versions.
             </p>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">

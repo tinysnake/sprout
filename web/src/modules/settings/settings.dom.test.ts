@@ -145,6 +145,15 @@ for (const flow of ['one', 'others'] as const) {
       await settle();
       assert.equal(calls, 0, 'Reconnection does not replay a queued command');
       assert.equal(confirm.disabled, false);
+      // A current state read must also guard before a subscription render arrives.
+      const state = service.state.bind(service);
+      service.state = () => ({ status: 'offline', connection: 'offline', loading: false });
+      confirm.click();
+      await settle();
+      assert.equal(calls, 0, 'Confirm rechecks authority, not just the rendered disabled state');
+      service.state = state;
+      service.setState({ status: 'online', connection: 'online', loading: false });
+      await settle();
       confirm.click();
       await settle();
       assert.equal(calls, 1, 'Only a new live confirmation submits');
