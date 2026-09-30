@@ -73,60 +73,60 @@ test('the complete runtime graph is constructible over in-memory collaborators a
 
 test('runtime coordinator persists every real routing attempt with exact correlation and unavailable telemetry', async () => {
   for (const configured of [false, true]) {
-  const model = { id: 'composition-wake-model', telemetryForAttempt: () => ({ tokens: { inputTokens: 10, outputTokens: 2 } }),
-    async judge(request: { attempt: number; context: string }) {
-      if (request.attempt === 1) return 'invalid output';
-      const ids = [...request.context.matchAll(/\[input \d+ \| id=([^ |]+) \|/g)].map((match) => match[1]!);
-      return JSON.stringify({ selections: [], suppressions: ids.map((inputId) => ({ inputId, rationale: 'No wake needed' })) });
-    } };
-  const directory = mkdtempSync(join(tmpdir(), 'sprout-usage-composition-'));
-  const filename = join(directory, 'usage.db');
-  const db = new DatabaseSync(filename);
-  const usage = new SqliteUsageStore({ db });
-  const runtime = await createRuntime({ configuration: hostConfiguration(), projectRoot: '/synthetic/project-root',
-    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]) }),
-    stores: { ...inMemoryStores(), usage },
-    ...(configured ? { routingModel: model } : {}),
-  });
-  try {
-    const project = await runtime.projectService.create({ id: 'usage-routing-project', displayName: 'Usage routing',
-      agentMemberships: [{ agentId: 'scout' }], wakePolicy: 'wake-model-assisted', routingIntervalMs: 1000 });
-    const scope = await runtime.conversationScopes.ensureProjectChannel(project.id);
-    await runtime.collaboration.deliver({ scopeId: scope.id, author: { id: 'operator', kind: 'human' },
-      body: 'unaddressed work', deliveryKey: 'usage-routing-composition' });
-    await new Promise((resolve) => setTimeout(resolve, 1050));
-    await runtime.collaboration.sweepRouting();
-    const batches = await runtime.stores.collaboration.listRoutingBatches(project.id);
-    assert.equal(batches.length, 1);
-    const attempts = await runtime.stores.collaboration.listRoutingAttempts(batches[0]!.id);
-    assert.equal(attempts.length, 2);
-    const activities = await runtime.usage.listActivities({ kind: 'routing_attempt' });
-    assert.equal(activities.length, attempts.length);
-    for (const attempt of attempts) {
-      const detail = await runtime.usage.getActivityByAttemptId(attempt.id);
-      assert.equal(detail?.activity.correlation.batchId, attempt.batchId);
-      assert.equal(detail?.activity.correlation.projectId, project.id);
-      assert.equal(detail?.activity.correlation.agentId, undefined);
-      assert.equal(detail?.activity.correlation.taskId, undefined);
-      assert.equal(detail?.activity.status, configured && attempt.attemptNumber === 2 ? 'completed' : 'failed');
-      assert.equal(detail?.effectiveObservation?.completeness, configured ? (attempt.attemptNumber === 2 ? 'complete' : 'partial') : 'unavailable');
-      assert.equal(detail?.effectiveObservation?.tokens?.inputTokens, configured ? 10 : undefined);
-    }
-    await runtime.collaboration.reconcile();
-    assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
-    // Simulate a crash after attempt persistence but before usage persistence.
-    db.exec('DELETE FROM usage_observations; DELETE FROM usage_activities');
-    await runtime.collaboration.reconcile();
-    assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
-    for (const attempt of attempts) {
-      assert.equal((await runtime.usage.getActivityByAttemptId(attempt.id))?.effectiveObservation?.completeness, 'unavailable');
-    }
-    // Independent SQLite connection sees the durable rows, not an in-memory view.
-    const reopened = new DatabaseSync(filename);
+    const model = { id: 'composition-wake-model', telemetryForAttempt: () => ({ tokens: { inputTokens: 10, outputTokens: 2 } }),
+      async judge(request: { attempt: number; context: string }) {
+        if (request.attempt === 1) return 'invalid output';
+        const ids = [...request.context.matchAll(/\[input \d+ \| id=([^ |]+) \|/g)].map((match) => match[1]!);
+        return JSON.stringify({ selections: [], suppressions: ids.map((inputId) => ({ inputId, rationale: 'No wake needed' })) });
+      } };
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-usage-composition-'));
+    const filename = join(directory, 'usage.db');
+    const db = new DatabaseSync(filename);
+    const usage = new SqliteUsageStore({ db });
+    const runtime = await createRuntime({ configuration: hostConfiguration(), projectRoot: '/synthetic/project-root',
+      environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]) }),
+      stores: { ...inMemoryStores(), usage },
+      ...(configured ? { routingModel: model } : {}),
+    });
     try {
-      assert.equal((await new SqliteUsageStore({ db: reopened }).listActivities()).length, 2);
-    } finally { reopened.close(); }
-  } finally { await runtime.close(); db.close(); rmSync(directory, { recursive: true, force: true }); }
+      const project = await runtime.projectService.create({ id: 'usage-routing-project', displayName: 'Usage routing',
+        agentMemberships: [{ agentId: 'scout' }], wakePolicy: 'wake-model-assisted', routingIntervalMs: 1000 });
+      const scope = await runtime.conversationScopes.ensureProjectChannel(project.id);
+      await runtime.collaboration.deliver({ scopeId: scope.id, author: { id: 'operator', kind: 'human' },
+        body: 'unaddressed work', deliveryKey: 'usage-routing-composition' });
+      await new Promise((resolve) => setTimeout(resolve, 1050));
+      await runtime.collaboration.sweepRouting();
+      const batches = await runtime.stores.collaboration.listRoutingBatches(project.id);
+      assert.equal(batches.length, 1);
+      const attempts = await runtime.stores.collaboration.listRoutingAttempts(batches[0]!.id);
+      assert.equal(attempts.length, 2);
+      const activities = await runtime.usage.listActivities({ kind: 'routing_attempt' });
+      assert.equal(activities.length, attempts.length);
+      for (const attempt of attempts) {
+        const detail = await runtime.usage.getActivityByAttemptId(attempt.id);
+        assert.equal(detail?.activity.correlation.batchId, attempt.batchId);
+        assert.equal(detail?.activity.correlation.projectId, project.id);
+        assert.equal(detail?.activity.correlation.agentId, undefined);
+        assert.equal(detail?.activity.correlation.taskId, undefined);
+        assert.equal(detail?.activity.status, configured && attempt.attemptNumber === 2 ? 'completed' : 'failed');
+        assert.equal(detail?.effectiveObservation?.completeness, configured ? (attempt.attemptNumber === 2 ? 'complete' : 'partial') : 'unavailable');
+        assert.equal(detail?.effectiveObservation?.tokens?.inputTokens, configured ? 10 : undefined);
+      }
+      await runtime.collaboration.reconcile();
+      assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
+      // Simulate a crash after attempt persistence but before usage persistence.
+      db.exec('DELETE FROM usage_observations; DELETE FROM usage_activities');
+      await runtime.collaboration.reconcile();
+      assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
+      for (const attempt of attempts) {
+        assert.equal((await runtime.usage.getActivityByAttemptId(attempt.id))?.effectiveObservation?.completeness, 'unavailable');
+      }
+      // Independent SQLite connection sees the durable rows, not an in-memory view.
+      const reopened = new DatabaseSync(filename);
+      try {
+        assert.equal((await new SqliteUsageStore({ db: reopened }).listActivities()).length, 2);
+      } finally { reopened.close(); }
+    } finally { await runtime.close(); db.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });
 

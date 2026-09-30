@@ -395,73 +395,73 @@ export class SqliteUsageStore implements UsageStore {
           throw new Error('Cannot supersede a stale observation; use the current effective head');
         }
       }
-    if (observation.supersedesObservationId !== undefined) {
+      if (observation.supersedesObservationId !== undefined) {
+        this.#db
+          .prepare(`
+            UPDATE usage_observations
+               SET is_effective = 0,
+                   superseded_at = ?
+             WHERE id = ? AND activity_id = ?
+          `)
+          .run(
+            observation.observedAt,
+            observation.supersedesObservationId,
+            observation.activityId,
+          );
+      }
+
+      const tokens = observation.tokens;
+      const priceDims =
+        observation.costEstimate.priceDimensions !== undefined
+          ? JSON.stringify(observation.costEstimate.priceDimensions)
+          : null;
+
       this.#db
         .prepare(`
-          UPDATE usage_observations
-             SET is_effective = 0,
-                 superseded_at = ?
-           WHERE id = ? AND activity_id = ?
+          INSERT INTO usage_observations
+            (id, activity_id, observed_at, source, source_version, completeness,
+             input_tokens, uncached_input_tokens, cached_input_tokens, cache_write_input_tokens,
+             output_tokens, reasoning_output_tokens, total_tokens, wall_duration_ms,
+             engine_turn_duration_ms, billed_cost_status, billed_usd_micros, billed_reason,
+             cost_estimate_status, cost_estimate_usd_micros, valuation_provenance,
+             price_source, price_source_version, price_dimensions, valued_at,
+             cost_estimate_reason, billing_basis, supersedes_observation_id,
+             superseded_at, supersession_reason, is_effective)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
-          observation.observedAt,
-          observation.supersedesObservationId,
+          observation.id,
           observation.activityId,
+          observation.observedAt,
+          observation.source,
+          observation.sourceVersion,
+          observation.completeness,
+          tokens?.inputTokens ?? null,
+          tokens?.uncachedInputTokens ?? null,
+          tokens?.cachedInputTokens ?? null,
+          tokens?.cacheWriteInputTokens ?? null,
+          tokens?.outputTokens ?? null,
+          tokens?.reasoningOutputTokens ?? null,
+          tokens?.totalTokens ?? null,
+          observation.durations.sproutWallDurationMs,
+          observation.durations.engineTurnDurationMs ?? null,
+          observation.billedCost.status,
+          observation.billedCost.billedUsdMicros ?? null,
+          observation.billedCost.reason ?? null,
+          observation.costEstimate.status,
+          observation.costEstimate.apiEquivalentUsdMicros ?? null,
+          observation.costEstimate.valuationProvenance ?? null,
+          observation.costEstimate.priceSource ?? null,
+          observation.costEstimate.priceSourceVersion ?? null,
+          priceDims,
+          observation.costEstimate.valuedAt ?? null,
+          observation.costEstimate.reason ?? null,
+          observation.billingBasis,
+          observation.supersedesObservationId ?? null,
+          observation.supersededAt ?? null,
+          observation.supersessionReason ?? null,
+          observation.isEffective ? 1 : 0,
         );
-    }
-
-    const tokens = observation.tokens;
-    const priceDims =
-      observation.costEstimate.priceDimensions !== undefined
-        ? JSON.stringify(observation.costEstimate.priceDimensions)
-        : null;
-
-    this.#db
-      .prepare(`
-        INSERT INTO usage_observations
-          (id, activity_id, observed_at, source, source_version, completeness,
-           input_tokens, uncached_input_tokens, cached_input_tokens, cache_write_input_tokens,
-           output_tokens, reasoning_output_tokens, total_tokens, wall_duration_ms,
-           engine_turn_duration_ms, billed_cost_status, billed_usd_micros, billed_reason,
-           cost_estimate_status, cost_estimate_usd_micros, valuation_provenance,
-           price_source, price_source_version, price_dimensions, valued_at,
-           cost_estimate_reason, billing_basis, supersedes_observation_id,
-           superseded_at, supersession_reason, is_effective)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
-        observation.id,
-        observation.activityId,
-        observation.observedAt,
-        observation.source,
-        observation.sourceVersion,
-        observation.completeness,
-        tokens?.inputTokens ?? null,
-        tokens?.uncachedInputTokens ?? null,
-        tokens?.cachedInputTokens ?? null,
-        tokens?.cacheWriteInputTokens ?? null,
-        tokens?.outputTokens ?? null,
-        tokens?.reasoningOutputTokens ?? null,
-        tokens?.totalTokens ?? null,
-        observation.durations.sproutWallDurationMs,
-        observation.durations.engineTurnDurationMs ?? null,
-        observation.billedCost.status,
-        observation.billedCost.billedUsdMicros ?? null,
-        observation.billedCost.reason ?? null,
-        observation.costEstimate.status,
-        observation.costEstimate.apiEquivalentUsdMicros ?? null,
-        observation.costEstimate.valuationProvenance ?? null,
-        observation.costEstimate.priceSource ?? null,
-        observation.costEstimate.priceSourceVersion ?? null,
-        priceDims,
-        observation.costEstimate.valuedAt ?? null,
-        observation.costEstimate.reason ?? null,
-        observation.billingBasis,
-        observation.supersedesObservationId ?? null,
-        observation.supersededAt ?? null,
-        observation.supersessionReason ?? null,
-        observation.isEffective ? 1 : 0,
-      );
       this.#db.exec('RELEASE usage_observation_record');
     } catch (error) {
       this.#db.exec('ROLLBACK TO usage_observation_record; RELEASE usage_observation_record');

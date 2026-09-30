@@ -70,4 +70,24 @@ test('captures telemetry from inner port when provided', async () => {
   assert.equal(adapter.lastTelemetry.durationMs, 100);
   assert.equal(adapter.lastTelemetry.tokens?.totalTokens, 60);
   assert.equal(adapter.lastTelemetry.billingBasis, 'metered_api');
+  assert.equal(adapter.takeTelemetry('attempt-2')?.tokens?.totalTokens, 60);
+  assert.equal(adapter.takeTelemetry('attempt-2'), undefined, 'settlement consumes telemetry once');
+});
+
+test('late timed-out routing responses cannot replace settled usage or another attempt telemetry', async () => {
+  let finish: (value: string) => void = () => undefined;
+  const adapter = new UsageAwareRoutingModelPort({ inner: {
+    id: 'delayed-model',
+    telemetryForAttempt: (id) => ({ tokens: { inputTokens: id === 'late' ? 99 : 10 } }),
+    judge: async (request) => request.attemptId === 'late'
+      ? new Promise<string>((resolve) => { finish = resolve; }) : 'valid output',
+  } });
+  const request = { batchId: 'batch', projectId: 'project', attempt: 1, context: 'context' };
+  const late = adapter.judge({ ...request, attemptId: 'late' });
+  assert.equal(adapter.takeTelemetry('late'), undefined); // coordinator timeout
+  await adapter.judge({ ...request, attemptId: 'retry', attempt: 2 });
+  finish('late output');
+  await late;
+  assert.equal(adapter.takeTelemetry('late'), undefined);
+  assert.equal(adapter.takeTelemetry('retry')?.tokens?.inputTokens, 10);
 });

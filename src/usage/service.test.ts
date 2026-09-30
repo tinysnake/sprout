@@ -335,23 +335,23 @@ test('Human stops retain stopped outcome and observed partial tokens', async () 
 test('two corrections against the same initial observation retain exactly one effective head', async () => {
   await withService(async (sqliteService) => {
     for (const service of [sqliteService, new UsageService({ store: new InMemoryUsageStore() })]) {
-    const activity = await service.recordRunActivity({
-      id: 'correction-run', agentId: 'agent-1', environmentInstanceId: 'env-1', prompt: 'work',
-      status: 'completed', events: [], createdAt: 1000, completedAt: 1100,
-    });
-    const initial = (await service.getActivity(activity.id))!.effectiveObservation!;
-    const input = { activityId: activity.id, supersedesObservationId: initial.id,
-      source: 'adapter-reconciliation', reason: 'Delayed provider estimate' };
-    // A failed insert must not deactivate the predecessor (transaction rollback).
-    await assert.rejects(service.store.recordObservation({ ...initial, supersedesObservationId: initial.id }));
-    assert.equal((await service.getActivity(activity.id))?.effectiveObservation?.id, initial.id);
-    await assert.rejects(service.recordCorrection({ ...input, reason: ' ' }), /source and reason/);
-    const results = await Promise.allSettled([service.recordCorrection(input), service.recordCorrection(input)]);
-    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
-    const detail = (await service.getActivity(activity.id))!;
-    assert.equal(detail.observations.length, 2);
-    assert.equal(detail.observations.filter((obs) => obs.isEffective).length, 1);
-    await assert.rejects(service.recordCorrection(input), /effective|stale/);
+      const activity = await service.recordRunActivity({
+        id: 'correction-run', agentId: 'agent-1', environmentInstanceId: 'env-1', prompt: 'work',
+        status: 'completed', events: [], createdAt: 1000, completedAt: 1100,
+      });
+      const initial = (await service.getActivity(activity.id))!.effectiveObservation!;
+      const input = { activityId: activity.id, supersedesObservationId: initial.id,
+        source: 'adapter-reconciliation', reason: 'Delayed provider estimate' };
+      // A failed insert must not deactivate the predecessor (transaction rollback).
+      await assert.rejects(service.store.recordObservation({ ...initial, supersedesObservationId: initial.id }));
+      assert.equal((await service.getActivity(activity.id))?.effectiveObservation?.id, initial.id);
+      await assert.rejects(service.recordCorrection({ ...input, reason: ' ' }), /source and reason/);
+      const results = await Promise.allSettled([service.recordCorrection(input), service.recordCorrection(input)]);
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      const detail = (await service.getActivity(activity.id))!;
+      assert.equal(detail.observations.length, 2);
+      assert.equal(detail.observations.filter((obs) => obs.isEffective).length, 1);
+      await assert.rejects(service.recordCorrection(input), /effective|stale/);
     }
   });
 });
