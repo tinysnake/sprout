@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
  * The application Shell: desktop sidebar, phone header, the main content region,
- * the phone bottom navigation, and the one polite live region.
+ * the phone bottom navigation, and the shared polite live region.
  *
  * It is the only component that owns the page frame and the only one that owns
- * an `aria-live` region. Destinations render inside the main region and announce
- * context changes through the shared channel, so streamed state stays readable
- * instead of being interleaved across several live regions.
+ * the shared `aria-live` region for connection and navigation changes. Chat's
+ * admission check has its own raw-state status so its brief checks cannot be
+ * overwritten by an unrelated shell announcement.
  */
 import { computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
@@ -54,7 +54,7 @@ onMounted(() => {
 
 <template>
   <div class="sprout-app-shell flex h-screen w-full bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden font-sans">
-    <!-- The single live region for the whole product. -->
+    <!-- Shared shell and navigation announcement region. -->
     <div
       class="shell-announcer sr-only"
       role="status"

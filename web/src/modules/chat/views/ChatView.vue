@@ -35,7 +35,7 @@ const batches = ref<readonly RoutingBatchSummaryView[]>([]);
 const inspection = ref<ScopeInspectionView | null>(null);
 const loading = ref(true);
 const detailLoading = ref(false);
-// Admission affects authority immediately; only its visual status is delayed.
+// Admission affects authority and assistive status immediately; only visual display is delayed.
 const showAdmissionNotice = useConnectionNotice(computed(() => !detailLoading.value));
 const error = ref('');
 const actionError = ref('');
@@ -379,6 +379,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
 
 <template>
   <div class="chat-view relative flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
+    <div class="chat-admission-announcement sr-only" role="status" aria-live="polite" aria-atomic="true">{{ detailLoading ? 'Checking conversation admission…' : '' }}</div>
     <div v-if="projects.length" class="mb-2 flex items-center gap-2 text-xs"><label for="chat-project-selector" class="font-bold">Project</label><select id="chat-project-selector" :value="projectId" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.displayName }}</option></select></div>
     <div v-if="showConnectionNotice && (loading || error || missingScope)" class="chat-offline-banner pointer-events-none absolute right-3 top-16 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
@@ -440,7 +441,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
         <div class="relative flex min-h-0 flex-1 flex-col">
           <!-- Both notices cover messages without allocating a row or intercepting input. -->
           <div v-if="showConnectionNotice" class="chat-offline-banner pointer-events-none absolute inset-x-3 top-2 z-20 rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
-          <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" :class="showConnectionNotice ? 'top-20' : 'top-2'" role="status">Checking conversation admission…</div>
+          <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" :class="showConnectionNotice ? 'top-20' : 'top-2'" aria-hidden="true">Checking conversation admission…</div>
           <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading">
           <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"

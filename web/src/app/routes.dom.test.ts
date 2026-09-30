@@ -664,9 +664,13 @@ test('conversation admission gates Send immediately but only floats after five c
     const before = geometry();
     const bodyClasses = body.className;
     const notice = () => doc.querySelector('.chat-detail-loading');
+    const status = doc.querySelector('.chat-admission-announcement');
+    assert.ok(status?.classList.contains('sr-only'), 'the admission live status has no visual footprint');
+    assert.equal(status.getAttribute('role'), 'status');
+    assert.equal(status.getAttribute('aria-live'), 'polite');
+    assert.match(status.textContent ?? '', /Checking conversation admission/, 'pending admission announces immediately');
     assert.equal(notice(), null, 'the initial admission check does not flash');
     assert.equal(body.classList.contains('pt-32'), false, 'admission reserves no vertical lane');
-    assert.equal(doc.querySelectorAll('.chat-detail-loading[role="status"]').length, 0, 'no premature visual status is announced');
     assert.equal(body.getAttribute('aria-busy'), 'true', 'raw admission remains exposed immediately');
     const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
     input.value = 'Keep this draft';
@@ -677,8 +681,9 @@ test('conversation admission gates Send immediately but only floats after five c
     assert.match(doc.querySelector('#chat-send-reason')?.textContent ?? '', /Checking conversation admission before sending/);
     await settle(4500);
     assert.equal(notice(), null, 'a still-pending short check has no visible status');
+    assert.match(status.textContent ?? '', /Checking conversation admission/, 'the live status does not wait for visual persistence');
     await settle(600);
-    assert.equal(notice()?.getAttribute('role'), 'status');
+    assert.equal(notice()?.getAttribute('aria-hidden'), 'true', 'the visual overlay does not repeat the live announcement');
     assert.match(notice()?.textContent ?? '', /Checking conversation admission/);
     assert.ok(notice()?.classList.contains('absolute'));
     assert.ok(notice()?.classList.contains('pointer-events-none'));
@@ -689,6 +694,7 @@ test('conversation admission gates Send immediately but only floats after five c
     resolve(await inspect('dm-architect'));
     await settle(50);
     assert.equal(notice(), null, 'resolution clears the status immediately');
+    assert.equal(status.textContent, '', 'resolution clears the live status immediately');
     assert.equal(body.getAttribute('aria-busy'), 'false');
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false, 'Send resumes with the same draft');
     assert.equal(doc.querySelector('#chat-send-reason'), null, 'admission no longer blocks Send');
@@ -698,9 +704,13 @@ test('conversation admission gates Send immediately but only floats after five c
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
       'a new admission check gates Send immediately');
     assert.equal(notice(), null, 'a new check starts its own display interval');
+    assert.match(status.textContent ?? '', /Checking conversation admission/, 'even a brief check announces before its visual interval');
+    assert.equal(body.getAttribute('aria-busy'), 'true');
     resolve(await inspect('wg-frontend'));
     await settle(60);
     assert.equal(notice(), null, 'a short admission flap never shows a status');
+    assert.equal(status.textContent, '', 'a short check also clears the live status on recovery');
+    assert.equal(body.getAttribute('aria-busy'), 'false');
   } finally { unmount(); await cleanup(); }
 });
 
