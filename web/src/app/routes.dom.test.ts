@@ -605,7 +605,13 @@ test('Chat floating notice waits five continuous seconds, clears on recovery, an
     const detail = doc.querySelector('[aria-label="Conversation detail"]');
     const body = doc.querySelector('.chat-messages-body');
     assert.ok(detail && body);
-    const height = detail.getBoundingClientRect().height;
+    const geometry = () => [detail, body].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return [rect.x, rect.y, rect.width, rect.height];
+    });
+    const before = geometry();
+    const bodyClasses = body.className;
+    assert.equal(body.classList.contains('pt-32'), false, 'hidden notices reserve no message lane');
     controller.set(OFFLINE_CONNECTION);
     await settle(150);
     assert.equal(notice(), null);
@@ -620,13 +626,82 @@ test('Chat floating notice waits five continuous seconds, clears on recovery, an
     assert.match(notice()?.textContent ?? '', /Offline.*disabled, not queued/s);
     assert.equal(notice()?.getAttribute('role'), 'status');
     assert.ok(notice()?.classList.contains('absolute'));
-    assert.ok(body.classList.contains('pt-32'), 'a permanent lane prevents overlap with message content');
-    assert.equal(detail.getBoundingClientRect().height, height, 'overlay does not change the detail box height');
+    assert.equal(body.classList.contains('pt-32'), false, 'visible notices reserve no message lane');
+    assert.equal(body.className, bodyClasses, 'connection visibility never changes message padding or layout classes');
+    assert.ok(notice()?.classList.contains('pointer-events-none'));
+    assert.ok(notice()?.classList.contains('bg-[var(--bg-surface)]'), 'the overlay is readable over messages');
+    assert.ok(notice()?.classList.contains('z-20'));
+    assert.deepEqual(geometry(), before, 'mounting an overlay does not change detail or message geometry');
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(30);
     assert.equal(notice(), null, 'recovery clears the visible notice immediately');
     app.unmount();
   } finally { await cleanup(); }
+});
+
+test('conversation admission gates Send immediately but only floats after five continuous seconds', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  let unmount = () => {};
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const fixture = new FixtureChatService();
+    const inspect = fixture.inspectScope.bind(fixture);
+    let resolve!: (value: Awaited<ReturnType<typeof inspect>>) => void;
+    fixture.inspectScope = (id) => new Promise((done) => { resolve = done; }).then(() => inspect(id));
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    unmount = () => app.unmount();
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(150);
+    const body = doc.querySelector('.chat-messages-body');
+    const detail = doc.querySelector('[aria-label="Conversation detail"]');
+    assert.ok(body && detail);
+    const geometry = () => [body, detail].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return [rect.x, rect.y, rect.width, rect.height];
+    });
+    const before = geometry();
+    const bodyClasses = body.className;
+    const notice = () => doc.querySelector('.chat-detail-loading');
+    assert.equal(notice(), null, 'the initial admission check does not flash');
+    assert.equal(body.classList.contains('pt-32'), false, 'admission reserves no vertical lane');
+    assert.equal(doc.querySelectorAll('.chat-detail-loading[role="status"]').length, 0, 'no premature visual status is announced');
+    assert.equal(body.getAttribute('aria-busy'), 'true', 'raw admission remains exposed immediately');
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    input.value = 'Keep this draft';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    assert.equal(input.disabled, false, 'the admission check does not interrupt typing');
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
+    assert.match(doc.querySelector('#chat-send-reason')?.textContent ?? '', /Checking conversation admission before sending/);
+    await settle(4500);
+    assert.equal(notice(), null, 'a still-pending short check has no visible status');
+    await settle(600);
+    assert.equal(notice()?.getAttribute('role'), 'status');
+    assert.match(notice()?.textContent ?? '', /Checking conversation admission/);
+    assert.ok(notice()?.classList.contains('absolute'));
+    assert.ok(notice()?.classList.contains('pointer-events-none'));
+    assert.ok(notice()?.classList.contains('bg-[var(--bg-surface)]'));
+    assert.ok(notice()?.classList.contains('z-20'));
+    assert.equal(body.className, bodyClasses, 'admission visibility never changes message padding or layout classes');
+    assert.deepEqual(geometry(), before, 'the admission overlay cannot push messages or resize detail');
+    resolve(await inspect('dm-architect'));
+    await settle(50);
+    assert.equal(notice(), null, 'resolution clears the status immediately');
+    assert.equal(body.getAttribute('aria-busy'), 'false');
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false, 'Send resumes with the same draft');
+    assert.equal(doc.querySelector('#chat-send-reason'), null, 'admission no longer blocks Send');
+    assert.deepEqual(geometry(), before);
+    await router.push('/project/chat/wg-frontend');
+    await settle(50);
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
+      'a new admission check gates Send immediately');
+    assert.equal(notice(), null, 'a new check starts its own display interval');
+    resolve(await inspect('wg-frontend'));
+    await settle(60);
+    assert.equal(notice(), null, 'a short admission flap never shows a status');
+  } finally { unmount(); await cleanup(); }
 });
 
 test('idle Message and Project-event arrivals announce without run status; hidden Chat catches up on return', async () => {

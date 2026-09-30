@@ -101,14 +101,14 @@ onMounted(() => {
       </header>
 
       <div class="relative flex min-h-0 flex-1 flex-col">
-        <!-- This reserved top lane is permanent; the notice itself is out of flow. -->
+        <!-- A notice overlays the page only while visible; the page reserves no space. -->
         <div v-if="showConnectionWarning" role="status"
-          class="shell-connection-banner pointer-events-none absolute right-3 top-2 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] items-start gap-2 rounded border border-[var(--yellow-attention-border)] bg-[var(--yellow-attention-bg)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] shadow-lg">
+          class="shell-connection-banner pointer-events-none absolute right-3 top-2 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] items-start gap-2 rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] shadow-lg">
           <Icon name="warning" :size="13" class="shrink-0" />
           <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
         </div>
         <main id="sprout-main-content" tabindex="-1"
-          class="flex-1 overflow-y-auto pb-16 pt-24 md:pb-0 focus-visible:outline-none">
+          class="flex-1 overflow-y-auto pb-16 md:pb-0 focus-visible:outline-none">
           <slot />
         </main>
       </div>

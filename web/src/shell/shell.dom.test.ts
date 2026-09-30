@@ -239,9 +239,13 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
       return [rect.x, rect.y, rect.width, rect.height];
     });
     const before = geometry();
+    const mainClasses = main.className;
+    assert.equal(main.classList.contains('pt-24'), false, 'the hidden notice reserves no top lane');
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(100);
+    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /Checking connection/i,
+      'the shared announcement follows raw state before visual display');
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the short-lived refresh banner is not laid out');
     assert.deepEqual(geometry(), before, 'main/header positions and app-shell dimensions stay constant');
@@ -257,7 +261,11 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
       'a prolonged connection stall still surfaces the warning');
     assert.equal(doc.querySelector('.shell-connection-banner')?.classList.contains('absolute'), true,
       'the floating status is out of flow at both breakpoints');
-    assert.ok(main.classList.contains('pt-24'), 'the notice lane is reserved even when hidden');
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('z-30'));
+    assert.equal(main.classList.contains('pt-24'), false, 'the visible notice reserves no top lane either');
+    assert.equal(main.className, mainClasses, 'notice visibility never changes main padding or layout classes');
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('pointer-events-none'));
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('bg-[var(--bg-surface)]'), 'the overlay has a solid surface over content');
     assert.deepEqual(geometry(), before, 'revealing the overlay leaves shell and content box geometry unchanged');
     app.unmount();
   } finally {

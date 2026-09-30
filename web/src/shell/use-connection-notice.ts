@@ -1,17 +1,17 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue';
 
-// Display only: command guards and the shared announcer observe raw connection
-// state. A continuous degraded interval of five seconds is needed for each
-// mounted notice; recovery hides it immediately and cancels the pending timer.
+// Display only: command guards, admission checks and the shared announcer
+// observe raw state. A continuous unresolved interval of five seconds is
+// needed for each mounted notice; resolution hides it immediately.
 export const CONNECTION_NOTICE_DELAY_MS = 5000;
 
-export function useConnectionNotice(controlAvailable: Readonly<Ref<boolean>>) {
+export function useConnectionNotice(resolved: Readonly<Ref<boolean>>) {
   const visible = ref(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  watch(controlAvailable, (available) => {
+  watch(resolved, (isResolved) => {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    if (available) {
+    if (isResolved) {
       visible.value = false;
     } else {
       timer = setTimeout(() => {
