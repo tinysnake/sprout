@@ -10,6 +10,7 @@ import { PROJECT_SERVICE } from '../../projects/types.ts';
 import { CHAT_SERVICE, type ChatTimelineItem } from '../types.ts';
 import { evidenceState, readOnlyReason } from '../evidence.ts';
 import { useShellConnection } from '../../../shell/use-shell-connection.ts';
+import { useConnectionNotice } from '../../../shell/use-connection-notice.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
 import Icon from '../../../primitives/Icon.vue';
 import Button from '../../../primitives/Button.vue';
@@ -23,6 +24,7 @@ const service = inject(CHAT_SERVICE, null);
 const projectService = inject(PROJECT_SERVICE, null);
 const agentService = inject(AGENT_SERVICE, null);
 const { presentation, state: connectionState } = useShellConnection();
+const showConnectionNotice = useConnectionNotice(computed(() => presentation.value.controlAvailable));
 const announcer = useAnnouncer();
 const projects = ref<readonly ProjectAuthorityView[]>([]);
 const agents = ref<readonly AgentInstance[]>([]);
@@ -374,9 +376,9 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
 </script>
 
 <template>
-  <div class="chat-view flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
+  <div class="chat-view relative flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
     <div v-if="projects.length" class="mb-2 flex items-center gap-2 text-xs"><label for="chat-project-selector" class="font-bold">Project</label><select id="chat-project-selector" :value="projectId" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.displayName }}</option></select></div>
-    <div v-if="!presentation.controlAvailable && (loading || error || missingScope)" class="chat-offline-banner mb-2 rounded border border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
+    <div v-if="showConnectionNotice && (loading || error || missingScope)" class="chat-offline-banner pointer-events-none absolute right-3 top-16 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--yellow-attention-bg)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
       <div class="h-8 w-52 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
       <div v-for="i in 4" :key="i" class="h-16 animate-pulse rounded bg-[var(--bg-surface-elevated)]" />
@@ -430,11 +432,13 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
           </div>
           <Button v-if="activeScope" variant="secondary" size="icon" class="chat-info-btn h-10 w-10 shrink-0" title="Conversation Information" aria-label="Conversation Information" @click="infoOpen = true"><Icon name="info" :size="16" /></Button>
         </header>
-        <div v-if="!presentation.controlAvailable" class="chat-offline-banner border-b border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
         <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><span><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</span><Button v-if="inspection.state.reason === 'working-group-disbanded' && project?.status === 'active'" variant="secondary" size="sm" class="min-h-11 shrink-0" :disabled="!presentation.controlAvailable || managingGroup" @click="restoreGroup">Restore WG</Button></div>
         <div v-else-if="archivedDirectAgent" class="chat-readonly-banner border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><Icon name="alert" :size="14" /> Agent @{{ archivedDirectAgent.displayName }} is archived. History is preserved for review; restore the Agent before sending new messages.</div>
         <div v-if="actionError" class="p-3 text-xs text-[var(--red-action)]" role="alert">{{ actionError }}</div>
-        <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto p-4" :aria-busy="detailLoading">
+        <div class="relative flex min-h-0 flex-1 flex-col">
+          <!-- The message lane stays reserved even when the floating status is hidden. -->
+          <div v-if="showConnectionNotice" class="chat-offline-banner pointer-events-none absolute inset-x-3 top-2 z-20 rounded border border-[var(--yellow-attention-border)] bg-[var(--yellow-attention-bg)] p-3 text-xs text-[var(--text-primary)] shadow-lg" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
+          <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-32" :aria-busy="detailLoading">
           <div v-if="detailLoading" class="chat-detail-loading text-xs text-[var(--text-muted)]" role="status">Checking conversation admission…</div>
           <div v-if="!timeline.length && !detailLoading" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"
@@ -469,6 +473,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
             </div>
             <p v-if="entry.kind === 'event'" class="text-[10px] text-[var(--text-muted)]">{{ entry.event.kind }} · {{ entry.event.disposition }}</p>
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
+          </div>
           </div>
         </div>
         <form class="chat-composer flex items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">

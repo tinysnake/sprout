@@ -572,7 +572,7 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
     assert.equal(doc.activeElement?.classList.contains('chat-mobile-back'), true, 'drill-down moves keyboard focus');
     controller.set(OFFLINE_CONNECTION);
     await settle(30);
-    assert.match(doc.querySelector('.chat-offline-banner')?.textContent ?? '', /stale.*disabled, not queued/i);
+    assert.equal(doc.querySelector('.chat-offline-banner'), null, 'transient offline state does not blink');
     assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, true);
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
     app.unmount();
@@ -589,6 +589,44 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
     assert.equal(loadingHarness.doc.querySelector('.chat-loading-state')?.getAttribute('aria-busy'), 'true');
     app.unmount();
   } finally { await loadingHarness.cleanup(); }
+});
+
+test('Chat floating notice waits five continuous seconds, clears on recovery, and never resizes the detail', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { createShellConnectionController, OFFLINE_CONNECTION } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
+    const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), connectionSource: controller });
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(150);
+    const notice = () => doc.querySelector('.chat-offline-banner');
+    const detail = doc.querySelector('[aria-label="Conversation detail"]');
+    const body = doc.querySelector('.chat-messages-body');
+    assert.ok(detail && body);
+    const height = detail.getBoundingClientRect().height;
+    controller.set(OFFLINE_CONNECTION);
+    await settle(150);
+    assert.equal(notice(), null);
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
+      'Send refuses immediately despite display debounce');
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await settle(50);
+    controller.set(OFFLINE_CONNECTION);
+    await settle(4900);
+    assert.equal(notice(), null, 'the recovered interval does not count toward five seconds');
+    await settle(180);
+    assert.match(notice()?.textContent ?? '', /Offline.*disabled, not queued/s);
+    assert.equal(notice()?.getAttribute('role'), 'status');
+    assert.ok(notice()?.classList.contains('absolute'));
+    assert.ok(body.classList.contains('pt-32'), 'a permanent lane prevents overlap with message content');
+    assert.equal(detail.getBoundingClientRect().height, height, 'overlay does not change the detail box height');
+    controller.set({ status: 'online', connection: 'online', loading: false });
+    await settle(30);
+    assert.equal(notice(), null, 'recovery clears the visible notice immediately');
+    app.unmount();
+  } finally { await cleanup(); }
 });
 
 test('idle Message and Project-event arrivals announce without run status; hidden Chat catches up on return', async () => {
@@ -676,7 +714,7 @@ test('background connection checks never interrupt a typed draft or focus, but S
     input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     await settle(20);
     assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
-    assert.match(doc.querySelector('.chat-offline-banner')?.textContent ?? '', /Checking Connection.*disabled, not queued/s);
+    assert.equal(doc.querySelector('.chat-offline-banner'), null, 'a brief check does not show the floating notice');
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(25);
     assert.equal(input.value, 'Draft still typing');
