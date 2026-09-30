@@ -1065,6 +1065,13 @@ function collisionSafeCatalogId(
   }
 }
 
+/** A completed schema transition that must be recorded with the schema commit. */
+export interface SchemaTransition {
+  readonly kind: 'initialized' | 'migrated';
+  readonly fromVersion: number;
+  readonly toVersion: number;
+}
+
 /** Options for database migration and initialization. */
 export interface MigrateDatabaseOptions {
   readonly filename: string;
@@ -1075,6 +1082,8 @@ export interface MigrateDatabaseOptions {
     | ((sourceDb: DatabaseSync, sourceFilename: string, safetyCopyPath: string) => void)
     | undefined;
   readonly migrations?: readonly MigrationStep[] | undefined;
+  /** Synchronous durable fact writer, invoked inside the schema transaction. */
+  readonly recordSchemaTransition?: ((db: DatabaseSync, transition: SchemaTransition) => void) | undefined;
 }
 
 /**
@@ -1131,9 +1140,22 @@ export function migrateOrInitializeDatabase(
   const currentVersion = getSchemaVersion(db);
   const empty = isDatabaseEmpty(db);
 
-  // 2. If empty, initialize directly at target version (no safety copy needed)
+  // 2. Initialize empty stores transactionally so schema version and its
+  // transition fact cannot be separated by a restart.
   if (empty) {
-    setSchemaVersion(db, targetVersion);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      setSchemaVersion(db, targetVersion);
+      options.recordSchemaTransition?.(db, { kind: 'initialized', fromVersion: currentVersion, toVersion: targetVersion });
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // preserve original error
+      }
+      throw error;
+    }
     return;
   }
 
@@ -1191,6 +1213,7 @@ export function migrateOrInitializeDatabase(
       step.migrate(db);
       setSchemaVersion(db, step.toVersion);
     }
+    options.recordSchemaTransition?.(db, { kind: 'migrated', fromVersion: currentVersion, toVersion: targetVersion });
     db.exec('COMMIT');
   } catch {
     try {
