@@ -14,6 +14,7 @@ import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 
 /**
  * Codex engine adapter (ADR-0001).
@@ -326,10 +327,12 @@ export class CodexSession implements EngineSession {
         turnId = startedTurnId;
         this.#turnId = startedTurnId;
       })
-      .catch((error: unknown) => {
+      .catch(() => {
+        // The rejection carries engine/provider text (a JSON-RPC error can echo
+        // an upstream body); only the stable failure class is persisted (#182).
         finish({
           status: 'failed',
-          message: error instanceof Error ? error.message : String(error),
+          message: sanitizedTurnFailure('codex', 'turn-start-rejected'),
         });
       });
 

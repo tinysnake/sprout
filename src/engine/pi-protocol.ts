@@ -1,4 +1,5 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage } from './port.ts';
+import { sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Pi's `--mode json` stream into engine-neutral run events.
@@ -15,6 +16,10 @@ import type { AgentRunEvent, EngineTurnResult, TokenUsage } from './port.ts';
  * - `tool_execution_update` carries `partialResult` and `tool_execution_end`
  *   carries `result`, so command output is visible while the tool runs.
  * - `agent_settled` is the terminal event for a turn.
+ * - an assistant message (or the turn) ending with `stopReason: "error"` is an
+ *   error termination: it settles the turn as **failed** with a sanitized
+ *   reason, never as a completed empty turn (#182). The `errorMessage` that
+ *   rides alongside it is the raw upstream body and is never read.
  */
 
 export interface PiTurnState {
@@ -55,6 +60,8 @@ interface PiMessage {
   readonly role?: string;
   readonly content?: readonly PiContentPart[] | string;
   readonly usage?: unknown;
+  /** `"stop" | "toolUse" | "error" | "aborted"`; `"error"` is an error termination. */
+  readonly stopReason?: string;
 }
 
 export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
@@ -101,11 +108,25 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       // the last one, since a turn may contain tool calls before its answer.
       const msg = message['message'] as PiMessage | undefined;
       if (msg?.role !== 'assistant') return { events: [] };
+      // An errored assistant message is a failure, not an empty answer. The
+      // engine's `errorMessage` is the raw upstream body: it is deliberately
+      // never read into state or the turn result (#182).
+      if (msg.stopReason === 'error') return failTurn(state, 'error-stop-reason');
       const text = extractText(msg.content);
       if (text !== '') state.finalText = text;
       addTokenUsage(state, readPiTokenUsage(msg.usage) ?? state.pendingMessageUsage);
       state.pendingMessageUsage = undefined;
       return { events: [] };
+    }
+
+    case 'turn_end': {
+      // The agent loop re-emits the terminal message on `turn_end`; checking it
+      // too means an error termination is caught even when `message_end` was
+      // omitted from a malformed stream.
+      const msg = message['message'] as PiMessage | undefined;
+      if (msg?.stopReason === 'error') return failTurn(state, 'error-stop-reason');
+      // Turn framing otherwise carries no run progress.
+      return { events: [], ignored: true };
     }
 
     case 'compaction_end': {
@@ -118,7 +139,16 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       return { events: [] };
     }
 
-    case 'agent_settled':
+    case 'agent_settled': {
+      // Belt and braces: if an error was already classified anywhere in the
+      // stream (or the settle event itself carries the error stop reason), the
+      // turn settles as failed — an errored turn can never complete as an
+      // empty successful turn (#182). An already-classified failure keeps its
+      // own class rather than being re-labelled.
+      if (state.failure !== undefined) {
+        return { events: [], finish: { status: 'failed', message: state.failure } };
+      }
+      if (message['stopReason'] === 'error') return failTurn(state, 'error-stop-reason');
       // A malformed or interrupted stream may omit message_end. Keep a valid
       // final update observable rather than failing the otherwise healthy run.
       addTokenUsage(state, state.pendingMessageUsage);
@@ -131,22 +161,30 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
           ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
         },
       };
+    }
 
     case 'error': {
-      const detail =
-        typeof message['message'] === 'string'
-          ? message['message']
-          : typeof message['error'] === 'string'
-            ? message['error']
-            : 'pi reported an error';
-      state.failure = detail;
-      return { events: [], finish: { status: 'failed', message: detail } };
+      // The event may carry the engine's raw detail (an upstream body); it is
+      // never read. Only the stable failure class reaches durable state (#182).
+      return failTurn(state, 'engine-error');
     }
 
     default:
       // Session, turn, agent, and telemetry framing carries no run progress.
       return { events: [], ignored: true };
   }
+}
+
+/**
+ * Classify an error termination: stable failure text in state and in the turn
+ * result, nothing engine-authored (#182).
+ */
+function failTurn(state: PiTurnState, cause: EngineTurnFailureCause): PiOutcome {
+  // First classification wins, so every later settle attempt reports the same
+  // stable reason for the same turn.
+  const failure = state.failure ?? sanitizedTurnFailure('pi', cause);
+  state.failure = failure;
+  return { events: [], finish: { status: 'failed', message: failure } };
 }
 
 function mapAssistantUpdate(message: Record<string, unknown>, state: PiTurnState): PiOutcome {
