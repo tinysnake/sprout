@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ProjectAgentAuthorityPort } from '../project/authority-service.ts';
 import type { ConversationProjectPort } from '../conversation/service.ts';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
 import { TaskProposalError, type ProposalActor, type TaskProposal, type TaskProposalContent,
@@ -6,7 +7,7 @@ import { TaskProposalError, type ProposalActor, type TaskProposal, type TaskProp
 import type { TaskProposalStore } from './proposal-store.ts';
 
 /**
- * Public proposal capability (#99). Only a read-only membership port and storage:
+ * Public proposal capability (#99). Only read-only membership/identity ports and storage:
  * validation cannot wake, submit, reserve, prepare context, or invoke a capability.
  * Agent callers supply a trusted internal actor; HTTP resolves Human membership itself.
  * #100 consumes contentVersion as a copy at admission; later edits cannot rewrite it.
@@ -14,11 +15,13 @@ import type { TaskProposalStore } from './proposal-store.ts';
 export class TaskProposalService {
   readonly #store: TaskProposalStore;
   readonly #projects: ConversationProjectPort;
+  readonly #agents: ProjectAgentAuthorityPort;
   readonly #now: () => number;
   readonly #id: () => string;
-  constructor(options: { store: TaskProposalStore; projects: ConversationProjectPort; now?: () => number; id?: () => string }) {
+  constructor(options: { store: TaskProposalStore; projects: ConversationProjectPort; agents: ProjectAgentAuthorityPort; now?: () => number; id?: () => string }) {
     this.#store = options.store;
     this.#projects = options.projects;
+    this.#agents = options.agents;
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? (() => `proposal-${randomUUID()}`);
   }
@@ -29,15 +32,16 @@ export class TaskProposalService {
     return { memberId: member.memberId, memberKind: 'human' };
   }
   async validate(projectId: string, actor: ProposalActor, input: TaskProposalContent): Promise<TaskProposalContent> {
-    await this.#authorize(projectId, actor);
+    await this.#authorize(projectId, actorSnapshot(actor));
     return validatedContent(input);
   }
   async propose(projectId: string, actor: ProposalActor, input: TaskProposalContent): Promise<TaskProposal> {
+    actor = actorSnapshot(actor);
     const content = await this.validate(projectId, actor, input);
     const now = this.#now();
     const proposal: TaskProposal = {
-      id: this.#id(), projectId, proposer: { ...actor }, status: 'proposed', revision: 1,
-      currentContentVersion: 1, versions: [{ ...content, version: 1, actor: { ...actor }, at: now, reason: 'Proposed' }],
+      id: this.#id(), projectId, proposer: actorSnapshot(actor), status: 'proposed', revision: 1,
+      currentContentVersion: 1, versions: [{ ...content, version: 1, actor: actorSnapshot(actor), at: now, reason: 'Proposed' }],
       lifecycle: [], createdAt: now, updatedAt: now,
     };
     await this.#store.create(proposal);
@@ -59,6 +63,7 @@ export class TaskProposalService {
     return structuredClone(content);
   }
   async revise(id: string, actor: ProposalActor, input: ReviseTaskProposal): Promise<TaskProposal> {
+    actor = actorSnapshot(actor);
     const proposal = await this.get(id);
     await this.#authorize(proposal.projectId, actor);
     const content = validatedContent(input);
@@ -69,7 +74,7 @@ export class TaskProposalService {
       const version = current.currentContentVersion + 1;
       const now = this.#now();
       return { ...current, revision: current.revision + 1, currentContentVersion: version, updatedAt: now,
-        versions: [...current.versions, { ...content, version, actor: { ...actor }, at: now, reason }] };
+        versions: [...current.versions, { ...content, version, actor: actorSnapshot(actor), at: now, reason }] };
     });
   }
   withdraw(id: string, actor: ProposalActor, input: ProposalDecision): Promise<TaskProposal> {
@@ -79,6 +84,7 @@ export class TaskProposalService {
     return this.#decide(id, actor, input, 'reject');
   }
   async #decide(id: string, actor: ProposalActor, input: ProposalDecision, action: 'withdraw' | 'reject'): Promise<TaskProposal> {
+    actor = actorSnapshot(actor);
     const proposal = await this.get(id);
     await this.#authorize(proposal.projectId, actor);
     const reason = text(input.reason, 'reason', 2000);
@@ -87,7 +93,7 @@ export class TaskProposalService {
       if (action === 'reject' ? actor.memberKind !== 'human' : !sameActor(current.proposer, actor)) throw new TaskProposalError('authority-required');
       const now = this.#now();
       return { ...current, status: action === 'reject' ? 'rejected' : 'withdrawn', revision: current.revision + 1, updatedAt: now,
-        lifecycle: [...current.lifecycle, { action, actor: { ...actor }, at: now, reason, contentVersion: current.currentContentVersion }] };
+        lifecycle: [...current.lifecycle, { action, actor: actorSnapshot(actor), at: now, reason, contentVersion: current.currentContentVersion }] };
     });
   }
   #open(proposal: TaskProposal): void {
@@ -104,7 +110,12 @@ export class TaskProposalService {
     if (!project.members.some(m => m.memberId === actor.memberId && m.memberKind === actor.memberKind && m.endedAt === undefined)) {
       throw new TaskProposalError('membership-required');
     }
+    if (actor.memberKind === 'agent' && !await this.#agents.agentIsActive(actor.memberId)) throw new TaskProposalError('agent-read-only');
   }
+}
+function actorSnapshot(actor: ProposalActor): ProposalActor {
+  if (!actor || typeof actor !== 'object') throw new TaskProposalError('membership-required');
+  return { memberId: actor.memberId, memberKind: actor.memberKind };
 }
 function sameActor(a: ProposalActor, b: ProposalActor): boolean {
   return a.memberId === b.memberId && a.memberKind === b.memberKind;

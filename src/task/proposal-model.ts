@@ -41,7 +41,7 @@ export interface ProposalDecision {
 export type ReviseTaskProposal = TaskProposalContent & ProposalDecision;
 export type ProposalErrorCode = 'invalid-content' | 'unknown-project' | 'unknown-proposal'
   | 'unknown-content-version' | 'membership-required' | 'authority-required'
-  | 'project-read-only' | 'proposal-closed' | 'stale-proposal';
+  | 'project-read-only' | 'agent-read-only' | 'proposal-closed' | 'stale-proposal';
 export class TaskProposalError extends Error {
   readonly code: ProposalErrorCode;
   constructor(code: ProposalErrorCode, message: string = code) {

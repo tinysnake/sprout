@@ -14,8 +14,9 @@ const other = { memberId: 'other', memberKind: 'agent' as const };
 const content = { title: 'Improve checks', goal: 'Prove correctness', constraints: ['Keep authority'], validationCriteria: ['Tests pass'] };
 function fixture(store: TaskProposalStore = new InMemoryTaskProposalStore()) {
   const facts = { projectId: 'project', status: 'active' as 'active' | 'archived', contentVersion: 1, goal: '', rules: [], members: structuredClone([human, agent, other]) as {memberId: string; memberKind: 'human' | 'agent'; endedAt?: number}[] };
-  const service = new TaskProposalService({ store, projects: { projectFacts: async (id) => id === 'project' ? facts : undefined } });
-  return { service, facts, store };
+  const activeAgents = new Set(['author', 'other']);
+  const service = new TaskProposalService({ store, agents: { agentIsActive: id => activeAgents.has(id) }, projects: { projectFacts: async (id) => id === 'project' ? facts : undefined } });
+  return { service, facts, store, activeAgents };
 }
 
 test('Human and Agent proposals share validated attributable content without execution dependencies', async () => {
@@ -27,10 +28,23 @@ test('Human and Agent proposals share validated attributable content without exe
     assert.deepEqual(proposal.versions[0]?.validationCriteria, content.validationCriteria);
     assert.deepEqual(proposal.versions[0]?.actor, actor);
   }
+  const mutableActor = { ...agent, unexpected: 'not durable' };
+  const pending = service.propose('project', mutableActor, content);
+  mutableActor.memberId = other.memberId;
+  const captured = await pending;
+  assert.deepEqual(captured.proposer, agent, 'authority and attribution hold the same actor snapshot');
+  assert.deepEqual(captured.versions[0]?.actor, agent, 'unknown actor fields are not persisted');
   const before = await store.listForProject('project');
   assert.deepEqual(await service.validate('project', agent, content), content);
   await assert.rejects(service.validate('project', agent, { ...content, goal: '' }), { code: 'invalid-content' });
   assert.deepEqual(await store.listForProject('project'), before);
+  const privatePath = ['','synthetic','private','workspace'].join('/');
+  const sensitive = { ...content, goal: `Review safely; do not disclose ${privatePath}` };
+  const sanitized = await service.validate('project', human, sensitive);
+  assert.ok(!sanitized.goal.includes(privatePath));
+  const saved = await service.propose('project', human, sensitive);
+  assert.equal(saved.versions[0]?.goal, sanitized.goal);
+  await assert.rejects(service.propose('project', human, { ...content, goal: privatePath }), { code: 'invalid-content' });
 });
 
 test('Only proposer revises or withdraws; Human override and rejection require durable reasons', async () => {
@@ -51,9 +65,13 @@ test('Only proposer revises or withdraws; Human override and rejection require d
 });
 
 test('Ended membership, actor-kind spoofing and archived Projects fail closed without losing historical reads', async () => {
-  const { service, facts } = fixture();
+  const { service, facts, activeAgents } = fixture();
   const proposal = await service.propose('project', agent, content);
   await assert.rejects(service.propose('project', { ...agent, memberKind: 'human' }, content), { code: 'membership-required' });
+  activeAgents.delete(agent.memberId);
+  await assert.rejects(service.propose('project', agent, content), { code: 'agent-read-only' });
+  await assert.rejects(service.revise(proposal.id, agent, { ...content, reason: 'Correction', expectedRevision: 1 }), { code: 'agent-read-only' });
+  activeAgents.add(agent.memberId);
   facts.members[1]!.endedAt = 5;
   await assert.rejects(service.withdraw(proposal.id, agent, { reason: 'Finished', expectedRevision: 1 }), { code: 'membership-required' });
   facts.status = 'archived';

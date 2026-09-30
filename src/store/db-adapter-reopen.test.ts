@@ -283,6 +283,12 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'completed_at', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
+  task_proposals: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'revision', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
   task_run_links: [
     { name: 'task_id', type: 'TEXT', notnull: 1, pk: 1 },
     { name: 'run_id', type: 'TEXT', notnull: 1, pk: 2 },

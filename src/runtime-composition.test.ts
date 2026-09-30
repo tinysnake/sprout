@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { CURRENT_SCHEMA_VERSION } from './store/schema.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { SchemaTooNewError } from './store/schema.ts';
 import {
@@ -332,7 +333,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 22; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION + 1}; CREATE TABLE retained_data (id TEXT PRIMARY KEY);`);
   database.close();
 
   let environmentClosed = 0;

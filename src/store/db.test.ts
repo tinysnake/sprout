@@ -277,6 +277,12 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'completed_at', type: 'INTEGER', notnull: 0, pk: 0 },
   ],
+  task_proposals: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'revision', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
   task_run_links: [
     { name: 'task_id', type: 'TEXT', notnull: 1, pk: 1 },
     { name: 'run_id', type: 'TEXT', notnull: 1, pk: 2 },
@@ -452,6 +458,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'environment_recovery_lease_idx', tbl: 'environment_recovery' },
         { name: 'environment_recovery_instance_idx', tbl: 'environment_recovery' },
         { name: 'environment_force_releases_instance_idx', tbl: 'environment_force_releases' },
+        { name: 'task_proposals_project', tbl: 'task_proposals' },
         { name: 'task_run_links_by_task', tbl: 'task_run_links' },
       ],
     );
@@ -526,6 +533,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'run_reconnect_gates',
         'run_reconnect_retries',
         'run_reconnect_triggers',
+        'task_proposals',
         'task_run_links',
         'tasks',
         'worker_connection_epochs',

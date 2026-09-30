@@ -1037,15 +1037,16 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
   {
     fromVersion: 21,
     toVersion: 22,
+    name: 'task_proposals_and_content_versions',
     migrate(db) {
       db.exec(`
-        CREATE TABLE task_proposals (
+        CREATE TABLE IF NOT EXISTS task_proposals (
           id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL,
           document TEXT NOT NULL,
           revision INTEGER NOT NULL CHECK (revision >= 1)
         );
-        CREATE INDEX task_proposals_project ON task_proposals(project_id);
+        CREATE INDEX IF NOT EXISTS task_proposals_project ON task_proposals(project_id);
       `);
     },
   },

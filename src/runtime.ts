@@ -734,7 +734,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      * Message, wake, run, Task, or lease port, so scope commands can never
      * wake an Agent or create work by themselves.
      */
-    const taskProposals = new TaskProposalService({ store: stores.taskProposals, projects: conversationProjects });
+    const taskProposals = new TaskProposalService({ store: stores.taskProposals, projects: conversationProjects, agents: projectAgentAuthority });
     const conversationScopes = new ConversationScopeService({
       store: stores.conversationScopes,
       projects: conversationProjects,

@@ -33,6 +33,7 @@ export function createTaskProposalRouter(options: { proposals: TaskProposalServi
         const projectId = projectRoute ? id : (await proposals.get(id)).projectId;
         const actor = await proposals.humanAuthority(projectId);
         const body = await context.readBody();
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TaskProposalError('invalid-content');
         if (collection) return json(context, 201, { proposal: await proposals.propose(id, actor, body as unknown as TaskProposalContent) });
         if (validation) return json(context, 200, { content: await proposals.validate(id, actor, body as unknown as TaskProposalContent) });
         const decision = body as unknown as ProposalDecision;

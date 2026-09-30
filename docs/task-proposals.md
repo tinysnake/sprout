@@ -1,0 +1,105 @@
+# Task proposals and content versions
+
+`TaskProposalService` is the public backend capability for #99. It owns proposal
+validation, authorship, authority, content history, and withdrawal/rejection.
+Production composes it in `src/runtime.ts` over `SqliteTaskProposalStore` and the
+same read-only Project facts used by conversation authority and the Project's
+read-only Agent identity authority. Archived Agents cannot propose, revise, or
+withdraw even while their historical Project membership remains recorded. The operator API
+mounts `createTaskProposalRouter`; the typed Web port is
+`createTaskProposalBrowserAdapter`.
+
+## Contract
+
+- `propose(projectId, actor, content)` records one Human- or Agent-created
+  proposal. `actor` is a trusted internal caller identity, not browser input.
+  It must match an active Project membership in both identity and kind.
+- `validate(projectId, actor, content)` checks membership, Project writability,
+  and bounded content, returning sanitized content. It writes nothing.
+- `get(id)` and `list(projectId)` preserve history, including rejected/withdrawn
+  proposals and proposals in archived Projects.
+- `revise(id, actor, content + reason + expectedRevision)` appends one full
+  content version. The current proposer or current Human may revise an open
+  proposal. Reasons are required for all revisions, including Human overrides.
+- `withdraw(id, actor, decision)` is proposer-only. `reject(id, actor, decision)`
+  is Human-only. Each closes the proposal and appends actor, reason, time and
+  the content version decided upon. Neither deletes history or reopens work.
+- `contentVersion(id, version)` returns an isolated historical content snapshot.
+  Later edits and caller mutations cannot change it. Admission must hold that
+  exact version, not reread the current-version pointer during the run.
+
+Content contains `title`, non-empty `goal`, `constraints`, and
+`validationCriteria`. Both arrays are required and may explicitly be empty.
+Text and reasons pass the shared privacy boundary before persistence. Limits:
+200 title characters, 16,000 goal characters, 100 entries per array, 4,000
+characters per entry, and 2,000 reason characters. Empty/all-withheld content
+is refused rather than replaced with invented goals or reasons.
+
+A proposal records `id`, `projectId`, `proposer`, `status`, `revision`,
+`currentContentVersion`, full attributed `versions`, append-only `lifecycle`,
+and timestamps. `revision` increments on every accepted mutation; it is distinct
+from content version, which increments only on revision. A stale command refuses
+rather than overwriting another accepted change. SQLite read/mutate/conditional
+write is synchronous and fenced by both revision and prior document; memory
+storage has the same snapshot-isolation and failure contract. The shared schema
+advances from v21 to v22 with the existing transactional migration/safety-copy
+protocol. Fresh databases initialize the table through the domain adapter.
+
+## HTTP and Web
+
+All routes use existing operator authentication and command CSRF protection.
+The server resolves the acting Human from Project membership; caller-supplied
+actor/proposer fields cannot impersonate an Agent or grant authority.
+
+| Method | Route | Response |
+| --- | --- | --- |
+| GET | `/api/projects/:id/task-proposals` | `{ proposals }` |
+| POST | `/api/projects/:id/task-proposals` | `{ proposal }` (201) |
+| POST | `/api/projects/:id/task-proposals/validate` | `{ content }` |
+| GET | `/api/task-proposals/:id` | `{ proposal }` |
+| GET | `/api/task-proposals/:id/versions/:version` | `{ contentVersion }` |
+| POST | `/api/task-proposals/:id/content` | `{ proposal }` |
+| POST | `/api/task-proposals/:id/withdraw` | `{ proposal }` |
+| POST | `/api/task-proposals/:id/reject` | `{ proposal }` |
+
+Creation/validation accept content. Revision accepts full replacement content,
+`reason`, and positive integer `expectedRevision`; decisions accept the latter
+two fields. Domain failures carry stable `code`: unknown targets are 404,
+invalid content is 400, authority/membership refusal is 403, and stale/lifecycle
+conflicts are 409. Unexpected failures expose no raw diagnostics.
+
+The browser adapter shares portable types with the backend, encodes path ids,
+and uses the existing transport for sessions, CSRF and connection state. It never
+queues or automatically replays a command after disconnect.
+
+## Execution boundary and next consumer
+
+This capability holds no runner, wake scheduler, Environment pool, context-worker,
+or lease-requiring capability port. Validation, creation and revision cannot
+start work, wake a lead, acquire a lease, or prepare Task context. Proposal ids
+are not legacy Task ids and cannot be passed to legacy Task begin or advance.
+
+#100 owns Human approve-and-begin and must atomically fence consumption of the
+proposal's current revision, record the exact approved content version, and bind
+it to the begun Task. #101 owns subsequent Task control and run admission.
+Neither execution admission nor the complete Tasks page (#102) is implemented
+by #99. The pre-existing Task API remains unchanged; this proposal capability
+adds no implicit bridge that could bypass Human approval.
+
+## Risk-to-test map
+
+- Shared model and authority loss/spoofing: `src/task/proposal.test.ts`.
+- Stale edits, caller aliasing, rollback and adapter parity:
+  `src/task/proposal-contract.test.ts` and proposal service tests.
+- Durable attribution and restart: proposal service SQLite reopen test.
+- Migration and old facts: `src/task/proposal-migration.test.ts` plus schema tests.
+- Authentication, CSRF, real runtime composition, Human override, browser wire
+  compatibility, invalid bodies and absence of execution side effects:
+  `web/src/adapters/task-proposal-contract.test.ts`.
+- Encoded identities and disconnected command non-replay:
+  `web/src/adapters/task-proposal-api.test.ts`.
+
+Reference inheritance: the work-status/ownership/live-execution separation
+already adopted from Paperclip by ADR-0006 is retained. Sprout's proposal authority
+and lease-free validation follow its own Task semantics; no reference code is
+copied.
