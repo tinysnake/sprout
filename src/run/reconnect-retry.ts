@@ -10,16 +10,18 @@
  * ## One durable state machine
  *
  * `RunReconnectRetryStore` holds three records and nothing else: a per-Project
- * gate (armed while every granted Environment is disconnected), a trigger per
- * consumed gate (the first reconnect that can admit work again), and one retry
+ * gate (armed after every granted Environment disconnects), a trigger per
+ * consumed gate (an accepted connection witnessed while armed, once it can
+ * admit work), and one retry
  * row per eligible original run (`queued → dispatched → settled`). Every
  * record is persisted before the action it authorizes, so a crash at any point
  * is finished by the next pass rather than lost or redone:
  *
  * - gate armed, crash before the trigger → the gate stays armed; the next
  *   qualifying reconnect triggers;
- * - trigger recorded, crash before eligibility → reconciliation rebuilds the
- *   eligible set idempotently (rows are keyed by the original run id);
+ * - trigger/eligible rows/gate disarm commit together; a crash before commit
+ *   leaves the armed gate for a later accepted connection, and a crash after
+ *   commit finds the same queued rows without another trigger;
  * - rows queued, crash before dispatch → reconciliation dispatches them;
  * - row dispatched, crash before submit → the durably named retry run id does
  *   not exist yet, so the same id is submitted — never a second one;
@@ -39,15 +41,11 @@
  *
  * ## The trigger waits for a reconnect that can actually work
  *
- * The consumed gate fires the first time a granted Environment of the armed
- * Project is both reconnected and able to admit work (`canAdmitWork`). A
- * socket-level reconnect whose readiness has not been re-established would
- * only fail the retry again, burning the one bounded attempt; while armed,
- * nothing else can make an Environment admissible, so this moment is exactly
- * "the first Environment reconnect after all Environments were disconnected",
- * observed when it is real. Because arming requires **zero** connected
- * Environments, a reconnect while any other Environment stayed connected never
- * consumes the gate.
+ * Only an accepted connection transition witnessed for a granted Environment
+ * while the gate is armed can consume it. The transition is held until its
+ * readiness permits admission; a later grant of an already-connected Worker
+ * cannot consume the gate. Because arming requires zero connected granted
+ * Environments, a reconnect while another stayed connected never qualifies.
  *
  * All entry points are serialized on one internal chain: connection/catalog
  * observations, run-settlement notifications, and restart reconciliation can
@@ -178,6 +176,8 @@ export class RunReconnectRetry {
   readonly #clock: { now(): number };
   /** One serialized chain: observations, settlements, and passes never race. */
   #chain: Promise<unknown> = Promise.resolve();
+  /** Accepted transitions witnessed while an armed Project grants the instance. */
+  readonly #pendingConnections = new Map<string, string>();
 
   constructor(options: RunReconnectRetryOptions) {
     this.#store = options.store;
@@ -197,7 +197,7 @@ export class RunReconnectRetry {
     // granting an Environment begins a full-disconnect episode that its first
     // qualifying reconnect may consume. Idempotent, and ordered ahead of any
     // later observation on the same chain.
-    void this.#enqueue(() => this.#pass()).catch(() => {
+    void this.noteEnvironmentState().catch(() => {
       process.stderr.write(
         '[run-retry] reconnect-retry initialization could not be evaluated; durable state is unchanged\n',
       );
@@ -207,12 +207,20 @@ export class RunReconnectRetry {
   /**
    * Re-evaluate gates, finish interrupted triggers, and advance retry rows.
    *
-   * Called on every catalog/connection publication and safe to call often:
+   * Called on every catalog/connection publication; only the gateway's actual
+   * accepted connection passes its instance id. Safe to call often:
    * each step is durable-idempotent, so a redundant pass changes nothing. The
    * result reports what this pass did, for observability and tests.
    */
-  noteEnvironmentState(): Promise<RunReconnectRetryReconcileResult> {
-    return this.#enqueue(() => this.#pass());
+  noteEnvironmentState(acceptedInstanceId?: string): Promise<RunReconnectRetryReconcileResult> {
+    // Snapshot at publication, not after an asynchronous catalog refresh: a
+    // rapid loss/reconnect must still arm before its accepted transition.
+    const projects = this.#projects().map((project) => ({
+      ...project,
+      instanceIds: [...project.instanceIds],
+      connected: project.instanceIds.some((id) => this.#isConnected(id)),
+    }));
+    return this.#enqueue(() => this.#pass(projects, acceptedInstanceId));
   }
 
   /** Restart reconciliation: the same durable pass, reported as evidence. */
@@ -229,21 +237,26 @@ export class RunReconnectRetry {
     return result;
   }
 
-  async #pass(): Promise<RunReconnectRetryReconcileResult> {
+  async #pass(
+    observed?: readonly (RunReconnectRetryProjectFacts & { readonly connected: boolean })[],
+    acceptedInstanceId?: string,
+  ): Promise<RunReconnectRetryReconcileResult> {
     const armedProjects: string[] = [];
     const triggeredProjects: string[] = [];
     const queuedRunIds: string[] = [];
     const dispatchedRetryRunIds: string[] = [];
     const settledRunIds: string[] = [];
 
-    for (const project of this.#projects()) {
+    for (const project of observed ?? this.#projects().map((p) => ({
+      ...p, connected: p.instanceIds.some((id) => this.#isConnected(id)),
+    }))) {
       if (project.instanceIds.length === 0) {
         // A Project with no granted Environment has nothing that can reconnect;
         // its failures stay fail-fast until an Environment is granted.
         continue;
       }
-      const connected = project.instanceIds.some((instanceId) => this.#isConnected(instanceId));
-      if (!connected) {
+      if (!project.connected) {
+        this.#pendingConnections.delete(project.projectId);
         const gate = await this.#store.getGate(project.projectId);
         if (gate?.armed !== true) {
           await this.#store.armGate(project.projectId, this.#clock.now());
@@ -251,11 +264,26 @@ export class RunReconnectRetry {
         }
       }
       const gate = await this.#store.getGate(project.projectId);
-      if (gate?.armed === true && project.instanceIds.some((id) => this.#canAdmitWork(id))) {
-        const trigger = await this.#consumeGate(project.projectId);
+      if (gate?.armed === true && acceptedInstanceId !== undefined &&
+          project.instanceIds.includes(acceptedInstanceId)) {
+        this.#pendingConnections.set(project.projectId, acceptedInstanceId);
+      }
+      const candidate = this.#pendingConnections.get(project.projectId);
+      if (gate?.armed === true && candidate !== undefined &&
+          project.instanceIds.includes(candidate) && this.#isConnected(candidate) &&
+          this.#canAdmitWork(candidate)) {
+        const eligible = (await this.#runs.list())
+          .filter((run) => run.projectId === project.projectId && isEnvironmentDisconnectedFailure(run))
+          .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+        const unqueued = [];
+        for (const run of eligible) {
+          if (await this.#store.getRetry(run.id) === undefined) unqueued.push(run.id);
+        }
+        const trigger = await this.#consumeGate(project.projectId, unqueued);
         if (trigger !== undefined) {
           triggeredProjects.push(project.projectId);
-          queuedRunIds.push(...(await this.#buildEligibility(trigger)));
+          queuedRunIds.push(...unqueued);
+          this.#pendingConnections.delete(project.projectId);
         }
       }
     }
@@ -281,18 +309,20 @@ export class RunReconnectRetry {
   }
 
   /** Durably consume this Project's armed gate into its one trigger. */
-  async #consumeGate(projectId: string): Promise<RunReconnectTrigger | undefined> {
+  async #consumeGate(projectId: string, eligibleRunIds: readonly string[]): Promise<RunReconnectTrigger | undefined> {
     const trigger: RunReconnectTrigger = {
       id: this.#ids.retryTrigger?.() ?? this.#fallbackIds.retryTrigger!(),
       projectId,
       at: this.#clock.now(),
       eligibilitySettled: false,
     };
-    return this.#store.createTriggerIfArmed(trigger);
+    return this.#store.createTriggerIfArmed(trigger, eligibleRunIds.map((originalRunId) => ({
+      originalRunId, triggerId: trigger.id, projectId, now: trigger.at,
+    })));
   }
 
   /**
-   * Persist the eligible-run set for one trigger, then mark it settled.
+   * Finish an older interrupted eligible-run build (new waves commit atomically).
    *
    * Built from durable run records only, in chronological order, and filtered
    * to the trigger's own Project so another Project's failures can never be

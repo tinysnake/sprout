@@ -190,7 +190,7 @@ test('full disconnect then the first qualifying reconnect retries the failed run
 
   // The reconnect: connected and able to admit work again.
   h.setAvailable(true);
-  const triggered = await service.noteEnvironmentState();
+  const triggered = await service.noteEnvironmentState('env-a');
   assert.deepEqual(triggered.triggeredProjects, ['p1']);
   assert.deepEqual(triggered.queuedRunIds, [originalId]);
   assert.equal(triggered.dispatchedRetryRunIds.length, 1);
@@ -227,7 +227,7 @@ test('a reconnect while another Environment stayed connected never triggers', as
 
   // env-b "reconnects" while env-a remained connected: no trigger, no rows.
   h.connectOnly('env-b');
-  const partial = await service.noteEnvironmentState();
+  const partial = await service.noteEnvironmentState('env-b');
   assert.deepEqual(partial.triggeredProjects, []);
   assert.deepEqual(partial.armedProjects, []);
   assert.deepEqual(await h.retryStore.listUnsettledTriggers(), []);
@@ -290,7 +290,7 @@ test('only the environment-absence failure class is eligible for retry', async (
 
   // First qualifying reconnect: exactly the eligible run is retried.
   h.setAvailable(true);
-  const triggered = await service.noteEnvironmentState();
+  const triggered = await service.noteEnvironmentState('env-a');
   assert.deepEqual(triggered.queuedRunIds, [eligibleId]);
   const rows = await h.retryStore.listRetries();
   assert.equal(rows.length, 1);
@@ -311,7 +311,7 @@ test('a run is retried at most once across reconnect episodes', async () => {
   // but fails with the same class — it still consumed the one bounded retry.
   h.connectOnly('env-a');
   h.pool.synchronize({ definitions: [definition], instances, eligibleInstanceIds: [] });
-  const first = await service.noteEnvironmentState();
+  const first = await service.noteEnvironmentState('env-a');
   assert.equal(first.dispatchedRetryRunIds.length, 1);
   const retryRunId = first.dispatchedRetryRunIds[0]!;
   await h.orchestrator.waitFor(retryRunId);
@@ -326,7 +326,7 @@ test('a run is retried at most once across reconnect episodes', async () => {
   h.setAvailable(false);
   await service.noteEnvironmentState();
   h.setAvailable(true);
-  const second = await service.noteEnvironmentState();
+  const second = await service.noteEnvironmentState('env-a');
   assert.deepEqual(second.queuedRunIds, []);
   assert.equal((await h.retryStore.listRetries()).length, 1);
   const runs = await h.orchestrator.list();
@@ -343,7 +343,7 @@ test('a retry that fails again keeps the sanitized failure class and the origina
 
   h.connectOnly('env-a');
   h.pool.synchronize({ definitions: [definition], instances, eligibleInstanceIds: [] });
-  const triggered = await service.noteEnvironmentState();
+  const triggered = await service.noteEnvironmentState('env-a');
   const retry = await h.orchestrator.load(triggered.dispatchedRetryRunIds[0]!);
   assert.equal(retry?.status, 'failed');
   // The exact class — capability name only, no path, host, prompt, or event

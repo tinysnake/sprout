@@ -81,12 +81,12 @@ export interface RunReconnectRetryStore {
   /** Arm a Project's gate; idempotent while already armed. */
   armGate(projectId: string, now: number): Promise<void>;
   /**
-   * Consume an armed gate into its trigger: record the trigger and disarm in
-   * one step. Returns the trigger only when the gate was armed, so a reconnect
-   * while any Environment stayed connected (or a second reconnect after the
-   * first consumed the gate) can never create a second trigger.
+   * Atomically insert the trigger, its complete eligible-run set (if supplied),
+   * and disarm the gate. A crash before commit leaves no trigger or retry rows;
+   * after commit the gate is disarmed and the set is settled. An omitted set
+   * supports reconciliation of older unfinished waves.
    */
-  createTriggerIfArmed(trigger: RunReconnectTrigger): Promise<RunReconnectTrigger | undefined>;
+  createTriggerIfArmed(trigger: RunReconnectTrigger, eligible?: readonly QueueRunReconnectRetry[]): Promise<RunReconnectTrigger | undefined>;
   /** Persist that the trigger's eligible-run set is complete. */
   settleTrigger(triggerId: string): Promise<void>;
   /** Triggers whose eligible-run set was never completed, for reconciliation. */
@@ -124,10 +124,12 @@ export class InMemoryRunReconnectRetryStore implements RunReconnectRetryStore {
 
   async createTriggerIfArmed(
     trigger: RunReconnectTrigger,
+    eligible?: readonly QueueRunReconnectRetry[],
   ): Promise<RunReconnectTrigger | undefined> {
     const gate = this.#gates.get(trigger.projectId);
     if (gate?.armed !== true) return undefined;
-    this.#triggers.set(trigger.id, trigger);
+    this.#triggers.set(trigger.id, eligible === undefined ? trigger : { ...trigger, eligibilitySettled: true });
+    for (const row of eligible ?? []) await this.queueRetry(row);
     this.#gates.set(trigger.projectId, { ...gate, armed: false, updatedAt: trigger.at });
     return trigger;
   }

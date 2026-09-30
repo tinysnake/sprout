@@ -20,7 +20,7 @@ const PROJECT_ID = 'retry-project';
 test('a fully disconnected Project re-admits its failed run on the first reconnect, once, with a linked reply', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-reconnect-retry-e2e-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const h = await readinessWorkflowHarness({ backend: 'memory', directory });
+  const h = await readinessWorkflowHarness({ backend: 'sqlite', directory });
   try {
     const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
     const keyPath = join(directory, 'worker-key.pem');

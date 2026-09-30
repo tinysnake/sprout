@@ -1225,8 +1225,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // Late-bound so every catalog publication — connection accept, channel
     // loss, readiness commit, authority change — hands the bounded reconnect
     // retry one observation without ordering the graph backwards (#181).
-    let noteRunReconnectRetry: () => Promise<void> = async () => undefined;
-    const publishCatalogMembership = (): void => {
+    let noteRunReconnectRetry: (acceptedInstanceId?: string) => Promise<void> = async () => undefined;
+    const publishCatalogMembership = (acceptedInstanceId?: string): void => {
       if (configuredCarrierPresent) {
         // An injected test/development carrier keeps exactly its one static
         // instance and immediate eligibility; the enrollment catalog is not its
@@ -1236,7 +1236,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
         });
-        void noteRunReconnectRetry().catch(() => {
+        void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
           process.stderr.write(
             '[run-retry] environment state observation failed; durable retry state is unchanged\n',
           );
@@ -1248,7 +1248,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
       });
-      void noteRunReconnectRetry().catch(() => {
+      void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
         process.stderr.write(
           '[run-retry] environment state observation failed; durable retry state is unchanged\n',
         );
@@ -1321,8 +1321,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         pool.requiresLease(instanceId, ADMISSION_CAPABILITY) !== undefined,
       onRetrySettled: (input) => collaboration.projectRetryReply(input),
     });
-    noteRunReconnectRetry = () =>
-      runReconnectRetry.noteEnvironmentState().then(() => undefined);
+    noteRunReconnectRetry = (acceptedInstanceId) =>
+      runReconnectRetry.noteEnvironmentState(acceptedInstanceId).then(() => undefined);
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1359,7 +1359,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // republish until some later event (#162).
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
-      publishCatalogMembership();
+      publishCatalogMembership(acceptance.enrollment.environmentInstanceId);
       void refreshEnvironmentCatalog().catch(() => undefined);
       // The Worker's own readiness is observed over the accepted inbound channel
       // (never by dialing one), so the catalog can reach eligibility once the

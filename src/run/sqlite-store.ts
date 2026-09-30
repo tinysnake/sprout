@@ -511,24 +511,38 @@ export class SqliteRunReconnectRetryStore implements RunReconnectRetryStore {
 
   async createTriggerIfArmed(
     trigger: RunReconnectTrigger,
+    eligible?: readonly QueueRunReconnectRetry[],
   ): Promise<RunReconnectTrigger | undefined> {
-    const gate = this.#db
-      .prepare('SELECT armed, updated_at FROM run_reconnect_gates WHERE project_id = ?')
-      .get(trigger.projectId) as unknown as { armed: number; updated_at: number } | undefined;
-    if (gate?.armed !== 1) return undefined;
-    // Order matters for crash safety: the trigger row is inserted before the
-    // gate disarms. A crash in between leaves an armed gate and no trigger, so
-    // the worst case is one later extra trigger — whose per-run rows are keyed
-    // by the original run id — never a silently lost wave.
-    this.#db
-      .prepare(
-        'INSERT INTO run_reconnect_triggers (id, project_id, at, eligibility_settled) VALUES (?, ?, ?, 0)',
-      )
-      .run(trigger.id, trigger.projectId, trigger.at);
-    this.#db
-      .prepare('UPDATE run_reconnect_gates SET armed = 0, updated_at = ? WHERE project_id = ?')
-      .run(trigger.at, trigger.projectId);
-    return trigger;
+    // SQLite's transaction rolls back the whole wave if the process dies at
+    // any statement: neither a second trigger nor a partial eligible set can
+    // survive the insert/disarm crash window.
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const gate = this.#db
+        .prepare('SELECT armed FROM run_reconnect_gates WHERE project_id = ?')
+        .get(trigger.projectId) as unknown as { armed: number } | undefined;
+      if (gate?.armed !== 1) {
+        this.#db.exec('COMMIT');
+        return undefined;
+      }
+      this.#db.prepare(
+        'INSERT INTO run_reconnect_triggers (id, project_id, at, eligibility_settled) VALUES (?, ?, ?, ?)',
+      ).run(trigger.id, trigger.projectId, trigger.at, eligible === undefined ? 0 : 1);
+      for (const row of eligible ?? []) {
+        this.#db.prepare(`INSERT INTO run_reconnect_retries
+          (original_run_id, trigger_id, project_id, state, queued_at)
+          VALUES (?, ?, ?, 'queued', ?)
+          ON CONFLICT(original_run_id) DO NOTHING`)
+          .run(row.originalRunId, trigger.id, trigger.projectId, row.now);
+      }
+      this.#db.prepare('UPDATE run_reconnect_gates SET armed = 0, updated_at = ? WHERE project_id = ?')
+        .run(trigger.at, trigger.projectId);
+      this.#db.exec('COMMIT');
+      return trigger;
+    } catch (error) {
+      if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   async settleTrigger(triggerId: string): Promise<void> {

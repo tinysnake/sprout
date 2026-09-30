@@ -460,6 +460,7 @@ export async function readinessWorkflowHarness(options: {
     dialProtocolVersion?: string,
   ): Promise<WorkerEnrollmentConnection>;
   close(): Promise<void>;
+  enrollAdditional(instanceId: string, keyPath: string): Promise<string>;
 }> {
   const { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey } = await import(
     './worker/enrollment-connector.ts'
@@ -534,6 +535,34 @@ export async function readinessWorkflowHarness(options: {
     base,
     cookie,
     csrf: csrfToken,
+    async enrollAdditional(instanceId, keyPath) {
+      const requested = await runtime.enrollments.requestEnrollment({
+        environmentInstanceId: instanceId,
+        displayName: 'Additional Environment',
+        platform: 'macos',
+        capabilityRequests: [ADMISSION_CAPABILITY],
+        engineFacts: [],
+      });
+      const id = requested.enrollment.id;
+      const host = loadOrCreateWorkerIdentity(keyPath);
+      await runtime.enrollments.claimEnrollment(id, requested.claim?.secret ?? '');
+      const challenge = await runtime.enrollments.issueChallenge(id);
+      await runtime.enrollments.connectWorker({
+        enrollmentId: id,
+        proof: {
+          challengeId: challenge.id,
+          publicKey: workerPublicKey(host.privateKey),
+          signature: signWorkerChallenge(host.privateKey, challenge),
+        },
+        connection: { state: 'online' },
+        compatibility: { state: 'compatible', workerProtocolVersion: WORKER_PROTOCOL_VERSION },
+        engines: [],
+      });
+      await runtime.enrollments.approve(id, {
+        capabilityPermissions: { [ADMISSION_CAPABILITY]: true },
+      });
+      return id;
+    },
     async connect(id, key, worker = {}, dialProtocolVersion = WORKER_PROTOCOL_VERSION) {
       const connection = await connectWorkerEnrollment({
         target: { enrollmentId: id, host: '127.0.0.1', port, claimSecret: undefined, identityKeyPath: key },
@@ -542,9 +571,11 @@ export async function readinessWorkflowHarness(options: {
       });
       connections.push(connection);
       const declaration = worker.readiness;
+      const enrollment = await runtime.enrollments.get(id);
+      assert.ok(enrollment);
       workers.push(new EnvironmentWorker({
-        environmentInstanceId: INSTANCE_ID,
-        workspaceRoot: join(options.directory, 'worker-workspace'),
+        environmentInstanceId: enrollment.environmentInstanceId,
+        workspaceRoot: join(options.directory, 'worker-workspace', enrollment.environmentInstanceId),
         engines: worker.engines ?? new Map(),
         input: connection.stream,
         output: connection.stream,
