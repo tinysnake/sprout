@@ -566,3 +566,116 @@ test('a non-addressed Project event persists without any wake or run', async (t)
   assert.equal((await harness.sqlite.collaboration.listEvents('project-sprout')).length, 4);
   assert.equal(harness.engine.requests.length, 0, 'the engine was never consulted');
 });
+
+/** Bounded poll: live failure publication is asynchronous by design (#180). */
+async function awaitFailureEvent(
+  coordinator: Harness['coordinator'],
+  projectId = 'project-sprout',
+) {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const events = (await coordinator.listEvents(projectId)).filter(
+      (event) => event.kind === 'agent-run-failure',
+    );
+    if (events.length > 0) return events;
+    if (Date.now() > deadline) return events;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test('a failed Project-scoped run surfaces as one informational system failure event', async (t) => {
+  const harness = build({
+    turns: [
+      {
+        events: [{ type: 'tool-output', text: 'RUN_EVENT_MUST_NOT_LEAK' }],
+        result: { status: 'failed', message: 'no available environment: engine turn failed' },
+      },
+    ],
+  });
+  t.after(harness.close);
+  const scopeId = await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']);
+
+  const delivered = await harness.coordinator.deliver({
+    scopeId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'Direct request that fails.',
+    recipients: ['scout'],
+    deliveryKey: 'direct-failed-1',
+  });
+  assert.equal(delivered.admittedRunIds.length, 1);
+  const runId = delivered.admittedRunIds[0]!;
+
+  const [event, ...rest] = await awaitFailureEvent(harness.coordinator);
+  assert.ok(event, 'the terminal failure reached the Project event stream');
+  assert.deepEqual(rest, [], 'exactly one event per terminal transition');
+  assert.equal(event.kind, 'agent-run-failure');
+  assert.equal(event.disposition, 'informational', 'labelled non-routing: no wake, no fan-out');
+  assert.deepEqual(event.producer, { id: 'sprout', kind: 'system' });
+  assert.equal(event.deliveryKey, `run-failure:${runId}`);
+  assert.equal(event.projectId, 'project-sprout');
+  assert.equal(event.summary, 'Agent run failed (execution) for scout');
+  assert.equal((await harness.sqlite.runs.get(runId))?.failureClass, 'execution');
+  assert.match(event.detail ?? '', new RegExp(`run ${runId}`));
+
+  // Privacy: the prompt and the raw run events are structurally excluded.
+  const serialized = JSON.stringify(event);
+  assert.doesNotMatch(serialized, /Direct request that fails\./);
+  assert.doesNotMatch(serialized, /RUN_EVENT_MUST_NOT_LEAK/);
+  assert.doesNotMatch(serialized, /engine turn failed/);
+  assert.doesNotMatch(serialized, /wrote:/, 'the wake prompt never enters the event');
+
+  // No reply and no fan-out for the failure event itself.
+  const agentMessages = (await harness.sqlite.collaboration.listMessages()).filter(
+    (message) => message.author.kind === 'agent',
+  );
+  assert.deepEqual(agentMessages, [], 'a failed run projects no reply');
+  assert.deepEqual(
+    (await harness.coordinator.listWakeRequests()).filter((wake) => wake.inputId === event.id),
+    [],
+    'the informational event woke nobody',
+  );
+
+  // Idempotency across restart reconciliation: the scan sees the same run and
+  // the same delivery key, so it reports no new work and stores no duplicate.
+  const reconciled = await harness.coordinator.reconcile();
+  assert.deepEqual(reconciled.failureEventRunIds, []);
+  const after = (await harness.coordinator.listEvents('project-sprout')).filter(
+    (candidate) => candidate.kind === 'agent-run-failure',
+  );
+  assert.equal(after.length, 1);
+});
+
+test('the no-available-environment admission failure still reaches its Project timeline', async (t) => {
+  // The flagship preview failure: admission refuses before any environment
+  // resolves, so the run must still carry its Project scope from submission
+  // for the event to be attributable (#180).
+  const harness = build({
+    turns: [scriptedTurn('must not run')],
+    projects: [{ ...project, availableEnvironmentInstanceIds: [] }],
+  });
+  t.after(harness.close);
+  const scopeId = await harness.scopes.openDirect('project-sprout', ['human-lead', 'scout']);
+
+  const delivered = await harness.coordinator.deliver({
+    scopeId,
+    author: { id: 'human-lead', kind: 'human' },
+    body: 'Reconnect then investigate.',
+    recipients: ['scout'],
+    deliveryKey: 'direct-no-env-1',
+  });
+  assert.equal(delivered.admittedRunIds.length, 1);
+  const runId = delivered.admittedRunIds[0]!;
+  const agentMessages = (await harness.sqlite.collaboration.listMessages()).filter(
+    (message) => message.author.kind === 'agent',
+  );
+  assert.deepEqual(agentMessages, [], 'the reply-less direct message stays reply-less');
+
+  const [event] = await awaitFailureEvent(harness.coordinator);
+  assert.ok(event, 'the admission failure is operator-visible');
+  assert.match(event.summary, /Agent run failed \(environment\) for scout/);
+  assert.equal((await harness.sqlite.runs.get(runId))?.failureClass, 'environment');
+  assert.doesNotMatch(event.summary, /no available environment for capability: agent-run/);
+  assert.equal(event.deliveryKey, `run-failure:${runId}`);
+  assert.equal((await harness.coordinator.listEvents('project-sprout')).length, 1);
+  assert.equal(harness.engine.requests.length, 0, 'the engine was never consulted');
+});

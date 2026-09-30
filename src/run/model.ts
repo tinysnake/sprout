@@ -24,6 +24,9 @@ export interface RunWorkspaceBinding {
 /** The observable lifecycle of one agent run. */
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
 
+/** Sprout's trusted classification at settlement, never inferred from failure text. */
+export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';
+
 /**
  * One bounded activation of an agent, as the core and the Web client see it.
  *
@@ -103,6 +106,8 @@ export interface AgentRun {
   readonly retryOfRunId?: string;
   readonly leaseId?: string;
   readonly failure?: string;
+  /** Absent on legacy rows; consumers treat absence as execution. */
+  readonly failureClass?: RunFailureClass;
   readonly result?: EngineTurnResult;
   /** Distinct machine-evidence history; never silently replaces a run's interrupted outcome. */
   readonly recoverySettlement?: { readonly status: 'completed' | 'failed' | 'interrupted' | 'stopped'; readonly eventCount: number };

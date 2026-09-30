@@ -570,6 +570,56 @@ test('a colon-bearing Agent reply opens projected evidence and its provenance', 
   } finally { await cleanup(); }
 });
 
+test('Project Chat renders the system run-failure entry and the reply-less failed direct run evidence from server projections only', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/project/chat');
+    app.mount(mount);
+    await settle(160);
+
+    // Failure-entry state: a labelled, non-routing informational system entry
+    // on the Project timeline the page already interleaves.
+    const entry = doc.querySelector('[data-event-id="event-run-failure"]') as HTMLElement;
+    assert.ok(entry, 'the terminal run failure reaches the Project timeline');
+    assert.match(entry.textContent ?? '', /Project event/);
+    assert.match(
+      entry.textContent ?? '',
+      /agent-run-failure · informational/,
+      'the entry names its stable kind and its declared disposition',
+    );
+    assert.match(entry.textContent ?? '', /no available environment for capability: agent-run/, 'sanitized failure reason');
+    assert.equal(
+      /wake-eligible|addressed/.test(entry.textContent ?? ''),
+      false,
+      'the failure entry declares no routing disposition',
+    );
+
+    // Evidence affordance for a reply-less direct message whose run failed.
+    await router.push('/project/chat/dm-architect');
+    await settle(120);
+    const trigger = doc.querySelector('[data-message-id="msg-dm-failed"] .chat-evidence-trigger') as HTMLButtonElement;
+    assert.ok(trigger, 'the reply-less direct message still offers its evidence affordance');
+    trigger.click();
+    await settle(90);
+    const popup = doc.querySelector('.chat-evidence-popup') as HTMLElement;
+    assert.ok(popup);
+    assert.equal(popup.dataset['evidenceState'], 'run-failed', 'the failed run is the decisive visible outcome');
+    assert.match(popup.textContent ?? '', /direct-recipient/, 'the WakeRequest reason is server evidence');
+    assert.match(popup.textContent ?? '', /Run: run-failed/, 'the WakeRequest links the durable run');
+    assert.match(popup.textContent ?? '', /· failed/, 'the run outcome is the {id,status} projection');
+    assert.match(popup.textContent ?? '', /msg-dm-failed/, 'the chain stays anchored to the originating message');
+    assert.match(popup.textContent ?? '', /No reply was produced/, 'a failed run never implies a reply');
+
+    // Privacy projection: neither the run prompt nor raw run events can surface
+    // on either surface — the Chat port is `{id,status}` and the event carries
+    // only the sanitized failure class and reason.
+    assert.doesNotMatch(doc.body.textContent ?? '', /PRIVATE-RUN-PROMPT|PRIVATE-RUN-EVENT/);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
 test('Project Chat marks offline facts stale and disables controls; loading and live unread are distinct', async () => {
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {

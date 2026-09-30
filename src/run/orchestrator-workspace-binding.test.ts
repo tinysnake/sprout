@@ -230,6 +230,38 @@ test('an agent whose project offers no usable environment is refused explicitly'
 });
 
 
+test('an admission failure still records its Project scope for the run-lifecycle event (#180)', async () => {
+  const { orchestrator } = build({
+    turns: [],
+    projects: [project({ availableEnvironmentInstanceIds: ['some-other-machine'] })],
+  });
+
+  const { id } = await orchestrator.submit({
+    agentId: 'agent-scout',
+    prompt: 'hello',
+    projectId: 'project-sprout',
+  });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /no available environment/i);
+  assert.equal(run.failureClass, 'environment');
+  assert.equal(
+    run.projectId,
+    'project-sprout',
+    'the caller\'s Project scope survives a pre-resolution failure, so its failure event is attributable',
+  );
+});
+
+
+test('unknown Agent refusal records admission independently of its failure text', async () => {
+  const { orchestrator } = build({ turns: [] });
+  const { id } = await orchestrator.submit({ agentId: 'missing-agent', prompt: 'hello', projectId: 'project-sprout' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'admission');
+});
+
 test('a run records the durable workspace binding it was admitted under and uses it for the Worker start', async () => {
   const store = new InMemoryRunStore();
   let adapter: ScriptedEngineAdapter | undefined;

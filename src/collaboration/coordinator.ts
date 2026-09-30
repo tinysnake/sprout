@@ -80,6 +80,18 @@
  * All halves are idempotent by construction (the wake CAS and the reply
  * delivery key), so a restart can never duplicate a run or a reply.
  *
+ * ## Run-lifecycle failure events (#180)
+ *
+ * The settlement stream that ends a run also publishes its system Project
+ * event when that run fails: the coordinator subscribes to the run orchestrator
+ * once, and every Project-scoped terminal failure becomes one durable
+ * `informational` `agent-run-failure` event (the producer projection lives in
+ * `run-failure-events.ts`). A process that dies between settlement and
+ * publication is repaired by `reconcile()`, which scans every durable run and
+ * publishes the same delivery key — so the live stream and the restart pass
+ * can never produce two events for one terminal transition. The event wakes
+ * nobody: `informational` is durable context, never routing (ADR-0007).
+ *
  * ## What is deliberately excluded
  *
  * A reply's body is the run's final assistant text only. The run's `events`
@@ -88,7 +100,7 @@
  * already keeps them out of shared context.
  */
 
-import type { AgentRun } from '../run/model.ts';
+import type { AgentRun, RunObserver } from '../run/model.ts';
 import type { RunOrchestrator } from '../run/orchestrator.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { redactSensitiveText, sanitizeIdentifier } from '../environment/privacy.ts';
@@ -140,6 +152,7 @@ import {
 } from './routing-judgement.ts';
 import type { CollaborationStore } from './store.ts';
 import { wakeFromBatch, wakeIdempotencyKey } from './store.ts';
+import { runFailureEventInput } from './run-failure-events.ts';
 
 /** The slice of the run orchestrator the coordinator uses. */
 export interface RunAdmitter {
@@ -167,6 +180,23 @@ export interface RunAdmitter {
    * provide it; when absent, `waitFor` is used and an unknown run propagates.
    */
   load?(runId: string): Promise<AgentRun | undefined>;
+  /**
+   * The durable settlement stream of this process's runs (#180).
+   *
+   * When present, the coordinator subscribes once so a Project-scoped terminal
+   * failure publishes its system event the moment the run settles. An admitter
+   * without the stream (tests, the probe) leaves publication entirely to the
+   * restart reconciliation scan over `list`, which uses the same delivery key.
+   */
+  subscribe?(observer: RunObserver): () => void;
+  /**
+   * Every durable run, including ones a previous process recorded (#180).
+   *
+   * Restart reconciliation scans it for Project-scoped terminal failures whose
+   * event was never published — the process died between settlement and
+   * publication. Optional like `load`, so minimal admitters need not provide it.
+   */
+  list?(): Promise<readonly AgentRun[]>;
 }
 
 /**
@@ -316,6 +346,12 @@ export interface ReconcileResult {
    * work inspected.
    */
   readonly projectedMessageIds: readonly string[];
+  /**
+   * Run ids whose system failure event this pass published (#180). A run whose
+   * event was already durable (published by the live settlement stream) is not
+   * listed: one event per terminal transition, reported as work done.
+   */
+  readonly failureEventRunIds: readonly string[];
 }
 
 /** The causal input of a wake: a Message or a system-produced Project event. */
@@ -385,6 +421,24 @@ export class CollaborationCoordinator {
     this.#routingModel = options.routingModel;
     this.#attemptTimeoutMs = options.routingAttemptTimeoutMs ?? 30_000;
     this.#routingBounds = options.routingBounds;
+
+    // The live run-lifecycle failure producer (#180). The subscription lives as
+    // long as the orchestrator it belongs to (both are process-lifetime), and
+    // the event's run-id delivery key makes this path and restart
+    // reconciliation converge on one event instead of racing for a second.
+    if (typeof options.runs.subscribe === 'function') {
+      options.runs.subscribe((run) => {
+        if (run.status !== 'failed') return;
+        void this.publishRunFailure(run).catch(() => {
+          // Never let publication failure disturb the run path. The durable run
+          // remains the authority and the next restart reconciliation publishes
+          // the same delivery key; the log names no prompt, error text, or host.
+          process.stderr.write(
+            `[collaboration] run failure event for run ${run.id} is deferred to restart reconciliation\n`,
+          );
+        });
+      });
+    }
   }
 
   /**
@@ -544,6 +598,22 @@ export class CollaborationCoordinator {
       (candidate) => candidate.inputId === event.id,
     );
     return { ...stored, wakes: finalWakes, admittedRunIds };
+  }
+
+  /**
+   * Publish the durable system failure event for one run (#180).
+   *
+   * Idempotent by construction: the event's delivery key is the run id, so the
+   * live settlement stream, a repeated observation of the same failed run, and
+   * restart reconciliation all converge on one durable event. Non-failure runs,
+   * non-terminal runs, and runs with no Project scope are skipped without a
+   * trace — there is no failure to report and no timeline to report it in.
+   */
+  async publishRunFailure(run: AgentRun): Promise<'skipped' | 'duplicate' | 'published'> {
+    const input = runFailureEventInput(run);
+    if (input === undefined) return 'skipped';
+    const result = await this.publishEvent(input);
+    return result.duplicate ? 'duplicate' : 'published';
   }
 
   /**
@@ -730,6 +800,10 @@ export class CollaborationCoordinator {
    * 2. **A completed run whose reply was never projected.** The run result is
    *    durable, so the reply is reconstructed from it. The projection is keyed by
    *    the wake idempotency key, so it cannot double-post.
+   * 3. **A Project-scoped terminal run failure whose system event was never
+   *    published.** The run record is durable, so the `agent-run-failure` event
+   *    is reconstructed from it and keyed by the run id, so this scan and the
+   *    live settlement stream can never both create the event (#180).
    *
    * The causal input is resolved as a Message first and a Project event second
    * for deterministic wakes; a model-assisted wake resolves through its frozen
@@ -772,7 +846,24 @@ export class CollaborationCoordinator {
       const projected = await this.#projectReply(wake, source, { awaitSettlement: false });
       if (projected) projectedMessageIds.add(causalId);
     }
-    return { admittedRunIds, projectedMessageIds: [...projectedMessageIds] };
+
+    // The failure-event scan runs over durable runs rather than wakes: a Task
+    // run or an admission failure has no wake to hang the event on, and its
+    // Project-scoped terminal failure is equally a fact the operator must see.
+    const failureEventRunIds: string[] = [];
+    for (const run of this.#runs.list !== undefined ? await this.#runs.list() : []) {
+      try {
+        if ((await this.publishRunFailure(run)) === 'published') failureEventRunIds.push(run.id);
+      } catch {
+        // One unreadable Project must not abort the pass: the durable run stays
+        // visible and the next pass retries the same delivery key.
+      }
+    }
+    return {
+      admittedRunIds,
+      projectedMessageIds: [...projectedMessageIds],
+      failureEventRunIds,
+    };
   }
 
   /** Durable state for observability: every Message on record. */

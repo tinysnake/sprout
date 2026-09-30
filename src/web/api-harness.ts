@@ -169,17 +169,27 @@ export async function signIn(base: string, credential: string): Promise<{ readon
 }
 
 
-export function buildWithCollaboration(options: { body?: string } = {}, auth?: OperatorSessionService) {
+export function buildWithCollaboration(
+  options: { body?: string; failing?: boolean; failureMessage?: string } = {},
+  auth?: OperatorSessionService,
+) {
   const adapter = new ScriptedEngineAdapter({
-    turns: [
-      {
-        events: [
-          { type: 'tool-output', text: 'TOOL_OUTPUT_MUST_NOT_LEAK' },
-          { type: 'message', text: options.body ?? 'Scout: replied.', final: true },
+    turns: options.failing === true
+      ? [
+          {
+            events: [{ type: 'tool-output', text: 'FAILED_RUN_TOOL_OUTPUT_MUST_NOT_LEAK' }],
+            result: { status: 'failed', message: options.failureMessage ?? 'engine turn failed' },
+          },
+        ]
+      : [
+          {
+            events: [
+              { type: 'tool-output', text: 'TOOL_OUTPUT_MUST_NOT_LEAK' },
+              { type: 'message', text: options.body ?? 'Scout: replied.', final: true },
+            ],
+            result: { status: 'completed', text: options.body ?? 'Scout: replied.' },
+          },
         ],
-        result: { status: 'completed', text: options.body ?? 'Scout: replied.' },
-      },
-    ],
   });
   const registry = new AgentRegistry([
     {

@@ -16,7 +16,7 @@ import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import { sanitizeWorkspacePath } from '../project/access.ts';
 import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
-import type { AgentRun, AgentRunStatus, RunObserver, RunWorkspaceBinding } from './model.ts';
+import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspaceBinding } from './model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
@@ -278,8 +278,9 @@ export class RunOrchestrator {
       // The caller's Project scope is recorded from the first line of the
       // run's life, so a pre-admission failure (`no available environment`)
       // still names the Project whose Environments were absent — the durable
-      // fact the bounded reconnect retry reads (#181). On success the resolved
-      // Project below reasserts the same id.
+      // fact both the bounded reconnect retry reads (#181) and the run-failure
+      // system event attributes its timeline entry to (#180). On success the
+      // resolved Project below reasserts the same id.
       ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
       ...(request.retryOfRunId !== undefined ? { retryOfRunId: request.retryOfRunId } : {}),
       createdAt: this.#clock.now(),
@@ -291,7 +292,7 @@ export class RunOrchestrator {
         await this.#finish(run, 'failed', {
           status: 'failed',
           message: `unknown agent: ${request.agentId}`,
-        }),
+        }, 'admission'),
       );
       return { id: run.id };
     }
@@ -306,7 +307,7 @@ export class RunOrchestrator {
           await this.#finish(run, 'failed', {
             status: 'failed',
             message: `task runs are not configured on this orchestrator: ${request.taskId}`,
-          }),
+          }, 'admission'),
         );
         return { id: run.id };
       }
@@ -331,7 +332,7 @@ export class RunOrchestrator {
       await this.settleTaskRun(await this.#finish(taskRun, 'failed', {
         status: 'failed',
         message: `task run ${request.taskId} requires lifecycle lease and environment bindings`,
-      }));
+      }, 'admission'));
       return { id: taskRun.id };
     }
 
@@ -343,7 +344,7 @@ export class RunOrchestrator {
         await this.#finish(taskRun, 'failed', {
           status: 'failed',
           message: `task run ${request.taskId} is missing its project scope`,
-        }),
+        }, 'admission'),
       );
       return { id: taskRun.id };
     }
@@ -362,7 +363,7 @@ export class RunOrchestrator {
         await this.#finish(taskRun, 'failed', {
           status: 'failed',
           message: `agent ${agent.id} is not a member of project ${request.projectId}`,
-        }),
+        }, 'admission'),
       );
       return { id: taskRun.id };
     }
@@ -383,7 +384,7 @@ export class RunOrchestrator {
         await this.#finish(taskRun, 'failed', {
           status: 'failed',
           message: this.#resolutionFailure(agent, resolution.reason),
-        }),
+        }, 'environment'),
       );
       return { id: taskRun.id };
     }
@@ -401,7 +402,7 @@ export class RunOrchestrator {
         await this.#finish(taskRun, 'failed', {
           status: 'failed',
           message: admittedOption.message,
-        }),
+        }, 'admission'),
       );
       return { id: taskRun.id };
     }
@@ -648,6 +649,7 @@ export class RunOrchestrator {
             ...stored,
             status: 'failed',
             failure: 'interrupted by a Sprout restart before this run finished',
+            failureClass: 'restart',
             result: {
               status: 'failed',
               message: 'interrupted by a Sprout restart before this run finished',
@@ -796,7 +798,7 @@ export class RunOrchestrator {
     if (nestedTaskLease) {
       const lease = this.#pool.getLease(initial.leaseId!);
       if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== initial.taskId || lease.instanceId !== initial.environmentInstanceId) {
-        return this.#finish(initial, 'failed', { status: 'failed', message: `task lease is not active for run ${initial.id}` });
+        return this.#finish(initial, 'failed', { status: 'failed', message: `task lease is not active for run ${initial.id}` }, 'admission');
       }
     }
     const acquired = nestedTaskLease ? undefined : this.#pool.acquireLease({
@@ -818,7 +820,7 @@ export class RunOrchestrator {
           acquired.reason === 'conflict'
             ? busyMessage
             : `environment unavailable: ${acquired.reason}`,
-      });
+      }, 'environment');
     }
 
     const running = await this.#advance(initial, { status: 'running', ...(acquired !== undefined && acquired.ok ? { leaseId: acquired.lease.id } : {}) });
@@ -1113,13 +1115,14 @@ export class RunOrchestrator {
     run: AgentRun,
     status: AgentRunStatus,
     result: EngineTurnResult,
+    failureClass: RunFailureClass = 'execution',
   ): Promise<AgentRun> {
     return this.#advance(run, {
       status,
       result,
       ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
       completedAt: this.#clock.now(),
-      ...(result.status === 'failed' ? { failure: result.message } : {}),
+      ...(result.status === 'failed' ? { failure: result.message, failureClass } : {}),
     });
   }
 

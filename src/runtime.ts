@@ -264,6 +264,8 @@ export interface SproutReconciliation {
   readonly projectedMessageIds: readonly string[];
   /** What the bounded reconnect-retry pass armed, triggered, queued, dispatched, and settled (#181). */
   readonly reconnectRetries: RunReconnectRetryReconcileResult;
+  /** Run ids whose system failure event the collaboration pass published (#180). */
+  readonly failureEventRunIds: readonly string[];
 }
 
 /** The wired runtime graph, plus the two lifecycle commands over it. */
@@ -1798,6 +1800,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           admittedRunIds: reconciled.admittedRunIds,
           projectedMessageIds: reconciled.projectedMessageIds,
           reconnectRetries,
+          failureEventRunIds: reconciled.failureEventRunIds,
         };
         lastReconciliation = result;
         return result;
