@@ -336,6 +336,13 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 2 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  operational_events: [
+    { name: 'sequence', type: 'INTEGER', notnull: 0, pk: 1 },
+    { name: 'subject', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
   environment_recovery: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },

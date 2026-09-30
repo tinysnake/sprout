@@ -34,6 +34,8 @@ import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
 import { parseWorkerConfiguration } from '../../host-config.ts';
+import { projectHostDiagnostic, type HostDiagnosticExport } from '../../operations/contract.ts';
+import { PRODUCT_VERSIONS } from '../../operations/versions.ts';
 import type { EngineAdapter } from '../../engine/port.ts';
 import { EnvironmentWorker, type EnvironmentWorkerOptions } from '../server.ts';
 import { WorkerRecoveryJournal } from '../recovery-journal.ts';
@@ -648,7 +650,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       'Commands:',
       '  enroll <endpoint> <enrollment-id>   Claim a pending enrollment (secret on stdin)',
       '  start [--foreground]                Start the Worker daemon in the background',
-      '  status                              Report host-local Worker state',
+      '  status [--diagnostics]              Report host-local Worker state or typed diagnostic JSON',
       '  stop                                Signal the running Worker daemon to stop',
       '  reset                               Remove host-local identity and configuration',
       '  install-service                     Install the signed-in-user service (LaunchAgent or Scheduled Task)',
@@ -1094,8 +1096,9 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
   }
 
   async function status(paths: WorkerHostPaths, args: readonly string[]): Promise<number> {
-    if (args.length !== 0) {
-      err('sprout worker status: takes no arguments');
+    const diagnosticExport = args.length === 1 && args[0] === '--diagnostics';
+    if (args.length !== 0 && !diagnosticExport) {
+      err('sprout worker status: takes no arguments except --diagnostics');
       return WORKER_EXIT.usage;
     }
     const enrolled = isEnrolled(paths);
@@ -1186,6 +1189,17 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
         },
         serviceInstalled,
       });
+    }
+    if (diagnosticExport) {
+      const diagnostic: HostDiagnosticExport = { ...projectHostDiagnostic({
+        worker: projected.state,
+        service: serviceInspectionFailed ? 'failed' : serviceLoaded ? 'running' : serviceInstalled ? 'stopped' : 'unknown',
+        data: localConfigurationValid ? 'accessible' : 'unavailable',
+        reachability: projected.state === 'connected' ? 'reachable' : 'unknown',
+        engines: [{ engine: 'pi', readiness: 'unknown' }, { engine: 'codex', readiness: 'unknown' }],
+      }), versions: PRODUCT_VERSIONS };
+      out(JSON.stringify(diagnostic));
+      return projected.state === 'local-configuration-failure' || serviceInspectionFailed ? WORKER_EXIT.failure : WORKER_EXIT.ok;
     }
     out(`state: ${projected.state}`);
     if (projected.epoch !== undefined) out(`epoch: ${projected.epoch}`);

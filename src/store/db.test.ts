@@ -330,6 +330,13 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'sequence', type: 'INTEGER', notnull: 1, pk: 2 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
   ],
+  operational_events: [
+    { name: 'sequence', type: 'INTEGER', notnull: 0, pk: 1 },
+    { name: 'subject', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
   environment_recovery: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -436,6 +443,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
     assert.deepEqual(
       indexes.map((index) => ({ name: index.name, tbl: index.tbl_name })),
       [
+        { name: 'operational_events_subject', tbl: 'operational_events' },
         { name: 'agent_runs_replay_sequence_idx', tbl: 'agent_runs' },
         { name: 'conversation_scopes_project', tbl: 'conversation_scopes' },
         { name: 'run_reconnect_triggers_project_idx', tbl: 'run_reconnect_triggers' },
