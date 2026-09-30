@@ -75,6 +75,8 @@ interface RetryHarness {
   note(): Promise<void>;
   setAvailable(available: boolean): void;
   connectOnly(instanceId: string): void;
+  acceptOnly(instanceId: string): void;
+  ready(instanceId: string): void;
   disconnect(instanceId: string): void;
 }
 
@@ -150,6 +152,13 @@ function harness(options: {
         eligibleInstanceIds: [...connected],
       });
     },
+    acceptOnly(instanceId: string): void {
+      connected.add(instanceId);
+    },
+    ready(instanceId: string): void {
+      admissible.add(instanceId);
+      pool.synchronize({ definitions: [definition], instances, eligibleInstanceIds: [...admissible] });
+    },
     disconnect(instanceId: string): void {
       connected.delete(instanceId);
       admissible.delete(instanceId);
@@ -217,6 +226,108 @@ test('full disconnect then the first qualifying reconnect retries the failed run
   );
   assert.deepEqual(h.settlements, [{ originalRunId: originalId, retryRunId }]);
   assert.deepEqual(await h.retryStore.listUnsettledTriggers(), []);
+});
+
+test('out-of-order readiness preserves the earlier accepted connection while the later stays unready', async () => {
+  const h = harness();
+  const service = h.service();
+  await service.reconcile();
+  const originalId = await submitDisconnectedRun(h);
+  h.acceptOnly('env-a');
+  await service.noteEnvironmentState('env-a');
+  h.acceptOnly('env-b');
+  await service.noteEnvironmentState('env-b');
+  h.ready('env-a');
+  const first = await service.noteEnvironmentState();
+  assert.deepEqual(first.triggeredProjects, ['p1']);
+  assert.deepEqual(first.queuedRunIds, [originalId]);
+  h.ready('env-b');
+  assert.deepEqual((await service.noteEnvironmentState()).triggeredProjects, []);
+  assert.equal((await h.retryStore.listRetries()).length, 1);
+});
+
+test('later accepted connection can trigger when the earlier one never becomes ready', async () => {
+  const h = harness();
+  const service = h.service();
+  await service.reconcile();
+  await submitDisconnectedRun(h);
+  h.acceptOnly('env-a');
+  await service.noteEnvironmentState('env-a');
+  h.acceptOnly('env-b');
+  await service.noteEnvironmentState('env-b');
+  h.ready('env-b');
+  assert.deepEqual((await service.noteEnvironmentState()).triggeredProjects, ['p1']);
+  h.ready('env-a');
+  assert.deepEqual((await service.noteEnvironmentState()).triggeredProjects, []);
+  assert.equal((await h.retryStore.listRetries()).length, 1);
+});
+
+test('near-simultaneous readiness publications consume only one gate', async () => {
+  const h = harness();
+  const service = h.service();
+  await service.reconcile();
+  await submitDisconnectedRun(h);
+  h.acceptOnly('env-a');
+  await service.noteEnvironmentState('env-a');
+  h.acceptOnly('env-b');
+  await service.noteEnvironmentState('env-b');
+  h.ready('env-a');
+  h.ready('env-b');
+  const passes = await Promise.all([service.noteEnvironmentState(), service.noteEnvironmentState()]);
+  assert.equal(passes.flatMap((pass) => pass.triggeredProjects).length, 1);
+  assert.equal(passes.flatMap((pass) => pass.dispatchedRetryRunIds).length, 1);
+  assert.equal((await h.retryStore.listRetries()).length, 1);
+});
+
+test('SQLite reopen during out-of-order readiness reaccepts connections and consumes only one gate', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'retry-order-reopen-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'sprout.db');
+  let db = new SqliteStore({ filename: path });
+  const connected = new Set<string>();
+  const ready = new Set<string>();
+  const makeService = () => new RunReconnectRetry({
+    store: db.runReconnectRetries,
+    runs: {
+      list: () => db.runs.list(),
+      load: (id) => db.runs.get(id),
+      submit: async ({ runId, retryOfRunId, projectId, agentId, prompt }) => {
+        await db.runs.save({ id: runId, retryOfRunId, projectId, agentId, prompt,
+          environmentInstanceId: 'env-a', status: 'completed', events: [], createdAt: 2 });
+        return { id: runId };
+      },
+    },
+    projects: () => [{ projectId: 'p1', instanceIds }],
+    isConnected: (id) => connected.has(id),
+    canAdmitWork: (id) => ready.has(id),
+  });
+  let service = makeService();
+  await service.reconcile();
+  await db.runs.save({ id: 'original', projectId: 'p1', agentId: 'scout', prompt: 'test',
+    environmentInstanceId: '', status: 'failed', events: [], failure: ENVIRONMENT_FAILURE, createdAt: 1 });
+  connected.add('env-a');
+  await service.noteEnvironmentState('env-a');
+  connected.add('env-b');
+  await service.noteEnvironmentState('env-b');
+  // Restart drops live connections and their process-local candidates, not the
+  // durable gate or failed run. New accepted transitions must be witnessed.
+  connected.clear();
+  await service.noteEnvironmentState();
+  db.close();
+  db = new SqliteStore({ filename: path });
+  service = makeService();
+  await service.reconcile();
+  connected.add('env-a');
+  await service.noteEnvironmentState('env-a');
+  connected.add('env-b');
+  await service.noteEnvironmentState('env-b');
+  ready.add('env-a');
+  assert.deepEqual((await service.noteEnvironmentState()).triggeredProjects, ['p1']);
+  ready.add('env-b');
+  assert.deepEqual((await service.noteEnvironmentState()).triggeredProjects, []);
+  assert.deepEqual((await db.runReconnectRetries.listRetries()).map((row) => row.originalRunId), ['original']);
+  assert.equal((await db.runs.list()).filter((run) => run.retryOfRunId === 'original').length, 1);
+  db.close();
 });
 
 test('a reconnect while another Environment stayed connected never triggers', async () => {

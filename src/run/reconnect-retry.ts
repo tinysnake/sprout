@@ -177,7 +177,7 @@ export class RunReconnectRetry {
   /** One serialized chain: observations, settlements, and passes never race. */
   #chain: Promise<unknown> = Promise.resolve();
   /** Accepted transitions witnessed while an armed Project grants the instance. */
-  readonly #pendingConnections = new Map<string, string>();
+  readonly #pendingConnections = new Map<string, Set<string>>();
 
   constructor(options: RunReconnectRetryOptions) {
     this.#store = options.store;
@@ -253,6 +253,7 @@ export class RunReconnectRetry {
       if (project.instanceIds.length === 0) {
         // A Project with no granted Environment has nothing that can reconnect;
         // its failures stay fail-fast until an Environment is granted.
+        this.#pendingConnections.delete(project.projectId);
         continue;
       }
       if (!project.connected) {
@@ -264,14 +265,25 @@ export class RunReconnectRetry {
         }
       }
       const gate = await this.#store.getGate(project.projectId);
-      if (gate?.armed === true && acceptedInstanceId !== undefined &&
-          project.instanceIds.includes(acceptedInstanceId)) {
-        this.#pendingConnections.set(project.projectId, acceptedInstanceId);
+      if (gate?.armed !== true) this.#pendingConnections.delete(project.projectId);
+      const pending = this.#pendingConnections.get(project.projectId);
+      // A grant or a catalog refresh cannot manufacture an accepted transition.
+      // Retain every witnessed transition until it disconnects, loses its grant,
+      // or the gate is consumed; readiness may arrive in any order.
+      if (pending) {
+        for (const id of pending) {
+          if (!project.instanceIds.includes(id) || !this.#isConnected(id)) pending.delete(id);
+        }
       }
-      const candidate = this.#pendingConnections.get(project.projectId);
-      if (gate?.armed === true && candidate !== undefined &&
-          project.instanceIds.includes(candidate) && this.#isConnected(candidate) &&
-          this.#canAdmitWork(candidate)) {
+      if (gate?.armed === true && acceptedInstanceId !== undefined &&
+          project.instanceIds.includes(acceptedInstanceId) && this.#isConnected(acceptedInstanceId)) {
+        const candidates = this.#pendingConnections.get(project.projectId) ?? new Set<string>();
+        candidates.add(acceptedInstanceId);
+        this.#pendingConnections.set(project.projectId, candidates);
+      }
+      const candidate = [...(this.#pendingConnections.get(project.projectId) ?? [])]
+        .find((id) => this.#canAdmitWork(id));
+      if (gate?.armed === true && candidate !== undefined) {
         const eligible = (await this.#runs.list())
           .filter((run) => run.projectId === project.projectId && isEnvironmentDisconnectedFailure(run))
           .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
