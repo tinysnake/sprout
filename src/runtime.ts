@@ -254,6 +254,8 @@ export interface SproutReconciliation {
   readonly admittedRunIds: readonly string[];
   /** Input Message ids whose reply the collaboration pass (re)projected. */
   readonly projectedMessageIds: readonly string[];
+  /** Run ids whose system failure event the collaboration pass published (#180). */
+  readonly failureEventRunIds: readonly string[];
 }
 
 /** The wired runtime graph, plus the two lifecycle commands over it. */
@@ -1742,6 +1744,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           recoveredRuns,
           admittedRunIds: reconciled.admittedRunIds,
           projectedMessageIds: reconciled.projectedMessageIds,
+          failureEventRunIds: reconciled.failureEventRunIds,
         };
         lastReconciliation = result;
         return result;

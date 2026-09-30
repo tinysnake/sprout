@@ -268,6 +268,12 @@ export class RunOrchestrator {
       status: 'queued',
       events: [],
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
+      // The caller's Project scope is recorded from the first durable fact, not
+      // only after environment resolution (#180): an admission failure such as
+      // "no available environment" settles before resolution runs, and it must
+      // still be attributable to the Project whose timeline is authoritative
+      // for its run-lifecycle event. Resolution may still refine it below.
+      ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
       createdAt: this.#clock.now(),
     };
 

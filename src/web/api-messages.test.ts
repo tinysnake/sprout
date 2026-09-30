@@ -480,3 +480,70 @@ test('a run admitted by a collaboration wake is stoppable through the run contro
     await context.api.close();
   }
 });
+
+test('a failed direct run surfaces as one sanitized informational Project event over the API', async () => {
+  const context = buildWithCollaboration({ failing: true });
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
+  try {
+    const delivered = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId,
+        authorId: 'human-lead',
+        authorKind: 'human',
+        body: 'Please investigate the outage.',
+        recipients: ['agent-scout'],
+        deliveryKey: 'api-failed-run-1',
+      }),
+    });
+    assert.equal(delivered.status, 202);
+    const result = (await delivered.json()) as { admittedRunIds: string[] };
+    assert.equal(result.admittedRunIds.length, 1);
+
+    // Live failure publication is asynchronous by design; the read-only events
+    // route is the operator's surface, so the assertion polls exactly that.
+    let events: {
+      id: string;
+      kind: string;
+      summary: string;
+      detail?: string;
+      disposition: string;
+      producerId: string;
+      producerKind: string;
+      responsibleAgentIds: string[];
+    }[] = [];
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      events = ((await (await fetch(`${base}/api/projects/project-sprout/events`)).json()) as {
+        events: typeof events;
+      }).events;
+      if (events.length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(events.length, 1, 'exactly one failure event for one terminal transition');
+    const event = events[0]!;
+    assert.equal(event.kind, 'agent-run-failure');
+    assert.equal(event.disposition, 'informational', 'labelled non-routing: no wake, no fan-out');
+    assert.equal(event.producerKind, 'system');
+    assert.equal(event.producerId, 'sprout');
+    assert.deepEqual(event.responsibleAgentIds, []);
+    assert.match(event.summary, /engine turn failed/);
+    assert.match(event.detail ?? '', new RegExp(`run ${result.admittedRunIds[0]}`), 'the evidence chain links the run');
+
+    // Privacy projection: never the run prompt, raw events, or tool output.
+    const serialized = JSON.stringify(event);
+    assert.doesNotMatch(serialized, /Please investigate the outage\./);
+    assert.doesNotMatch(serialized, /FAILED_RUN_TOOL_OUTPUT_MUST_NOT_LEAK/);
+
+    // Routing exclusion: an informational event owns no WakeRequest at all.
+    const evidence = (await (
+      await fetch(`${base}/api/project-events/${event.id}/observations`)
+    ).json()) as { wakes: unknown[] };
+    assert.deepEqual(evidence.wakes, []);
+  } finally {
+    await context.api.close();
+  }
+});

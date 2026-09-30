@@ -205,7 +205,7 @@ test('reconciliation is idempotent: a second pass neither re-admits nor re-proje
       const first = await restarted.coordinator.reconcile();
       assert.equal(first.projectedMessageIds.length, 1);
       const second = await restarted.coordinator.reconcile();
-      assert.deepEqual(second, { admittedRunIds: [], projectedMessageIds: [] });
+      assert.deepEqual(second, { admittedRunIds: [], projectedMessageIds: [], failureEventRunIds: [] });
 
       const replies = (await restarted.sqlite.collaboration.listMessages()).filter(
         (message) => message.author.kind === 'agent',
@@ -343,6 +343,7 @@ test('a wake naming a run that no longer exists does not abort reconciliation', 
       assert.deepEqual(await restarted.coordinator.reconcile(), {
         admittedRunIds: [],
         projectedMessageIds: [],
+        failureEventRunIds: [],
       });
       const replies = (await restarted.sqlite.collaboration.listMessages()).filter(
         (message) => message.author.kind === 'agent',
@@ -374,6 +375,7 @@ test('a suppressed-only message has no wake to admit or project', async () => {
       assert.deepEqual(await store.coordinator.reconcile(), {
         admittedRunIds: [],
         projectedMessageIds: [],
+        failureEventRunIds: [],
       });
       assert.equal(store.sqlite.collaboration.observations('msg-none').length, 1);
     } finally {
@@ -428,6 +430,7 @@ test('an addressed Project event wake recovers through the same reconcile pass',
       assert.deepEqual(await restarted.coordinator.reconcile(), {
         admittedRunIds: [],
         projectedMessageIds: [],
+        failureEventRunIds: [],
       });
     } finally {
       restarted.sqlite.close();
