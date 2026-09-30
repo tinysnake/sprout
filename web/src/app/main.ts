@@ -10,6 +10,12 @@ import { createAgentBrowserAdapter } from '../adapters/agent-api.js';
 import { ProductionAgentService } from '../modules/agents/adapters/production-adapter.js';
 import { PROJECT_SERVICE, type ProjectManagementService } from '../modules/projects/types.js';
 import { ProductionProjectService } from '../modules/projects/adapters/production-adapter.js';
+import { CHAT_SERVICE, type ChatService } from '../modules/chat/types.js';
+import { ProductionChatService } from '../modules/chat/adapters/production-adapter.js';
+import { createConversationBrowserAdapter } from '../adapters/conversation-api.js';
+import { createMessageBrowserAdapter } from '../adapters/message-api.js';
+import { createRoutingBrowserAdapter } from '../adapters/routing-api.js';
+import { createRunBrowserAdapter } from '../adapters/run-api.js';
 import { createProjectAccessBrowserAdapter, createProjectBrowserAdapter } from '../adapters/project-api.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
 import { createOperatorSessionBrowserAdapter } from '../adapters/operator-session-api.js';
@@ -42,6 +48,8 @@ export interface SproutAppOptions {
   agentService?: AgentManagementService;
   /** The typed Project Overview authority; production and tests inject it explicitly. */
   projectService?: ProjectManagementService;
+  /** Production Chat authority; tests inject a fixture explicitly, never by default. */
+  chatService?: ChatService;
   /**
    * A page-owned connection source.
    *
@@ -77,6 +85,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.projectService) {
     app.provide(PROJECT_SERVICE, options.projectService);
+  }
+  if (options.chatService) {
+    app.provide(CHAT_SERVICE, options.chatService);
   }
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);
@@ -120,10 +131,17 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       agents: agentService,
       environments: environmentService,
     });
+    const chatService = new ProductionChatService({
+      conversations: createConversationBrowserAdapter(transport),
+      messages: createMessageBrowserAdapter(transport),
+      routing: createRoutingBrowserAdapter(transport),
+      runs: createRunBrowserAdapter(transport),
+    });
     const { app, router } = createSproutApp({
       environmentService,
       agentService,
       projectService,
+      chatService,
       connectionSource: transport,
       operatorSession,
     });

@@ -841,6 +841,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // Chat-only minimal status projection: never serialize prompt or run events.
+    if (request.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'runs' && segments[3] === 'status') {
+      const run = orchestrator.get(segments[2] ?? '') ?? (await orchestrator.load(segments[2] ?? ''));
+      if (!run) { sendJson(response, 404, { error: 'unknown run' }); return; }
+      sendJson(response, 200, { id: run.id, status: run.status });
+      return;
+    }
+
     // GET /api/runs/:id — inspect one run.
     if (
       request.method === 'GET' &&

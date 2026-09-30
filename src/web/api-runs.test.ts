@@ -24,6 +24,9 @@ test('a user can submit a request from the Web client and inspect the result', a
     assert.ok(id);
 
     const run = await waitForTerminal(base, id);
+    const statusResponse = await fetch(`${base}/api/runs/${id}/status`);
+    assert.equal(statusResponse.status, 200);
+    assert.deepEqual(await statusResponse.json(), { id, status: 'completed' }, 'Chat never receives prompt, tool output, or raw events');
     assert.equal(run.status, 'completed');
     assert.deepEqual(run.result, { status: 'completed', text: 'done' });
     assert.deepEqual(
@@ -169,6 +172,7 @@ test('an unknown run is a 404 rather than an empty success', async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/runs/nope`);
     assert.equal(response.status, 404);
+    assert.equal((await fetch(`${base}/api/runs/nope/status`)).status, 404);
   });
 });
 
