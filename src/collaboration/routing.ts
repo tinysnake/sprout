@@ -329,7 +329,11 @@ export interface RoutingInputOutcome {
  */
 export interface RoutingModelPort {
   readonly id: string;
+  /** Optional trusted producer telemetry correlated to this exact invocation. */
+  readonly telemetryForAttempt?: (attemptId: string) => Partial<import('../usage/routing-adapter.ts').RoutingTelemetry> | undefined;
   judge(request: {
+    /** Coordinator-owned durable attempt identity; never synthesized by an adapter. */
+    readonly attemptId: string;
     readonly batchId: string;
     readonly projectId: string;
     /** 1-based attempt number; the retry is attempt 2 on the same snapshot. */

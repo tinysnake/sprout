@@ -22,7 +22,7 @@ test('measures Sprout wall duration and captures absent telemetry truthfully', a
   });
 
   const response = await adapter.judge({
-    batchId: 'batch-1',
+    attemptId: 'attempt-1', batchId: 'batch-1',
     projectId: 'proj-1',
     attempt: 1,
     context: 'context-body',
@@ -42,12 +42,12 @@ test('captures telemetry from inner port when provided', async () => {
   let currentTime = 1000;
   const clock = { now: () => currentTime };
 
-  const innerPort: RoutingModelPort & { lastTelemetry?: unknown } = {
+  const innerPort: RoutingModelPort = {
     id: 'telemetry-model',
-    lastTelemetry: {
+    telemetryForAttempt: (attemptId) => attemptId === 'attempt-2' ? {
       tokens: { inputTokens: 50, outputTokens: 10, totalTokens: 60 },
       billingBasis: 'metered_api',
-    },
+    } : undefined,
     async judge(_request) {
       currentTime += 100;
       return JSON.stringify({ selections: [], suppressions: [] });
@@ -60,7 +60,7 @@ test('captures telemetry from inner port when provided', async () => {
   });
 
   await adapter.judge({
-    batchId: 'batch-2',
+    attemptId: 'attempt-2', batchId: 'batch-2',
     projectId: 'proj-2',
     attempt: 1,
     context: 'ctx',

@@ -102,6 +102,7 @@ import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import type { UsageStore } from './usage/store.ts';
 import { InMemoryUsageStore } from './usage/store.ts';
 import { UsageService } from './usage/service.ts';
+import { UsageAwareRoutingModelPort } from './usage/routing-adapter.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
 import { workSafetyFromRecovery } from './environment/recovery.ts';
@@ -385,6 +386,8 @@ export interface SproutRuntimeOptions {
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
+  /** Trusted host-composed wake model, never supplied through Human HTTP. */
+  readonly routingModel?: CollaborationCoordinatorOptions['routingModel'];
 }
 
 /** Explicit private composition injection, used only by adapter tests. */
@@ -1122,10 +1125,21 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      * closed with visible per-input outcomes when none does. Task summaries
      * remain omitted until explicit per-input relevance can be established.
      */
+    const usageRoutingModel = options.routingModel === undefined ? undefined
+      : new UsageAwareRoutingModelPort({ inner: options.routingModel });
     const collaboration = new CollaborationCoordinator({
       scopes: conversationScopes,
       store: stores.collaboration,
       runs: orchestrator,
+      ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
+      onRoutingAttempt: async (attempt, projectId) => {
+        const telemetry = usageRoutingModel?.takeTelemetry(attempt.id);
+        await usageService.recordRoutingAttemptActivity(attempt, {
+          ...telemetry, batchId: attempt.batchId, projectId,
+          // The lifecycle's start/settlement is authoritative, not native latency.
+          durationMs: Math.max(0, attempt.finishedAt - attempt.startedAt),
+        });
+      },
       onObservation:
         options.onObservation ??
         (({ inputId, observation }) => {

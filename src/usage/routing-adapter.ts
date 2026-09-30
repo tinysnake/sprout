@@ -1,14 +1,11 @@
 /**
- * Wake-model routing adapter with usage telemetry observation (ADR-0007, ADR-0010, #105).
- *
- * Wraps a RoutingModelPort to measure Sprout wall duration and observe available
- * token/cost telemetry without modifying core routing decisions.
- * Unsupported telemetry is reported as explicitly unavailable, never zero.
+ * Wake-model telemetry adapter (ADR-0007, ADR-0010).
+ * Measurement is correlated to the coordinator-owned attempt id. Only the
+ * coordinator's awaited settlement observer persists usage: raw model success
+ * is not routing success, and a late timed-out response is not a new activity.
  */
-
 import type { RoutingModelPort } from '../collaboration/routing.ts';
 import type { DetailedTokenDimensions, ApiEquivalentCostEstimate, BillingBasis } from './model.ts';
-import type { UsageService } from './service.ts';
 
 export interface RoutingTelemetry {
   readonly durationMs: number;
@@ -21,121 +18,49 @@ export interface RoutingTelemetry {
 
 export interface UsageAwareRoutingModelPortOptions {
   readonly inner: RoutingModelPort;
-  readonly usageService?: UsageService | undefined;
   readonly clock?: { now(): number } | undefined;
 }
 
 export class UsageAwareRoutingModelPort implements RoutingModelPort {
   readonly #inner: RoutingModelPort;
-  readonly #usageService?: UsageService | undefined;
   readonly #clock: { now(): number };
+  readonly #active = new Set<string>();
+  readonly #telemetry = new Map<string, RoutingTelemetry>();
   #lastTelemetry?: RoutingTelemetry;
 
   constructor(options: UsageAwareRoutingModelPortOptions) {
     this.#inner = options.inner;
-    this.#usageService = options.usageService;
     this.#clock = options.clock ?? { now: () => Date.now() };
   }
 
-  get id(): string {
-    return this.#inner.id;
+  get id(): string { return this.#inner.id; }
+  get lastTelemetry(): RoutingTelemetry | undefined { return this.#lastTelemetry; }
+
+  /** Called exactly at coordinator settlement, including timeout/invalid output. */
+  takeTelemetry(attemptId: string): RoutingTelemetry | undefined {
+    this.#active.delete(attemptId);
+    const telemetry = this.#telemetry.get(attemptId);
+    this.#telemetry.delete(attemptId);
+    return telemetry;
   }
 
-  get lastTelemetry(): RoutingTelemetry | undefined {
-    return this.#lastTelemetry;
-  }
-
-  async judge(request: {
-    readonly batchId: string;
-    readonly projectId: string;
-    readonly attempt: number;
-    readonly context: string;
-  }): Promise<string> {
+  async judge(request: Parameters<RoutingModelPort['judge']>[0]): Promise<string> {
     const startedAt = this.#clock.now();
+    this.#active.add(request.attemptId);
     try {
-      const raw = await this.#inner.judge(request);
-      const finishedAt = this.#clock.now();
-      const durationMs = Math.max(0, finishedAt - startedAt);
-
-      // Check if raw output or inner port exposes telemetry
-      let telemetry: RoutingTelemetry = {
-        durationMs,
-        source: `routing-model:${this.#inner.id}`,
-        sourceVersion: '1.0',
-        billingBasis: 'unknown',
-      };
-
-      // If the inner port has telemetry or if raw JSON has a usage property
-      const innerTelemetry = (this.#inner as unknown as { readonly lastTelemetry?: Partial<RoutingTelemetry> }).lastTelemetry;
-      if (innerTelemetry) {
-        telemetry = {
-          ...telemetry,
+      return await this.#inner.judge(request);
+    } finally {
+      // Ignore a late response after the coordinator has already settled timeout.
+      if (this.#active.has(request.attemptId)) {
+        const innerTelemetry = this.#inner.telemetryForAttempt?.(request.attemptId);
+        const telemetry: RoutingTelemetry = {
+          source: `routing-model:${this.#inner.id}`, sourceVersion: '1.0', billingBasis: 'unknown',
           ...innerTelemetry,
-          durationMs,
+          durationMs: Math.max(0, this.#clock.now() - startedAt),
         };
+        this.#lastTelemetry = telemetry;
+        this.#telemetry.set(request.attemptId, telemetry);
       }
-
-      this.#lastTelemetry = telemetry;
-
-      if (this.#usageService) {
-        const attemptId = `${request.batchId}-att-${request.attempt}`;
-        void this.#usageService.recordRoutingAttemptActivity(
-          {
-            id: attemptId,
-            batchId: request.batchId,
-            attemptNumber: request.attempt,
-            modelId: this.#inner.id,
-            startedAt,
-            finishedAt,
-            status: 'succeeded',
-          },
-          {
-            batchId: request.batchId,
-            projectId: request.projectId,
-            durationMs,
-            tokens: telemetry.tokens,
-            cost: telemetry.cost,
-            billingBasis: telemetry.billingBasis,
-            source: telemetry.source,
-            sourceVersion: telemetry.sourceVersion,
-          },
-        );
-      }
-
-      return raw;
-    } catch (error) {
-      const finishedAt = this.#clock.now();
-      const durationMs = Math.max(0, finishedAt - startedAt);
-      this.#lastTelemetry = {
-        durationMs,
-        source: `routing-model:${this.#inner.id}`,
-        sourceVersion: '1.0',
-        billingBasis: 'unknown',
-      };
-
-      if (this.#usageService) {
-        const attemptId = `${request.batchId}-att-${request.attempt}`;
-        void this.#usageService.recordRoutingAttemptActivity(
-          {
-            id: attemptId,
-            batchId: request.batchId,
-            attemptNumber: request.attempt,
-            modelId: this.#inner.id,
-            startedAt,
-            finishedAt,
-            status: 'failed',
-          },
-          {
-            batchId: request.batchId,
-            projectId: request.projectId,
-            durationMs,
-            source: `routing-model:${this.#inner.id}`,
-            sourceVersion: '1.0',
-          },
-        );
-      }
-
-      throw error;
     }
   }
 }
