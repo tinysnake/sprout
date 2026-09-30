@@ -56,7 +56,7 @@ const contentClasses = computed(() => {
             </DialogDescription>
           </div>
           <DialogClose
-            class="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-elevated)] cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+            class="rounded p-1 min-h-[44px] min-w-[44px] shrink-0 inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-elevated)] cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
             aria-label="Close dialog"
           >
             <Icon name="close" :size="16" />

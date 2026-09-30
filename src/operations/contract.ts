@@ -41,6 +41,8 @@ export interface WebDiagnostic {
   readonly environments: readonly { readonly subject: string; readonly enrollment: 'pending' | 'approved' | 'revoked' | 'archived'; readonly connection: 'never-connected' | 'online' | 'reconnecting' | 'offline'; readonly compatibility: 'unknown' | 'compatible' | 'incompatible'; readonly worker: 'connected' | 'not-connected'; readonly reachability: 'reachable' | 'unknown'; readonly engines: readonly DiagnosticEngine[]; readonly workSafety: 'clear' | 'held' | 'reconciling' | 'recovery' }[];
   readonly events: readonly OperationalEvent[];
 }
+/** Installed versions/ranges only: not negotiated Worker compatibility, schema support
+ * limits, or migration safety-copy existence/retention. Those must not be inferred. */
 export interface OperatorSettings {
   readonly versions: DiagnosticVersions;
   readonly session: { readonly authenticated: true; readonly activeCount: number };

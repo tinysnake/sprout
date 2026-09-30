@@ -106,6 +106,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
   const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
   const chatModule = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+  const settingsModule = (await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts')) as typeof import('../modules/settings/adapters/fixture-adapter.ts');
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
@@ -114,6 +115,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
     chatService: new chatModule.FixtureChatService(),
+    settingsService: new settingsModule.FixtureSettingsService(),
   };
 }
 
@@ -218,7 +220,8 @@ test('Production Web: settings view tabs and responsive visibility', async () =>
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.match(doc.body.textContent ?? '', /Platform & Protocol Compatibility/);
-    assert.match(doc.body.textContent ?? '', /Carrier & Transport Security/);
+    assert.match(doc.body.textContent ?? '', /Worker connection facts/);
+    assert.match(doc.body.textContent ?? '', /Transport carrier and socket permissions are not reported/);
 
     // 3. Click Status Strip card to switch back to Access & Security
     const accessCard = doc.querySelector('.settings-status-card') as HTMLButtonElement;
