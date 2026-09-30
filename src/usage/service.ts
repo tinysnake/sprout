@@ -95,6 +95,8 @@ export class UsageService {
       status = 'active';
     } else if (run.status === 'completed') {
       status = 'completed';
+    } else if (run.recoverySettlement?.status === 'stopped') {
+      status = 'stopped';
     } else if (run.status === 'interrupted') {
       status = 'interrupted';
     } else {
@@ -292,6 +294,9 @@ export class UsageService {
    * Appends to supersession history rather than overwriting prior observations.
    */
   async recordDelayedObservation(input: DelayedObservationInput): Promise<UsageObservation> {
+    if (!input.source.trim() || !input.reason.trim()) {
+      throw new Error('Corrections require source and reason');
+    }
     const activity = await this.#store.getActivity(input.activityId);
     if (!activity) {
       throw new Error(`Usage activity not found: ${input.activityId}`);
@@ -302,6 +307,9 @@ export class UsageService {
       throw new Error(`Superseded observation not found for activity: ${input.supersedesObservationId}`);
     }
 
+    if (!prior.isEffective) {
+      throw new Error('Cannot supersede a stale observation; use the current effective head');
+    }
     const now = this.#clock.now();
     const newId = `uobs_${randomUUID()}`;
 

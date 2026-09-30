@@ -383,6 +383,18 @@ export class SqliteUsageStore implements UsageStore {
   }
 
   async recordObservation(observation: UsageObservation): Promise<void> {
+    // No await inside the savepoint: checking the head, selecting its successor,
+    // and inserting are one atomic write, including when callers race.
+    this.#db.exec('SAVEPOINT usage_observation_record');
+    try {
+      if (observation.isEffective) {
+        const head = this.#db.prepare(
+          'SELECT id FROM usage_observations WHERE activity_id = ? AND is_effective = 1',
+        ).get(observation.activityId) as { id: string } | undefined;
+        if (head?.id !== observation.supersedesObservationId) {
+          throw new Error('Cannot supersede a stale observation; use the current effective head');
+        }
+      }
     if (observation.supersedesObservationId !== undefined) {
       this.#db
         .prepare(`
@@ -450,6 +462,11 @@ export class SqliteUsageStore implements UsageStore {
         observation.supersessionReason ?? null,
         observation.isEffective ? 1 : 0,
       );
+      this.#db.exec('RELEASE usage_observation_record');
+    } catch (error) {
+      this.#db.exec('ROLLBACK TO usage_observation_record; RELEASE usage_observation_record');
+      throw error;
+    }
   }
 
   async getObservation(id: string): Promise<UsageObservation | undefined> {

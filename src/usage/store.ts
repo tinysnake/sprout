@@ -145,6 +145,14 @@ export class InMemoryUsageStore implements UsageStore {
   }
 
   async recordObservation(observation: UsageObservation): Promise<void> {
+    if (this.#observations.has(observation.id)) throw new Error('Observation already exists');
+    if (observation.isEffective) {
+      const head = (this.#observationsByActivity.get(observation.activityId) ?? [])
+        .map((id) => this.#observations.get(id)).find((obs) => obs?.isEffective);
+      if (head?.id !== observation.supersedesObservationId) {
+        throw new Error('Cannot supersede a stale observation; use the current effective head');
+      }
+    }
     if (observation.supersedesObservationId !== undefined) {
       const prior = this.#observations.get(observation.supersedesObservationId);
       if (prior) {
