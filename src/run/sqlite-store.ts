@@ -11,6 +11,14 @@ import {
   type StoredSessionKey,
 } from './session-key-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
+import type {
+  ProjectRetryGate,
+  QueueRunReconnectRetry,
+  RunReconnectRetry,
+  RunReconnectRetryState,
+  RunReconnectRetryStore,
+  RunReconnectTrigger,
+} from './reconnect-retry-store.ts';
 
 /**
  * SQLite-backed storage for the run domain (ADR-0002).
@@ -59,6 +67,7 @@ interface RunRow {
   readonly workspace_binding: string | null;
   readonly recovery_settlement: string | null;
   readonly recovered_events: string | null;
+  readonly retry_of_run_id: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -105,7 +114,8 @@ export class SqliteRunStore implements RunStore {
         configuration_version INTEGER,
         workspace_binding TEXT,
         recovery_settlement TEXT,
-        recovered_events TEXT
+        recovered_events TEXT,
+        retry_of_run_id TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
@@ -122,6 +132,9 @@ export class SqliteRunStore implements RunStore {
     this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
     this.#addColumnIfMissing('agent_runs', 'recovery_settlement', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'recovered_events', 'TEXT');
+    // The bounded reconnect retry link (#181). A database from before this
+    // column still has its runs; they simply are nobody's retry.
+    this.#addColumnIfMissing('agent_runs', 'retry_of_run_id', 'TEXT');
     this.#backfillReplaySequences();
     this.#db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
@@ -156,8 +169,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events, retry_of_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -173,7 +186,8 @@ export class SqliteRunStore implements RunStore {
            configuration_version = excluded.configuration_version,
            workspace_binding = excluded.workspace_binding,
            recovery_settlement = excluded.recovery_settlement,
-           recovered_events = excluded.recovered_events`,
+           recovered_events = excluded.recovered_events,
+           retry_of_run_id = excluded.retry_of_run_id`,
       )
       .run(
         run.id,
@@ -197,6 +211,7 @@ export class SqliteRunStore implements RunStore {
         run.workspaceBinding ? JSON.stringify(run.workspaceBinding) : null,
         run.recoverySettlement ? JSON.stringify(run.recoverySettlement) : null,
         run.recoveredEvents ? JSON.stringify(run.recoveredEvents) : null,
+        run.retryOfRunId ?? null,
       );
     return replaySequence;
   }
@@ -351,6 +366,7 @@ function toRun(row: RunRow): AgentRun {
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
     ...(recoverySettlement !== undefined ? { recoverySettlement } : {}),
     ...(recoveredEvents !== undefined ? { recoveredEvents } : {}),
+    ...(row.retry_of_run_id !== null ? { retryOfRunId: row.retry_of_run_id } : {}),
     ...(row.configuration_version !== null ? { configurationVersion: row.configuration_version } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
@@ -375,5 +391,244 @@ function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
     workingDirectory: row.working_directory,
     key: row.session_key,
     updatedAt: row.updated_at,
+  };
+}
+
+interface RetryGateRow {
+  readonly project_id: string;
+  readonly armed: number;
+  readonly armed_at: number | null;
+  readonly updated_at: number;
+}
+
+interface RetryTriggerRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly at: number;
+  readonly eligibility_settled: number;
+}
+
+interface RetryRow {
+  readonly original_run_id: string;
+  readonly trigger_id: string;
+  readonly project_id: string;
+  readonly state: string;
+  readonly retry_run_id: string | null;
+  readonly queued_at: number;
+  readonly dispatched_at: number | null;
+  readonly settled_at: number | null;
+}
+
+/**
+ * SQLite-backed storage for the bounded reconnect-retry state machine (#181).
+ *
+ * The tables are created when the run domain's tables are mounted, beside
+ * `agent_runs`, because they are retry bookkeeping about runs rather than a
+ * schema-versioned product surface: a database from before this seam opens
+ * with empty gates, triggers, and rows — nobody was ever retried — and a
+ * historical database gains the three empty tables on open, exactly like
+ * `agent_session_keys`.
+ *
+ * All three record kinds are small and hot-read on every pass, so they are
+ * narrow typed columns rather than JSON documents; there is no prompt, event
+ * payload, host fact, or credential in any of them.
+ */
+export class SqliteRunReconnectRetryStore implements RunReconnectRetryStore {
+  readonly #db: DatabaseSync;
+  readonly #ownsDb: boolean;
+
+  constructor(options: { filename: string } | { db: DatabaseSync }) {
+    if ('db' in options) {
+      this.#db = options.db;
+      this.#ownsDb = false;
+    } else {
+      this.#db = new DatabaseSync(options.filename);
+      this.#ownsDb = true;
+      try {
+        migrateOrInitializeDatabase(this.#db, { filename: options.filename });
+      } catch (error) {
+        this.#db.close();
+        throw error;
+      }
+    }
+    this.#init();
+  }
+
+  #init(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS run_reconnect_gates (
+        project_id TEXT PRIMARY KEY,
+        armed INTEGER NOT NULL,
+        armed_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS run_reconnect_triggers (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        eligibility_settled INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS run_reconnect_triggers_project_idx
+        ON run_reconnect_triggers (project_id);
+      CREATE TABLE IF NOT EXISTS run_reconnect_retries (
+        original_run_id TEXT PRIMARY KEY,
+        trigger_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        retry_run_id TEXT,
+        queued_at INTEGER NOT NULL,
+        dispatched_at INTEGER,
+        settled_at INTEGER
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS run_reconnect_retries_retry_idx
+        ON run_reconnect_retries (retry_run_id);
+    `);
+  }
+
+  async getGate(projectId: string): Promise<ProjectRetryGate | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM run_reconnect_gates WHERE project_id = ?')
+      .get(projectId) as unknown as RetryGateRow | undefined;
+    return row === undefined ? undefined : toGate(row);
+  }
+
+  async armGate(projectId: string, now: number): Promise<void> {
+    const existing = this.#db
+      .prepare('SELECT armed FROM run_reconnect_gates WHERE project_id = ?')
+      .get(projectId) as unknown as { armed: number } | undefined;
+    if (existing?.armed === 1) return;
+    this.#db
+      .prepare(
+        `INSERT INTO run_reconnect_gates (project_id, armed, armed_at, updated_at)
+         VALUES (?, 1, ?, ?)
+         ON CONFLICT(project_id) DO UPDATE SET
+           armed = 1,
+           armed_at = excluded.armed_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(projectId, now, now);
+  }
+
+  async createTriggerIfArmed(
+    trigger: RunReconnectTrigger,
+  ): Promise<RunReconnectTrigger | undefined> {
+    const gate = this.#db
+      .prepare('SELECT armed, updated_at FROM run_reconnect_gates WHERE project_id = ?')
+      .get(trigger.projectId) as unknown as { armed: number; updated_at: number } | undefined;
+    if (gate?.armed !== 1) return undefined;
+    // Order matters for crash safety: the trigger row is inserted before the
+    // gate disarms. A crash in between leaves an armed gate and no trigger, so
+    // the worst case is one later extra trigger — whose per-run rows are keyed
+    // by the original run id — never a silently lost wave.
+    this.#db
+      .prepare(
+        'INSERT INTO run_reconnect_triggers (id, project_id, at, eligibility_settled) VALUES (?, ?, ?, 0)',
+      )
+      .run(trigger.id, trigger.projectId, trigger.at);
+    this.#db
+      .prepare('UPDATE run_reconnect_gates SET armed = 0, updated_at = ? WHERE project_id = ?')
+      .run(trigger.at, trigger.projectId);
+    return trigger;
+  }
+
+  async settleTrigger(triggerId: string): Promise<void> {
+    this.#db
+      .prepare('UPDATE run_reconnect_triggers SET eligibility_settled = 1 WHERE id = ?')
+      .run(triggerId);
+  }
+
+  async listUnsettledTriggers(): Promise<readonly RunReconnectTrigger[]> {
+    const rows = this.#db
+      .prepare('SELECT * FROM run_reconnect_triggers WHERE eligibility_settled = 0 ORDER BY at ASC, id ASC')
+      .all() as unknown as RetryTriggerRow[];
+    return rows.map(toTrigger);
+  }
+
+  async queueRetry(row: QueueRunReconnectRetry): Promise<boolean> {
+    const result = this.#db
+      .prepare(
+        `INSERT INTO run_reconnect_retries
+           (original_run_id, trigger_id, project_id, state, queued_at)
+         VALUES (?, ?, ?, 'queued', ?)
+         ON CONFLICT(original_run_id) DO NOTHING`,
+      )
+      .run(row.originalRunId, row.triggerId, row.projectId, row.now);
+    return result.changes === 1;
+  }
+
+  async getRetry(originalRunId: string): Promise<RunReconnectRetry | undefined> {
+    const row = this.#db
+      .prepare('SELECT * FROM run_reconnect_retries WHERE original_run_id = ?')
+      .get(originalRunId) as unknown as RetryRow | undefined;
+    return row === undefined ? undefined : toRetry(row);
+  }
+
+  async markDispatched(
+    originalRunId: string,
+    retryRunId: string,
+    now: number,
+  ): Promise<boolean> {
+    const result = this.#db
+      .prepare(
+        `UPDATE run_reconnect_retries
+           SET state = 'dispatched', retry_run_id = ?, dispatched_at = ?
+         WHERE original_run_id = ? AND state = 'queued'`,
+      )
+      .run(retryRunId, now, originalRunId);
+    return result.changes === 1;
+  }
+
+  async markSettled(originalRunId: string, now: number): Promise<void> {
+    this.#db
+      .prepare(
+        `UPDATE run_reconnect_retries
+           SET state = 'settled', settled_at = ?
+         WHERE original_run_id = ? AND state = 'dispatched'`,
+      )
+      .run(now, originalRunId);
+  }
+
+  async listRetries(): Promise<readonly RunReconnectRetry[]> {
+    const rows = this.#db
+      .prepare('SELECT * FROM run_reconnect_retries ORDER BY queued_at ASC, original_run_id ASC')
+      .all() as unknown as RetryRow[];
+    return rows.map(toRetry);
+  }
+
+  close(): void {
+    if (this.#ownsDb) {
+      this.#db.close();
+    }
+  }
+}
+
+function toGate(row: RetryGateRow): ProjectRetryGate {
+  return {
+    projectId: row.project_id,
+    armed: row.armed === 1,
+    ...(row.armed_at !== null ? { armedAt: row.armed_at } : {}),
+    updatedAt: row.updated_at,
+  };
+}
+
+function toTrigger(row: RetryTriggerRow): RunReconnectTrigger {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    at: row.at,
+    eligibilitySettled: row.eligibility_settled === 1,
+  };
+}
+
+function toRetry(row: RetryRow): RunReconnectRetry {
+  return {
+    originalRunId: row.original_run_id,
+    triggerId: row.trigger_id,
+    projectId: row.project_id,
+    state: row.state as RunReconnectRetryState,
+    ...(row.retry_run_id !== null ? { retryRunId: row.retry_run_id } : {}),
+    queuedAt: row.queued_at,
+    ...(row.dispatched_at !== null ? { dispatchedAt: row.dispatched_at } : {}),
+    ...(row.settled_at !== null ? { settledAt: row.settled_at } : {}),
   };
 }

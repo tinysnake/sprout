@@ -33,6 +33,7 @@ import {
 import { InMemoryProjectStore } from './project/store.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryRunStore } from './run/store.ts';
+import { InMemoryRunReconnectRetryStore } from './run/reconnect-retry-store.ts';
 import { InMemoryTaskStore } from './task/store.ts';
 import { InMemoryOperatorSessionStore } from './auth/store.ts';
 import { InMemoryEnrollmentStore } from './environment/enrollment-store.ts';
@@ -223,6 +224,7 @@ export function inMemoryStores(): MemoryStores {
   let closes = 0;
   return {
     runs,
+    runReconnectRetries: new InMemoryRunReconnectRetryStore(),
     leases: new InMemoryLeaseStore(),
     projects: new InMemoryProjectStore(),
     sessionKeys: new InMemorySessionKeyStore(),
