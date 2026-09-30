@@ -69,7 +69,18 @@ export function sanitizeUsagePayload<T>(value: T, keyName?: string): T {
   }
   if (typeof value === 'object' && value !== null) {
     const sanitized: Record<string, unknown> = {};
+    const routing = (value as Record<string, unknown>).kind === 'routing_attempt';
+    const forbiddenOwnership = new Set(['runId', 'agentId', 'taskId', 'environmentInstanceId']);
     for (const [key, val] of Object.entries(value)) {
+      // Service types are not a transport trust boundary: validate ownership
+      // again for both flattened drill-down identities and nested correlations.
+      if (routing && forbiddenOwnership.has(key)) continue;
+      if (routing && key === 'correlation' && typeof val === 'object' && val !== null) {
+        sanitized[key] = sanitizeUsagePayload(Object.fromEntries(
+          Object.entries(val).filter(([field]) => !forbiddenOwnership.has(field)),
+        ));
+        continue;
+      }
       if (/tokens?$/i.test(key) && !/secret|auth|access|session|bearer|cookie/i.test(key)) {
         sanitized[key] = sanitizeUsagePayload(val, key);
         continue;

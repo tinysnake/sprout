@@ -317,3 +317,33 @@ test('GET /api/usage/aggregate and drill-down routes', async () => {
     await h.api.close();
   }
 });
+
+
+test('HTTP serialization omits smuggled Routing ownership in aggregate identities and activity correlations', async () => {
+  const h = await openUsageHarness();
+  try {
+    const identity = {
+      activityId: 'routing', kind: 'routing_attempt', attemptId: 'attempt', batchId: 'batch',
+      projectId: 'project', agentId: 'agent', taskId: 'task', runId: 'run', environmentInstanceId: 'environment',
+    };
+    const aggregate = await h.usage.getAggregate({});
+    h.usage.getAggregate = async () => ({ ...aggregate, activityIdentities: [identity] });
+    h.usage.listActivities = async () => [{
+      id: 'routing', kind: 'routing_attempt', correlation: { ...identity },
+      engine: 'routing', model: 'wake', status: 'completed', createdAt: 1,
+    } as unknown as UsageActivity];
+    for (const route of ['aggregate', 'activities']) {
+      const response = await fetch(`${h.base}/api/usage/${route}`);
+      assert.equal(response.status, 200);
+      const payload = await response.json() as Record<string, any>;
+      const exported = route === 'aggregate' ? payload.activityIdentities[0] : payload.activities[0].correlation;
+      assert.equal(exported.attemptId, 'attempt');
+      assert.equal(exported.batchId, 'batch');
+      assert.equal(exported.projectId, 'project');
+      for (const forbidden of ['agentId', 'taskId', 'runId', 'environmentInstanceId']) {
+        assert.equal(Object.hasOwn(exported, forbidden), false, `Routing must not export ${forbidden}`);
+      }
+      assert.equal(identity.agentId, 'agent', 'serialization must not mutate service facts');
+    }
+  } finally { await h.api.close(); }
+});
