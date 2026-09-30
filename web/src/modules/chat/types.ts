@@ -1,7 +1,7 @@
 import type { InjectionKey } from 'vue';
 import type { MessageView, ProjectEventView, RunView } from '../../../../src/web/views.ts';
 import type { BrowserTransportState } from '../../transport/browser-transport.ts';
-import type { ConversationScopeView, ScopeInspectionView } from '../../adapters/conversation-api.ts';
+import type { ConversationScopeView, CreateWorkingGroupInput, ScopeInspectionView, WorkingGroupScopeView } from '../../adapters/conversation-api.ts';
 import type { RoutingBatchDetailView, RoutingBatchSummaryView, RoutingEvidenceView, RoutingWindowView } from '../../adapters/routing-api.ts';
 import type { MessageBrowserAdapter } from '../../adapters/message-api.ts';
 
@@ -12,6 +12,8 @@ export interface ChatService {
   listScopes(projectId: string): Promise<readonly ConversationScopeView[]>;
   inspectScope(scopeId: string): Promise<ScopeInspectionView>;
   openDirectConversation(projectId: string, participants: readonly string[]): Promise<ConversationScopeView>;
+  createWorkingGroup(projectId: string, input: CreateWorkingGroupInput): Promise<WorkingGroupScopeView>;
+  restoreWorkingGroup(id: string): Promise<WorkingGroupScopeView>;
   listMessages(scopeId?: string): ReturnType<MessageBrowserAdapter['listMessages']>;
   postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }): ReturnType<MessageBrowserAdapter['postMessage']>;
   listProjectEvents(projectId: string): Promise<readonly ProjectEventView[]>;

@@ -19,6 +19,8 @@ export class ProductionChatService implements ChatService {
   listScopes: ChatService['listScopes'] = (id) => this.ports.conversations.listScopes(id);
   inspectScope: ChatService['inspectScope'] = (id) => this.ports.conversations.inspectScope(id);
   openDirectConversation: ChatService['openDirectConversation'] = (id, participants) => this.ports.conversations.openDirectConversation(id, { participants });
+  createWorkingGroup: ChatService['createWorkingGroup'] = (id, input) => this.ports.conversations.createWorkingGroup(id, input);
+  restoreWorkingGroup: ChatService['restoreWorkingGroup'] = (id) => this.ports.conversations.restoreWorkingGroup(id);
   listMessages: ChatService['listMessages'] = (id) => this.ports.messages.listMessages(id);
   postMessage: ChatService['postMessage'] = (input) => this.ports.messages.postMessage(input);
   listProjectEvents: ChatService['listProjectEvents'] = (id) => this.ports.messages.listProjectEvents(id);

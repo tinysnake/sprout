@@ -418,10 +418,38 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
     (doc.querySelector('.chat-composer button') as HTMLButtonElement).click();
     await settle(100);
     assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /First message/);
+    await router.push('/project/chat');
+    await settle(70);
+    (doc.querySelector('.chat-direct-unopened') as HTMLButtonElement).click();
+    await settle(100);
+    assert.equal(router.currentRoute.value.params['scopeId'], 'dm-programmer', 'a project Agent opens an idempotent Project-scoped direct conversation');
+    assert.ok(doc.querySelector('[data-scope-id="dm-programmer"]'));
+    await router.push('/project/chat');
+    await settle(70);
+    (doc.querySelector('.chat-info-btn') as HTMLButtonElement).click();
+    await settle(60);
+    assert.match(doc.body.textContent ?? '', /Conversation Details —/, 'info dialog works after navigating back');
+    (doc.querySelector('.close-chat-info-btn') as HTMLButtonElement).click();
+    await settle(60);
+    (doc.querySelector('.chat-create-wg') as HTMLButtonElement).click();
+    await settle(120);
+    const name = doc.querySelector('#chat-wg-name') as HTMLInputElement;
+    assert.ok(name, 'the Working Group composer opens');
+    name.value = 'Focused Review';
+    name.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    (doc.querySelector('.chat-create-wg-submit') as HTMLButtonElement).click();
+    await settle(100);
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /No messages yet/);
+    assert.ok([...doc.querySelectorAll('[data-scope-kind="working-group"]')].some((item) => /Focused Review/.test(item.textContent ?? '')));
     await router.push('/project/chat/wg-retired');
     await settle(100);
     assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /disbanded.*read-only/i);
     assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, true);
+    (doc.querySelector('.chat-readonly-banner button') as HTMLButtonElement).click();
+    await settle(100);
+    assert.equal(doc.querySelector('.chat-readonly-banner'), null, 'restore rechecks server admission');
+    assert.equal((doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, false);
     await router.push('/project/chat/dm-ended');
     await settle(100);
     assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /membership has ended/i);
@@ -514,4 +542,38 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
     assert.equal(loadingHarness.doc.querySelector('.chat-loading-state')?.getAttribute('aria-busy'), 'true');
     app.unmount();
   } finally { await loadingHarness.cleanup(); }
+});
+
+test('a refused Message response reuses its delivery key when the unchanged draft is retried', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const fixture = new FixtureChatService();
+    const post = fixture.postMessage.bind(fixture);
+    const keys: string[] = [];
+    fixture.postMessage = async (input) => {
+      keys.push(input.deliveryKey);
+      if (keys.length === 1) throw new Error('response lost after delivery');
+      return post(input);
+    };
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(140);
+    const input = doc.querySelector('.chat-composer input') as HTMLInputElement;
+    input.value = 'Please inspect the evidence';
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await settle(20);
+    (doc.querySelector('.chat-composer button') as HTMLButtonElement).click();
+    await settle(50);
+    assert.match(doc.body.textContent ?? '', /Message was not sent/);
+    assert.equal(input.value, 'Please inspect the evidence', 'the draft remains for retry');
+    (doc.querySelector('.chat-composer button') as HTMLButtonElement).click();
+    await settle(80);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0], keys[1], 'retry cannot create a second delivery/wake');
+    assert.match(doc.querySelector('.chat-messages-body')?.textContent ?? '', /Please inspect the evidence/);
+    app.unmount();
+  } finally { await cleanup(); }
 });

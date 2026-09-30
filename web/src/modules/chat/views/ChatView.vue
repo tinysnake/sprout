@@ -12,7 +12,7 @@ import { useShellConnection } from '../../../shell/use-shell-connection.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
 import Icon from '../../../primitives/Icon.vue';
 import Button from '../../../primitives/Button.vue';
-import Dialog from '../../../primitives/Dialog.vue';
+import ChatDialog from './ChatDialog.vue';
 import EmptyState from '../../../primitives/EmptyState.vue';
 
 const route = useRoute();
@@ -32,8 +32,14 @@ const detailLoading = ref(false);
 const error = ref('');
 const actionError = ref('');
 const newMessage = ref('');
+let pendingDelivery: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string } | null = null;
 const sending = ref(false);
 const infoOpen = ref(false);
+const createGroupOpen = ref(false);
+const groupName = ref('');
+const groupGoal = ref('');
+const groupMembers = ref<string[]>([]);
+const managingGroup = ref(false);
 const evidenceOpen = ref<string | null>(null);
 const evidence = ref<RoutingEvidenceView | null>(null);
 const evidenceLoading = ref(false);
@@ -44,12 +50,17 @@ const unreadVersion = ref(0);
 let generation = 0;
 let detailGeneration = 0;
 let unsubRuns: (() => void) | undefined;
+const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
 const requestedScopeId = computed(() => typeof route.params['scopeId'] === 'string' ? route.params['scopeId'] as string : '');
 const projectId = computed(() => typeof route.query['project'] === 'string' ? route.query['project'] as string : projects.value.find((p) => p.status === 'active')?.id ?? projects.value[0]?.id ?? '');
 const project = computed(() => projects.value.find((p) => p.id === projectId.value));
 const channelScopes = computed(() => scopes.value.filter((s) => s.kind === 'project'));
 const workingGroups = computed(() => scopes.value.filter((s) => s.kind === 'working-group'));
 const directScopes = computed(() => scopes.value.filter((s) => s.kind === 'direct'));
+const activeAgentMembers = computed(() => project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'agent' && m.endedAt === undefined) || []);
+const unopenedAgents = computed(() => {
+  return activeAgentMembers.value.filter((member) => !directScopes.value.some((scope) => scope.kind === 'direct' && scope.participants.includes(member.memberId)));
+});
 const missingScope = computed(() => !!requestedScopeId.value && !loading.value && !scopes.value.some((s) => s.id === requestedScopeId.value));
 const activeScope = computed(() => requestedScopeId.value ? scopes.value.find((s) => s.id === requestedScopeId.value) : channelScopes.value[0] ?? scopes.value[0]);
 const activeMessages = computed(() => messages.value.filter((m) => m.scopeId === activeScope.value?.id));
@@ -62,7 +73,6 @@ const unavailableReason = computed(() => !presentation.value.controlAvailable ? 
   inspection.value && !inspection.value.state.writable ? readOnlyReason(inspection.value.state.reason) : detailLoading.value ? 'Checking conversation admission before sending.' : '');
 const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined) : 'informational');
 const evidenceMessage = computed(() => messages.value.find((m) => m.id === evidenceOpen.value));
-const evidenceBatch = computed(() => evidence.value?.batches[0]);
 
 function currentVersion(p: ProjectAuthorityView) { return p.content.versions.find((v) => v.version === p.content.currentVersion) ?? p.content.versions.at(-1); }
 function title(scope: ConversationScopeView): string {
@@ -110,9 +120,12 @@ async function loadProject() {
 }
 async function refreshMessages() {
   if (!service || !projectId.value) return;
+  const id = projectId.value;
+  const token = generation;
   try {
-    const [all, projectEvents] = await Promise.all([service.listMessages(), service.listProjectEvents(projectId.value)]);
-    messages.value = all.filter((m) => m.projectId === projectId.value || scopes.value.some((s) => s.id === m.scopeId));
+    const [all, projectEvents] = await Promise.all([service.listMessages(), service.listProjectEvents(id)]);
+    if (token !== generation || id !== projectId.value) return;
+    messages.value = all.filter((m) => m.projectId === id || scopes.value.some((s) => s.id === m.scopeId));
     events.value = projectEvents;
     markVisible();
   } catch { actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
@@ -136,6 +149,41 @@ async function selectScope(scope: ConversationScopeView) {
   await nextTick();
   (document.querySelector('.chat-mobile-back') as HTMLElement | null)?.focus();
 }
+async function openAgentDirect(agentId: string) {
+  const humanId = project.value && currentVersion(project.value)?.memberships.find((member) => member.memberKind === 'human' && member.endedAt === undefined)?.memberId;
+  if (!service || !presentation.value.controlAvailable || !humanId || !projectId.value) return;
+  actionError.value = '';
+  try {
+    const scope = await service.openDirectConversation(projectId.value, [humanId, agentId]);
+    scopes.value = await service.listScopes(projectId.value);
+    await selectScope(scope);
+  } catch { actionError.value = 'Direct conversation could not be opened. No message was sent.'; announcer.announce(actionError.value); }
+}
+async function createGroup() {
+  if (!service || !projectId.value || !presentation.value.controlAvailable || project.value?.status !== 'active' || !groupName.value.trim() || managingGroup.value) return;
+  managingGroup.value = true;
+  actionError.value = '';
+  try {
+    const created = await service.createWorkingGroup(projectId.value, { displayName: groupName.value.trim(), ...(groupGoal.value.trim() ? { goal: groupGoal.value.trim() } : {}), memberIds: groupMembers.value });
+    scopes.value = await service.listScopes(projectId.value);
+    createGroupOpen.value = false;
+    groupName.value = ''; groupGoal.value = ''; groupMembers.value = [];
+    await selectScope(created);
+    announcer.announce(`Working Group ${title(created)} created.`);
+  } catch { actionError.value = 'Working Group was not created. Check membership and try again.'; announcer.announce(actionError.value); }
+  finally { managingGroup.value = false; }
+}
+async function restoreGroup() {
+  if (!service || !activeScope.value || activeScope.value.kind !== 'working-group' || !presentation.value.controlAvailable || managingGroup.value) return;
+  managingGroup.value = true;
+  try {
+    await service.restoreWorkingGroup(activeScope.value.id);
+    scopes.value = await service.listScopes(projectId.value);
+    await loadScope();
+    announcer.announce('Working Group restored; conversation is writable.');
+  } catch { actionError.value = 'Working Group cannot be restored until its members are eligible.'; announcer.announce(actionError.value); }
+  finally { managingGroup.value = false; }
+}
 async function closeScope() {
   const id = activeScope.value?.id;
   await router.push({ name: 'project-chat', query: route.query });
@@ -146,10 +194,17 @@ async function closeScope() {
 async function sendMessage() {
   if (!canSend.value || !newMessage.value.trim() || !service || !activeScope.value) return;
   const scopeId = activeScope.value.id;
+  const body = newMessage.value.trim();
+  // A transport refusal can follow durable delivery. Retrying the unchanged
+  // draft uses the same key so the server deduplicates rather than re-waking.
+  const deliveryKey = pendingDelivery?.scopeId === scopeId && pendingDelivery.body === body
+    ? pendingDelivery.deliveryKey : `web-${crypto.randomUUID()}`;
+  pendingDelivery = { scopeId, body, deliveryKey };
   sending.value = true;
   actionError.value = '';
   try {
-    await service.postMessage({ scopeId, body: newMessage.value.trim(), deliveryKey: `web-${crypto.randomUUID()}` });
+    await service.postMessage(pendingDelivery);
+    pendingDelivery = null;
     newMessage.value = '';
     await refreshMessages();
     announcer.announce(`Message sent to ${title(activeScope.value)}.`);
@@ -202,8 +257,15 @@ watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScope, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
-  unsubRuns = service?.subscribeRuns(() => { void refreshMessages(); }); });
-onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
+  unsubRuns = service?.subscribeRuns(() => {
+    void refreshMessages();
+    // Run settlement can reach the event stream just before its reply projection.
+    for (const delay of [400, 1500]) {
+      const timer = setTimeout(() => { refreshTimers.delete(timer); void refreshMessages(); }, delay);
+      refreshTimers.add(timer);
+    }
+  }); });
+onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
 </script>
 
 <template>
@@ -228,10 +290,10 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.re
         <div class="flex items-center justify-between px-2 pb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
           <span>Conversations &amp; Groups</span><span>{{ scopes.length }} Scopes</span>
         </div>
-        <template v-for="section in [{ label: 'Project Channels', items: channelScopes }, { label: `Working Groups (${workingGroups.length})`, items: workingGroups }, { label: `Direct Messages (${directScopes.length})`, items: directScopes }]" :key="section.label">
+        <template v-for="section in [{ label: 'Project Channels', items: channelScopes }, { label: `Working Groups (${workingGroups.length})`, items: workingGroups }, { label: `Direct Messages (${directScopes.length + unopenedAgents.length})`, items: directScopes }]" :key="section.label">
           <div class="chat-section border-t border-[var(--border-subtle)] pt-2">
-            <h2 class="px-2 pb-1 text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{{ section.label }}</h2>
-            <p v-if="!section.items.length" class="px-2 py-2 text-xs text-[var(--text-muted)]">No conversations yet.</p>
+            <div class="flex items-center justify-between px-2 pb-1"><h2 class="text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{{ section.label }}</h2><button v-if="section.label.startsWith('Working Groups')" type="button" class="chat-create-wg min-h-11 px-2 text-[11px] font-semibold text-[var(--accent-primary)] disabled:opacity-60" :disabled="!presentation.controlAvailable || project?.status !== 'active'" @click="createGroupOpen = true"><Icon name="plus" :size="12" /> New WG</button></div>
+            <p v-if="!section.items.length && !section.label.startsWith('Direct Messages')" class="px-2 py-2 text-xs text-[var(--text-muted)]">No conversations yet.</p>
             <button v-for="scope in section.items" :key="scope.id" type="button" :data-scope-id="scope.id" :data-scope-kind="scopeKind(scope)" :aria-current="activeScope?.id === scope.id ? 'page' : undefined"
               class="chat-scope-card mb-1 flex min-h-[64px] w-full items-start gap-2 rounded border p-2.5 text-left focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
               :class="activeScope?.id === scope.id ? 'border-[var(--accent-primary)] bg-[var(--bg-surface)] ring-1 ring-[var(--accent-primary)]' : 'border-transparent hover:border-[var(--border-strong)]'" @click="selectScope(scope)">
@@ -243,6 +305,11 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.re
                 <span v-if="unread(scope)" class="chat-unread-badge mt-1 inline-block rounded-full bg-[var(--accent-primary)] px-2 text-[10px] font-bold text-[var(--text-inverse)]">{{ unread(scope) }} new</span>
               </span>
             </button>
+            <template v-if="section.label.startsWith('Direct Messages')">
+              <button v-for="member in unopenedAgents" :key="member.memberId" type="button" :disabled="!presentation.controlAvailable" class="chat-direct-unopened mb-1 flex min-h-[64px] w-full items-center gap-2 rounded border border-transparent p-2.5 text-left text-xs hover:border-[var(--border-strong)] disabled:opacity-60" @click="openAgentDirect(member.memberId)">
+                <Icon name="agents" :size="17" class="text-[var(--accent-primary)]" /><span><strong class="block">@{{ member.memberId }}</strong><span class="block text-[10px] text-[var(--text-muted)]">Direct message · Open conversation</span><span class="block truncate text-[var(--text-secondary)]">{{ member.responsibilities.join('; ') || 'No messages yet with agent.' }}</span></span>
+              </button>
+            </template>
           </div>
         </template>
       </aside>
@@ -257,7 +324,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.re
           <Button v-if="activeScope" variant="secondary" size="icon" class="chat-info-btn h-10 w-10 shrink-0" title="Conversation Information" aria-label="Conversation Information" @click="infoOpen = true"><Icon name="info" :size="16" /></Button>
         </header>
         <div v-if="!presentation.controlAvailable" class="chat-offline-banner border-b border-[var(--yellow-attention)] bg-[var(--yellow-attention-bg)] p-3 text-xs" role="status">{{ presentation.label }}. Shown facts may be stale; control actions are disabled, not queued.</div>
-        <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</div>
+        <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><span><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</span><Button v-if="inspection.state.reason === 'working-group-disbanded' && project?.status === 'active'" variant="secondary" size="sm" class="min-h-11 shrink-0" :disabled="!presentation.controlAvailable || managingGroup" @click="restoreGroup">Restore WG</Button></div>
         <div v-if="actionError" class="p-3 text-xs text-[var(--red-action)]" role="alert">{{ actionError }}</div>
         <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto p-4" :aria-busy="detailLoading">
           <div v-if="detailLoading" class="chat-detail-loading text-xs text-[var(--text-muted)]" role="status">Checking conversation admission…</div>
@@ -302,13 +369,22 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); document.re
         </form>
       </section>
     </div>
-    <Dialog :open="infoOpen" :title="`Conversation Details — ${activeScope ? title(activeScope) : ''}`" description="Scope identity, admission and routing policy" @update:open="infoOpen = $event">
+    <ChatDialog :open="infoOpen" :title="`Conversation Details — ${activeScope ? title(activeScope) : ''}`" description="Scope identity, admission and routing policy" @update:open="infoOpen = $event">
       <div v-if="activeScope" class="space-y-3 text-xs text-[var(--text-secondary)]">
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong class="block text-sm">{{ title(activeScope) }} · {{ kindLabel(activeScope) }}</strong><span>Project: {{ project?.displayName }} · {{ projectId }}</span><p v-if="inspection?.context.workingGroup">Goal: {{ inspection.context.workingGroup.goal }} · Rules: {{ inspection.context.workingGroup.rules.join('; ') }}</p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Project Wake Policy</strong><p>{{ project && currentVersion(project)?.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (fixed collection window)' : 'Explicit Mentions Only' }}</p><p>Direct messages, exact mentions, and @all use deterministic addressing.</p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Recent routing batches</strong><p v-if="!batches.length">No routing batches recorded for this Project.</p><button v-for="batch in batches" :key="batch.id" class="block min-h-11 text-left text-[var(--accent-primary)]" @click="inspectBatch(batch.id)">Inspect Causal Routing Chain · {{ batch.id }} · {{ batch.status }}</button></div>
       </div>
       <template #footer><Button variant="primary" size="sm" class="close-chat-info-btn min-h-11" @click="infoOpen = false">Close</Button></template>
-    </Dialog>
+    </ChatDialog>
+    <ChatDialog :open="createGroupOpen" title="Create Working Group" description="Create a focused Project collaboration channel. The Human creator is included automatically." @update:open="createGroupOpen = $event">
+      <form class="flex flex-col gap-3 text-xs" @submit.prevent="createGroup">
+        <label for="chat-wg-name" class="font-bold">Working Group Name *</label><input id="chat-wg-name" v-model="groupName" type="text" required class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3" />
+        <label for="chat-wg-goal" class="font-bold">Working Group Goal (Optional)</label><input id="chat-wg-goal" v-model="groupGoal" type="text" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3" />
+        <fieldset><legend class="font-bold">Initial Agent Members</legend><label v-for="member in activeAgentMembers" :key="member.memberId" class="flex min-h-11 items-center gap-2"><input v-model="groupMembers" type="checkbox" :value="member.memberId" />@{{ member.memberId }} · {{ member.responsibilities.join('; ') }}</label></fieldset>
+        <p v-if="actionError" role="alert">{{ actionError }}</p>
+      </form>
+      <template #footer><Button variant="secondary" size="sm" class="min-h-11" @click="createGroupOpen = false">Cancel</Button><Button variant="primary" size="sm" class="chat-create-wg-submit min-h-11" :disabled="!groupName.trim() || managingGroup || !presentation.controlAvailable" @click="createGroup">Create Working Group</Button></template>
+    </ChatDialog>
   </div>
 </template>

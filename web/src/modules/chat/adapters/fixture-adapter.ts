@@ -51,6 +51,7 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 
 /** Test-only authority. Production bootstrap never imports it. */
 export class FixtureChatService implements ChatService {
+  readonly #scopes = [...scopes];
   readonly #messages = [...fixtureMessages];
   readonly #listeners = new Set<(run: RunView) => void>();
   private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
@@ -59,14 +60,36 @@ export class FixtureChatService implements ChatService {
   subscribeState(listener: (state: BrowserTransportState) => void) { listener(this.state()); return () => {}; }
   async listScopes(id: string): Promise<readonly ConversationScopeView[]> {
     if (this.options.loading) return new Promise(() => {});
-    return id === 'project-archived' ? [{ id: 'channel-project-archived', kind: 'project', projectId: id, createdAt: at, updatedAt: at }] : scopes;
+    return id === 'project-archived' ? [{ id: 'channel-project-archived', kind: 'project', projectId: id, createdAt: at, updatedAt: at }] : [...this.#scopes];
   }
   async inspectScope(id: string): Promise<ScopeInspectionView> {
-    const scope = scopes.find((candidate) => candidate.id === id) ?? { id, kind: 'project' as const, projectId: 'project-archived', createdAt: at, updatedAt: at };
-    const reason = scope.projectId === 'project-archived' || this.options.archived ? 'project-archived' : id === 'wg-retired' ? 'working-group-disbanded' : id === 'dm-ended' ? 'membership-ended' : undefined;
+    const scope = this.#scopes.find((candidate) => candidate.id === id) ?? { id, kind: 'project' as const, projectId: 'project-archived', createdAt: at, updatedAt: at };
+    const reason = scope.projectId === 'project-archived' || this.options.archived ? 'project-archived' : scope.kind === 'working-group' && scope.status === 'disbanded' ? 'working-group-disbanded' : id === 'dm-ended' ? 'membership-ended' : undefined;
     return { scope, state: { scopeId: id, writable: reason === undefined, ...(reason ? { reason } : {}) }, context: { scopeId: id, projectId: scope.projectId, kind: scope.kind, project: { contentVersion: 1, goal: 'Coordinate durable work.', rules: ['Share checkable evidence.'] }, ...(scope.kind === 'working-group' ? { workingGroup: { displayName: id, contentVersion: 1, goal: 'Coordinate focused work.', rules: ['Share checkable evidence.'] } } : {}) } };
   }
-  async openDirectConversation(id: string, participants: readonly string[]) { const existing = scopes.find((scope) => scope.kind === 'direct' && scope.projectId === id && participants.every((p) => scope.participants.includes(p))); if (!existing) throw new Error('No fixture direct conversation'); return existing; }
+  async openDirectConversation(id: string, participants: readonly string[]): Promise<ConversationScopeView> {
+    const existing = this.#scopes.find((scope) => scope.kind === 'direct' && scope.projectId === id && participants.every((p) => scope.participants.includes(p)));
+    if (existing) return existing;
+    if (id !== projectId || !participants.includes('operator') || participants.length !== 2) throw new Error('Not a current Project member');
+    const scope: ConversationScopeView = { id: `dm-${participants.find((p) => p !== 'operator')}`, kind: 'direct', projectId: id, participants, createdAt: at, updatedAt: at };
+    this.#scopes.push(scope);
+    return scope;
+  }
+  async createWorkingGroup(id: string, input: { readonly displayName: string; readonly goal?: string; readonly memberIds?: readonly string[] }): Promise<WorkingGroupScopeView> {
+    if (id !== projectId || !input.displayName.trim()) throw new Error('Working Group unavailable');
+    const created = group(`wg-created-${this.#scopes.length}`);
+    const result: WorkingGroupScopeView = { ...created, content: { currentVersion: 1, versions: [{ ...created.content.versions[0]!, displayName: input.displayName, goal: input.goal ?? '' }] }, memberships: [created.memberships[0]!, ...(input.memberIds ?? []).map((memberId) => ({ memberId, memberKind: 'agent', addedAt: at, addedBy: 'operator' }))] };
+    this.#scopes.push(result);
+    return result;
+  }
+  async restoreWorkingGroup(id: string): Promise<WorkingGroupScopeView> {
+    const index = this.#scopes.findIndex((scope) => scope.id === id && scope.kind === 'working-group' && scope.status === 'disbanded');
+    if (index < 0) throw new Error('Restore unavailable');
+    const before = this.#scopes[index] as WorkingGroupScopeView;
+    const restored: WorkingGroupScopeView = { ...before, status: 'active', lifecycle: [...before.lifecycle, { action: 'restore', at: at + 50, actorMemberId: 'operator', reason: 'Restored' }] };
+    this.#scopes[index] = restored;
+    return restored;
+  }
   async listMessages(scopeId?: string) { return this.#messages.filter((message) => !scopeId || message.scopeId === scopeId); }
   async postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }) {
     const message = makeMessage(`msg-sent-${input.deliveryKey}`, input.scopeId, input.body, at + 50 + this.#messages.length);
