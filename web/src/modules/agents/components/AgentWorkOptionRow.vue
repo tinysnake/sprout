@@ -13,6 +13,10 @@ import { optionStateLabel, optionStateVariant } from '../status.js';
  * the explicit up/down move buttons (touch), and ArrowUp/ArrowDown on the
  * drag handle or the row itself (keyboard). Every path emits the same
  * `move` event; the page turns it into one append-only configuration version.
+ *
+ * The row also offers the in-place edit (Spec story 37): it targets this
+ * option's identity and leaves its priority position alone, so the page can
+ * send the same ordered list back through one reconfiguration.
  */
 const props = defineProps<{
   option: AgentWorkOptionRow;
@@ -25,6 +29,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'move', payload: { from: number; to: number }): void;
   (e: 'remove', optionId: string): void;
+  /** In-place edit (Spec story 37): same option identity, same priority. */
+  (e: 'edit', optionId: string): void;
 }>();
 
 const dragged = ref(false);
@@ -145,7 +151,7 @@ function handleRowKeydown(event: KeyboardEvent) {
       <span class="sr-only">{{ option.compatibilityReason }}</span>
     </div>
 
-    <!-- Right: move up / move down / remove (touch and keyboard parity) -->
+    <!-- Right: move up / move down / edit / remove (touch and keyboard parity) -->
     <div v-if="props.editable" class="agent-option-actions flex items-center gap-1 shrink-0">
       <Button
         variant="ghost"
@@ -169,6 +175,17 @@ function handleRowKeydown(event: KeyboardEvent) {
         @click.stop="move(index + 1)"
       >
         <Icon name="chevron-down" :size="12" />
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="xs"
+        class="edit-opt-btn h-7 w-7 p-0"
+        title="Edit Work Option"
+        :aria-label="`Edit ${option.engine} work option`"
+        @click.stop="emit('edit', option.id)"
+      >
+        <Icon name="guide" :size="12" />
       </Button>
 
       <Button

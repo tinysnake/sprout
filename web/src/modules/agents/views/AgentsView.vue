@@ -27,6 +27,7 @@ import CreateAgentDialog from '../components/CreateAgentDialog.vue';
 import EditAgentDialog from '../components/EditAgentDialog.vue';
 import EditInstructionsDialog from '../components/EditInstructionsDialog.vue';
 import AddWorkOptionDialog from '../components/AddWorkOptionDialog.vue';
+import EditWorkOptionDialog from '../components/EditWorkOptionDialog.vue';
 import ArchiveAgentDialog from '../components/ArchiveAgentDialog.vue';
 import AgentGuideDialog from '../components/AgentGuideDialog.vue';
 import MobileDetailHeader from '../../../shell/MobileDetailHeader.vue';
@@ -75,6 +76,7 @@ const isGuideOpen = ref(false);
 const isEditOpen = ref(false);
 const isEditInstructionsOpen = ref(false);
 const isAddOptionOpen = ref(false);
+const isEditOptionOpen = ref(false);
 const isArchiveOpen = ref(false);
 
 // The last typed refusal per dialog, rendered inline and announced.
@@ -82,7 +84,12 @@ const createError = ref('');
 const editError = ref('');
 const instructionsError = ref('');
 const addOptionError = ref('');
+const editOptionError = ref('');
 const archiveError = ref('');
+
+// The option the edit dialog targets: an identity only, so the draft always
+// prefills from the stored record the dialog names.
+const editingOptionId = ref('');
 
 async function loadData() {
   const service = activeService.value;
@@ -198,6 +205,20 @@ const selectedAgent = computed<AgentInstance | undefined>(() => {
 
 const selectedId = ref<string>('');
 
+/** The option the edit dialog edits, resolved from the selected record. */
+const editingOption = computed(() => {
+  if (editingOptionId.value === '') return undefined;
+  return selectedAgent.value?.workOptions.find((option) => option.id === editingOptionId.value);
+});
+
+/** Its 1-based priority, for the dialog title. */
+const editingPriority = computed(() => {
+  const agent = selectedAgent.value;
+  if (agent === undefined || editingOptionId.value === '') return undefined;
+  const index = agent.workOptions.findIndex((option) => option.id === editingOptionId.value);
+  return index === -1 ? undefined : index + 1;
+});
+
 function handleSelectAgent(id: string) {
   selectedId.value = id;
   // Push the route so phone drills down and the record is URL-addressable.
@@ -297,6 +318,65 @@ async function handleMoveOption(agent: AgentInstance, from: number, to: number) 
   if (outcome.ok) {
     announcer.announce(`${moved.engine.toUpperCase()} moved to priority ${to + 1}.`);
   } else {
+    announcer.announce(outcome.message);
+  }
+}
+
+/**
+ * Opens the in-place editor for one option (Spec story 37).
+ *
+ * Only the dialog's target identity is remembered; the draft itself is
+ * prefilled by the dialog from the stored option, so what the operator sees
+ * is exactly what is durable.
+ */
+function openEditOption(agent: AgentInstance, optionId: string) {
+  if (!agent.workOptions.some((option) => option.id === optionId)) return;
+  editOptionError.value = '';
+  editingOptionId.value = optionId;
+  isEditOptionOpen.value = true;
+}
+
+/**
+ * Saves one option's engine, model, and effort in place.
+ *
+ * The ordered list is submitted with every option identity intact and this
+ * option's position unchanged: the port appends one configuration version and
+ * rewrites none, so earlier versions — and every run admitted under them —
+ * keep the facts they were admitted with (Spec story 37). A refusal keeps the
+ * dialog open with the typed message; nothing is swallowed.
+ */
+async function handleEditOption(
+  agent: AgentInstance,
+  optionId: string,
+  update: { engine: string; workModel: string; effort: string }
+) {
+  editOptionError.value = '';
+  const index = agent.workOptions.findIndex((option) => option.id === optionId);
+  if (index === -1) {
+    editOptionError.value = REFUSAL_FALLBACK;
+    announcer.announce(editOptionError.value);
+    return;
+  }
+  const input: ReconfigureAgentInput = {
+    workOptions: agent.workOptions.map((option, position) =>
+      position === index
+        ? { id: option.id, engine: update.engine, workModel: update.workModel, effort: update.effort }
+        : {
+            id: option.id,
+            engine: option.engine,
+            workModel: option.workModel,
+            effort: option.effort,
+          }
+    ),
+    reason: `Edited the ${update.engine} work option at priority ${index + 1}.`,
+  };
+  const outcome = await runControl((service) => service.reconfigureAgent(agent.id, input));
+  if (outcome.ok) {
+    isEditOptionOpen.value = false;
+    editingOptionId.value = '';
+    announcer.announce(`Work option at priority ${index + 1} updated as a new configuration version.`);
+  } else {
+    editOptionError.value = outcome.message;
     announcer.announce(outcome.message);
   }
 }
@@ -536,6 +616,7 @@ function currentOptionInputs(agent: AgentInstance) {
               @edit="(agent) => (isEditOpen = true)"
               @edit-instructions="(agent) => (isEditInstructionsOpen = true)"
               @add-option="(agent) => (isAddOptionOpen = true)"
+              @edit-option="(payload) => openEditOption(payload.agent, payload.optionId)"
               @move-option="(payload) => handleMoveOption(payload.agent, payload.from, payload.to)"
               @remove-option="(payload) => handleRemoveOption(payload.agent, payload.optionId)"
               @archive="(agent) => ((archiveError = ''), (isArchiveOpen = true))"
@@ -557,6 +638,7 @@ function currentOptionInputs(agent: AgentInstance) {
               @edit="(agent) => (isEditOpen = true)"
               @edit-instructions="(agent) => (isEditInstructionsOpen = true)"
               @add-option="(agent) => (isAddOptionOpen = true)"
+              @edit-option="(payload) => openEditOption(payload.agent, payload.optionId)"
               @move-option="(payload) => handleMoveOption(payload.agent, payload.from, payload.to)"
               @remove-option="(payload) => handleRemoveOption(payload.agent, payload.optionId)"
               @archive="(agent) => ((archiveError = ''), (isArchiveOpen = true))"
@@ -615,6 +697,17 @@ function currentOptionInputs(agent: AgentInstance) {
       :disabled="controlsDisabled"
       @update:open="isAddOptionOpen = $event"
       @confirm="(payload) => handleAddOption(selectedAgent!, payload)"
+    />
+
+    <EditWorkOptionDialog
+      v-if="selectedAgent"
+      :open="isEditOptionOpen"
+      :option="editingOption"
+      :priority="editingPriority"
+      :error="editOptionError"
+      :disabled="controlsDisabled"
+      @update:open="isEditOptionOpen = $event"
+      @confirm="(payload) => handleEditOption(selectedAgent!, editingOptionId, payload)"
     />
 
     <ArchiveAgentDialog
