@@ -4,7 +4,8 @@
  * Implements additive domain routes for:
  * - GET /api/usage/activities
  * - GET /api/usage/activities/:id
- * - POST /api/usage/activities/:id/observations
+ * Human HTTP is read-only; trusted adapters/reconciliation append corrections
+ * through UsageService with source, reason, and current-head supersession.
  * - GET /api/usage/aggregate (and /api/usage/summary)
  * - GET /api/usage/runs/:runId
  * - GET /api/usage/tasks/:taskId
@@ -23,11 +24,6 @@ import type { UsageService } from '../usage/service.ts';
 import type {
   UsageActivityKind,
   UsageActivityStatus,
-  MeasurementCompleteness,
-  DetailedTokenDimensions,
-  ApiEquivalentCostEstimate,
-  AttributableBilledCost,
-  BillingBasis,
 } from '../usage/model.ts';
 
 export interface UsageRouterOptions {
@@ -163,47 +159,10 @@ export function createUsageRouter(options: UsageRouterOptions): ApiRouter {
         return json(context, 200, detail);
       }
 
-      // 3. POST /api/usage/activities/:id/observations
+      // ADR-0010 forbids Human measurement editing, including payloads claiming
+      // provider provenance. Operator authentication is not producer authority.
       if (sub === 'activities' && segments[4] === 'observations' && segments.length === 5) {
-        if (method !== 'POST') {
-          return json(context, 405, { error: 'method not allowed' });
-        }
-        const activityId = segments[3]!;
-        let body: Record<string, unknown>;
-        try {
-          body = await context.readBody();
-        } catch {
-          return json(context, 400, { error: 'invalid json body' });
-        }
-
-        const supersedesObservationId = body['supersedesObservationId'];
-        const source = body['source'];
-        const reason = body['reason'];
-
-        if (typeof supersedesObservationId !== 'string' || typeof source !== 'string' || typeof reason !== 'string') {
-          return json(context, 400, {
-            error: 'required fields missing: supersedesObservationId, source, reason',
-          });
-        }
-
-        try {
-          const observation = await usage.recordDelayedObservation({
-            activityId,
-            supersedesObservationId,
-            source,
-            sourceVersion: typeof body['sourceVersion'] === 'string' ? body['sourceVersion'] : undefined,
-            reason,
-            tokens: body['tokens'] as DetailedTokenDimensions | undefined,
-            completeness: body['completeness'] as MeasurementCompleteness | undefined,
-            costEstimate: body['costEstimate'] as ApiEquivalentCostEstimate | undefined,
-            billedCost: body['billedCost'] as AttributableBilledCost | undefined,
-            billingBasis: body['billingBasis'] as BillingBasis | undefined,
-          });
-          return json(context, 201, { observation });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return json(context, 400, { error: message });
-        }
+        return json(context, 405, { error: 'usage observations are read-only on the Human HTTP surface' });
       }
 
       // 4. GET /api/usage/aggregate and GET /api/usage/summary

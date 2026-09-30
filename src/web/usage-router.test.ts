@@ -130,7 +130,7 @@ test('GET /api/usage/activities/:id returns activity detail with observations an
   }
 });
 
-test('POST /api/usage/activities/:id/observations appends delayed observation', async () => {
+test('Human HTTP cannot append provider or billed facts even with a correction-shaped payload', async () => {
   const h = await openUsageHarness();
   try {
     await h.store.recordActivity({
@@ -166,6 +166,10 @@ test('POST /api/usage/activities/:id/observations appends delayed observation', 
         supersedesObservationId: 'obs-initial',
         source: 'codex.turn_cost',
         reason: 'Delayed provider estimate arrived via OTLP',
+        tokens: { inputTokens: 999 },
+        completeness: 'complete',
+        billingBasis: 'metered_api',
+        billedCost: { status: 'available', currency: 'USD', billedUsdMicros: 999 },
         costEstimate: {
           status: 'available',
           currency: 'USD',
@@ -176,18 +180,11 @@ test('POST /api/usage/activities/:id/observations appends delayed observation', 
       }),
     });
 
-    assert.equal(res.status, 201);
-    const body = (await res.json()) as { observation: UsageObservation };
-    assert.equal(body.observation.supersedesObservationId, 'obs-initial');
-    assert.equal(body.observation.costEstimate.valuationProvenance, 'provider_estimated');
-    assert.equal(body.observation.costEstimate.apiEquivalentUsdMicros, 550);
-
-    // Verify activity detail now has effective observation pointing to the new one
+    assert.equal(res.status, 405);
     const detail = await h.usage.getActivity('act-1');
-    assert.equal(detail?.effectiveObservation?.id, body.observation.id);
-    assert.equal(detail?.observations.length, 2);
-    assert.equal(detail?.observations[0]?.isEffective, false);
-    assert.equal(detail?.observations[1]?.isEffective, true);
+    assert.equal(detail?.effectiveObservation?.id, 'obs-initial');
+    assert.equal(detail?.observations.length, 1);
+    assert.equal(detail?.effectiveObservation?.billedCost.status, 'unavailable');
   } finally {
     await h.api.close();
   }
@@ -201,7 +198,7 @@ test('POST /api/usage/activities/:id/observations rejects invalid payload', asyn
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ missingRequiredFields: true }),
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 405);
   } finally {
     await h.api.close();
   }
