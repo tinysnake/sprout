@@ -1,4 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
+import { SqliteOperationalStore } from '../operations/sqlite-store.ts';
+import { diagnosticSubject } from '../operations/service.ts';
 
 import { SqliteRunStore, SqliteSessionKeyStore, SqliteRunReconnectRetryStore } from '../run/sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
@@ -20,6 +23,7 @@ import { SqliteProjectCreationStore } from '../project/creation-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
 import {
   getSchemaVersion,
+  isDatabaseEmpty,
   migrateOrInitializeDatabase,
   type MigrationStep,
   type SchemaVersionRange,
@@ -94,6 +98,13 @@ export {
  *   (`environment/sqlite-recovery-store.ts`)
  */
 
+function recordMigrationFact(db: DatabaseSync, state: 'initialized' | 'migrated' | 'unchanged'): void {
+  new SqliteOperationalStore(db);
+  db.prepare('INSERT INTO operational_events(subject, kind, state, at) VALUES (?, ?, ?, ?)').run(
+    diagnosticSubject(randomUUID()), 'migration', state, Date.now(),
+  );
+}
+
 export interface SqliteStoreOptions {
   /** A file path, or `:memory:` for tests. */
   readonly filename: string;
@@ -135,9 +146,12 @@ export class SqliteStore {
   readonly workerConnectionEpochs: SqliteWorkerConnectionEpochStore;
   readonly recovery: SqliteRecoveryStore;
   readonly schemaVersion: number;
+  readonly operations: SqliteOperationalStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    const previousVersion = getSchemaVersion(this.db);
+    const previouslyEmpty = isDatabaseEmpty(this.db);
     try {
       migrateOrInitializeDatabase(this.db, {
         filename: options.filename,
@@ -146,12 +160,19 @@ export class SqliteStore {
         supportedRange: options.supportedSchemaRange,
         createSafetyCopy: options.createSafetyCopy,
         migrations: options.migrations,
+        recordSchemaTransition: (db, transition) => {
+          if (transition.toVersion >= 22) recordMigrationFact(db, transition.kind);
+        },
       });
     } catch (error) {
       this.db.close();
       throw error;
     }
     this.schemaVersion = getSchemaVersion(this.db);
+    this.operations = new SqliteOperationalStore(this.db);
+    if (this.schemaVersion >= 22 && !previouslyEmpty && previousVersion === this.schemaVersion) {
+      recordMigrationFact(this.db, 'unchanged');
+    }
     // The one connection's transaction lifecycle: a cross-domain boundary (the
     // Task begin/end lease binding) runs through this, so neither the Task nor
     // the environment adapter owns `BEGIN`/`COMMIT` on the other's table.

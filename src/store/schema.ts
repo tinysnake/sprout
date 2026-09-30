@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 23;
+export const CURRENT_SCHEMA_VERSION = 24;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 23;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 24;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1066,6 +1066,15 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       }
     },
   },
+  {
+    fromVersion: 23,
+    toVersion: 24,
+    name: 'operational_diagnostics',
+    migrate: (db) => db.exec(`CREATE TABLE IF NOT EXISTS operational_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      subject TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL
+    ); CREATE INDEX IF NOT EXISTS operational_events_subject ON operational_events(subject, kind, sequence);`),
+  },
 ];
 
 /** Resolve even an adversarial candidate collision without exposing legacy keys. */
@@ -1090,6 +1099,13 @@ function collisionSafeCatalogId(
   }
 }
 
+/** A completed schema transition that must be recorded with the schema commit. */
+export interface SchemaTransition {
+  readonly kind: 'initialized' | 'migrated';
+  readonly fromVersion: number;
+  readonly toVersion: number;
+}
+
 /** Options for database migration and initialization. */
 export interface MigrateDatabaseOptions {
   readonly filename: string;
@@ -1100,6 +1116,8 @@ export interface MigrateDatabaseOptions {
     | ((sourceDb: DatabaseSync, sourceFilename: string, safetyCopyPath: string) => void)
     | undefined;
   readonly migrations?: readonly MigrationStep[] | undefined;
+  /** Synchronous durable fact writer, invoked inside the schema transaction. */
+  readonly recordSchemaTransition?: ((db: DatabaseSync, transition: SchemaTransition) => void) | undefined;
 }
 
 /**
@@ -1156,9 +1174,22 @@ export function migrateOrInitializeDatabase(
   const currentVersion = getSchemaVersion(db);
   const empty = isDatabaseEmpty(db);
 
-  // 2. If empty, initialize directly at target version (no safety copy needed)
+  // 2. Initialize empty stores transactionally so schema version and its
+  // transition fact cannot be separated by a restart.
   if (empty) {
-    setSchemaVersion(db, targetVersion);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      setSchemaVersion(db, targetVersion);
+      options.recordSchemaTransition?.(db, { kind: 'initialized', fromVersion: currentVersion, toVersion: targetVersion });
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // preserve original error
+      }
+      throw error;
+    }
     return;
   }
 
@@ -1216,6 +1247,7 @@ export function migrateOrInitializeDatabase(
       step.migrate(db);
       setSchemaVersion(db, step.toVersion);
     }
+    options.recordSchemaTransition?.(db, { kind: 'migrated', fromVersion: currentVersion, toVersion: targetVersion });
     db.exec('COMMIT');
   } catch {
     try {

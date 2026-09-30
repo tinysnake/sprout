@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteStore } from '../store/db.ts';
+import { CURRENT_SCHEMA_VERSION } from '../store/schema.ts';
 import { TaskProposalService } from './proposal-service.ts';
 
 test('v21 forward migration keeps old durable facts and creates proposals behind a safety copy', async () => {
@@ -16,7 +17,7 @@ test('v21 forward migration keeps old durable facts and creates proposals behind
     legacy.close();
     const current = new SqliteStore({ filename });
     try {
-      assert.equal(current.schemaVersion, 23);
+      assert.equal(current.schemaVersion, CURRENT_SCHEMA_VERSION);
       assert.ok(existsSync(`${filename}.safety-copy`));
       assert.equal(current.db.prepare('SELECT fact FROM existing_facts').get()!.fact, 'Preserved');
       const service = new TaskProposalService({ store: current.taskProposals, agents: { agentIsActive: () => true }, projects: { projectFacts: async () => ({
@@ -52,7 +53,7 @@ test('v22 additive provenance migration explicitly reads historical direct propo
 
     const current = new SqliteStore({ filename });
     try {
-      assert.equal(current.schemaVersion, 23);
+      assert.equal(current.schemaVersion, CURRENT_SCHEMA_VERSION);
       const restored = await current.taskProposals.get(oldProposal.id);
       assert.equal(restored?.origin, null);
       assert.equal(restored?.versions[0]?.goal, 'Preserved');

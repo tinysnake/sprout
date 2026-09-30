@@ -1,4 +1,7 @@
 import { existsSync } from 'node:fs';
+import { OperatorDiagnostics } from './operations/module.ts';
+import { MemoryOperationalStore, type OperationalStore } from './operations/service.ts';
+import { createOperatorRouter } from './web/operator-router.ts';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -147,6 +150,8 @@ export type { TaskContextWorker };
  * the in-memory adapters, so the same graph is exercised either way.
  */
 export interface RuntimeStores {
+  readonly operations?: OperationalStore;
+  readonly schemaVersion?: number;
   readonly runs: RunStore;
   /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
   readonly runReconnectRetries: RunReconnectRetryStore;
@@ -1187,6 +1192,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // Refreshes read several independently durable sources. A slow older read
     // must never publish after a newer epoch/readiness observation: doing so
     // would turn a current fact back into a stale catalog projection.
+    let operations: OperatorDiagnostics | undefined;
     let catalogProjectionRevision = 0;
     const refreshEnvironmentCatalog = async (): Promise<readonly EnvironmentCatalogEntry[]> => {
       const revision = ++catalogProjectionRevision;
@@ -1235,6 +1241,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       }
       if (revision !== catalogProjectionRevision) return environmentCatalog.entries();
       environmentCatalog.update(inputs);
+      await operations?.capture();
       publishCatalogMembership();
       return environmentCatalog.entries();
     };
@@ -1627,6 +1634,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     };
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
+    operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery, connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined });
+    await operations.start();
+    await operations.capture();
     const api = createRunApi({
       orchestrator,
       agents,
@@ -1651,6 +1661,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (#88) are composed through the same seam and delegate every safety rule
       // to the recovery service.
       routers: [
+        createOperatorRouter(operations),
         createEnvironmentRouter({ enrollments, recovery, archive, requestProbe: requestWorkerProbe }),
         // Durable Project, template-snapshot, and membership authority (#92),
         // composed through the same #85 additive seam. Only the authenticated
