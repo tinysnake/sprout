@@ -19,6 +19,19 @@ test('routing evidence keeps pending, suppressed, fail-closed, deterministic and
   assert.equal(evidenceState(eventEvidence as RoutingEvidenceView), 'informational');
 });
 
+test('a reply-less direct message with a failed run labels the run outcome, not an inference', async () => {
+  const service = new FixtureChatService();
+  const message = (await service.listMessages()).find((item) => item.id === 'msg-dm-failed')!;
+  const evidence = await service.messageRouting('msg-dm-failed');
+
+  // Without a run outcome the durable wake still reads as routed…
+  assert.equal(evidenceState(evidence, message), 'routed');
+  // …and the server's `{id,status}` projection makes the failed run decisive.
+  assert.equal(evidenceState(evidence, message, 'failed'), 'run-failed');
+  assert.equal(evidenceState(evidence, message, 'running'), 'routed', 'a live run is not a failure');
+  assert.equal(evidence.deterministicWakes[0]?.runId, 'run-failed', 'the WakeRequest links the durable run');
+});
+
 test('admission refusals preserve distinct read-only reasons', () => {
   assert.match(readOnlyReason('project-archived'), /archived/);
   assert.match(readOnlyReason('working-group-disbanded'), /disbanded/);

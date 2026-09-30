@@ -28,8 +28,19 @@ const fixtureMessages: MessageView[] = [
   makeMessage('msg-retired', 'wg-retired', 'History is preserved.', at + 7),
   makeMessage('msg-dm', 'dm-architect', 'Lease recovery evidence attached.', at + 8),
   makeMessage('msg-ended', 'dm-ended', 'Previous collaboration.', at + 9),
+  // A reply-less direct message whose admitted run settled failed (#180): the
+  // evidence affordance must still open WakeRequest → run outcome from server
+  // evidence, with no reply to anchor on.
+  makeMessage('msg-dm-failed', 'dm-architect', 'Investigate the failed run.', at + 10),
 ];
 const event: ProjectEventView = { id: 'event-review', projectId, kind: 'task-update', summary: 'Task review completed.', producerId: 'system', producerKind: 'system', disposition: 'informational', responsibleAgentIds: [], createdAt: at + 3.5 };
+/** The system run-lifecycle failure entry (#180): labelled, informational, non-routing. */
+const runFailureEvent: ProjectEventView = {
+  id: 'event-run-failure', projectId, kind: 'agent-run-failure',
+  summary: 'Agent run failed (environment) for architect: no available environment for capability: agent-run',
+  detail: 'run run-failed · agent architect',
+  producerId: 'sprout', producerKind: 'system', disposition: 'informational', responsibleAgentIds: [], createdAt: at + 11,
+};
 const bounds = { inputContentChars: 4_000, contextMessageChars: 1_000, recentContextMessages: 12, totalContextChars: 48_000 };
 function batch(id: string, inputId: string, status: string): RoutingBatchDetailView {
   const window = { id: `window-${id}`, projectId, openedAt: at, deadlineAt: at + 30_000, intervalMs: 30_000, status: 'closed', inputCount: 1 };
@@ -46,6 +57,9 @@ const batches = [batch('batch-suppressed', 'msg-suppressed', 'suppressed'), batc
 function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvidenceView {
   if (id === 'msg-pending') return { input, window: { id: 'window-open', projectId, openedAt: at, deadlineAt: at + 30_000, intervalMs: 30_000, status: 'open', inputCount: 1 }, batches: [], deterministicWakes: [], observations: [] };
   if (id === 'msg-addressed') return { input, batches: [], deterministicWakes: [{ agentId: 'programmer', reason: 'mention', status: 'settled', runId: 'run-projected' }], observations: [] };
+  // The reply-less failed direct message: one admitted deterministic wake whose
+  // run is durable server evidence, and no reply by construction (#180).
+  if (id === 'msg-dm-failed') return { input, batches: [], deterministicWakes: [{ agentId: 'architect', reason: 'direct-recipient', status: 'admitted', runId: 'run-failed' }], observations: [] };
   return { input, batches: batches.filter((detail) => detail.inputs.some((entry) => entry.inputId === id)), deterministicWakes: [], observations: id.startsWith('reply-') ? [] : [{ agentId: '', status: 'suppressed', reason: 'unaddressed', detail: 'Explicit-only policy.' }] };
 }
 
@@ -53,9 +67,24 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 export class FixtureChatService implements ChatService {
   readonly #scopes = [...scopes];
   readonly #messages = [...fixtureMessages];
-  readonly #events = [event];
+  readonly #events = [event, runFailureEvent];
+  #idleEvents = 0;
   readonly #listeners = new Set<(run: { readonly id: string; readonly status: RunView['status'] }) => void>();
   private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
+  /**
+   * The full durable run record the Chat port must never receive (#98, #180).
+   *
+   * `getRunStatus` below returns `{id,status}` only, so no prompt or raw event
+   * can reach the evidence affordance; tests assert these markers stay out of
+   * the rendered page.
+   */
+  readonly withheldRunRecord: RunView = {
+    id: 'run-failed', agentId: 'architect',
+    prompt: 'PRIVATE-RUN-PROMPT full operator request text',
+    status: 'failed',
+    events: [{ type: 'command' as const, command: 'PRIVATE-RUN-EVENT tool output' }],
+    handOffAttached: false, createdAt: at, completedAt: at + 60_000,
+  };
   constructor(options: { readonly archived?: boolean; readonly loading?: boolean } = {}) { this.options = options; }
   state(): BrowserTransportState { return { status: 'online', connection: 'online', loading: false }; }
   subscribeState(listener: (state: BrowserTransportState) => void) { listener(this.state()); return () => {}; }
@@ -118,11 +147,12 @@ export class FixtureChatService implements ChatService {
   }
   async listProjectEvents(id: string) { return id === projectId ? [...this.#events] : []; }
   async messageRouting(id: string) { const message = this.#messages.find((item) => item.id === id); if (!message) throw new Error('Message not found'); return evidence({ kind: 'message', message: { ...message } }, id); }
-  async eventRouting(id: string): Promise<RoutingEvidenceView> { if (id !== event.id) throw new Error('Event not found'); return evidence({ kind: 'event', event: { ...event } }, id); }
+  async eventRouting(id: string): Promise<RoutingEvidenceView> { const target = this.#events.find((item) => item.id === id); if (!target) throw new Error('Event not found'); return evidence({ kind: 'event', event: { ...target } }, id); }
   async listRoutingBatches(id: string) { return { windows: batches.map((detail) => detail.window!), batches: id === projectId ? batches.map((detail) => detail.batch) : [] }; }
   async getRoutingBatch(id: string) { const detail = batches.find((entry) => entry.batch.id === id); if (!detail) throw new BrowserRequestError('rejected', 404); return detail; }
-  async getRun(id: string): Promise<RunView> { return { id, agentId: 'programmer', prompt: '', status: 'completed', events: [], handOffAttached: false, createdAt: at, completedAt: at + 30_300 }; }
-  async getRunStatus(id: string) { return { id, status: 'completed' as const }; }
+  async getRun(id: string): Promise<RunView> { return id === this.withheldRunRecord.id ? { ...this.withheldRunRecord } : { id, agentId: 'programmer', prompt: '', status: 'completed', events: [], handOffAttached: false, createdAt: at, completedAt: at + 30_300 }; }
+  /** The Chat run surface is the `{id,status}` privacy projection — nothing else (#98, #180). */
+  async getRunStatus(id: string) { return { id, status: (id === 'run-failed' ? 'failed' : 'completed') as 'failed' | 'completed' }; }
   subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async pushIncoming(scopeId: string, body: string) {
     this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, at + 100 + this.#messages.length, 'programmer', 'agent'));
@@ -134,6 +164,9 @@ export class FixtureChatService implements ChatService {
     this.#messages.push(makeMessage(`idle-${this.#messages.length}`, scopeId, body, at + 200 + this.#messages.length, 'programmer', 'agent'));
   }
   pushIdleEvent(summary: string) {
-    this.#events.push({ ...event, id: `idle-event-${this.#events.length}`, summary, createdAt: at + 300 + this.#events.length });
+    // Stable identity independent of how many authored events the fixture
+    // starts with, so page assertions address the same id every run.
+    this.#idleEvents += 1;
+    this.#events.push({ ...event, id: `idle-event-${this.#idleEvents}`, summary, createdAt: at + 300 + this.#idleEvents });
   }
 }

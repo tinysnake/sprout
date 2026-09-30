@@ -1,13 +1,22 @@
 import type { MessageView } from '../../../../src/web/views.ts';
 import type { RoutingEvidenceView } from '../../adapters/routing-api.ts';
 
-export type EvidenceState = 'projected' | 'pending' | 'failed' | 'suppressed' | 'routed' | 'informational';
+export type EvidenceState = 'projected' | 'pending' | 'failed' | 'suppressed' | 'routed' | 'run-failed' | 'informational';
 
 /** Evidence is a server projection; this function only labels its visible state. */
-export function evidenceState(evidence: RoutingEvidenceView, message?: MessageView): EvidenceState {
+export function evidenceState(
+  evidence: RoutingEvidenceView,
+  message?: MessageView,
+  runStatus?: string,
+): EvidenceState {
   const empty = !evidence.window && evidence.batches.length === 0 &&
     evidence.deterministicWakes.length === 0 && evidence.observations.length === 0;
   if (message?.authorKind === 'agent' && empty) return 'projected';
+  // A failed run is the decisive visible outcome for this input: the routing
+  // evidence stays durable, but the operator must first see that the admitted
+  // run settled failed and produced no reply. The status is the server's
+  // `{id,status}` projection — never a client inference (#98, #180).
+  if (runStatus === 'failed') return 'run-failed';
   if (evidence.window?.status === 'open' || evidence.batches.some((detail) => detail.batch.status === 'frozen')) return 'pending';
   if (evidence.batches.some((detail) => detail.batch.status === 'failed' || detail.outcomes.some((outcome) => outcome.status === 'failed')) ||
     evidence.observations.some((observation) => observation.status === 'failed')) return 'failed';

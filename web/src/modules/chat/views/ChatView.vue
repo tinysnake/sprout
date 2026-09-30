@@ -95,7 +95,7 @@ const canEnterText = computed(() => !!service && !!activeScope.value && !archive
 const unavailableReason = computed(() => !presentation.value.controlAvailable ? `${presentation.value.label}. Shown facts may be stale; control actions are disabled, not queued.` :
   archivedDirectAgent.value ? `Agent @${archivedDirectAgent.value.displayName} is archived. History is preserved for review; restore the Agent before sending new messages.` :
   inspection.value && !inspection.value.state.writable ? readOnlyReason(inspection.value.state.reason) : detailLoading.value ? 'Checking conversation admission before sending.' : '');
-const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined) : 'informational');
+const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined, provenance.value?.runStatus) : 'informational');
 const evidenceMessage = computed(() => messages.value.find((m) => m.id === evidenceOpen.value));
 
 function currentVersion(p: ProjectAuthorityView) { return p.content.versions.find((v) => v.version === p.content.currentVersion) ?? p.content.versions.at(-1); }
@@ -320,7 +320,26 @@ async function resolveProvenance(message: MessageView) {
   // reply id gives a lookup hint for event or multi-input batch replies; only
   // server evidence is displayed, never an inferred run or fabricated input.
   const hint = message.inReplyTo ?? (message.id.startsWith('reply-') ? message.id.slice(6).split(':').slice(0, -1).join(':') : '');
-  if (!hint) return;
+  if (!hint) {
+    // A reply-less input — for example a direct message whose run failed — has
+    // no reply to point back from. The evidence already loaded for this exact
+    // message carries its own durable WakeRequests, so the chain
+    // WakeRequest → run outcome is read from server evidence only: the run
+    // comes from a wake the server returned for this message, and its outcome
+    // from the `{id,status}` projection (Spec story 65, #180).
+    const wake = evidence.value === null
+      ? undefined
+      : [...evidence.value.deterministicWakes, ...evidence.value.batches.flatMap((detail) => detail.wakes)]
+          .find((candidate) => candidate.runId !== undefined);
+    if (wake?.runId === undefined) return;
+    const run = await service.getRunStatus(wake.runId).catch(() => undefined);
+    provenance.value = {
+      inputIds: [message.id],
+      runId: wake.runId,
+      ...(run !== undefined ? { runStatus: run.status } : {}),
+    };
+    return;
+  }
   try {
     let trigger: RoutingEvidenceView | undefined;
     try { trigger = await service.messageRouting(hint); } catch { try { trigger = await service.eventRouting(hint); } catch { /* may name a batch */ } }
@@ -344,7 +363,10 @@ async function openEvidence(id: string, kind: 'message' | 'event', trigger: Even
   try {
     evidence.value = kind === 'message' ? await service.messageRouting(id) : await service.eventRouting(id);
     const message = messages.value.find((item) => item.id === id);
-    if (message && evidenceState(evidence.value, message) === 'projected') void resolveProvenance(message);
+    // Every Message with evidence resolves its WakeRequest → run outcome — a
+    // reply-less input (for example a direct message whose run failed) has no
+    // reply to anchor on, so the chain resolves from this message's own wakes.
+    if (message) void resolveProvenance(message);
   } catch { announcer.announce('Routing evidence is unavailable.'); }
   finally { evidenceLoading.value = false; }
 }
@@ -452,6 +474,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
                     <p v-if="currentEvidenceState === 'projected'" class="font-bold text-[var(--purple-agent)]">Projected Reply · Non-Routing</p>
                     <p v-if="currentEvidenceState === 'projected'">Assistant output projected on completion cannot trigger downstream wake evaluations.</p>
                     <p v-if="provenance?.runId">Run: <code>{{ provenance.runId }}</code> · {{ provenance.runStatus ?? 'status unavailable' }}</p>
+                    <p v-if="currentEvidenceState === 'run-failed'" class="font-bold text-[var(--red-action)]">Run failed. No reply was produced for this message; the WakeRequest and run outcome above are server evidence.</p>
                     <p v-if="provenance?.inputIds.length">Triggered by: <code>{{ provenance.inputIds.join(', ') }}</code></p>
                     <p v-if="currentEvidenceState === 'pending'">Collection window open or frozen; wake-model judgement is pending. No outcome has been selected yet.</p>
                     <p v-if="evidence.window">Window: <code>{{ evidence.window.id }}</code> · {{ evidence.window.status }} · deadline {{ time(evidence.window.deadlineAt) }}</p>
