@@ -36,6 +36,7 @@ export const projects = new ProjectRegistry([
 ]);
 
 export function build(options: {
+  keepAliveMs?: number;
   settleAfterMs?: number;
   tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 } = {}) {
@@ -73,13 +74,14 @@ export function build(options: {
     store: new InMemoryRunStore(),
     leaseTtlMs: 60_000,
   });
-  const api = createRunApi({ orchestrator, agents: registry });
+  const api = createRunApi({ orchestrator, agents: registry, ...(options.keepAliveMs === undefined ? {} : { keepAliveMs: options.keepAliveMs }) });
   return { api, orchestrator, pool };
 }
 
 export async function withServer(
   fn: (base: string, context: ReturnType<typeof build>) => Promise<void>,
   options: {
+    keepAliveMs?: number;
     settleAfterMs?: number;
     tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
   } = {},

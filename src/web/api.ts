@@ -103,7 +103,7 @@ export interface RunApiOptions {
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
-  /** Interval for SSE keep-alive comments. Exposed so tests need not wait. */
+  /** Interval for SSE heartbeat events. Exposed so tests need not wait. */
   readonly keepAliveMs?: number;
   /** Additive M2 domain routers, run after transport authorization. */
   readonly routers?: readonly ApiRouter[];
@@ -964,7 +964,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
     for (const record of eventLog.after(cursor)) send(record);
     const unsubscribe = eventLog.subscribe(send);
 
-    const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
+    const keepAlive = setInterval(() => {
+      if (response.writableEnded) return;
+      response.write(': ping\n\nevent: heartbeat\ndata: \n\n');
+    }, options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
     keepAlive.unref?.();
 

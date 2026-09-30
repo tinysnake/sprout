@@ -798,7 +798,7 @@ test('a refused Message response reuses its delivery key when the unchanged draf
   } finally { await cleanup(); }
 });
 
-test('background connection checks never interrupt a typed draft or focus, but Send remains refused', async () => {
+test('background reads preserve typing, focus and Send authority', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
@@ -819,8 +819,8 @@ test('background connection checks never interrupt a typed draft or focus, but S
     input.value += ' still typing';
     input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     await settle(20);
-    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
-    assert.equal(doc.querySelector('.chat-offline-banner'), null, 'a brief check does not show the floating notice');
+    assert.equal((doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, false);
+    assert.equal(doc.querySelector('.chat-offline-banner'), null, 'a read is not a connection warning');
     controller.set({ status: 'online', connection: 'online', loading: false });
     await settle(25);
     assert.equal(input.value, 'Draft still typing');

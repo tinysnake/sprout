@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { describeConnection } from '../shell/connection.ts';
 import {
   BrowserRequestError,
   createBrowserTransport,
@@ -21,6 +22,9 @@ class FakeEventSource implements BrowserEventSource {
   close(): void { this.closed = true; }
   open(): void { this.onopen?.(new Event('open')); }
   error(): void { this.onerror?.(new Event('error')); }
+  heartbeat(): void {
+    this.#listeners.get('heartbeat')?.({ data: '' } as MessageEvent<string>);
+  }
   emitRun(data: unknown, cursor = ''): void {
     this.#listeners.get('run')?.({ data: JSON.stringify(data), lastEventId: cursor } as MessageEvent<string>);
   }
@@ -40,13 +44,14 @@ test('browser transport sends CSRF only for immediate commands and exposes loadi
   transport.setCsrfToken('csrf-private-value');
 
   const pending = transport.request<{ readonly accepted: boolean }>('/api/command', { method: 'POST' });
-  assert.equal(transport.state().status, 'loading');
+  assert.equal(transport.state().status, 'online');
+  assert.equal(transport.state().loading, true);
   assert.equal(new Headers(request?.headers).get('x-sprout-csrf'), 'csrf-private-value');
   assert.ok(resolveFetch);
   resolveFetch(new Response(JSON.stringify({ accepted: true }), { status: 200 }));
   assert.deepEqual(await pending, { accepted: true });
   assert.equal(transport.state().status, 'online');
-  assert.ok(states.includes('loading'));
+  assert.ok(states.every((status) => status === 'online'));
   // A completed command has no retained input and cannot be replayed later.
   assert.equal(request?.body, undefined);
 });
@@ -70,6 +75,66 @@ test('browser transport remains loading until every concurrent request settles',
   assert.deepEqual(await second, { request: 2 });
   assert.equal(transport.state().loading, false);
   assert.equal(transport.state().connection, 'online');
+});
+
+test('an in-flight API read does not degrade presentation or revoke control', async () => {
+  let resolveFetch: ((response: Response) => void) | undefined;
+  const transport = createBrowserTransport({
+    fetch: () => new Promise<Response>((resolve) => { resolveFetch = resolve; }),
+  });
+  const presentations: ReturnType<typeof describeConnection>[] = [];
+  transport.subscribeState((state) => presentations.push(describeConnection(state)));
+  const before = describeConnection(transport.state());
+  const pending = transport.request('/api/read');
+  assert.equal(transport.state().loading, true);
+  assert.deepEqual(describeConnection(transport.state()), before);
+  assert.ok(presentations.every((presentation) => presentation.announce === before.announce && presentation.controlAvailable));
+  resolveFetch!(new Response('{}'));
+  await pending;
+  assert.deepEqual(describeConnection(transport.state()), before);
+});
+
+test('only SSE traffic restores staleness; heartbeat renews quiet-stream liveness', async () => {
+  const source = new FakeEventSource();
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  const transport = createBrowserTransport({
+    eventSource: () => source,
+    fetch: async (path) => path === '/api/unauthorized' ? new Response('', { status: 401 }) : new Response('{}'),
+    setTimeout: (callback) => {
+      const id = ++nextTimer;
+      timers.set(id, callback as () => void);
+      return id as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout: (id) => { timers.delete(id as unknown as number); },
+  });
+  const arrivals: unknown[] = [];
+  const stop = transport.events((event) => arrivals.push(event));
+  source.open();
+  assert.equal(timers.size, 1);
+  const firstTimer = nextTimer;
+  source.heartbeat();
+  assert.equal(transport.state().connection, 'online');
+  assert.equal(timers.has(firstTimer), false, 'a heartbeat renews the watchdog');
+  assert.equal(timers.size, 1);
+  assert.deepEqual(arrivals, [], 'heartbeat does not reach chat or wake subscribers');
+  for (let interval = 0; interval < 3; interval += 1) {
+    source.heartbeat();
+    assert.equal(transport.state().connection, 'online', 'a quiet healthy stream remains fresh each interval');
+    assert.equal(timers.size, 1);
+  }
+  timers.get(nextTimer)!();
+  assert.equal(transport.state().connection, 'stale');
+  assert.equal(describeConnection(transport.state()).controlAvailable, false);
+  await transport.request('/api/read');
+  assert.equal(transport.state().connection, 'stale', 'fetch success does not manufacture SSE liveness');
+  assert.equal(timers.size, 1, 'fetch does not arm the watchdog');
+  await assert.rejects(() => transport.request('/api/unauthorized'), BrowserRequestError);
+  assert.equal(transport.state().connection, 'stale', 'an HTTP error response is not SSE liveness either');
+  source.heartbeat();
+  assert.equal(transport.state().connection, 'online');
+  assert.equal(describeConnection(transport.state()).controlAvailable, true);
+  stop();
 });
 
 test('browser transport identifies authenticated failures without exposing response bodies', async () => {
