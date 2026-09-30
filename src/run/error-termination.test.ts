@@ -8,6 +8,8 @@ import { EnvironmentPool } from '../environment/pool.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { CodexEngineAdapter, type CodexProcess } from '../engine/codex.ts';
 import { sanitizedTurnFailure } from '../engine/turn-failure.ts';
+import { runFailureEventInput } from '../collaboration/run-failure-events.ts';
+import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
 import type { EngineAdapter } from '../engine/port.ts';
 
 import { AgentRegistry } from '../agent/registry.ts';
@@ -37,6 +39,42 @@ import { RunOrchestrator } from './orchestrator.ts';
  * `src/collaboration/coordinator.test.ts`); this file proves the settlement
  * that refusal keys on is actually durable here.
  */
+
+// Diagnosis F2: the preview Worker had loaded the pre-#182 mapper. Replay the
+// content-free shape of its native session failure, not a new startup failure.
+test('bad-model zero-usage Pi failure reaches the run-failure projection', async () => {
+  const adapter = piAdapter((process) => {
+    process.line({ type: 'session', version: 3, id: 'isolated-bad-model' });
+    process.line({ type: 'agent_start' });
+    process.line({ type: 'turn_start' });
+    process.line({
+      type: 'message_end',
+      message: {
+        role: 'assistant', content: [], stopReason: 'error',
+        errorMessage: UPSTREAM_BODY,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      },
+    });
+    process.line({ type: 'turn_end', message: { role: 'assistant', content: [], stopReason: 'error' } });
+    process.line({ type: 'agent_end', messages: [], willRetry: false });
+    process.line({ type: 'agent_settled' });
+    process.kill();
+  });
+  const { orchestrator, store } = buildFor('pi', adapter, 'agent-bad-model');
+  const started = await orchestrator.submit({ agentId: 'agent-bad-model', prompt: PROMPT_MARKER });
+  const run = await orchestrator.waitFor(started.id);
+  assert.equal(run.status, 'failed', 'errored native session must not persist completed empty zero-usage success');
+  assert.equal((await store.get(run.id))?.failureClass, 'execution');
+  assert.equal(run.failure, sanitizedTurnFailure('pi', 'error-stop-reason'));
+  assert.deepEqual(run.events, []);
+  const result = sanitizeEngineTurnResult(run.result!);
+  assert.equal(result.status, 'failed');
+  if (result.status === 'failed') assert.equal(result.message, WORKER_DIAGNOSTICS.turnFailed);
+  const event = runFailureEventInput(run);
+  assert.equal(event?.kind, 'agent-run-failure');
+  assert.equal(event?.disposition, 'informational');
+  assert.ok(!JSON.stringify(event).includes(UPSTREAM_BODY));
+});
 
 const PROMPT_MARKER = 'PROMPT-DO-NOT-PERSIST-8f2a';
 const CONTRACT_MARKER = 'CONTRACT-DO-NOT-PERSIST-3b7c';
