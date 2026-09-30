@@ -176,6 +176,22 @@ test('an unknown run is a 404 rather than an empty success', async () => {
   });
 });
 
+test('a quiet SSE stream emits a real empty heartbeat without a cursor or chat data', async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/events`);
+    const reader = response.body!.getReader();
+    try {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false);
+      const frame = new TextDecoder().decode(chunk.value);
+      assert.match(frame, /event: heartbeat\ndata: ?\n\n/);
+      assert.doesNotMatch(frame, /\nid:|\nevent: (?:message|run)/);
+    } finally {
+      await reader.cancel();
+    }
+  }, { keepAliveMs: 10 });
+});
+
 test('progress is pushed to the client before the run settles', async () => {
   await withServer(
     async (base) => {

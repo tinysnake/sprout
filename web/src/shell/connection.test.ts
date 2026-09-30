@@ -26,12 +26,10 @@ test('only a connected shell offers control actions', () => {
   assert.equal(describeConnection(state('offline')).controlAvailable, false);
 });
 
-test('loading is distinguished from connected rather than assumed to be one', () => {
-  const loading = describeConnection(state('online', true));
-  assert.equal(loading.label, 'Checking Connection');
-  assert.equal(loading.status, 'yellow');
-  assert.equal(loading.controlAvailable, false);
-  assert.match(loading.announce, /wait/i);
+test('an in-flight read leaves connection presentation, announcement and control unchanged', () => {
+  for (const connection of ['online', 'reconnecting', 'stale', 'offline'] as const) {
+    assert.deepEqual(describeConnection(state(connection, true)), describeConnection(state(connection)));
+  }
 });
 
 test('offline says facts are cached and actions are not queued', () => {

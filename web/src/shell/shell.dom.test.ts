@@ -174,7 +174,7 @@ test('the phone header states connection status in text and offers the theme con
 });
 
 
-test('the Shell reports loading, offline, and reconnecting distinctly, and refuses control while unsettled', async () => {
+test('the Shell ignores read loading and reports offline and reconnecting truthfully', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
@@ -194,12 +194,14 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
     await settle(60);
     assert.equal(notice(), null, 'a brief connection check does not insert a shell row');
     await settle(5050);
-    assert.match(notice()?.textContent ?? '', /Checking connection/i, 'loading is announced as a pending check');
-    assert.equal(notice()?.closest('[role="status"]')?.classList.contains('absolute'), true);
+    assert.equal(notice(), null, 'even a long read is not a connection warning');
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), '', 'a read causes no announcement');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
     await settle(60);
+    await settle(5050);
     assert.match(notice()?.textContent ?? '', /Reconnecting/i, 'reconnecting says so');
+    assert.equal(notice()?.closest('[role="status"]')?.classList.contains('absolute'), true);
     assert.match(notice()?.textContent ?? '', /unavailable/i, 'reconnecting explains that control is unavailable');
 
     controller.set({ status: 'offline', connection: 'offline', loading: false });
@@ -244,8 +246,8 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(100);
-    assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /Checking connection/i,
-      'the shared announcement follows raw state before visual display');
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), '',
+      'a read does not change the shared announcement');
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the short-lived refresh banner is not laid out');
     assert.deepEqual(geometry(), before, 'main/header positions and app-shell dimensions stay constant');
