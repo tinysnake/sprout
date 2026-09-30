@@ -569,8 +569,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/tasks — create a durable multi-run Task (#28).
+    // The protected runtime creates Tasks only through Human approve-and-begin.
+    // The unauthenticated M1 transport seam retains its legacy fixture API.
     if (request.method === 'POST' && url.pathname === '/api/tasks' && tasks) {
+      if (auth) {
+        sendJson(response, 409, { code: 'proposal-required', error: 'create a Task proposal and approve-and-begin it' });
+        return;
+      }
       const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const title = typeof body.title === 'string' ? body.title : '';
@@ -637,8 +642,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
       tasks
     ) {
       const taskId = segments[2] ?? '';
-      if ((await tasks.get(taskId)) === undefined) {
+      const existingTask = await tasks.get(taskId);
+      if (existingTask === undefined) {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
+        return;
+      }
+      if (auth) {
+        sendJson(response, 409, { code: 'use-task-advances', error: 'use the attributed Task advance command' });
         return;
       }
       const body = await readBody();
@@ -663,10 +673,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/tasks/:id/begin — select and retain a Task-held environment.
+    // POST /api/tasks/:id/begin — legacy M1 entry point, disabled behind Human auth.
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      if (auth) {
+        sendJson(response, 409, { code: 'proposal-required', error: 'only an approved proposal can begin a Task' });
+        return;
+      }
       const body = await readBody();
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }

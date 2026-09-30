@@ -79,8 +79,10 @@ import {
 } from './task/environment-lifecycle.ts';
 import { TaskService } from './task/service.ts';
 import { TaskProposalService } from './task/proposal-service.ts';
+import { TaskAdmissionService } from './task/admission-service.ts';
 import type { TaskProposalStore } from './task/proposal-store.ts';
 import { createTaskProposalRouter } from './web/task-proposal-router.ts';
+import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
@@ -279,6 +281,7 @@ export interface SproutRuntime {
   readonly orchestrator: RunOrchestrator;
   readonly tasks: TaskService;
   readonly taskProposals: TaskProposalService;
+  readonly taskAdmissions: TaskAdmissionService;
   readonly collaboration: CollaborationCoordinator;
   readonly pool: EnvironmentPool;
   readonly agents: AgentRegistry;
@@ -1072,6 +1075,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     });
     tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
+    const taskAdmissions = new TaskAdmissionService({
+      proposals: taskProposals,
+      proposalStore: stores.taskProposals,
+      tasks,
+      lifecycle: taskLifecycle,
+      projects,
+      agentAuthority: projectAgentAuthority,
+    });
 
     recovery = new EnvironmentRecoveryService({
       store: stores.recovery,
@@ -1669,6 +1680,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // boundary, so their actor is the authenticated Human by construction.
         createConversationRouter({ scopes: conversationScopes }),
         createTaskProposalRouter({ proposals: taskProposals }),
+        createTaskAdmissionRouter({ admissions: taskAdmissions }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -1776,6 +1788,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       projectAccess: projectAccessService,
       conversationScopes,
       taskProposals,
+      taskAdmissions,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
