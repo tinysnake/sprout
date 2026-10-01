@@ -8,7 +8,7 @@ import { InMemoryTaskProposalStore } from './proposal-store.ts';
 import { TaskProposalService } from './proposal-service.ts';
 import { TaskAdmissionError, TaskAdmissionService } from './admission-service.ts';
 import { TaskService } from './service.ts';
-import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
+import { TaskEnvironmentLeaseRefusal, TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
 import type { TaskStore } from './store.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
@@ -143,11 +143,47 @@ test('failure before lease acquisition leaves the proposal open and creates no T
   const waiting = await propose(conflicted);
   const held = conflicted.pool.acquireLease({ instanceId: 'env-a', capability: 'agent-run', holderId: 'other-work', ttlMs: 1000 });
   assert.equal(held.ok, true);
-  await assert.rejects(conflicted.admissions.beginProposal(waiting.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })), /environment env-a is unavailable/);
+  await assert.rejects(
+    conflicted.admissions.beginProposal(waiting.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
+    (error: unknown) => error instanceof TaskAdmissionError && error.code === 'environment-unavailable',
+  );
   assert.equal((await conflicted.proposals.get(waiting.id)).status, 'proposed');
   assert.deepEqual(await conflicted.taskStore.list(), []);
   assert.equal(conflicted.pool.activeLease('env-a')?.holderId, 'other-work');
   assert.deepEqual(conflicted.materializations, []);
+});
+
+test('begin reports a typed conflict when a Task-held lease is recovering', async () => {
+  const context = fixture();
+  const proposal = await propose(context);
+  const held = context.pool.acquireLease({
+    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+  });
+  assert.ok(held.ok);
+  assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
+
+  await assert.rejects(
+    context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
+    (error: unknown) => error instanceof TaskAdmissionError && error.code === 'environment-recovering',
+  );
+  assert.equal((await context.proposals.get(proposal.id)).status, 'proposed');
+  assert.deepEqual(await context.taskStore.list(), []);
+  assert.deepEqual(context.materializations, []);
+});
+
+test('legacy begin also exposes typed Task lease reservation refusals', async () => {
+  const context = fixture();
+  const task = await context.tasks.create({ projectId: 'project', title: 'Legacy Task', goal: 'Begin safely.', assignedAgentId: 'scout' });
+  const held = context.pool.acquireLease({
+    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+  });
+  assert.ok(held.ok);
+  assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
+
+  await assert.rejects(
+    context.tasks.begin(task.id),
+    (error: unknown) => error instanceof TaskEnvironmentLeaseRefusal && error.state === 'recovering',
+  );
 });
 
 test('failure after acquisition preserves approval, the original Environment binding, and recovery', async () => {

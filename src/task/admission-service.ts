@@ -4,13 +4,14 @@ import type { ProjectRegistry } from '../project/registry.ts';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
 import type { TaskActor, Task, TaskRunLink } from './model.ts';
 import type { TaskService } from './service.ts';
-import type { TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
+import { TaskEnvironmentLeaseRefusal, type TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
 import { TaskProposalError, type TaskProposalBeginInput } from './proposal-model.ts';
 
 export type TaskAdmissionErrorCode = 'invalid-command' | 'lead-ineligible' | 'environment-ineligible'
-  | 'no-compatible-agent' | 'task-not-admitted' | 'advance-forbidden' | 'target-ineligible';
+  | 'no-compatible-agent' | 'task-not-admitted' | 'advance-forbidden' | 'target-ineligible'
+  | 'environment-recovering' | 'environment-unavailable';
 
 export class TaskAdmissionError extends Error {
   readonly code: TaskAdmissionErrorCode;
@@ -140,13 +141,23 @@ export class TaskAdmissionService {
       createdAt: approvedAt,
       updatedAt: approvedAt,
     };
-    await this.#lifecycle.beginApproved(task, {
-      environmentInstanceId: input.environmentInstanceId,
-      contextAgentId,
-      consumeProposal: () => { this.#proposalStore.consumeForBegin(proposal.id, proposal.revision, {
-        actor, at: approvedAt, reason, taskId,
-      }); },
-    });
+    try {
+      await this.#lifecycle.beginApproved(task, {
+        environmentInstanceId: input.environmentInstanceId,
+        contextAgentId,
+        consumeProposal: () => { this.#proposalStore.consumeForBegin(proposal.id, proposal.revision, {
+          actor, at: approvedAt, reason, taskId,
+        }); },
+      });
+    } catch (error) {
+      if (error instanceof TaskEnvironmentLeaseRefusal) {
+        if (error.state === 'recovering') {
+          throw new TaskAdmissionError('environment-recovering', 'the selected Environment is protected by Task lease recovery');
+        }
+        throw new TaskAdmissionError('environment-unavailable', 'the selected Environment is no longer available');
+      }
+      throw error;
+    }
 
     if (lead.memberKind === 'human') {
       return { task: (await this.#tasks.get(taskId))!, duplicate: false };

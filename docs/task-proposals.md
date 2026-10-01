@@ -78,6 +78,10 @@ carry stable `code`: unknown targets are 404,
 invalid content is 400, authority/membership refusal is 403, and stale/lifecycle
 conflicts are 409. Unexpected failures expose no raw diagnostics.
 
+For proposal begin, a recovering Task-held Environment lease returns HTTP 409
+with `code: environment-recovering`; other lease reservation refusals return 409
+with `code: environment-unavailable`. Both refusals leave the proposal proposed.
+
 The browser adapter shares portable types with the backend, encodes path ids,
 and uses the existing transport for sessions, CSRF and connection state. It never
 queues or automatically replays a command after disconnect.

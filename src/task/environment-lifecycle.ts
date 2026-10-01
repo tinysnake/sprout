@@ -9,7 +9,7 @@
 
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
-import type { EnvironmentPool } from '../environment/pool.ts';
+import type { AcquireLeaseFailure, AcquireLeaseResult, EnvironmentPool, LeaseState } from '../environment/pool.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
@@ -21,6 +21,23 @@ import { buildTaskContext } from './context.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
+
+/** A Task begin cannot reserve an Environment whose lease is already held. */
+export class TaskEnvironmentLeaseRefusal extends Error {
+  readonly reason: AcquireLeaseFailure;
+  readonly state: LeaseState | undefined;
+
+  constructor(instanceId: string, refusal: Extract<AcquireLeaseResult, { readonly ok: false }>, includeLeaseState = false) {
+    const holder = refusal.heldBy ?? (includeLeaseState ? 'another holder' : refusal.reason);
+    const message = includeLeaseState
+      ? `environment ${instanceId} is unavailable: held by ${holder} (${refusal.state ?? 'active'})`
+      : `environment ${instanceId} is unavailable: ${holder}`;
+    super(message);
+    this.name = 'TaskEnvironmentLeaseRefusal';
+    this.reason = refusal.reason;
+    this.state = refusal.state;
+  }
+}
 
 /** Why one Task recovery request cannot apply (#171). */
 export type TaskRecoveryRefusalCode =
@@ -178,9 +195,7 @@ export class TaskEnvironmentLifecycle {
       instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
       taskId: task.id, ttlMs: this.#leaseTtlMs,
     });
-    if (!acquired.ok) {
-      throw new Error(`environment ${input.environmentInstanceId} is unavailable: ${acquired.heldBy ?? acquired.reason}`);
-    }
+    if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(input.environmentInstanceId, acquired);
     const beginning: Task = {
       ...task,
       ...(task.admission?.lead.memberKind === 'agent' ? { assignedAgentId: task.admission.lead.memberId } : {}),
@@ -244,9 +259,7 @@ export class TaskEnvironmentLifecycle {
         instanceId: resolution.instanceId, capability: agent.capability, holderId: task.id,
         taskId: task.id, ttlMs: this.#leaseTtlMs,
       });
-      if (!acquired.ok) {
-        throw new Error(`environment ${resolution.instanceId} is unavailable: held by ${acquired.heldBy ?? 'another holder'} (${acquired.state ?? 'active'})`);
-      }
+      if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(resolution.instanceId, acquired, true);
       // Durable begin intent precedes Worker preparation. The lease remains
       // blocking if the process dies before, during, or after that call.
       task = {
