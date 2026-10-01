@@ -280,6 +280,20 @@ function toggleActivity(id: string) {
   selectedActivityId.value = selectedActivityId.value === id ? undefined : id;
 }
 
+function onTabKey(event: KeyboardEvent, tab: UsageTab) {
+  const tabs = Object.keys(tabLabels) as UsageTab[];
+  const current = tabs.indexOf(tab);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : event.key === 'ArrowRight' ? (current + 1) % tabs.length
+    : event.key === 'ArrowLeft' ? (current + tabs.length - 1) % tabs.length : undefined;
+  if (next === undefined) return;
+  event.preventDefault();
+  activeTab.value = tabs[next]!;
+  selectedActivityId.value = undefined;
+  const tablist = (event.currentTarget as HTMLElement).closest('[role="tablist"]');
+  tablist?.querySelector<HTMLButtonElement>(`[data-usage-tab="${tabs[next]}"]`)?.focus();
+}
+
 function clearFilters() {
   timeRangeFilter.value = 'all';
   projectFilter.value = 'all';
@@ -577,7 +591,11 @@ const timeRangeLabels: Record<string, string> = {
             class="usage-view-tab"
             :class="{ active: activeTab === tab }"
             :data-usage-tab="tab"
+            :id="`usage-tab-${tab}`"
             :aria-selected="activeTab === tab"
+            :tabindex="activeTab === tab ? 0 : -1"
+            aria-controls="usage-tab-panel"
+            @keydown="onTabKey($event, tab)"
             @click="activeTab = tab; selectedActivityId = undefined"
           >
             {{ label }}
@@ -666,7 +684,7 @@ const timeRangeLabels: Record<string, string> = {
       </section>
 
       <!-- 6. Tab Surfaces -->
-      <section class="usage-tab-surface" :aria-label="`${tabLabels[activeTab]} view`">
+      <section id="usage-tab-panel" class="usage-tab-surface" role="tabpanel" :aria-labelledby="`usage-tab-${activeTab}`" :aria-label="`${tabLabels[activeTab]} view`">
         <!-- 6a. Empty State -->
         <div v-if="filteredActivities.length === 0" class="usage-empty-state">
           <span class="usage-empty-icon">

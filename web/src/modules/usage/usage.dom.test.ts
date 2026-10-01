@@ -612,3 +612,29 @@ test('Usage F7: constituent drill-down controls have a computed minimum 44px tar
     app.unmount();
   } finally { await cleanup(); }
 });
+
+test('Usage F8: tabs rove focus and selection with arrows, Home and End and own a panel', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { app } = await mountedPage(vite, mount);
+    const tabs = [...doc.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    tabs[0]!.click(); tabs[0]!.focus();
+    const key = async (name: string, index: number) => {
+      doc.activeElement!.dispatchEvent(new doc.defaultView!.KeyboardEvent('keydown', { key: name, bubbles: true }));
+      await settle(80);
+      assert.equal(doc.activeElement, tabs[index], `${name}: focus moves`);
+      assert.equal(tabs[index]!.getAttribute('aria-selected'), 'true');
+      assert.equal(tabs[index]!.tabIndex, 0);
+      assert.equal(tabs.filter(t => t.tabIndex === 0).length, 1);
+      const panel = doc.getElementById(tabs[index]!.getAttribute('aria-controls')!);
+      assert.equal(panel?.getAttribute('role'), 'tabpanel');
+      assert.equal(panel?.getAttribute('aria-labelledby'), tabs[index]!.id);
+    };
+    await key('ArrowRight', 1);
+    await key('End', 5);
+    await key('ArrowRight', 0);
+    await key('ArrowLeft', 5);
+    await key('Home', 0);
+    app.unmount();
+  } finally { await cleanup(); }
+});
