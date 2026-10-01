@@ -117,7 +117,7 @@ const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: stri
   { path: '/feed', destination: 'feed', expect: /Operations Feed & Human Attention/ },
   { path: '/project/overview', destination: 'project', tab: 'overview', expect: /Project Contract & Purpose/ },
   { path: '/project/tasks', destination: 'project', tab: 'tasks', expect: /Project Tasks & Operating Loop/ },
-  { path: '/project/tasks/101', destination: 'project', tab: 'tasks', expect: /Task Operating Stage & Specification/ },
+  { path: '/project/tasks/101', destination: 'project', tab: 'tasks', expect: /Project Tasks & Operating Loop/ },
   { path: '/project/chat', destination: 'project', tab: 'chat', expect: /Conversations & Groups/ },
   { path: '/project/chat/wg-frontend', destination: 'project', tab: 'chat', expect: /wg-frontend/ },
   { path: '/manage/environments', destination: 'manage', tab: 'environments', expect: /Environments & Host Infrastructure/ },
@@ -190,8 +190,9 @@ test('browser history moves between nested records and restores each context', a
     await settle(80);
     await router.push('/project/tasks/104');
     await settle(80);
-    assert.match(doc.body.textContent ?? '', /#104/, 'the second record is open');
-    assert.match(doc.body.textContent ?? '', /Distributed Agent Orchestration/, 'the second record content is shown');
+    assert.equal(router.currentRoute.value.params['taskId'], '104', 'the selected record identity is route-addressable');
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/, 'the production page reports missing Task authority');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Distributed Agent Orchestration/, 'the route does not substitute prototype Task facts');
 
     dom.window.history.back();
     await settle(160);
@@ -201,7 +202,8 @@ test('browser history moves between nested records and restores each context', a
     dom.window.history.forward();
     await settle(160);
     assert.equal(router.currentRoute.value.path, '/project/tasks/104', 'Forward returns to the record');
-    assert.match(doc.body.textContent ?? '', /Distributed Agent Orchestration/, 'the record content is restored');
+    assert.equal(router.currentRoute.value.params['taskId'], '104', 'Forward restores the Task identity');
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/, 'the detail still requires production authority');
 
     dom.window.history.back();
     await settle(160);

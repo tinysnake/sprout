@@ -16,6 +16,8 @@ import { createConversationBrowserAdapter } from '../adapters/conversation-api.j
 import { createMessageBrowserAdapter } from '../adapters/message-api.js';
 import { createRoutingBrowserAdapter } from '../adapters/routing-api.js';
 import { createRunBrowserAdapter } from '../adapters/run-api.js';
+import { createTaskBrowserAdapter, type TaskBrowserAdapter } from '../adapters/task-api.js';
+import { TASKS_API } from '../modules/tasks/types.js';
 import { createProjectAccessBrowserAdapter, createProjectBrowserAdapter } from '../adapters/project-api.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
 import { createOperatorSessionBrowserAdapter } from '../adapters/operator-session-api.js';
@@ -48,6 +50,8 @@ export interface SproutAppOptions {
   agentService?: AgentManagementService;
   /** The typed Project Overview authority; production and tests inject it explicitly. */
   projectService?: ProjectManagementService;
+  /** Production Task proposal, run-history, lease, and control authority. */
+  taskService?: TaskBrowserAdapter;
   /** Production Chat authority; tests inject a fixture explicitly, never by default. */
   chatService?: ChatService;
   /**
@@ -85,6 +89,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.projectService) {
     app.provide(PROJECT_SERVICE, options.projectService);
+  }
+  if (options.taskService) {
+    app.provide(TASKS_API, options.taskService);
   }
   if (options.chatService) {
     app.provide(CHAT_SERVICE, options.chatService);
@@ -131,6 +138,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       agents: agentService,
       environments: environmentService,
     });
+    const taskService = createTaskBrowserAdapter(transport);
     const chatService = new ProductionChatService({
       conversations: createConversationBrowserAdapter(transport),
       messages: createMessageBrowserAdapter(transport),
@@ -141,6 +149,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       environmentService,
       agentService,
       projectService,
+      taskService,
       chatService,
       connectionSource: transport,
       operatorSession,
