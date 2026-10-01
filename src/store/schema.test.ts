@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
 
-import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
 
 import { SqliteStore } from './db.ts';
 
@@ -32,13 +32,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 25);
+  assert.equal(CURRENT_SCHEMA_VERSION, 26);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 25);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 26);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 25,
-    current: 25,
+    max: 26,
+    current: 26,
   });
 });
 
@@ -503,5 +503,247 @@ test('a failed workspace_binding migration rolls back the column and preserves i
     const safety = new DatabaseSync(safetyPath);
     assert.equal(getSchemaVersion(safety), 9);
     safety.close();
+  });
+});
+
+// Seed the actual v25 schema, not a hand-built approximation of its columns.
+async function withV25Usage(fn: (path: string, legacy: DatabaseSync) => Promise<void>): Promise<void> {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'usage.db');
+    const seed = new DatabaseSync(path);
+    seed.exec('CREATE TABLE legacy_marker (id TEXT); PRAGMA user_version = 24;');
+    seed.close();
+    const legacy = new DatabaseSync(path);
+    migrateOrInitializeDatabase(legacy, { filename: path, targetVersion: 25 });
+    try {
+      legacy.exec(`INSERT INTO usage_activities
+        (id, kind, attempt_id, batch_id, project_id, engine, model, status, created_at, settled_at)
+        VALUES ('routing', 'routing_attempt', 'attempt', 'batch', 'project', 'routing', 'wake', 'completed', 1, 2);
+        INSERT INTO usage_observations
+        (id, activity_id, observed_at, source, source_version, completeness, wall_duration_ms,
+         billed_cost_status, cost_estimate_status, cost_estimate_usd_micros, valuation_provenance, billing_basis)
+        VALUES ('observation', 'routing', 2, 'routing', '1', 'unavailable', 1,
+          'unavailable', 'available', 0, 'provider_estimated', 'unknown');`);
+      await fn(path, legacy);
+    } finally { legacy.close(); }
+  });
+}
+
+for (const [shape, mutation, reason] of [
+  ['Routing ownership', "UPDATE usage_activities SET agent_id = 'agent', task_id = 'task'", 'Invalid legacy usage activity attribution'],
+  ['BLOB Routing attempt ID', "UPDATE usage_activities SET attempt_id = X'617474656d7074'", 'Invalid legacy usage activity attribution'],
+  ['available cost without facts', 'UPDATE usage_observations SET cost_estimate_usd_micros = NULL, valuation_provenance = NULL', 'Invalid legacy usage observation cost facts'],
+] as const) {
+  test(`v25 migration rejects ${shape} without rewriting durable facts`, async () => {
+    await withV25Usage(async (path, legacy) => {
+      legacy.exec(mutation);
+      const before = legacy.prepare('SELECT * FROM usage_activities').all();
+      const observations = legacy.prepare('SELECT * FROM usage_observations').all();
+      let refusal: unknown;
+      try {
+        const upgraded = new SqliteStore({ filename: path });
+        upgraded.close();
+      } catch (error) { refusal = error; }
+      if (refusal === undefined) {
+        const reopened = new SqliteStore({ filename: path });
+        try {
+          if (shape === 'available cost without facts') {
+            const aggregate = await reopened.usage.getAggregate({});
+            assert.equal(aggregate.costCoverage.available, 0, 'missing cost facts must not count as available');
+          } else {
+            await reopened.usage.listActivities();
+          }
+        } finally { reopened.close(); }
+      }
+      assert.ok(refusal instanceof SchemaMigrationError && refusal.guidance.includes(reason), 'invalid facts must refuse migration with actionable guidance');
+      // Reopen the rejected database: the schema, rows, and safety copy remain v25.
+      const retained = new DatabaseSync(path);
+      try {
+        assert.equal(getSchemaVersion(retained), 25);
+        assert.deepEqual(retained.prepare('SELECT * FROM usage_activities').all(), before);
+        assert.deepEqual(retained.prepare('SELECT * FROM usage_observations').all(), observations);
+        assert.equal(retained.prepare("SELECT name FROM sqlite_master WHERE name = 'usage_activity_attribution_insert'").get(), undefined);
+      } finally { retained.close(); }
+      const safety = new DatabaseSync(defaultSafetyCopyPath(path));
+      try { assert.equal(getSchemaVersion(safety), 25); } finally { safety.close(); }
+    });
+  });
+}
+
+test('valid v25 usage migrates unchanged and reads truthfully after reopen', async () => {
+  await withV25Usage(async (path, legacy) => {
+    const before = legacy.prepare('SELECT * FROM usage_activities').all();
+    const observations = legacy.prepare('SELECT * FROM usage_observations').all();
+    const upgraded = new SqliteStore({ filename: path });
+    upgraded.close();
+    const reopened = new SqliteStore({ filename: path });
+    try {
+      assert.deepEqual(reopened.db.prepare('SELECT * FROM usage_activities').all(), before);
+      assert.deepEqual(reopened.db.prepare('SELECT * FROM usage_observations').all(), observations);
+      assert.equal((await reopened.usage.listActivities()).length, 1);
+      const aggregate = await reopened.usage.getAggregate({});
+      assert.deepEqual(aggregate.costCoverage, { available: 1, pending: 0, unavailable: 0 });
+      assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0);
+    } finally { reopened.close(); }
+  });
+});
+
+test('v26 migration triggers reject unreadable Agent-run attribution on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      let insertError: unknown;
+      try {
+        store.db.prepare(`INSERT INTO usage_activities
+          (id, kind, run_id, agent_id, engine, model, status, created_at)
+          VALUES ('raw-invalid-run', 'agent_run', 'valid-run', NULL, 'pi', 'model', 'completed', 3)`).run();
+      } catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        await assert.rejects(store.usage.listActivities(), /Invalid usage activity attribution/);
+      }
+      assert.ok(insertError !== undefined, 'raw v26 insert must reject an Agent run without a nonempty agent_id');
+      assert.match(String(insertError), /invalid usage activity attribution/i);
+      assert.equal((await store.usage.listActivities()).length, 1, 'a rejected write leaves existing activity reads clean');
+
+      // Seed an invalid preexisting row solely to exercise the UPDATE trigger independently.
+      const insertTriggerSql = (store.db.prepare(`SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+      assert.ok(insertTriggerSql, 'the migration must install the INSERT attribution trigger');
+      store.db.exec('DROP TRIGGER usage_activity_attribution_insert');
+      store.db.prepare(`INSERT INTO usage_activities
+        (id, kind, run_id, agent_id, engine, model, status, created_at)
+        VALUES ('raw-invalid-update', 'agent_run', 'update-run', NULL, 'pi', 'model', 'completed', 4)`).run();
+      store.db.exec(insertTriggerSql);
+      assert.ok(store.db.prepare(`SELECT 1 FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+      'the INSERT attribution trigger is restored before continuing');
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = 'raw-invalid-update'").run(),
+        /invalid usage activity attribution/i,
+      );
+      store.db.prepare("DELETE FROM usage_activities WHERE id = 'raw-invalid-update'").run();
+      assert.equal((await store.usage.listActivities()).length, 1);
+    } finally { store.close(); }
+  });
+});
+
+test('v26 migration triggers reject empty and non-TEXT required attribution IDs on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      const baseline = await store.usage.listActivities();
+      const requiredIds = [
+        { label: 'Agent-run run_id', kind: 'agent_run', column: 'run_id' },
+        { label: 'Agent-run agent_id', kind: 'agent_run', column: 'agent_id' },
+        { label: 'Routing attempt attempt_id', kind: 'routing_attempt', column: 'attempt_id' },
+        { label: 'Routing attempt batch_id', kind: 'routing_attempt', column: 'batch_id' },
+        { label: 'Routing attempt project_id', kind: 'routing_attempt', column: 'project_id' },
+      ] as const;
+      const invalidIds = requiredIds.flatMap((required) => [
+        { ...required, label: `${required.label} empty string`, value: '' },
+        { ...required, label: `${required.label} BLOB`, value: new Uint8Array([0x61]) },
+      ]);
+      const insertInvalidActivity = (id: string, invalid: (typeof invalidIds)[number]): void => {
+        const values: {
+          run_id: string | Uint8Array | null;
+          attempt_id: string | Uint8Array | null;
+          batch_id: string | Uint8Array | null;
+          project_id: string | Uint8Array | null;
+          agent_id: string | Uint8Array | null;
+        } = {
+          run_id: invalid.kind === 'agent_run' ? `run-${id}` : null,
+          attempt_id: invalid.kind === 'routing_attempt' ? `attempt-${id}` : null,
+          batch_id: invalid.kind === 'routing_attempt' ? `batch-${id}` : null,
+          project_id: invalid.kind === 'routing_attempt' ? `project-${id}` : null,
+          agent_id: invalid.kind === 'agent_run' ? `agent-${id}` : null,
+        };
+        values[invalid.column] = invalid.value;
+        store.db.prepare(`INSERT INTO usage_activities
+          (id, kind, run_id, attempt_id, batch_id, project_id, agent_id, engine, model, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pi', 'model', 'completed', 3)`)
+          .run(id, invalid.kind, values.run_id, values.attempt_id, values.batch_id, values.project_id, values.agent_id);
+      };
+      const insertTriggerSql = (store.db.prepare(`SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+      assert.ok(insertTriggerSql, 'the v25-to-v26 migration must install the INSERT attribution trigger');
+
+      const acceptedWrites: string[] = [];
+      for (const [index, invalid] of invalidIds.entries()) {
+        const insertId = `invalid-id-insert-${index}`;
+        let insertError: unknown;
+        try { insertInvalidActivity(insertId, invalid); } catch (error) { insertError = error; }
+        if (insertError === undefined) {
+          acceptedWrites.push(`${invalid.label} INSERT`);
+          store.db.prepare('DELETE FROM usage_activities WHERE id = ?').run(insertId);
+        } else {
+          assert.match(String(insertError), /invalid usage activity attribution/i, `${invalid.label} INSERT error`);
+        }
+        assert.deepEqual(await store.usage.listActivities(), baseline, `${invalid.label}: activity reads are clean after INSERT`);
+
+        const updateId = `invalid-id-update-${index}`;
+        store.db.exec('DROP TRIGGER usage_activity_attribution_insert');
+        insertInvalidActivity(updateId, invalid);
+        store.db.exec(insertTriggerSql);
+        assert.ok(store.db.prepare(`SELECT 1 FROM sqlite_master
+          WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+        'the INSERT attribution trigger is restored before continuing');
+        let updateError: unknown;
+        try { store.db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = ?").run(updateId); }
+        catch (error) { updateError = error; }
+        if (updateError === undefined) acceptedWrites.push(`${invalid.label} UPDATE`);
+        else assert.match(String(updateError), /invalid usage activity attribution/i, `${invalid.label} UPDATE error`);
+        store.db.prepare('DELETE FROM usage_activities WHERE id = ?').run(updateId);
+        assert.deepEqual(await store.usage.listActivities(), baseline, `${invalid.label}: activity reads are clean after UPDATE`);
+      }
+      assert.deepEqual(acceptedWrites, [], `invalid required IDs must not be accepted: ${acceptedWrites.join(', ')}`);
+    } finally { store.close(); }
+  });
+});
+
+test('v26 migration cost triggers reject fractional available amounts on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      await store.usage.recordActivity({
+        id: 'fractional-cost-activity', kind: 'agent_run',
+        correlation: { runId: 'fractional-cost-run', agentId: 'agent' },
+        engine: 'pi', model: 'model', status: 'completed', createdAt: 10, settledAt: 20,
+      });
+      const insert = (
+        id: string,
+        estimateStatus: 'available' | 'unavailable', estimate: number | null,
+        billedStatus: 'available' | 'unavailable', billed: number | null,
+      ) => store.db.prepare(`INSERT INTO usage_observations
+        (id, activity_id, observed_at, source, source_version, completeness, wall_duration_ms,
+         billed_cost_status, billed_usd_micros, cost_estimate_status, cost_estimate_usd_micros,
+         valuation_provenance, billing_basis)
+        VALUES (?, 'fractional-cost-activity', 20, 'raw-test', '1', 'complete', 10, ?, ?, ?, ?, ?, 'unknown')`)
+        .run(id, billedStatus, billed, estimateStatus, estimate, estimateStatus === 'available' ? 'provider_estimated' : null);
+
+      let insertError: unknown;
+      try { insert('fractional-estimate-insert', 'available', 0.5, 'unavailable', null); }
+      catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        const aggregate = await store.usage.getAggregate({});
+        assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0.5, 'fractional raw estimate is exported by aggregation');
+      }
+      assert.ok(insertError !== undefined, 'v26 trigger must reject fractional available estimates');
+      assert.match(String(insertError), /invalid usage observation cost facts/i);
+
+      insert('integer-estimate-update', 'available', 2, 'unavailable', null);
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_observations SET cost_estimate_usd_micros = 0.5 WHERE id = 'integer-estimate-update'").run(),
+        /invalid usage observation cost facts/i,
+      );
+      assert.throws(
+        () => insert('fractional-bill-insert', 'unavailable', null, 'available', 0.5),
+        /invalid usage observation cost facts/i,
+      );
+      insert('integer-bill-update', 'unavailable', null, 'available', 2);
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_observations SET billed_usd_micros = 0.5 WHERE id = 'integer-bill-update'").run(),
+        /invalid usage observation cost facts/i,
+      );
+    } finally { store.close(); }
   });
 });

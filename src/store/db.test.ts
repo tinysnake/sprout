@@ -528,6 +528,8 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'usage_activities_agent_id_idx', tbl: 'usage_activities' },
         { name: 'usage_activities_model_idx', tbl: 'usage_activities' },
         { name: 'usage_activities_settled_at_idx', tbl: 'usage_activities' },
+        { name: 'usage_activities_run_id_unique', tbl: 'usage_activities' },
+        { name: 'usage_activities_attempt_id_unique', tbl: 'usage_activities' },
         { name: 'usage_observations_activity_idx', tbl: 'usage_observations' },
         { name: 'usage_observations_effective_idx', tbl: 'usage_observations' },
       ],
@@ -552,6 +554,15 @@ test('explicit indexes keep their names, tables, and column order', async () => 
       readonly name: string;
     }[];
     assert.deepEqual(columns.map((column) => column.name), ['task_id', 'sequence']);
+
+    const usageRunColumns = store.db.prepare('PRAGMA index_info(usage_activities_run_id_unique)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(usageRunColumns.map((column) => column.name), ['run_id']);
+    const usageAttemptColumns = store.db.prepare('PRAGMA index_info(usage_activities_attempt_id_unique)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(usageAttemptColumns.map((column) => column.name), ['attempt_id']);
   });
 });
 

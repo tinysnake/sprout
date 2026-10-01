@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 25;
+export const CURRENT_SCHEMA_VERSION = 26;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 25;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 26;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -213,6 +213,9 @@ export class MigrationSafetyCopyError extends SchemaError {
   }
 }
 
+/** Only fixed, non-sensitive validation guidance may cross the migration error boundary. */
+class UsageMigrationValidationError extends Error {}
+
 /** Error thrown when forward migration fails during execution. */
 export class SchemaMigrationError extends SchemaError {
   readonly fromVersion: number;
@@ -224,6 +227,7 @@ export class SchemaMigrationError extends SchemaError {
     readonly safetyCopyPath?: string | undefined;
     readonly fromVersion: number;
     readonly toVersion: number;
+    readonly validationGuidance?: string | undefined;
   }) {
     const sanitizedDb = sanitizePath(input.databasePath);
     const sanitizedCopy = input.safetyCopyPath ? sanitizePath(input.safetyCopyPath) : undefined;
@@ -234,6 +238,7 @@ export class SchemaMigrationError extends SchemaError {
     const guidance =
       `Schema migration from v${input.fromVersion} to v${input.toVersion} failed and was rolled back. ` +
       `The database was not modified.${copyNotice} ` +
+      (input.validationGuidance ? `${input.validationGuidance} ` : '') +
       `Please ensure the service is stopped, inspect host diagnostics, verify database integrity, and resolve the issue or restore from the pre-migration safety copy before restarting Sprout.`;
     super(message, { guidance, databasePath: input.databasePath });
     this.name = 'SchemaMigrationError';
@@ -1149,6 +1154,111 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       `);
     },
   },
+  {
+    fromVersion: 25,
+    toVersion: 26,
+    name: 'usage_activity_attribution_constraints',
+    migrate: (db) => {
+      // Reject rather than silently rewrite durable attribution or append-only
+      // monetary history. A reviewed repair must preserve correction provenance.
+      const invalidActivity = db.prepare(`SELECT 1 FROM usage_activities WHERE NOT (
+        (kind = 'agent_run' AND typeof(run_id) = 'text' AND length(run_id) > 0
+          AND typeof(agent_id) = 'text' AND length(agent_id) > 0 AND attempt_id IS NULL AND batch_id IS NULL)
+        OR
+        (kind = 'routing_attempt' AND run_id IS NULL AND typeof(attempt_id) = 'text' AND length(attempt_id) > 0
+          AND typeof(batch_id) = 'text' AND length(batch_id) > 0
+          AND typeof(project_id) = 'text' AND length(project_id) > 0
+          AND task_id IS NULL AND agent_id IS NULL AND environment_instance_id IS NULL)
+      ) LIMIT 1`).get();
+      if (invalidActivity !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage activity attribution. Arrange a reviewed data repair of usage_activities before retrying; do not discard durable history.');
+      }
+      const invalidCost = db.prepare(`SELECT 1 FROM usage_observations WHERE
+        (cost_estimate_status = 'available' AND (
+          cost_estimate_usd_micros IS NULL OR typeof(cost_estimate_usd_micros) != 'integer'
+          OR cost_estimate_usd_micros < 0 OR cost_estimate_usd_micros > 9007199254740991
+          OR valuation_provenance IS NULL
+          OR valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+        )) OR (billed_cost_status = 'available' AND (
+          billed_usd_micros IS NULL OR typeof(billed_usd_micros) != 'integer'
+          OR billed_usd_micros < 0 OR billed_usd_micros > 9007199254740991
+        )) LIMIT 1`).get();
+      if (invalidCost !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage observation cost facts. Arrange a reviewed data repair of usage_observations preserving source and correction history before retrying.');
+      }
+      db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_run_id_unique
+        ON usage_activities (run_id) WHERE run_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_attempt_id_unique
+        ON usage_activities (attempt_id) WHERE attempt_id IS NOT NULL;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
+      BEFORE INSERT ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
+      BEFORE UPDATE ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_identity_immutable
+      BEFORE UPDATE ON usage_activities
+      WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.run_id IS NOT NEW.run_id
+        OR OLD.attempt_id IS NOT NEW.attempt_id OR OLD.batch_id IS NOT NEW.batch_id
+        OR OLD.project_id IS NOT NEW.project_id OR OLD.task_id IS NOT NEW.task_id
+        OR OLD.agent_id IS NOT NEW.agent_id OR OLD.environment_instance_id IS NOT NEW.environment_instance_id
+        OR OLD.engine IS NOT NEW.engine OR OLD.model IS NOT NEW.model OR OLD.created_at IS NOT NEW.created_at
+      BEGIN SELECT RAISE(ABORT, 'usage activity identity is immutable'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_insert
+      BEFORE INSERT ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_update
+      BEFORE UPDATE ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+      `);
+    },
+  },
 ];
 
 /** Resolve even an adversarial candidate collision without exposing legacy keys. */
@@ -1323,7 +1433,7 @@ export function migrateOrInitializeDatabase(
     }
     options.recordSchemaTransition?.(db, { kind: 'migrated', fromVersion: currentVersion, toVersion: targetVersion });
     db.exec('COMMIT');
-  } catch {
+  } catch (error) {
     try {
       db.exec('ROLLBACK');
     } catch {
@@ -1334,6 +1444,7 @@ export function migrateOrInitializeDatabase(
       safetyCopyPath: options.filename !== ':memory:' ? safetyCopyPath : undefined,
       fromVersion: currentVersion,
       toVersion: targetVersion,
+      validationGuidance: error instanceof UsageMigrationValidationError ? error.message : undefined,
     });
   }
 }

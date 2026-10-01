@@ -9,7 +9,7 @@ import { createRunApi } from './api.ts';
 import { createUsageRouter } from './usage-router.ts';
 import { InMemoryUsageStore } from '../usage/store.ts';
 import { UsageService } from '../usage/service.ts';
-import type { UsageActivity, UsageObservation } from '../usage/model.ts';
+import type { UsageActivity, UsageObservation, UsageAggregate } from '../usage/model.ts';
 
 interface UsageTestHarness {
   readonly api: Awaited<ReturnType<typeof createRunApi>>;
@@ -88,7 +88,7 @@ test('GET /api/usage/activities/:id returns activity detail with observations an
     await h.store.recordActivity({
       id: 'act-run-1',
       kind: 'agent_run',
-      correlation: { runId: 'run-1', projectId: 'proj-1' },
+      correlation: { runId: 'run-1', projectId: 'proj-1', agentId: 'agent-1' },
       engine: 'codex',
       model: 'gpt-4o',
       status: 'completed',
@@ -136,7 +136,7 @@ test('Human HTTP cannot append provider or billed facts even with a correction-s
     await h.store.recordActivity({
       id: 'act-1',
       kind: 'agent_run',
-      correlation: { runId: 'run-1' },
+      correlation: { runId: 'run-1', agentId: 'agent-1' },
       engine: 'codex',
       model: 'gpt-4o',
       status: 'completed',
@@ -204,6 +204,60 @@ test('POST /api/usage/activities/:id/observations rejects invalid payload', asyn
   }
 });
 
+test('scope and time-range queries return settlement-attributed run and attempt identities', async () => {
+  const h = await openUsageHarness();
+  try {
+    await h.store.recordActivity({
+      id: 'settled-in-range', kind: 'agent_run',
+      correlation: { runId: 'run-in-range', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 500, settledAt: 1500, wallDurationMs: 1000,
+    });
+    await h.store.recordActivity({
+      id: 'routing-in-range', kind: 'routing_attempt',
+      correlation: { attemptId: 'attempt-in-range', batchId: 'batch-1', projectId: 'p1' },
+      engine: 'routing-model', model: 'wake-v1', status: 'completed', createdAt: 1600, settledAt: 1900, wallDurationMs: 300,
+    });
+    await h.store.recordActivity({
+      id: 'settled-at-end', kind: 'agent_run',
+      correlation: { runId: 'run-at-end', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1700, settledAt: 2000, wallDurationMs: 300,
+    });
+
+    const projectResponse = await fetch(`${h.base}/api/usage/projects/p1?from=1000&to=2000&timeZone=America%2FNew_York`);
+    assert.equal(projectResponse.status, 200);
+    const project = await projectResponse.json() as {
+      totalActivities: number;
+      workModelSubtotal: { activityIdentities: readonly { runId?: string }[] };
+      routingModelSubtotal: { activityIdentities: readonly { attemptId?: string }[] };
+      timeRange: { from: number; to: number; timeZone: string; bounds: string; attribution: string };
+    };
+    assert.equal(project.totalActivities, 2);
+    assert.deepEqual(project.workModelSubtotal.activityIdentities.map((item) => item.runId), ['run-in-range']);
+    assert.deepEqual(project.routingModelSubtotal.activityIdentities.map((item) => item.attemptId), ['attempt-in-range']);
+    assert.deepEqual(project.timeRange, {
+      from: 1000, to: 2000, timeZone: 'America/New_York', bounds: '[start, end)', attribution: 'settlement',
+    });
+
+    const attemptResponse = await fetch(`${h.base}/api/usage/attempts/attempt-in-range`);
+    assert.equal(attemptResponse.status, 200);
+    const attemptDetail = await attemptResponse.json() as { activity: { correlation: { attemptId?: string } } };
+    assert.equal(attemptDetail.activity.correlation.attemptId, 'attempt-in-range');
+
+    const taskResponse = await fetch(`${h.base}/api/usage/tasks/t1?from=1000&to=2000&timeZone=UTC`);
+    const task = await taskResponse.json() as { totalActivities: number; activityIdentities: readonly { kind: string; runId?: string }[] };
+    assert.equal(taskResponse.status, 200);
+    assert.equal(task.totalActivities, 1);
+    assert.deepEqual(task.activityIdentities.map((item) => [item.kind, item.runId]), [['agent_run', 'run-in-range']]);
+
+    for (const query of ['from=invalid', 'from=2000&to=1000', 'timeZone=Not%2FAZone']) {
+      const invalid = await fetch(`${h.base}/api/usage/aggregate?${query}`);
+      assert.equal(invalid.status, 400, query);
+    }
+  } finally {
+    await h.api.close();
+  }
+});
+
 test('GET /api/usage/aggregate and drill-down routes', async () => {
   const h = await openUsageHarness();
   try {
@@ -262,4 +316,38 @@ test('GET /api/usage/aggregate and drill-down routes', async () => {
   } finally {
     await h.api.close();
   }
+});
+
+
+test('HTTP serialization omits smuggled Routing ownership in aggregate identities and activity correlations', async () => {
+  const h = await openUsageHarness();
+  try {
+    const identity = {
+      activityId: 'routing', kind: 'routing_attempt', attemptId: 'attempt', batchId: 'batch',
+      projectId: 'project', agentId: 'agent', taskId: 'task', runId: 'run', environmentInstanceId: 'environment',
+      model: 'wake', status: 'completed', createdAt: 1,
+    };
+    const aggregate = await h.usage.getAggregate({});
+    h.usage.getAggregate = async () => ({ ...aggregate, activityIdentities: [identity] } as unknown as UsageAggregate);
+    h.usage.listActivities = async () => [{
+      id: 'routing', kind: 'routing_attempt', correlation: { ...identity },
+      engine: 'routing', model: 'wake', status: 'completed', createdAt: 1,
+    } as unknown as UsageActivity];
+    for (const route of ['aggregate', 'activities']) {
+      const response = await fetch(`${h.base}/api/usage/${route}`);
+      assert.equal(response.status, 200);
+      const payload = await response.json() as {
+        activityIdentities: Record<string, unknown>[];
+        activities: { correlation: Record<string, unknown> }[];
+      };
+      const exported = route === 'aggregate' ? payload.activityIdentities[0]! : payload.activities[0]!.correlation;
+      assert.equal(exported.attemptId, 'attempt');
+      assert.equal(exported.batchId, 'batch');
+      assert.equal(exported.projectId, 'project');
+      for (const forbidden of ['agentId', 'taskId', 'runId', 'environmentInstanceId']) {
+        assert.equal(Object.hasOwn(exported, forbidden), false, `Routing must not export ${forbidden}`);
+      }
+      assert.equal(identity.agentId, 'agent', 'serialization must not mutate service facts');
+    }
+  } finally { await h.api.close(); }
 });

@@ -98,29 +98,77 @@ export interface ApiEquivalentCostEstimate {
  * A Routing attempt links to attempt, batch, Project, and wake model,
  * but never to an Agent or Task (ADR-0010 §"Usage activities and attribution").
  */
-export interface UsageActivityCorrelation {
-  readonly runId?: string | undefined;
-  readonly attemptId?: string | undefined;
-  readonly batchId?: string | undefined;
+export interface AgentRunUsageCorrelation {
+  readonly runId: string;
+  readonly attemptId?: never;
+  readonly batchId?: never;
   readonly projectId?: string | undefined;
   readonly taskId?: string | undefined;
-  readonly agentId?: string | undefined;
+  readonly agentId: string;
   readonly environmentInstanceId?: string | undefined;
 }
 
-/**
- * One model-consuming activity observed by Sprout.
- */
-export interface UsageActivity {
+/** Structural attribution boundary: Routing attempts have no Agent or Task fields. */
+export interface RoutingAttemptUsageCorrelation {
+  readonly runId?: never;
+  readonly attemptId: string;
+  readonly batchId: string;
+  readonly projectId: string;
+  readonly taskId?: never;
+  readonly agentId?: never;
+  readonly environmentInstanceId?: never;
+}
+
+export type UsageActivityCorrelation = AgentRunUsageCorrelation | RoutingAttemptUsageCorrelation;
+
+interface UsageActivityFields {
   readonly id: string;
-  readonly kind: UsageActivityKind;
-  readonly correlation: UsageActivityCorrelation;
   readonly engine: string;
   readonly model: string;
   readonly status: UsageActivityStatus;
   readonly createdAt: number;
   readonly settledAt?: number | undefined;
   readonly wallDurationMs?: number | undefined;
+}
+
+/**
+ * One model-consuming activity observed by Sprout. The discriminant makes a
+ * Routing attempt structurally incapable of carrying Agent or Task attribution.
+ */
+export type UsageActivity = UsageActivityFields & (
+  | { readonly kind: 'agent_run'; readonly correlation: AgentRunUsageCorrelation }
+  | { readonly kind: 'routing_attempt'; readonly correlation: RoutingAttemptUsageCorrelation }
+);
+
+export function assertUsageActivityAttribution(activity: UsageActivity): void {
+  const correlation = activity.correlation as unknown as Record<string, unknown>;
+  const valid = activity.kind === 'agent_run'
+    ? typeof correlation.runId === 'string' && correlation.runId.length > 0 &&
+      correlation.attemptId === undefined && correlation.batchId === undefined &&
+      typeof correlation.agentId === 'string' && correlation.agentId.length > 0
+    : activity.kind === 'routing_attempt' &&
+      typeof correlation.attemptId === 'string' && correlation.attemptId.length > 0 &&
+      typeof correlation.batchId === 'string' && correlation.batchId.length > 0 &&
+      typeof correlation.projectId === 'string' && correlation.projectId.length > 0 &&
+      correlation.runId === undefined && correlation.taskId === undefined &&
+      correlation.agentId === undefined && correlation.environmentInstanceId === undefined;
+  if (!valid) throw new Error('Invalid usage activity attribution: work and routing ownership are disjoint');
+}
+
+export function assertUsageActivityIdentityUnchanged(prior: UsageActivity, next: UsageActivity): void {
+  const same = prior.id === next.id && prior.kind === next.kind &&
+    prior.engine === next.engine && prior.model === next.model && prior.createdAt === next.createdAt &&
+    (prior.kind === 'agent_run' && next.kind === 'agent_run'
+      ? prior.correlation.runId === next.correlation.runId &&
+        prior.correlation.projectId === next.correlation.projectId &&
+        prior.correlation.taskId === next.correlation.taskId &&
+        prior.correlation.agentId === next.correlation.agentId &&
+        prior.correlation.environmentInstanceId === next.correlation.environmentInstanceId
+      : prior.kind === 'routing_attempt' && next.kind === 'routing_attempt' &&
+        prior.correlation.attemptId === next.correlation.attemptId &&
+        prior.correlation.batchId === next.correlation.batchId &&
+        prior.correlation.projectId === next.correlation.projectId);
+  if (!same) throw new Error('Usage activity identity is immutable after recording');
 }
 
 /**
@@ -162,22 +210,48 @@ export interface CostCoverageCounts {
 export type TokenCoverageStatus = 'complete' | 'observed_incomplete' | 'unavailable';
 
 export interface TokenTotals {
-  readonly inputTokens: number;
-  readonly uncachedInputTokens: number;
-  readonly cachedInputTokens: number;
-  readonly cacheWriteInputTokens: number;
-  readonly outputTokens: number;
-  readonly reasoningOutputTokens: number;
-  readonly totalTokens: number;
+  /** A dimension is omitted when no activity reported that dimension. */
+  readonly inputTokens?: number | undefined;
+  readonly uncachedInputTokens?: number | undefined;
+  readonly cachedInputTokens?: number | undefined;
+  readonly cacheWriteInputTokens?: number | undefined;
+  readonly outputTokens?: number | undefined;
+  readonly reasoningOutputTokens?: number | undefined;
+  readonly totalTokens?: number | undefined;
   readonly status: TokenCoverageStatus;
 }
 
 export type CostCoverageStatus = 'single_provenance' | 'mixed_provenance' | 'unavailable';
 
 export interface CostTotals {
-  readonly apiEquivalentUsdMicros: number;
+  /** Omitted when no activity has a known estimate; known zero remains 0. */
+  readonly apiEquivalentUsdMicros?: number | undefined;
   readonly status: CostCoverageStatus;
-  readonly byProvenance: Record<ValuationProvenance, number>;
+  readonly byProvenance: Partial<Record<ValuationProvenance, number>>;
+}
+
+export interface UsageActivityIdentity {
+  readonly activityId: string;
+  readonly kind: UsageActivityKind;
+  readonly runId?: string | undefined;
+  readonly attemptId?: string | undefined;
+  readonly batchId?: string | undefined;
+  readonly projectId?: string | undefined;
+  readonly taskId?: string | undefined;
+  readonly agentId?: string | undefined;
+  readonly model: string;
+  readonly status: UsageActivityStatus;
+  readonly createdAt: number;
+  readonly settledAt?: number | undefined;
+}
+
+/** The bounds are absolute instants; the named IANA zone is explicit display/derivation context. */
+export interface UsageTimeRange {
+  readonly from?: number | undefined;
+  readonly to?: number | undefined;
+  readonly timeZone: string;
+  readonly bounds: '[start, end)';
+  readonly attribution: 'settlement';
 }
 
 export interface UsageAggregate {
@@ -187,7 +261,9 @@ export interface UsageAggregate {
   readonly tokens: TokenTotals;
   readonly cost: CostTotals;
   readonly billedCost: AttributableBilledCost;
-  readonly totalSproutWallDurationMs: number;
+  readonly totalSproutWallDurationMs?: number | undefined;
+  readonly activityIdentities: readonly UsageActivityIdentity[];
+  readonly timeRange?: UsageTimeRange | undefined;
   readonly workModelSubtotal?: UsageAggregate | undefined;
   readonly routingModelSubtotal?: UsageAggregate | undefined;
   readonly groups?: Record<string, UsageAggregate> | undefined;
@@ -198,29 +274,26 @@ export function isTokenCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+export function assertUsageObservation(observation: UsageObservation): void {
+  if (observation.costEstimate.status === 'available' && (
+    !isTokenCount(observation.costEstimate.apiEquivalentUsdMicros) ||
+    typeof observation.costEstimate.valuationProvenance !== 'string' ||
+    !(['provider_estimated', 'harness_calculated', 'locally_estimated'] as const)
+      .includes(observation.costEstimate.valuationProvenance as ValuationProvenance)
+  )) {
+    throw new Error('Available API-equivalent cost requires a safe amount and supported valuation provenance');
+  }
+  if (observation.billedCost.status === 'available' && !isTokenCount(observation.billedCost.billedUsdMicros)) {
+    throw new Error('Available billed cost requires a safe amount');
+  }
+}
+
 export function emptyTokenTotals(): TokenTotals {
-  return {
-    inputTokens: 0,
-    uncachedInputTokens: 0,
-    cachedInputTokens: 0,
-    cacheWriteInputTokens: 0,
-    outputTokens: 0,
-    reasoningOutputTokens: 0,
-    totalTokens: 0,
-    status: 'unavailable',
-  };
+  return { status: 'unavailable' };
 }
 
 export function emptyCostTotals(): CostTotals {
-  return {
-    apiEquivalentUsdMicros: 0,
-    status: 'unavailable',
-    byProvenance: {
-      provider_estimated: 0,
-      harness_calculated: 0,
-      locally_estimated: 0,
-    },
-  };
+  return { status: 'unavailable', byProvenance: {} };
 }
 
 export function emptyUsageAggregate(): UsageAggregate {
@@ -231,7 +304,7 @@ export function emptyUsageAggregate(): UsageAggregate {
     tokens: emptyTokenTotals(),
     cost: emptyCostTotals(),
     billedCost: { status: 'unavailable', currency: 'USD', reason: 'no activity observed' },
-    totalSproutWallDurationMs: 0,
+    activityIdentities: [],
   };
 }
 
@@ -255,35 +328,27 @@ export function aggregateObservations(
   let completeTokensCount = 0;
   let partialTokensCount = 0;
   let unavailableTokensCount = 0;
-
   let availableCostCount = 0;
   let pendingCostCount = 0;
   let unavailableCostCount = 0;
 
-  let inputTokens = 0;
-  let uncachedInputTokens = 0;
-  let cachedInputTokens = 0;
-  let cacheWriteInputTokens = 0;
-  let outputTokens = 0;
-  let reasoningOutputTokens = 0;
-  let totalTokens = 0;
-  let hasAnyTokens = false;
-
-  let apiEquivalentUsdMicros = 0;
-  let hasAnyCost = false;
-  const byProvenance: Record<ValuationProvenance, number> = {
-    provider_estimated: 0,
-    harness_calculated: 0,
-    locally_estimated: 0,
+  const tokenTotals: Partial<Record<keyof Omit<TokenTotals, 'status'>, number>> = {};
+  const addToken = (key: keyof Omit<TokenTotals, 'status'>, value: number | undefined): void => {
+    if (value !== undefined) tokenTotals[key] = (tokenTotals[key] ?? 0) + value;
   };
+  let hasAnyTokenDimension = false;
+  let apiEquivalentUsdMicros: number | undefined;
+  const byProvenance: Partial<Record<ValuationProvenance, number>> = {};
   const seenProvenances = new Set<ValuationProvenance>();
-
-  let totalWallDurationMs = 0;
+  let totalWallDurationMs: number | undefined;
   let anyBilledAvailable = false;
   let totalBilledUsdMicros = 0;
 
   for (const { activity, observation } of items) {
-    totalWallDurationMs += observation?.durations.sproutWallDurationMs ?? activity.wallDurationMs ?? 0;
+    const duration = activity.status === 'active'
+      ? activity.wallDurationMs ?? observation?.durations.sproutWallDurationMs
+      : observation?.durations.sproutWallDurationMs ?? activity.wallDurationMs;
+    if (duration !== undefined) totalWallDurationMs = (totalWallDurationMs ?? 0) + duration;
 
     if (!observation || observation.completeness === 'unavailable') {
       unavailableTokensCount += 1;
@@ -294,28 +359,29 @@ export function aggregateObservations(
     }
 
     if (observation?.tokens) {
-      hasAnyTokens = true;
-      inputTokens += observation.tokens.inputTokens ?? 0;
-      uncachedInputTokens += observation.tokens.uncachedInputTokens ?? 0;
-      cachedInputTokens += observation.tokens.cachedInputTokens ?? 0;
-      cacheWriteInputTokens += observation.tokens.cacheWriteInputTokens ?? 0;
-      outputTokens += observation.tokens.outputTokens ?? 0;
-      reasoningOutputTokens += observation.tokens.reasoningOutputTokens ?? 0;
-      totalTokens += observation.tokens.totalTokens ?? 0;
+      for (const key of [
+        'inputTokens', 'uncachedInputTokens', 'cachedInputTokens', 'cacheWriteInputTokens',
+        'outputTokens', 'reasoningOutputTokens', 'totalTokens',
+      ] as const) {
+        const value = observation.tokens[key];
+        if (value !== undefined) hasAnyTokenDimension = true;
+        addToken(key, value);
+      }
     }
 
     if (!observation || observation.costEstimate.status === 'unavailable') {
       unavailableCostCount += 1;
     } else if (observation.costEstimate.status === 'pending') {
       pendingCostCount += 1;
-    } else if (observation.costEstimate.status === 'available') {
+    } else {
       availableCostCount += 1;
-      const micros = observation.costEstimate.apiEquivalentUsdMicros ?? 0;
-      apiEquivalentUsdMicros += micros;
-      hasAnyCost = true;
-      const prov = observation.costEstimate.valuationProvenance ?? 'locally_estimated';
-      byProvenance[prov] = (byProvenance[prov] ?? 0) + micros;
-      seenProvenances.add(prov);
+      const micros = observation.costEstimate.apiEquivalentUsdMicros;
+      if (micros !== undefined) apiEquivalentUsdMicros = (apiEquivalentUsdMicros ?? 0) + micros;
+      const provenance = observation.costEstimate.valuationProvenance;
+      if (micros !== undefined && provenance !== undefined) {
+        byProvenance[provenance] = (byProvenance[provenance] ?? 0) + micros;
+        seenProvenances.add(provenance);
+      }
     }
 
     if (observation?.billedCost.status === 'available' && observation.billedCost.billedUsdMicros !== undefined) {
@@ -324,23 +390,14 @@ export function aggregateObservations(
     }
   }
 
-  let tokenStatus: TokenCoverageStatus;
-  if (!hasAnyTokens && completeTokensCount === 0 && partialTokensCount === 0) {
-    tokenStatus = 'unavailable';
-  } else if (partialTokensCount > 0 || unavailableTokensCount > 0) {
-    tokenStatus = 'observed_incomplete';
-  } else {
-    tokenStatus = 'complete';
-  }
-
-  let costStatus: CostCoverageStatus;
-  if (!hasAnyCost) {
-    costStatus = 'unavailable';
-  } else if (seenProvenances.size > 1) {
-    costStatus = 'mixed_provenance';
-  } else {
-    costStatus = 'single_provenance';
-  }
+  const tokenStatus: TokenCoverageStatus = !hasAnyTokenDimension
+    ? 'unavailable'
+    : partialTokensCount > 0 || unavailableTokensCount > 0 || completeTokensCount !== items.length
+      ? 'observed_incomplete'
+      : 'complete';
+  const costStatus: CostCoverageStatus = apiEquivalentUsdMicros === undefined
+    ? 'unavailable'
+    : seenProvenances.size > 1 ? 'mixed_provenance' : 'single_provenance';
 
   return {
     totalActivities: items.length,
@@ -354,24 +411,24 @@ export function aggregateObservations(
       pending: pendingCostCount,
       unavailable: unavailableCostCount,
     },
-    tokens: {
-      inputTokens,
-      uncachedInputTokens,
-      cachedInputTokens,
-      cacheWriteInputTokens,
-      outputTokens,
-      reasoningOutputTokens,
-      totalTokens,
-      status: tokenStatus,
-    },
+    tokens: { ...tokenTotals, status: tokenStatus },
     cost: {
-      apiEquivalentUsdMicros,
+      ...(apiEquivalentUsdMicros !== undefined ? { apiEquivalentUsdMicros } : {}),
       status: costStatus,
       byProvenance,
     },
     billedCost: anyBilledAvailable
       ? { status: 'available', currency: 'USD', billedUsdMicros: totalBilledUsdMicros }
       : { status: 'unavailable', currency: 'USD', reason: 'provider does not supply per-run invoice facts' },
-    totalSproutWallDurationMs: totalWallDurationMs,
+    ...(totalWallDurationMs !== undefined ? { totalSproutWallDurationMs: totalWallDurationMs } : {}),
+    activityIdentities: items.map(({ activity }) => ({
+      activityId: activity.id,
+      kind: activity.kind,
+      ...activity.correlation,
+      model: activity.model,
+      status: activity.status,
+      createdAt: activity.createdAt,
+      ...(activity.settledAt !== undefined ? { settledAt: activity.settledAt } : {}),
+    })),
   };
 }
