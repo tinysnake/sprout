@@ -101,6 +101,7 @@ async function deterministicAppOptions(vite: ViteDevServer) {
   const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
   const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
   const chatModule = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+  const usageModule = (await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts')) as typeof import('../modules/usage/adapters/fixture-adapter.ts');
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
@@ -109,6 +110,7 @@ async function deterministicAppOptions(vite: ViteDevServer) {
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
     chatService: new chatModule.FixtureChatService(),
+    usageService: new usageModule.FixtureUsageService(),
   };
 }
 

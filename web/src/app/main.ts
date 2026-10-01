@@ -23,6 +23,9 @@ import { createOperatorBrowserAdapter } from '../adapters/operator-api.js';
 import { SETTINGS_SERVICE, type SettingsService } from '../modules/settings/ports.js';
 import { ProductionSettingsService } from '../modules/settings/adapters/production-adapter.js';
 import { OPERATOR_SESSION } from './auth.js';
+import { USAGE_SERVICE, type UsageManagementService } from '../modules/usage/types.js';
+import { createUsageBrowserAdapter } from '../adapters/usage-api.js';
+import { ProductionUsageService } from '../modules/usage/adapters/production-adapter.js';
 import type { RunView } from '../../../src/web/views.ts';
 import type { ShellConnectionSource } from '../shell/connection.js';
 import { SHELL_CONNECTION_SOURCE } from '../shell/use-shell-connection.js';
@@ -53,6 +56,8 @@ export interface SproutAppOptions {
   projectService?: ProjectManagementService;
   /** Production Chat authority; tests inject a fixture explicitly, never by default. */
   chatService?: ChatService;
+  /** Production Usage authority; tests inject a fixture explicitly, never by default. */
+  usageService?: UsageManagementService;
   /**
    * A page-owned connection source.
    *
@@ -92,6 +97,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.chatService) {
     app.provide(CHAT_SERVICE, options.chatService);
+  }
+  if (options.usageService) {
+    app.provide(USAGE_SERVICE, options.usageService);
   }
   if (options.connectionSource) {
     app.provide(SHELL_CONNECTION_SOURCE, options.connectionSource);
@@ -150,11 +158,14 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       operatorSession,
       transport,
     );
+    const usageAdapter = createUsageBrowserAdapter(transport);
+    const usageService = new ProductionUsageService(usageAdapter);
     const { app, router } = createSproutApp({
       environmentService,
       agentService,
       projectService,
       chatService,
+      usageService,
       connectionSource: transport,
       operatorSession,
       settingsService,
