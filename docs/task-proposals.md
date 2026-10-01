@@ -112,6 +112,41 @@ compositions. #101 owns later Task controls and Task content changes, including
 new content versions and admission of subsequent runs against the latest
 version. The complete Tasks page remains #102.
 
+## Task control boundary (#101)
+
+Once begun, the protected Task controls remain independent of proposal approval:
+
+- `POST /api/tasks/:id/pause` immediately holds admission; an active run may
+  settle naturally. `POST /api/tasks/:id/interrupt` is available only while a
+  pause request still has an active run and settles that run as `stopped`.
+  `POST /api/tasks/:id/resume` clears the Human pause without automatically
+  admitting another run.
+- `POST /api/tasks/:id/blockers` accepts only `reason`, `requiredAction`,
+  `responsible`, and `nextAdvancer`. Responsibility is a current Human/Agent,
+  an external condition, or a recovery mechanism. The blocker holds the Task
+  lease and prevents advancement until a Human clears it.
+- `POST /api/tasks/:id/completion-claims` accepts only `outcomeSummary`,
+  `validationEvidence`, `durableChanges`, `limitations`, and
+  `recommendedDisposition`. It rejects unknown keys (including reasoning or
+  transcript fields), empty required evidence, and non-factual nested values.
+  A claim is not completion; the Task retains its lease while awaiting Human
+  validation.
+- `POST /api/tasks/:id/validation` accepts `{ claimId, decision: "accept" |
+  "correct", reason }`. Acceptance begins safe cleanup toward completion;
+  correction returns to deliberate work without releasing the lease.
+- `POST /api/tasks/:id/end` only retries an already accepted completion intent.
+  `POST /api/tasks/:id/discard` records cancellation intent and uses the same
+  cleanup-then-release sequence. `POST /api/tasks/:id/recovery` is Human-only;
+  retries of an accepted completion preserve that completed intent. Force
+  Release remains the Environment recovery service's explicit emergency path.
+
+All routes derive the Human from the authenticated operator boundary and reject
+caller-supplied actors. Agent Task leads receive only internal bounded
+advancement, subordinate stop, blocker, and completion-claim capabilities.
+Task, nested-run, pause/validation, and Environment lease state remain distinct;
+terminal `done` or `cancelled` is not recorded until normal context cleanup and
+lease release have committed together.
+
 ## Risk-to-test map
 
 - Pre-acquisition refusal and post-acquisition Worker failure: `src/task/admission.test.ts`.
@@ -130,6 +165,12 @@ version. The complete Tasks page remains #102.
   `web/src/adapters/task-proposal-contract.test.ts`.
 - Encoded identities and disconnected command non-replay:
   `web/src/adapters/task-proposal-api.test.ts`.
+- Pause/Interrupt, retained lease, unexpected restart, and Task-lead escalation:
+  `src/task/control-service.test.ts`, `src/task/environment-lifecycle.test.ts`,
+  and `src/run/orchestrator.test.ts`.
+- Claim/blocker shape, Human validation/correction, end/recovery disposition,
+  Force Release integration, and hostile HTTP actor fields:
+  `src/task/control-service.test.ts` and `src/web/task-control-router.test.ts`.
 
 Reference inheritance: the work-status/ownership/live-execution separation
 already adopted from Paperclip by ADR-0006 is retained. Sprout's proposal authority

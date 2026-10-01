@@ -17,6 +17,7 @@
  *    check first, so a retried advancement cannot double-count a run.
  */
 
+import { serializeTaskControlDocument } from './model.ts';
 import type {
   Task,
   TaskRunLink,
@@ -59,6 +60,8 @@ export interface TaskStore {
     expected: {
       readonly environmentLifecycleState: Task['environmentLifecycleState'];
       readonly activeRunId: Task['activeRunId'];
+      readonly updatedAt?: number;
+      readonly controlDocument: string | null;
     },
   ): Promise<boolean>;
 
@@ -85,6 +88,8 @@ export interface TaskStore {
   }, expected: {
     readonly environmentLifecycleState: Task['environmentLifecycleState'];
     readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
   }): Promise<boolean>;
 
   /** Commit a terminal Task state and release its Task lease together. */
@@ -156,9 +161,13 @@ export class InMemoryTaskStore implements TaskStore {
   async saveIfUnchanged(task: Task, expected: {
     readonly environmentLifecycleState: Task['environmentLifecycleState'];
     readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
   }): Promise<boolean> {
     const current = this.#tasks.get(task.id);
-    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId) return false;
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId
+      || (expected.updatedAt !== undefined && current.updatedAt !== expected.updatedAt)
+      || serializeTaskControlDocument(current) !== expected.controlDocument) return false;
     this.#tasks.set(task.id, task);
     return true;
   }
@@ -184,9 +193,13 @@ export class InMemoryTaskStore implements TaskStore {
   }, expected: {
     readonly environmentLifecycleState: Task['environmentLifecycleState'];
     readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
   }): Promise<boolean> {
     const current = this.#tasks.get(task.id);
-    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId) return false;
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId
+      || (expected.updatedAt !== undefined && current.updatedAt !== expected.updatedAt)
+      || serializeTaskControlDocument(current) !== expected.controlDocument) return false;
     const links = this.#links.get(task.id) ?? [];
     if (links.some(link => link.runId === input.runId)) return false;
     const link: TaskRunLink = {

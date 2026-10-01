@@ -120,7 +120,7 @@ test('the user can stop a run through the API', async () => {
       const stop = await fetch(`${base}/api/runs/${id}/stop`, { method: 'POST' });
       assert.equal(stop.status, 200);
       const stopped = (await stop.json()) as Record<string, unknown>;
-      assert.equal(stopped.status, 'interrupted');
+      assert.equal(stopped.status, 'stopped');
     },
     { settleAfterMs: 5_000 },
   );

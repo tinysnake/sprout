@@ -461,7 +461,7 @@ test('a run admitted by a collaboration wake is stoppable through the run contro
 
     const stop = await fetch(`${base}/api/runs/${runId}/stop`, { method: 'POST' });
     assert.equal(stop.status, 200);
-    assert.equal(((await stop.json()) as { status: string }).status, 'interrupted');
+    assert.equal(((await stop.json()) as { status: string }).status, 'stopped');
 
     // The delivery completes once the stopped run settles without a reply.
     const response = await delivery;

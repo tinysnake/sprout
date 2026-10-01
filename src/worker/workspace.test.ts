@@ -176,8 +176,10 @@ test('a durable cleanup failure retains the Task lease until restart retries thr
   const reopened = new SqliteStore({ filename });
   const retry = lifecycle(reopened, replacement, false);
   assert.equal(retry.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
-  const discarded = await retry.lifecycle.recover('task-1', 'discard');
-  assert.equal(discarded.environmentLifecycleState, 'discarded');
+  const completed = await retry.lifecycle.recover('task-1', 'discard');
+  assert.equal(completed.status, 'done', 'the accepted end intent survives recovery even when the retry says discard');
+  assert.equal(completed.environmentLifecycleState, 'ended');
+  assert.equal(completed.endDisposition, 'completed');
   assert.equal(retry.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
   reopened.close();
 });

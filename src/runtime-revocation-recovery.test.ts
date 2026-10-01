@@ -163,7 +163,7 @@ test('#171 task recovery actions refuse actionably instead of the protected gene
     const post = (action: string) => fetch(`${h.base}/api/tasks/${task.id}/recovery`, {
       method: 'POST',
       headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, reason: 'operator recovery decision' }),
     });
 
     // The witnessed review sequence: resume succeeds (the Task returns to

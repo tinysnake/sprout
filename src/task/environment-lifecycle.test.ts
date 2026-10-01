@@ -128,6 +128,26 @@ test('begin binds a Task-owned non-expiring lease; nested settlement retains it 
   assert.deepEqual(calls, ['prepare', 'prepare', 'recycle']);
 });
 
+test('Human pause blocks later admission, Interrupt settles stopped, and the Task lease stays held until resume', async () => {
+  const scenario = build();
+  await scenario.store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'go');
+
+  const pauseRequested = await scenario.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'hold after this run');
+  assert.equal(pauseRequested.pauseState, 'requested');
+  await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'stopped'));
+  const paused = await scenario.store.get('task-1');
+  assert.equal(paused?.pauseState, 'paused');
+  await assert.rejects(scenario.lifecycle.advanceRun('task-1', 'pi', 'must not start'), /paused/i);
+  assert.equal(paused?.environmentLifecycleState, 'idle');
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+
+  await scenario.lifecycle.resumePause('task-1', { memberId: 'operator', memberKind: 'human' }, 'continue deliberately');
+  assert.equal((await scenario.store.get('task-1'))?.pauseState, undefined);
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+});
+
 test('interrupted nested work and restart retain exclusion until the owning Task resumes or discards', async () => {
   const scenario = build();
   await scenario.store.create(task());
@@ -145,6 +165,60 @@ test('interrupted nested work and restart retain exclusion until the owning Task
   const discarded = await scenario.lifecycle.recover('task-1', 'discard');
   assert.equal(discarded.environmentLifecycleState, 'discarded');
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
+});
+
+test('SQLite restart preserves pause state and its attributed control history beside the held Task lease', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-pause-restart-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    await first.tasks.create(task());
+    const firstRuntime = sqliteLifecycle(first);
+    const begun = await firstRuntime.lifecycle.begin('task-1');
+    const paused = await firstRuntime.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'inspect before continuing');
+    assert.equal(paused.pauseState, 'paused');
+    first.close();
+
+    const restarted = new SqliteStore({ filename });
+    const runtime = sqliteLifecycle(restarted);
+    const restored = await restarted.tasks.get('task-1');
+    assert.equal(restored?.pauseState, 'paused');
+    assert.deepEqual(restored?.controlHistory?.map(event => event.action), ['paused']);
+    assert.equal(runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+    restarted.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('SQLite cleanup recovery preserves the completed end intent across restart and discard retry', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-end-intent-restart-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    let recycleAttempts = 0;
+    const worker: TaskContextWorker = {
+      prepare: async () => ({ bootstrapInstructions: '' }),
+      recycle: async () => { recycleAttempts += 1; if (recycleAttempts === 1) throw new Error('cleanup unavailable'); },
+    };
+    await first.tasks.create(task());
+    const initial = sqliteLifecycle(first, { worker });
+    const begun = await initial.lifecycle.begin('task-1');
+    await assert.rejects(initial.lifecycle.end('task-1'), /cleanup unavailable/);
+    const intent = await first.tasks.get('task-1');
+    assert.equal(intent?.environmentLifecycleState, 'recovery');
+    assert.equal(intent?.endDisposition, 'completed');
+    assert.notEqual(intent?.status, 'done');
+    first.close();
+
+    const restarted = new SqliteStore({ filename });
+    const recovery = sqliteLifecycle(restarted);
+    await recovery.lifecycle.reconcile();
+    const recovered = await recovery.lifecycle.recover('task-1', 'discard');
+    assert.equal(recovered.status, 'done');
+    assert.equal(recovered.environmentLifecycleState, 'ended');
+    assert.equal(recovered.endDisposition, 'completed');
+    assert.equal(recovery.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
+    restarted.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('crashed child begin/end boundaries retain idle Task ownership and make retries durable across SQLite restarts', async () => {

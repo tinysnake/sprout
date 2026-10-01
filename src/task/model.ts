@@ -73,6 +73,46 @@ export interface TaskActor {
   readonly memberKind: 'human' | 'agent';
 }
 
+export type TaskPauseState = 'requested' | 'paused';
+
+export type TaskBlockerResponsibility =
+  | { readonly kind: 'human' | 'agent'; readonly memberId: string }
+  | { readonly kind: 'external-condition'; readonly condition: string }
+  | { readonly kind: 'recovery'; readonly mechanism: string };
+
+/** A routable wait with an explicit owner, action, and next Task advancer. */
+export interface TaskBlocker {
+  readonly reason: string;
+  readonly requiredAction: string;
+  readonly responsible: TaskBlockerResponsibility;
+  readonly nextAdvancer: TaskActor;
+  readonly createdBy: TaskActor;
+  readonly createdAt: number;
+}
+
+/** Fact-form completion evidence. No free-form reasoning or transcript field exists. */
+export interface TaskCompletionClaim {
+  readonly id: string;
+  readonly actor: TaskActor;
+  readonly at: number;
+  readonly outcomeSummary: string;
+  readonly validationEvidence: readonly string[];
+  readonly durableChanges: readonly string[];
+  readonly limitations: readonly string[];
+  readonly recommendedDisposition: 'complete' | 'continue';
+}
+
+export type TaskControlEvent =
+  | { readonly action: 'pause-requested'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
+  | { readonly action: 'paused' | 'interrupt-requested' | 'resumed'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
+  | { readonly action: 'subordinate-run-stop-requested'; readonly actor: TaskActor; readonly at: number; readonly runId: string; readonly reason: string }
+  | { readonly action: 'blocker-raised'; readonly actor: TaskActor; readonly at: number; readonly blocker: TaskBlocker }
+  | { readonly action: 'blocker-cleared'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
+  | { readonly action: 'completion-claimed'; readonly actor: TaskActor; readonly at: number; readonly claimId: string }
+  | { readonly action: 'validation-accepted' | 'validation-corrected'; readonly actor: TaskActor; readonly at: number; readonly claimId: string; readonly reason: string }
+  | { readonly action: 'end-requested'; readonly actor: TaskActor; readonly at: number; readonly disposition: 'completed' | 'cancelled'; readonly reason: string }
+  | { readonly action: 'recovery-requested'; readonly actor: TaskActor; readonly at: number; readonly recoveryAction: 'resume' | 'discard'; readonly reason: string };
+
 /** Approval and the exact proposal snapshot bound by one approve-and-begin command. */
 export interface TaskAdmission {
   readonly proposalId: string;
@@ -103,8 +143,17 @@ export interface Task {
   readonly environmentPreference?: EnvironmentPreference;
   /** Present for Tasks created by Human approve-and-begin; binds immutable proposal facts. */
   readonly admission?: TaskAdmission;
-  /** Why the Task is `blocked`, when it is. */
+  /** Legacy plain-text reason; new blockers use the complete routable shape below. */
   readonly blockerReason?: string;
+  readonly blocker?: TaskBlocker;
+  readonly completionClaims?: readonly TaskCompletionClaim[];
+  /** The only claim eligible for a Human validation decision. */
+  readonly pendingCompletionClaimId?: string;
+  /** Admission hold orthogonal to run and Environment lease lifecycles. */
+  readonly pauseState?: TaskPauseState;
+  readonly controlHistory?: readonly TaskControlEvent[];
+  /** Durable intent survives cleanup/release recovery without changing disposition. */
+  readonly endDisposition?: 'completed' | 'cancelled';
   /** Fixed only by Task begin; absent for an unbegun Task. */
   readonly environmentInstanceId?: string;
   /** The Task-held lease, never a nested run-held lease. */
@@ -119,6 +168,18 @@ export interface Task {
   readonly completedAt?: number;
 }
 
+export function serializeTaskControlDocument(task: Task): string | null {
+  const document = {
+    ...(task.blocker !== undefined ? { blocker: task.blocker } : {}),
+    ...(task.completionClaims !== undefined ? { completionClaims: task.completionClaims } : {}),
+    ...(task.pendingCompletionClaimId !== undefined ? { pendingCompletionClaimId: task.pendingCompletionClaimId } : {}),
+    ...(task.pauseState !== undefined ? { pauseState: task.pauseState } : {}),
+    ...(task.controlHistory !== undefined ? { controlHistory: task.controlHistory } : {}),
+    ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
+  };
+  return Object.keys(document).length > 0 ? JSON.stringify(document) : null;
+}
+
 /**
  * A Task-level summary of one linked run.
  *
@@ -131,7 +192,7 @@ export interface TaskRunSummary {
   readonly runId: string;
   readonly agentId: string;
   /** The run's terminal status at the time the summary was recorded. */
-  readonly status: 'completed' | 'failed' | 'interrupted';
+  readonly status: 'completed' | 'failed' | 'stopped' | 'interrupted';
   /** The bounded fact-form outcome; empty when the run produced no text. */
   readonly summary: string;
   readonly recordedAt: number;

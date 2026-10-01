@@ -14,7 +14,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
-import type { Task, TaskActor } from './model.ts';
+import { serializeTaskControlDocument, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim } from './model.ts';
 import { isTerminalTaskStatus } from './model.ts';
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
@@ -23,10 +23,7 @@ import type { TaskContextMaterialization } from '../worker/protocol.ts';
 export type TaskRecoveryAction = 'resume' | 'discard';
 
 /** Why one Task recovery request cannot apply (#171). */
-export type TaskRecoveryRefusalCode =
-  | 'not-awaiting-recovery'
-  | 'ending-requires-discard'
-  | 'lease-cannot-resume';
+export type TaskRecoveryRefusalCode = 'not-awaiting-recovery' | 'lease-cannot-resume';
 
 /**
  * A recovery request that cannot apply, named so the API can surface it.
@@ -282,7 +279,9 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#require(taskId);
     if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
     if (task.environmentLifecycleState === 'running') throw new Error(`task ${taskId} already has an active run`);
-    if (!['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
+    if (task.pauseState !== undefined) throw new Error(`task ${taskId} is paused and cannot admit a run`);
+    if (task.blocker !== undefined) throw new Error(`task ${taskId} has an unresolved blocker`);
+    if (!['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} is ${task.environmentLifecycleState ?? 'unbegun'} and cannot advance`);
     }
     if (!task.environmentInstanceId || !task.environmentLeaseId) throw new Error(`task ${taskId} has no environment lease`);
@@ -298,7 +297,8 @@ export class TaskEnvironmentLifecycle {
     const runId = this.#ids.run();
     // Persist the active nested-run fact and its complete advance attribution before the Worker can start.
     const running: Task = { ...task, status: 'in-progress', environmentLifecycleState: 'running', activeRunId: runId, updatedAt: this.#clock.now() };
-    const expected = { environmentLifecycleState: task.environmentLifecycleState, activeRunId: task.activeRunId };
+    const expected = { environmentLifecycleState: task.environmentLifecycleState, activeRunId: task.activeRunId,
+      updatedAt: task.updatedAt, controlDocument: serializeTaskControlDocument(task) };
     const admitted = audit === undefined
       ? await this.#store.saveIfUnchanged(running, expected)
       : await this.#store.admitRun(running, { runId, agentId, actor: audit.actor, reason: audit.reason, contentVersion: audit.contentVersion, now: this.#clock.now() }, expected);
@@ -339,11 +339,19 @@ export class TaskEnvironmentLifecycle {
       await this.#toRecovery(task, 'running', true);
       return;
     }
+    const requestedPause = task.pauseState === 'requested'
+      ? [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'pause-requested' && 'reason' in event)
+      : undefined;
+    if (task.pauseState === 'requested' && requestedPause === undefined) throw new Error('Task pause request has no durable Human action');
     const next: Task = {
       ...task,
-      status: run.status === 'failed' ? 'blocked' : 'in-progress',
-      environmentLifecycleState: run.status === 'failed' ? 'blocked' : 'idle',
+      status: run.status === 'failed' ? 'blocked' : task.blocker !== undefined ? 'blocked' : 'in-progress',
+      environmentLifecycleState: run.status === 'failed' || task.blocker !== undefined ? 'blocked' : 'idle',
       ...(run.status === 'failed' ? { blockerReason: `run ${run.id} failed: ${run.failure ?? 'no failure detail'}` } : {}),
+      ...(requestedPause !== undefined ? { pauseState: 'paused' as const,
+        controlHistory: [...(task.controlHistory ?? []), {
+          action: 'paused' as const, actor: requestedPause.actor, at: this.#clock.now(), reason: requestedPause.reason,
+        }] } : {}),
       updatedAt: this.#clock.now(),
     };
     await this.#store.save(omit(next, 'activeRunId'));
@@ -353,21 +361,29 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#require(taskId);
     if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') return task;
     if (task.activeRunId) throw new Error(`task ${taskId} cannot end while run ${task.activeRunId} is active`);
-    if (task.environmentLifecycleState === 'ending') return this.#recycleThenRelease(task, 'ended');
+    if (task.environmentLifecycleState === 'ending') return this.#recycleThenRelease(task);
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} is ${task.environmentLifecycleState ?? 'unbegun'} and cannot end`);
     }
-    const ending = { ...task, environmentLifecycleState: 'ending' as const, updatedAt: this.#clock.now() };
+    const ending = { ...task, environmentLifecycleState: 'ending' as const, endDisposition: task.endDisposition ?? 'completed' as const, updatedAt: this.#clock.now() };
     await this.#store.save(ending);
-    return this.#recycleThenRelease(ending, 'ended');
+    return this.#recycleThenRelease(ending);
   }
 
   async recover(taskId: string, action: TaskRecoveryAction): Promise<Task> {
     const task = await this.#require(taskId);
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
     if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
-    if (action === 'discard') return this.#recycleThenRelease(task, 'discarded');
-    if (task.recoveryState === 'ending') throw new TaskRecoveryRefusal('ending-requires-discard', `task ${taskId} was ending; discard completes its cleanup`);
+    if (task.recoveryState === 'ending') {
+      if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
+      return this.#recycleThenRelease(task);
+    }
+    if (action === 'discard') {
+      const { pendingCompletionClaimId: _pending, ...rest } = task;
+      const ending = { ...rest, environmentLifecycleState: 'ending' as const, endDisposition: 'cancelled' as const, updatedAt: this.#clock.now() };
+      await this.#store.save(ending);
+      return this.#recycleThenRelease(ending);
+    }
     if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
@@ -377,7 +393,19 @@ export class TaskEnvironmentLifecycle {
       await this.#store.save(resumed); return resumed;
     }
     // A lost nested session is a visible interrupted fact, never an automatic relaunch.
-    const resumed = omit(omit({ ...task, status: 'blocked' as const, environmentLifecycleState: 'blocked' as const, blockerReason: task.blockerReason ?? 'nested run interrupted; advance deliberately to resume', updatedAt: this.#clock.now() }, 'recoveryState'), 'activeRunId');
+    const requestedPause = task.pauseState === 'requested'
+      ? [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'pause-requested')
+      : undefined;
+    if (task.pauseState === 'requested' && requestedPause === undefined) throw new Error('Task pause request has no durable Human action');
+    const resumed = omit(omit({
+      ...task,
+      status: 'blocked' as const,
+      environmentLifecycleState: 'blocked' as const,
+      blockerReason: task.blockerReason ?? 'nested run interrupted; advance deliberately to resume',
+      ...(requestedPause !== undefined ? { pauseState: 'paused' as const,
+        controlHistory: [...(task.controlHistory ?? []), { action: 'paused' as const, actor: requestedPause.actor, at: this.#clock.now(), reason: requestedPause.reason }] } : {}),
+      updatedAt: this.#clock.now(),
+    }, 'recoveryState'), 'activeRunId');
     await this.#store.save(resumed); return resumed;
   }
 
@@ -401,6 +429,201 @@ export class TaskEnvironmentLifecycle {
     if (task.environmentLifecycleState === 'recovery' || !task.environmentLeaseId) return;
     if (!['beginning', 'idle', 'blocked', 'awaiting-validation', 'running', 'ending'].includes(task.environmentLifecycleState ?? '')) return;
     await this.#toRecovery(task, task.environmentLifecycleState!, task.activeRunId !== undefined);
+  }
+
+  /** Pause stops future admissions immediately while preserving an active run and its lease. */
+  async requestPause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.pauseState !== undefined) return task;
+    if (!['running', 'idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')
+      || !task.environmentLeaseId) throw new Error(`task ${taskId} cannot be paused in its current lifecycle`);
+    const lease = this.#pool.getLease(task.environmentLeaseId);
+    if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id) {
+      throw new Error(`task ${taskId} lease is not active`);
+    }
+    if ((task.environmentLifecycleState === 'running') !== (task.activeRunId !== undefined)) {
+      throw new Error(`task ${taskId} active run state is inconsistent`);
+    }
+    const at = this.#clock.now();
+    const action = task.activeRunId === undefined ? 'paused' as const : 'pause-requested' as const;
+    const next: Task = {
+      ...task,
+      pauseState: action === 'paused' ? 'paused' : 'requested',
+      controlHistory: [...(task.controlHistory ?? []), { action, actor, at, reason }],
+      updatedAt: at,
+    };
+    const saved = await this.#store.saveIfUnchanged(next, {
+      environmentLifecycleState: task.environmentLifecycleState,
+      activeRunId: task.activeRunId,
+      updatedAt: task.updatedAt,
+      controlDocument: serializeTaskControlDocument(task),
+    });
+    if (!saved) throw new Error(`task ${taskId} changed before pause was recorded`);
+    return next;
+  }
+
+  /** Resume is an explicit Human action; it never admits a run by itself. */
+  async resumePause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.pauseState === undefined) throw new Error(`task ${taskId} is not paused`);
+    if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
+      throw new Error(`task ${taskId} cannot resume while work is active or recovery is unresolved`);
+    }
+    this.#assertActiveTaskLease(task);
+    const at = this.#clock.now();
+    const { pauseState: _pause, ...rest } = task;
+    const next: Task = {
+      ...rest,
+      controlHistory: [...(task.controlHistory ?? []), { action: 'resumed', actor, at, reason }],
+      updatedAt: at,
+    };
+    const saved = await this.#store.saveIfUnchanged(next, {
+      environmentLifecycleState: task.environmentLifecycleState,
+      activeRunId: task.activeRunId,
+      updatedAt: task.updatedAt,
+      controlDocument: serializeTaskControlDocument(task),
+    });
+    if (!saved) throw new Error(`task ${taskId} changed before resume was recorded`);
+    return next;
+  }
+
+  async raiseBlocker(taskId: string, actor: TaskActor, blocker: TaskBlocker): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
+      || task.pendingCompletionClaimId !== undefined) throw new Error(`task ${taskId} cannot be blocked in its current lifecycle`);
+    this.#assertActiveTaskLease(task);
+    const next: Task = {
+      ...task, status: 'blocked', environmentLifecycleState: 'blocked', blocker,
+      blockerReason: blocker.reason,
+      controlHistory: [...(task.controlHistory ?? []), { action: 'blocker-raised', actor, at: blocker.createdAt, blocker }],
+      updatedAt: blocker.createdAt,
+    };
+    await this.#saveControlTransition(task, next, 'blocker');
+    return next;
+  }
+
+  async clearBlocker(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.blocker === undefined || task.activeRunId !== undefined || task.environmentLifecycleState !== 'blocked') {
+      throw new Error(`task ${taskId} has no clearable blocker`);
+    }
+    this.#assertActiveTaskLease(task);
+    const { blocker: _blocker, blockerReason: _reason, ...rest } = task;
+    const at = this.#clock.now();
+    const next: Task = {
+      ...rest, status: 'in-progress', environmentLifecycleState: 'idle',
+      controlHistory: [...(task.controlHistory ?? []), { action: 'blocker-cleared', actor, at, reason }], updatedAt: at,
+    };
+    await this.#saveControlTransition(task, next, 'blocker');
+    return next;
+  }
+
+  async submitCompletionClaim(taskId: string, claim: TaskCompletionClaim): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
+      || task.blocker !== undefined || task.pendingCompletionClaimId !== undefined) {
+      throw new Error(`task ${taskId} cannot accept a completion claim in its current lifecycle`);
+    }
+    this.#assertActiveTaskLease(task);
+    const next: Task = {
+      ...task,
+      status: 'in-progress', environmentLifecycleState: 'awaiting-validation',
+      completionClaims: [...(task.completionClaims ?? []), claim], pendingCompletionClaimId: claim.id,
+      controlHistory: [...(task.controlHistory ?? []), { action: 'completion-claimed', actor: claim.actor, at: claim.at, claimId: claim.id }],
+      updatedAt: claim.at,
+    };
+    await this.#saveControlTransition(task, next, 'completion claim');
+    return next;
+  }
+
+  async validateCompletionClaim(taskId: string, actor: TaskActor, input: {
+    readonly claimId: string;
+    readonly decision: 'accept' | 'correct';
+    readonly reason: string;
+  }): Promise<Task> {
+    const task = await this.#require(taskId);
+    const claim = task.completionClaims?.find(item => item.id === input.claimId);
+    if (task.pendingCompletionClaimId !== input.claimId || claim === undefined
+      || task.environmentLifecycleState !== 'awaiting-validation' || task.activeRunId !== undefined) {
+      throw new Error(`task ${taskId} has no matching pending completion claim`);
+    }
+    const at = this.#clock.now();
+    this.#assertActiveTaskLease(task);
+    if (input.decision === 'correct') {
+      const { pendingCompletionClaimId: _pending, ...rest } = task;
+      const next: Task = {
+        ...rest,
+        status: task.blocker !== undefined ? 'blocked' : 'in-progress',
+        environmentLifecycleState: task.blocker !== undefined ? 'blocked' : 'idle',
+        controlHistory: [...(task.controlHistory ?? []), {
+          action: 'validation-corrected', actor, at, claimId: claim.id, reason: input.reason,
+        }],
+        updatedAt: at,
+      };
+      await this.#saveControlTransition(task, next, 'validation');
+      return next;
+    }
+    if (claim.recommendedDisposition !== 'complete') throw new Error('only a completion recommendation can be accepted');
+    this.#assertActiveTaskLease(task);
+    const { pendingCompletionClaimId: _pending, ...rest } = task;
+    const next: Task = {
+      ...rest,
+      environmentLifecycleState: 'ending', endDisposition: 'completed',
+      controlHistory: [...(task.controlHistory ?? []),
+        { action: 'validation-accepted', actor, at, claimId: claim.id, reason: input.reason },
+        { action: 'end-requested', actor, at, disposition: 'completed', reason: input.reason }],
+      updatedAt: at,
+    };
+    await this.#saveControlTransition(task, next, 'validation');
+    return this.#recycleThenRelease(next);
+  }
+
+  async discardForHuman(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
+      throw new Error(`task ${taskId} cannot be discarded in its current lifecycle`);
+    }
+    this.#assertActiveTaskLease(task);
+    const at = this.#clock.now();
+    const { pendingCompletionClaimId: _pending, ...rest } = task;
+    const ending: Task = {
+      ...rest, environmentLifecycleState: 'ending', endDisposition: 'cancelled',
+      controlHistory: [...(task.controlHistory ?? []), { action: 'end-requested', actor, at, disposition: 'cancelled', reason }],
+      updatedAt: at,
+    };
+    await this.#saveControlTransition(task, ending, 'discard');
+    return this.#recycleThenRelease(ending);
+  }
+
+  async recordInterruptRequest(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.pauseState !== 'requested' || task.activeRunId === undefined || task.environmentLifecycleState !== 'running') {
+      throw new Error(`task ${taskId} has no active run awaiting Interrupt`);
+    }
+    this.#assertActiveTaskLease(task);
+    const at = this.#clock.now();
+    const next: Task = { ...task, controlHistory: [...(task.controlHistory ?? []), { action: 'interrupt-requested', actor, at, reason }], updatedAt: at };
+    await this.#saveControlTransition(task, next, 'interrupt');
+    return next;
+  }
+
+  async recordSubordinateStopRequest(taskId: string, actor: TaskActor, runId: string, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.activeRunId !== runId || task.environmentLifecycleState !== 'running') throw new Error(`run ${runId} is not active for Task ${taskId}`);
+    this.#assertActiveTaskLease(task);
+    const at = this.#clock.now();
+    const next: Task = { ...task, controlHistory: [...(task.controlHistory ?? []), { action: 'subordinate-run-stop-requested', actor, at, runId, reason }], updatedAt: at };
+    await this.#saveControlTransition(task, next, 'run stop');
+    return next;
+  }
+
+  async recoverForHuman(taskId: string, action: TaskRecoveryAction, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
+    const at = this.#clock.now();
+    const next: Task = { ...task, controlHistory: [...(task.controlHistory ?? []), { action: 'recovery-requested', actor, at, recoveryAction: action, reason }], updatedAt: at };
+    await this.#saveControlTransition(task, next, 'recovery');
+    return this.recover(taskId, action);
   }
 
   /** Enter the retained human-validation gap without releasing the Task lease. */
@@ -472,17 +695,21 @@ export class TaskEnvironmentLifecycle {
     }
     const forced: Task = omit(
       omit(
-        {
-          ...task,
-          status: 'cancelled' as const,
-          completedAt: input.at,
-          environmentLifecycleState: 'discarded' as const,
-          blockerReason: 'Force Released by the Human operator; unresolved facts recorded.',
-          updatedAt: input.at,
-        },
-        'recoveryState',
+        omit(
+          {
+            ...task,
+            status: 'cancelled' as const,
+            completedAt: input.at,
+            environmentLifecycleState: 'discarded' as const,
+            endDisposition: 'cancelled' as const,
+            blockerReason: 'Force Released by the Human operator; unresolved facts recorded.',
+            updatedAt: input.at,
+          },
+          'recoveryState',
+        ),
+        'activeRunId',
       ),
-      'activeRunId',
+      'pendingCompletionClaimId',
     );
     if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
       // One transaction commits the terminal Task row and the Task-held lease
@@ -496,7 +723,7 @@ export class TaskEnvironmentLifecycle {
     return [...new Set(affectedRunIds)];
   }
 
-  async #recycleThenRelease(task: Task, terminal: 'ended' | 'discarded'): Promise<Task> {
+  async #recycleThenRelease(task: Task): Promise<Task> {
     try {
       const workspacePath = this.#workspacePath(task.projectId, task.environmentInstanceId!);
       await this.#worker.recycle({
@@ -505,7 +732,9 @@ export class TaskEnvironmentLifecycle {
         environmentInstanceId: task.environmentInstanceId!, environmentLeaseId: task.environmentLeaseId!,
       });
     } catch (error) { await this.#toRecovery(task, 'ending'); throw error; }
-    const ended = omit(omit({ ...task, status: terminal === 'ended' ? 'done' as const : 'cancelled' as const, completedAt: this.#clock.now(), environmentLifecycleState: terminal, updatedAt: this.#clock.now() }, 'recoveryState'), 'activeRunId');
+    const completed = (task.endDisposition ?? 'completed') === 'completed';
+    const terminal = completed ? 'ended' as const : 'discarded' as const;
+    const ended = omit(omit({ ...task, status: completed ? 'done' as const : 'cancelled' as const, completedAt: this.#clock.now(), environmentLifecycleState: terminal, endDisposition: completed ? 'completed' as const : 'cancelled' as const, updatedAt: this.#clock.now() }, 'recoveryState'), 'activeRunId');
     if (!task.environmentLeaseId) {
       await this.#toRecovery(task, 'ending');
       throw new Error(`task ${task.id} lease could not be released after cleanup`);
@@ -590,6 +819,22 @@ export class TaskEnvironmentLifecycle {
       || this.#pool.requiresLease(environmentInstanceId, agent.capability) !== true) return false;
     const admission = await this.#runs.evaluateOptionAdmission?.(agentId, environmentInstanceId);
     return admission?.ok ?? true;
+  }
+
+  #assertActiveTaskLease(task: Task): void {
+    const lease = task.environmentLeaseId === undefined ? undefined : this.#pool.getLease(task.environmentLeaseId);
+    if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id
+      || lease.instanceId !== task.environmentInstanceId) throw new Error(`task ${task.id} lease is not active`);
+  }
+
+  async #saveControlTransition(current: Task, next: Task, operation: string): Promise<void> {
+    const saved = await this.#store.saveIfUnchanged(next, {
+      environmentLifecycleState: current.environmentLifecycleState,
+      activeRunId: current.activeRunId,
+      updatedAt: current.updatedAt,
+      controlDocument: serializeTaskControlDocument(current),
+    });
+    if (!saved) throw new Error(`task ${current.id} changed before ${operation} was recorded`);
   }
 
   async #require(taskId: string): Promise<Task> {

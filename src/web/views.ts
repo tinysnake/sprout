@@ -533,6 +533,12 @@ export interface TaskView {
   readonly admission?: Task['admission'];
   readonly environmentPreference?: { readonly kind: string; readonly id: string };
   readonly blockerReason?: string;
+  readonly blocker?: Task['blocker'];
+  readonly completionClaims?: Task['completionClaims'];
+  readonly pendingCompletionClaimId?: string;
+  readonly pauseState?: Task['pauseState'];
+  readonly controlHistory?: Task['controlHistory'];
+  readonly endDisposition?: Task['endDisposition'];
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
@@ -559,6 +565,12 @@ export function toTaskView(task: Task): TaskView {
       ? { environmentPreference: task.environmentPreference }
       : {}),
     ...(task.blockerReason !== undefined ? { blockerReason: task.blockerReason } : {}),
+    ...(task.blocker !== undefined ? { blocker: task.blocker } : {}),
+    ...(task.completionClaims !== undefined ? { completionClaims: task.completionClaims } : {}),
+    ...(task.pendingCompletionClaimId !== undefined ? { pendingCompletionClaimId: task.pendingCompletionClaimId } : {}),
+    ...(task.pauseState !== undefined ? { pauseState: task.pauseState } : {}),
+    ...(task.controlHistory !== undefined ? { controlHistory: task.controlHistory } : {}),
+    ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
