@@ -35,7 +35,7 @@ const activeService = computed(() => props.service ?? injectedService);
 
 const route = useRoute();
 
-const activeTab = ref<UsageTab>('project');
+const activeTab = ref<UsageTab>('run');
 const timeRangeFilter = ref<UsageSettlementRange>('all');
 const projectFilter = ref<string>('all');
 const agentFilter = ref<string>('all');
@@ -466,7 +466,6 @@ const timeRangeLabels: Record<string, string> = {
           <h1>Usage &amp; Costs</h1>
           <p>Observe model activity with enough context to distinguish usage, estimates, bills, and gaps. Usage &amp; Cost Telemetry.</p>
         </div>
-        <Badge variant="warning">Attributable billed cost: Unavailable (Self-hosted local interfaces)</Badge>
       </header>
 
       <!-- 2. Reading Note -->

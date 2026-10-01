@@ -662,3 +662,15 @@ test('Usage F10: compact composition applies throughout the prototype tablet ran
   assert.equal(valueAt(860, '.usage-view-tabs', 'grid-template-columns'), 'repeat(6, minmax(0, 1fr))');
   dom.window.close();
 });
+
+test('Usage F11: starts on Agent run with an unbadged full-width header', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { app } = await mountedPage(vite, mount);
+    assert.deepEqual({
+      initialTab: doc.querySelector('[role="tab"][aria-selected="true"]')?.getAttribute('data-usage-tab'),
+      billedHeaderBadge: /Attributable billed cost/.test(doc.querySelector('.usage-page-header')?.textContent ?? ''),
+    }, { initialTab: 'run', billedHeaderBadge: false });
+    app.unmount();
+  } finally { await cleanup(); }
+});
