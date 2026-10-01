@@ -83,9 +83,11 @@ import {
 import { TaskService } from './task/service.ts';
 import { TaskProposalService } from './task/proposal-service.ts';
 import { TaskAdmissionService } from './task/admission-service.ts';
+import { TaskControlService } from './task/control-service.ts';
 import type { TaskProposalStore } from './task/proposal-store.ts';
 import { createTaskProposalRouter } from './web/task-proposal-router.ts';
 import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
+import { createTaskControlRouter } from './web/task-control-router.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
@@ -294,6 +296,7 @@ export interface SproutRuntime {
   readonly tasks: TaskService;
   readonly taskProposals: TaskProposalService;
   readonly taskAdmissions: TaskAdmissionService;
+  readonly taskControls: TaskControlService;
   readonly collaboration: CollaborationCoordinator;
   readonly pool: EnvironmentPool;
   readonly agents: AgentRegistry;
@@ -1107,6 +1110,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       projects,
       agentAuthority: projectAgentAuthority,
     });
+    const taskControls = new TaskControlService({
+      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator,
+    });
 
     recovery = new EnvironmentRecoveryService({
       store: stores.recovery,
@@ -1124,10 +1130,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       holders: {
         clearIdleTask: (taskId) => taskLifecycle.clearIdleRecovery(taskId),
         resumeTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'resume');
+          await taskControls.recoverForHuman(taskId, { action: 'resume', reason: 'Human resolved Environment recovery' });
         },
         discardTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'discard');
+          await taskControls.recoverForHuman(taskId, { action: 'discard', reason: 'Human discarded Environment recovery' });
         },
         forceReleaseTask: (input) => taskLifecycle.forceRelease(input.taskId, input),
       },
@@ -1723,6 +1729,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
+        createTaskControlRouter({ controls: taskControls }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -1832,6 +1839,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       taskProposals,
       usage: usageService,
       taskAdmissions,
+      taskControls,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,

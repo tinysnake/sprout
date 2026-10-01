@@ -234,6 +234,8 @@ export class RunOrchestrator {
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
+  readonly #stopRequests = new Set<string>();
+  readonly #stopInterruptSent = new Set<string>();
   readonly #settled = new Map<string, Promise<AgentRun>>();
   readonly #observers = new Set<RunObserver>();
   readonly #ids: IdFactory;
@@ -752,16 +754,19 @@ export class RunOrchestrator {
     if (!run) throw new Error(`unknown run: ${runId}`);
     if (run.status !== 'running' && run.status !== 'queued') return run;
 
+    this.#stopRequests.add(runId);
     const session = this.#sessions.get(runId);
     if (session) {
       // Ask the engine to stop, then close the session. `close` is what
       // guarantees the run settles, so a wedged or already-dead engine cannot
       // leave the user's stop command waiting.
-      await session.interrupt();
+      await this.#interruptRequestedSession(runId, session);
       await session.close();
       this.#sessions.delete(runId);
     }
 
+    // A queued run or a run between admission and session registration observes
+    // the durable stop request when its execution reaches the engine boundary.
     return (await this.waitFor(runId)) ?? run;
   }
 
@@ -770,6 +775,9 @@ export class RunOrchestrator {
     agent: AgentDefinition,
     workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspaceKind?: 'default' | 'relative'; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
+    if (this.#stopRequests.has(initial.id)) {
+      return this.#finish(initial, 'stopped', { status: 'interrupted' });
+    }
     // The run executes under the option it was admitted with (#90): the
     // engine, work model, and effort recorded before any engine accepted the
     // work. This is deliberately not re-derived here — re-deriving could move
@@ -996,6 +1004,7 @@ export class RunOrchestrator {
     let current = running;
     try {
       const turn = session.run(prompt);
+      if (this.#stopRequests.has(running.id)) await this.#interruptRequestedSession(running.id, session);
       // The events iterator throws when a turn fails, so the *authoritative*
       // outcome is read from `completion` afterwards. Reading it there is what
       // lets a turn-level refusal (opencode exits 1 on a stale `--session`) be
@@ -1111,10 +1120,16 @@ export class RunOrchestrator {
       case 'completed':
         return this.#finish(run, 'completed', result);
       case 'interrupted':
-        return this.#finish(run, 'interrupted', result);
+        return this.#finish(run, this.#stopRequests.has(run.id) ? 'stopped' : 'interrupted', result);
       case 'failed':
         return this.#finish(run, 'failed', result);
     }
+  }
+
+  async #interruptRequestedSession(runId: string, session: EngineSession): Promise<void> {
+    if (this.#stopInterruptSent.has(runId)) return;
+    this.#stopInterruptSent.add(runId);
+    await session.interrupt();
   }
 
   async #finish(
@@ -1123,14 +1138,20 @@ export class RunOrchestrator {
     result: EngineTurnResult,
     failureClass: RunFailureClass = 'execution',
   ): Promise<AgentRun> {
-    return this.#advance(run, {
-      status,
-      result,
-      ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
-      ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
+    const stopWins = this.#stopRequests.has(run.id) && status !== 'completed';
+    const finalStatus = stopWins ? 'stopped' : status;
+    const finalResult: EngineTurnResult = stopWins ? { status: 'interrupted' } : result;
+    const settled = await this.#advance(run, {
+      status: finalStatus,
+      result: finalResult,
+      ...(finalResult.tokenUsage !== undefined ? { tokenUsage: finalResult.tokenUsage } : {}),
+      ...(finalResult.detailedTokens !== undefined ? { detailedTokens: finalResult.detailedTokens } : {}),
       completedAt: this.#clock.now(),
-      ...(result.status === 'failed' ? { failure: result.message, failureClass } : {}),
+      ...(finalResult.status === 'failed' ? { failure: finalResult.message, failureClass } : {}),
     });
+    this.#stopRequests.delete(run.id);
+    this.#stopInterruptSent.delete(run.id);
+    return settled;
   }
 
   /** Record a new run state, persist it, and notify observers in that order. */

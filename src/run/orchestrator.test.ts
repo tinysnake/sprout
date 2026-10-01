@@ -213,10 +213,10 @@ test('the user can stop a running run and the lease is released', async () => {
   const stopped = await orchestrator.stop(id);
 
   assert.equal(interrupted, true, 'the adapter received an interrupt');
-  assert.equal(stopped.status, 'interrupted');
+  assert.equal(stopped.status, 'stopped', 'an intentional Human stop is distinct from unexpected interruption');
   assert.equal(stopped.result?.status, 'interrupted');
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
-  assert.equal((await orchestrator.waitFor(id)).status, 'interrupted');
+  assert.equal((await orchestrator.waitFor(id)).status, 'stopped');
 });
 
 

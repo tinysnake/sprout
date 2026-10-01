@@ -25,6 +25,7 @@
  */
 
 import type { EnvironmentPreference } from '../environment/model.ts';
+import { sanitizeOperatorText } from '../environment/privacy.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun } from '../run/model.ts';
 import { buildTaskContext, renderTaskPrompt } from './context.ts';
@@ -384,9 +385,9 @@ function defaultAdvancePrompt(task: Task): string {
  * as the O5 hand-off).
  */
 function summarizeRun(run: AgentRun): string {
-  if (run.result?.status === 'completed') return run.result.text.trim();
-  if (run.result?.status === 'failed') return run.result.message.trim();
-  return run.failure?.trim() ?? '';
+  const text = run.result?.status === 'completed' ? run.result.text
+    : run.result?.status === 'failed' ? run.result.message : run.failure;
+  return sanitizeOperatorText(text, { maxLength: 4000, fallback: '' }).trim();
 }
 
 /** Set an optional field to a value, or remove it when the patch says `null`. */

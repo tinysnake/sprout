@@ -22,7 +22,7 @@ export interface RunWorkspaceBinding {
 }
 
 /** The observable lifecycle of one agent run. */
-export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted';
 
 /** Sprout's trusted classification at settlement, never inferred from failure text. */
 export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';

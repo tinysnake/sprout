@@ -351,7 +351,7 @@ test('the user can stop a run through the worker', async (t) => {
 
   const stopped = await orchestrator.stop(id);
 
-  assert.equal(stopped.status, 'interrupted');
+  assert.equal(stopped.status, 'stopped');
   assert.equal(pool.activeLease('mac-mini-1'), undefined, 'stopping releases the lease');
 });
 

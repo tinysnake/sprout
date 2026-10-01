@@ -535,6 +535,13 @@ export interface TaskView {
   readonly admission?: Task['admission'];
   readonly environmentPreference?: { readonly kind: string; readonly id: string };
   readonly blockerReason?: string;
+  readonly blocker?: Task['blocker'];
+  readonly completionClaims?: Task['completionClaims'];
+  readonly pendingCompletionClaimId?: string;
+  readonly pauseState?: Task['pauseState'];
+  readonly controlHistory?: Task['controlHistory'];
+  readonly endDisposition?: Task['endDisposition'];
+  readonly forcedRelease?: Task['forcedRelease'];
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
@@ -561,6 +568,13 @@ export function toTaskView(task: Task): TaskView {
       ? { environmentPreference: task.environmentPreference }
       : {}),
     ...(task.blockerReason !== undefined ? { blockerReason: task.blockerReason } : {}),
+    ...(task.blocker !== undefined ? { blocker: task.blocker } : {}),
+    ...(task.completionClaims !== undefined ? { completionClaims: task.completionClaims } : {}),
+    ...(task.pendingCompletionClaimId !== undefined ? { pendingCompletionClaimId: task.pendingCompletionClaimId } : {}),
+    ...(task.pauseState !== undefined ? { pauseState: task.pauseState } : {}),
+    ...(task.controlHistory !== undefined ? { controlHistory: task.controlHistory } : {}),
+    ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
+    ...(task.forcedRelease !== undefined ? { forcedRelease: task.forcedRelease } : {}),
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
@@ -578,6 +592,7 @@ export function toTaskView(task: Task): TaskView {
  * a human needs to decide whether cleanup is pending, retryable, or complete.
  */
 export function toTaskContextState(task: Task): string {
+  if (task.forcedRelease !== undefined) return 'cleanup-unproved-force-release';
   switch (task.environmentLifecycleState) {
     case undefined: return 'not-created';
     case 'beginning': return 'preparing';
