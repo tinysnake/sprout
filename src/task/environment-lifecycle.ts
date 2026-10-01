@@ -63,6 +63,16 @@ export class TaskRecoveryRefusal extends Error {
   }
 }
 
+/** A concurrent Task advance lost the durable one-active-run admission fence. */
+export class TaskAdvanceConflictError extends Error {
+  readonly code = 'advance-conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskAdvanceConflictError';
+  }
+}
+
 /** A test process may throw this immediately after a durable commit. */
 export class DurableWriteCrash extends Error {}
 
@@ -294,7 +304,7 @@ export class TaskEnvironmentLifecycle {
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     const task = await this.#require(taskId);
     if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
-    if (task.environmentLifecycleState === 'running') throw new Error(`task ${taskId} already has an active run`);
+    if (task.environmentLifecycleState === 'running') throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} is ${task.environmentLifecycleState ?? 'unbegun'} and cannot advance`);
     }
@@ -315,7 +325,7 @@ export class TaskEnvironmentLifecycle {
     const admitted = audit === undefined
       ? await this.#store.saveIfUnchanged(running, expected)
       : await this.#store.admitRun(running, { runId, agentId, actor: audit.actor, reason: audit.reason, contentVersion: audit.contentVersion, now: this.#clock.now() }, expected);
-    if (!admitted) throw new Error(`task ${taskId} already has an active run`);
+    if (!admitted) throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     let prepared: { readonly bootstrapInstructions: string };
     try {
       // The active-run admission is durable before this refresh.  A Worker

@@ -108,7 +108,10 @@ eligible Project Agent. Each admitted run link records its actor, reason, target
 and bound content version in the same compare-and-set that enforces one active
 run. Human leads receive no automatic run. Agent leads receive one initial,
 separately recorded run after context preparation succeeds. The Human approval
-command supplies the initial run's actor and reason.
+command supplies the initial run's actor and reason. If that submission fails
+after begin commits, the response and every idempotent retry report
+`initialRunFailed: true`; the failed attempt's link is not presented as an
+admitted `initialRunId`.
 
 The authenticated runtime refuses direct legacy Task creation, begin, and
 advance routes; the old Task transport remains only for unauthenticated M1 test

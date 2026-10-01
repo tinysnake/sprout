@@ -86,6 +86,8 @@ export interface TaskAdmission {
   readonly approvedBy: TaskActor;
   readonly approvedAt: number;
   readonly approvalReason: string;
+  /** Set durably when the separately admitted initial Agent run could not be submitted. */
+  readonly initialRunFailed?: boolean;
 }
 
 export interface Task {

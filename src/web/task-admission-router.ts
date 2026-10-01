@@ -1,6 +1,7 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 import { TaskAdmissionError } from '../task/admission-service.ts';
 import type { TaskAdmissionService } from '../task/admission-service.ts';
+import { TaskAdvanceConflictError } from '../task/environment-lifecycle.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
 import { toTaskRunLinkView, toTaskView } from './views.ts';
 
@@ -60,6 +61,9 @@ export function createTaskAdmissionRouter(options: { readonly admissions: TaskAd
           advance: toTaskRunLinkView(result.audit),
         });
       } catch (error) {
+        if (error instanceof TaskAdvanceConflictError) {
+          return json(context, 409, { code: error.code, error: error.message });
+        }
         if (error instanceof TaskProposalError) {
           const status = error.code.startsWith('unknown-') ? 404 : error.code === 'invalid-content' ? 400
             : ['membership-required', 'authority-required'].includes(error.code) ? 403 : 409;
