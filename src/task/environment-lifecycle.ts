@@ -822,10 +822,19 @@ export class TaskEnvironmentLifecycle {
     }
   }
 
-  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false): Promise<void> {
+  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false, retry = false): Promise<void> {
     if (task.environmentLeaseId) this.#pool.markRecovering(task.environmentLeaseId);
     const recovering: Task = { ...task, environmentLifecycleState: 'recovery', recoveryState: prior, updatedAt: this.#clock.now() };
-    await this.#store.save(recovering);
+    const saved = await this.#store.saveIfUnchanged(recovering, {
+      environmentLifecycleState: task.environmentLifecycleState, activeRunId: task.activeRunId,
+      updatedAt: task.updatedAt, controlDocument: serializeTaskControlDocument(task),
+    });
+    if (!saved) {
+      const current = await this.#require(task.id);
+      if (isTerminalTaskStatus(current.status) || current.environmentLifecycleState === 'recovery') return;
+      if (retry) throw new Error('Task changed repeatedly during recovery protection; reconciliation is required');
+      return this.#toRecovery(current, current.environmentLifecycleState ?? prior, current.activeRunId !== undefined, true);
+    }
     // The durable recovery record (#88) is opened after the Task state is durable,
     // so the record always describes a Task that really entered recovery. A
     // failure here must not roll back the protection: the lease is already

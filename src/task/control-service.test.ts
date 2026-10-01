@@ -125,6 +125,32 @@ test('a failed nested run blocks unfinished Task work instead of making the Task
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
 });
 
+test('unexpected settlement racing Pause retains the Human hold through recovery', async () => {
+  const s = await scenario();
+  const advanced = await s.lifecycle.advanceRun('task-1', 'pi', 'work', { actor: lead, reason: 'step', contentVersion: 1 });
+  const get = s.store.get.bind(s.store);
+  let releaseRead!: () => void;
+  let readCaptured!: () => void;
+  const delayed = new Promise<void>(resolve => { releaseRead = resolve; });
+  const captured = new Promise<void>(resolve => { readCaptured = resolve; });
+  s.store.get = async id => {
+    const snapshot = await get(id);
+    s.store.get = get;
+    readCaptured();
+    await delayed;
+    return snapshot;
+  };
+  const interrupted = s.lifecycle.settleRun('task-1', run(advanced.runId, 'interrupted'));
+  await captured;
+  await s.controls.pauseForHuman('task-1', { reason: 'hold admission' });
+  releaseRead();
+  await interrupted;
+  assert.equal((await s.tasks.get('task-1'))?.pauseState, 'requested');
+  const recovered = await s.controls.recoverForHuman('task-1', { action: 'resume', reason: 'inspect retained work' });
+  assert.equal(recovered.pauseState, 'paused');
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
+});
+
 test('failure diagnostics remain bounded summaries rather than leaking into Task blockers', async () => {
   const s = await scenario();
   const advanced = await s.lifecycle.advanceRun('task-1', 'pi', 'work', { actor: lead, reason: 'step', contentVersion: 1 });

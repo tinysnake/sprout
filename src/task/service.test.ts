@@ -365,7 +365,7 @@ test('a failed run blocks the Task and records the failure as its summary', asyn
   assert.equal(run.status, 'failed');
   const blocked = await scenario.service.get(task.id);
   assert.equal(blocked?.status, 'blocked');
-  assert.match(blocked?.blockerReason ?? '', /run .* failed: engine exploded/);
+  assert.match(blocked?.blockerReason ?? '', /run .* failed; inspect the bounded run summary/);
   const withRuns = await scenario.service.getWithRuns(task.id);
   assert.equal(withRuns?.runs[0]?.summary?.status, 'failed');
   assert.equal(withRuns?.runs[0]?.summary?.summary, 'engine exploded');
