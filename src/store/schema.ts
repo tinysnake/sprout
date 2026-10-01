@@ -1162,11 +1162,12 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       // Reject rather than silently rewrite durable attribution or append-only
       // monetary history. A reviewed repair must preserve correction provenance.
       const invalidActivity = db.prepare(`SELECT 1 FROM usage_activities WHERE NOT (
-        (kind = 'agent_run' AND run_id IS NOT NULL AND length(run_id) > 0
-          AND agent_id IS NOT NULL AND length(agent_id) > 0 AND attempt_id IS NULL AND batch_id IS NULL)
+        (kind = 'agent_run' AND typeof(run_id) = 'text' AND length(run_id) > 0
+          AND typeof(agent_id) = 'text' AND length(agent_id) > 0 AND attempt_id IS NULL AND batch_id IS NULL)
         OR
-        (kind = 'routing_attempt' AND run_id IS NULL AND attempt_id IS NOT NULL AND length(attempt_id) > 0
-          AND batch_id IS NOT NULL AND length(batch_id) > 0 AND project_id IS NOT NULL AND length(project_id) > 0
+        (kind = 'routing_attempt' AND run_id IS NULL AND typeof(attempt_id) = 'text' AND length(attempt_id) > 0
+          AND typeof(batch_id) = 'text' AND length(batch_id) > 0
+          AND typeof(project_id) = 'text' AND length(project_id) > 0
           AND task_id IS NULL AND agent_id IS NULL AND environment_instance_id IS NULL)
       ) LIMIT 1`).get();
       if (invalidActivity !== undefined) {
@@ -1194,26 +1195,30 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
       BEFORE INSERT ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
-          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
           AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
-        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
-          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
-          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
       )
       BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
 
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
       BEFORE UPDATE ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
-          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
           AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
-        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
-          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
-          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
       )
       BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
 

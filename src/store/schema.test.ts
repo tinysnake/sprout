@@ -531,6 +531,7 @@ async function withV25Usage(fn: (path: string, legacy: DatabaseSync) => Promise<
 
 for (const [shape, mutation, reason] of [
   ['Routing ownership', "UPDATE usage_activities SET agent_id = 'agent', task_id = 'task'", 'Invalid legacy usage activity attribution'],
+  ['BLOB Routing attempt ID', "UPDATE usage_activities SET attempt_id = X'617474656d7074'", 'Invalid legacy usage activity attribution'],
   ['available cost without facts', 'UPDATE usage_observations SET cost_estimate_usd_micros = NULL, valuation_provenance = NULL', 'Invalid legacy usage observation cost facts'],
 ] as const) {
   test(`v25 migration rejects ${shape} without rewriting durable facts`, async () => {
@@ -546,11 +547,11 @@ for (const [shape, mutation, reason] of [
       if (refusal === undefined) {
         const reopened = new SqliteStore({ filename: path });
         try {
-          if (shape === 'Routing ownership') {
-            await reopened.usage.listActivities();
-          } else {
+          if (shape === 'available cost without facts') {
             const aggregate = await reopened.usage.getAggregate({});
             assert.equal(aggregate.costCoverage.available, 0, 'missing cost facts must not count as available');
+          } else {
+            await reopened.usage.listActivities();
           }
         } finally { reopened.close(); }
       }
@@ -605,16 +606,96 @@ test('v26 migration triggers reject unreadable Agent-run attribution on insert a
       assert.equal((await store.usage.listActivities()).length, 1, 'a rejected write leaves existing activity reads clean');
 
       // Seed an invalid preexisting row solely to exercise the UPDATE trigger independently.
+      const insertTriggerSql = (store.db.prepare(`SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+      assert.ok(insertTriggerSql, 'the migration must install the INSERT attribution trigger');
       store.db.exec('DROP TRIGGER usage_activity_attribution_insert');
       store.db.prepare(`INSERT INTO usage_activities
         (id, kind, run_id, agent_id, engine, model, status, created_at)
         VALUES ('raw-invalid-update', 'agent_run', 'update-run', NULL, 'pi', 'model', 'completed', 4)`).run();
+      store.db.exec(insertTriggerSql);
+      assert.ok(store.db.prepare(`SELECT 1 FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+      'the INSERT attribution trigger is restored before continuing');
       assert.throws(
         () => store.db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = 'raw-invalid-update'").run(),
         /invalid usage activity attribution/i,
       );
       store.db.prepare("DELETE FROM usage_activities WHERE id = 'raw-invalid-update'").run();
       assert.equal((await store.usage.listActivities()).length, 1);
+    } finally { store.close(); }
+  });
+});
+
+test('v26 migration triggers reject empty and non-TEXT required attribution IDs on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      const baseline = await store.usage.listActivities();
+      const requiredIds = [
+        { label: 'Agent-run run_id', kind: 'agent_run', column: 'run_id' },
+        { label: 'Agent-run agent_id', kind: 'agent_run', column: 'agent_id' },
+        { label: 'Routing attempt attempt_id', kind: 'routing_attempt', column: 'attempt_id' },
+        { label: 'Routing attempt batch_id', kind: 'routing_attempt', column: 'batch_id' },
+        { label: 'Routing attempt project_id', kind: 'routing_attempt', column: 'project_id' },
+      ] as const;
+      const invalidIds = requiredIds.flatMap((required) => [
+        { ...required, label: `${required.label} empty string`, value: '' },
+        { ...required, label: `${required.label} BLOB`, value: new Uint8Array([0x61]) },
+      ]);
+      const insertInvalidActivity = (id: string, invalid: (typeof invalidIds)[number]): void => {
+        const values: {
+          run_id: string | Uint8Array | null;
+          attempt_id: string | Uint8Array | null;
+          batch_id: string | Uint8Array | null;
+          project_id: string | Uint8Array | null;
+          agent_id: string | Uint8Array | null;
+        } = {
+          run_id: invalid.kind === 'agent_run' ? `run-${id}` : null,
+          attempt_id: invalid.kind === 'routing_attempt' ? `attempt-${id}` : null,
+          batch_id: invalid.kind === 'routing_attempt' ? `batch-${id}` : null,
+          project_id: invalid.kind === 'routing_attempt' ? `project-${id}` : null,
+          agent_id: invalid.kind === 'agent_run' ? `agent-${id}` : null,
+        };
+        values[invalid.column] = invalid.value;
+        store.db.prepare(`INSERT INTO usage_activities
+          (id, kind, run_id, attempt_id, batch_id, project_id, agent_id, engine, model, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'pi', 'model', 'completed', 3)`)
+          .run(id, invalid.kind, values.run_id, values.attempt_id, values.batch_id, values.project_id, values.agent_id);
+      };
+      const insertTriggerSql = (store.db.prepare(`SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+      assert.ok(insertTriggerSql, 'the v25-to-v26 migration must install the INSERT attribution trigger');
+
+      const acceptedWrites: string[] = [];
+      for (const [index, invalid] of invalidIds.entries()) {
+        const insertId = `invalid-id-insert-${index}`;
+        let insertError: unknown;
+        try { insertInvalidActivity(insertId, invalid); } catch (error) { insertError = error; }
+        if (insertError === undefined) {
+          acceptedWrites.push(`${invalid.label} INSERT`);
+          store.db.prepare('DELETE FROM usage_activities WHERE id = ?').run(insertId);
+        } else {
+          assert.match(String(insertError), /invalid usage activity attribution/i, `${invalid.label} INSERT error`);
+        }
+        assert.deepEqual(await store.usage.listActivities(), baseline, `${invalid.label}: activity reads are clean after INSERT`);
+
+        const updateId = `invalid-id-update-${index}`;
+        store.db.exec('DROP TRIGGER usage_activity_attribution_insert');
+        insertInvalidActivity(updateId, invalid);
+        store.db.exec(insertTriggerSql);
+        assert.ok(store.db.prepare(`SELECT 1 FROM sqlite_master
+          WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+        'the INSERT attribution trigger is restored before continuing');
+        let updateError: unknown;
+        try { store.db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = ?").run(updateId); }
+        catch (error) { updateError = error; }
+        if (updateError === undefined) acceptedWrites.push(`${invalid.label} UPDATE`);
+        else assert.match(String(updateError), /invalid usage activity attribution/i, `${invalid.label} UPDATE error`);
+        store.db.prepare('DELETE FROM usage_activities WHERE id = ?').run(updateId);
+        assert.deepEqual(await store.usage.listActivities(), baseline, `${invalid.label}: activity reads are clean after UPDATE`);
+      }
+      assert.deepEqual(acceptedWrites, [], `invalid required IDs must not be accepted: ${acceptedWrites.join(', ')}`);
     } finally { store.close(); }
   });
 });

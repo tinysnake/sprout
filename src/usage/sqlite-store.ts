@@ -260,26 +260,30 @@ export class SqliteUsageStore implements UsageStore {
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
       BEFORE INSERT ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
-          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
           AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
-        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
-          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
-          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
       )
       BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
 
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
       BEFORE UPDATE ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
-          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
           AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
-        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
-          AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
-          AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
       )
       BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
 

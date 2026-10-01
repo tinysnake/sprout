@@ -277,9 +277,11 @@ export function isTokenCount(value: unknown): value is number {
 export function assertUsageObservation(observation: UsageObservation): void {
   if (observation.costEstimate.status === 'available' && (
     !isTokenCount(observation.costEstimate.apiEquivalentUsdMicros) ||
-    observation.costEstimate.valuationProvenance === undefined
+    typeof observation.costEstimate.valuationProvenance !== 'string' ||
+    !(['provider_estimated', 'harness_calculated', 'locally_estimated'] as const)
+      .includes(observation.costEstimate.valuationProvenance as ValuationProvenance)
   )) {
-    throw new Error('Available API-equivalent cost requires a safe amount and valuation provenance');
+    throw new Error('Available API-equivalent cost requires a safe amount and supported valuation provenance');
   }
   if (observation.billedCost.status === 'available' && !isTokenCount(observation.billedCost.billedUsdMicros)) {
     throw new Error('Available billed cost requires a safe amount');

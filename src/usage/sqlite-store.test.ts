@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { SqliteUsageStore } from './sqlite-store.ts';
+import { assertUsageObservation } from './model.ts';
 import type { UsageActivity, UsageObservation } from './model.ts';
 import { SqliteStore } from '../store/db.ts';
 
@@ -93,16 +94,93 @@ test('SQLite rejects unreadable Agent-run attribution on raw insert and update',
     assert.deepEqual(await store.listActivities(), [], 'a rejected write leaves activity reads clean');
 
     // Seed an invalid preexisting row solely to exercise the UPDATE trigger independently.
+    const insertTriggerSql = (db.prepare(`SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+    assert.ok(insertTriggerSql, 'SqliteUsageStore must install the INSERT attribution trigger');
     db.exec('DROP TRIGGER usage_activity_attribution_insert');
     db.prepare(`INSERT INTO usage_activities
       (id, kind, run_id, agent_id, engine, model, status, created_at)
       VALUES ('raw-invalid-update', 'agent_run', 'update-run', NULL, 'pi', 'model', 'completed', 4)`).run();
+    db.exec(insertTriggerSql);
+    assert.ok(db.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+    'the INSERT attribution trigger is restored before continuing');
     assert.throws(
       () => db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = 'raw-invalid-update'").run(),
       /invalid usage activity attribution/i,
     );
     db.prepare("DELETE FROM usage_activities WHERE id = 'raw-invalid-update'").run();
     assert.deepEqual(await store.listActivities(), []);
+  });
+});
+
+test('SQLite attribution triggers reject empty and non-TEXT required IDs on insert and update', async () => {
+  await withTempStore(async (store, db) => {
+    const baseline = await store.listActivities();
+    const requiredIds = [
+      { label: 'Agent-run run_id', kind: 'agent_run', column: 'run_id' },
+      { label: 'Agent-run agent_id', kind: 'agent_run', column: 'agent_id' },
+      { label: 'Routing attempt attempt_id', kind: 'routing_attempt', column: 'attempt_id' },
+      { label: 'Routing attempt batch_id', kind: 'routing_attempt', column: 'batch_id' },
+      { label: 'Routing attempt project_id', kind: 'routing_attempt', column: 'project_id' },
+    ] as const;
+    const invalidIds = requiredIds.flatMap((required) => [
+      { ...required, label: `${required.label} empty string`, value: '' },
+      { ...required, label: `${required.label} BLOB`, value: new Uint8Array([0x61]) },
+    ]);
+    const insertInvalidActivity = (id: string, invalid: (typeof invalidIds)[number]): void => {
+      const values: {
+        run_id: string | Uint8Array | null;
+        attempt_id: string | Uint8Array | null;
+        batch_id: string | Uint8Array | null;
+        project_id: string | Uint8Array | null;
+        agent_id: string | Uint8Array | null;
+      } = {
+        run_id: invalid.kind === 'agent_run' ? `run-${id}` : null,
+        attempt_id: invalid.kind === 'routing_attempt' ? `attempt-${id}` : null,
+        batch_id: invalid.kind === 'routing_attempt' ? `batch-${id}` : null,
+        project_id: invalid.kind === 'routing_attempt' ? `project-${id}` : null,
+        agent_id: invalid.kind === 'agent_run' ? `agent-${id}` : null,
+      };
+      values[invalid.column] = invalid.value;
+      db.prepare(`INSERT INTO usage_activities
+        (id, kind, run_id, attempt_id, batch_id, project_id, agent_id, engine, model, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pi', 'model', 'completed', 3)`)
+        .run(id, invalid.kind, values.run_id, values.attempt_id, values.batch_id, values.project_id, values.agent_id);
+    };
+    const insertTriggerSql = (db.prepare(`SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+    assert.ok(insertTriggerSql, 'SqliteUsageStore must install the INSERT attribution trigger');
+
+    const acceptedWrites: string[] = [];
+    for (const [index, invalid] of invalidIds.entries()) {
+      const insertId = `invalid-id-insert-${index}`;
+      let insertError: unknown;
+      try { insertInvalidActivity(insertId, invalid); } catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        acceptedWrites.push(`${invalid.label} INSERT`);
+        db.prepare('DELETE FROM usage_activities WHERE id = ?').run(insertId);
+      } else {
+        assert.match(String(insertError), /invalid usage activity attribution/i, `${invalid.label} INSERT error`);
+      }
+      assert.deepEqual(await store.listActivities(), baseline, `${invalid.label}: activity reads are clean after INSERT`);
+
+      const updateId = `invalid-id-update-${index}`;
+      db.exec('DROP TRIGGER usage_activity_attribution_insert');
+      insertInvalidActivity(updateId, invalid);
+      db.exec(insertTriggerSql);
+      assert.ok(db.prepare(`SELECT 1 FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+      'the INSERT attribution trigger is restored before continuing');
+      let updateError: unknown;
+      try { db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = ?").run(updateId); }
+      catch (error) { updateError = error; }
+      if (updateError === undefined) acceptedWrites.push(`${invalid.label} UPDATE`);
+      else assert.match(String(updateError), /invalid usage activity attribution/i, `${invalid.label} UPDATE error`);
+      db.prepare('DELETE FROM usage_activities WHERE id = ?').run(updateId);
+      assert.deepEqual(await store.listActivities(), baseline, `${invalid.label}: activity reads are clean after UPDATE`);
+    }
+    assert.deepEqual(acceptedWrites, [], `invalid required IDs must not be accepted: ${acceptedWrites.join(', ')}`);
   });
 });
 
@@ -226,6 +304,20 @@ test('persistence refuses available cost facts without safe integer amounts', as
       billedCost: { status: 'available', currency: 'USD', billedUsdMicros: 0.5 },
       costEstimate: { status: 'unavailable', currency: 'USD', reason: 'not available' },
     }), /safe amount/i);
+    const unsupportedProvenance: UsageObservation = {
+      ...base,
+      id: 'unsupported-provenance',
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: {
+        status: 'available', currency: 'USD', apiEquivalentUsdMicros: 1,
+        valuationProvenance: 'unsupported' as never,
+      },
+    };
+    assert.throws(
+      () => assertUsageObservation(unsupportedProvenance),
+      /valuation provenance/i,
+      'the runtime model assertion must reject provenance outside its allowed values',
+    );
   });
 });
 
