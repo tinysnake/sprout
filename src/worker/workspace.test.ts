@@ -25,11 +25,14 @@ test('a Worker persists Project workspaces, refreshes Task context, and safely r
   const first = await worker(root);
   t.after(() => first.close());
 
-  const prepared = await first.contexts.prepare(materialization());
+  const prepared = await first.contexts.prepare(materialization({ taskContentVersion: 4, taskValidationCriteria: ['The approved result is verified.'] }));
   assert.match(prepared.bootstrapInstructions, /^Sprout Task bootstrap:/);
   assert.doesNotMatch(prepared.bootstrapInstructions, /\/Users\/|\\Users\\/);
   const workspace = onlyWorkspace(root);
   const context = onlyContext(workspace);
+  const approvedTask = readFileSync(join(context, 'TASK.md'), 'utf8');
+  assert.match(approvedTask, /Content version: 4/);
+  assert.match(approvedTask, /The approved result is verified\./);
   assert.equal(await new WorkerWorkspace(root).inspectTaskContext(recycle()), true);
   assert.equal(await new WorkerWorkspace(root).inspectTaskContext({ ...recycle(), environmentLeaseId: 'wrong-lease' }), false);
   writeFileSync(join(workspace, 'AGENTS.md'), '# repository-owned rules\n');

@@ -598,7 +598,10 @@ export class RunOrchestrator {
       ? await this.#engineFacts(environmentInstanceId)
       : undefined;
     const reqs = this.#requirements ? await this.#requirements() : undefined;
-    return evaluateAdmissibleWorkOption(options, observed ?? [], reqs);
+    if (observed === undefined || (observed.length === 0 && !this.#strictAdmission)) {
+      return options[0] !== undefined ? { ok: true, option: options[0] } : { ok: false, reason: 'no configured work option' };
+    }
+    return evaluateAdmissibleWorkOption(options, observed, reqs);
   }
 
   /** The current observable state of a run. */

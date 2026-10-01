@@ -34,6 +34,36 @@ export class SqliteTaskProposalStore implements TaskProposalStore {
       WHERE project_id = ? ORDER BY json_extract(document, '$.createdAt'), id`).all(projectId) as unknown as ProposalRow[];
     return rows.map(proposalFromRow);
   }
+  consumeForBegin(id: string, expectedRevision: number, input: {
+    readonly actor: import('./proposal-model.ts').ProposalActor;
+    readonly at: number;
+    readonly reason: string;
+    readonly taskId: string;
+  }): TaskProposal {
+    const row = this.db.prepare(`SELECT document, revision, working_group_id, source_message_id
+      FROM task_proposals WHERE id = ?`).get(id) as (ProposalRow & { revision: number }) | undefined;
+    if (!row) throw new TaskProposalError('unknown-proposal');
+    if (row.revision !== expectedRevision) throw new TaskProposalError('stale-proposal');
+    const current = proposalFromRow(row);
+    if (current.status !== 'proposed') throw new TaskProposalError('proposal-closed');
+    const next: TaskProposal = {
+      ...current,
+      status: 'begun',
+      revision: current.revision + 1,
+      updatedAt: input.at,
+      lifecycle: [...current.lifecycle, {
+        action: 'begun', actor: structuredClone(input.actor), at: input.at, reason: input.reason,
+        contentVersion: current.currentContentVersion, taskId: input.taskId,
+      }],
+    };
+    const changed = this.db.prepare(`UPDATE task_proposals
+      SET document = ?, revision = ? WHERE id = ? AND revision = ? AND document = ?
+        AND working_group_id IS ? AND source_message_id IS ?`)
+      .run(JSON.stringify(next), next.revision, id, expectedRevision, row.document, row.working_group_id, row.source_message_id);
+    if (changed.changes !== 1) throw new TaskProposalError('stale-proposal');
+    return structuredClone(next);
+  }
+
   async change(id: string, expectedRevision: number, mutate: (current: TaskProposal) => TaskProposal): Promise<TaskProposal> {
     // Synchronous read/mutate/CAS: no await permits an interleaving in this process;
     // document + revision fence also protects against a writer on another connection.

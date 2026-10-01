@@ -210,6 +210,9 @@ export interface TaskContextMaterialization {
   readonly taskTitle: string;
   readonly taskGoal: string;
   readonly taskConstraints: readonly string[];
+  /** Bound proposal snapshot fields, absent only for legacy Tasks. */
+  readonly taskValidationCriteria?: readonly string[];
+  readonly taskContentVersion?: number;
   readonly taskStatus: string;
   readonly priorRunSummaries: string;
   readonly agentId: string;

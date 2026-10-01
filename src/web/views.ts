@@ -530,6 +530,7 @@ export interface TaskView {
   readonly constraints: readonly string[];
   readonly status: string;
   readonly assignedAgentId?: string;
+  readonly admission?: Task['admission'];
   readonly environmentPreference?: { readonly kind: string; readonly id: string };
   readonly blockerReason?: string;
   readonly environmentInstanceId?: string;
@@ -553,6 +554,7 @@ export function toTaskView(task: Task): TaskView {
     constraints: task.constraints,
     status: task.status,
     ...(task.assignedAgentId !== undefined ? { assignedAgentId: task.assignedAgentId } : {}),
+    ...(task.admission !== undefined ? { admission: task.admission } : {}),
     ...(task.environmentPreference !== undefined
       ? { environmentPreference: task.environmentPreference }
       : {}),
@@ -601,6 +603,10 @@ export interface TaskRunLinkView {
   readonly agentId: string;
   readonly sequence: number;
   readonly linkedAt: number;
+  readonly actor?: TaskRunLink['actor'];
+  readonly reason?: string;
+  readonly contentVersion?: number;
+  readonly requestedAt?: number;
   readonly summary?: {
     readonly status: string;
     readonly summary: string;
@@ -618,6 +624,10 @@ export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
     agentId: link.agentId,
     sequence: link.sequence,
     linkedAt: link.linkedAt,
+    ...(link.actor !== undefined ? { actor: link.actor } : {}),
+    ...(link.reason !== undefined ? { reason: link.reason } : {}),
+    ...(link.contentVersion !== undefined ? { contentVersion: link.contentVersion } : {}),
+    ...(link.requestedAt !== undefined ? { requestedAt: link.requestedAt } : {}),
     ...(link.summary !== undefined
       ? {
           summary: {

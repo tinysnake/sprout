@@ -143,6 +143,22 @@ export class TaskService {
     return this.#store.getWithRuns(taskId);
   }
 
+  /** Persist the failed outcome of the separately submitted Agent-lead begin run. */
+  async recordInitialRunFailure(taskId: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (!task.admission || task.admission.lead.memberKind !== 'agent') {
+      throw new Error(`task ${taskId} has no Agent-lead admission run`);
+    }
+    if (task.admission.initialRunFailed) return task;
+    const failed: Task = {
+      ...task,
+      admission: { ...task.admission, initialRunFailed: true },
+      updatedAt: this.#clock.now(),
+    };
+    await this.#store.save(failed);
+    return failed;
+  }
+
   /**
    * Apply a partial update to a Task.
    *
@@ -154,6 +170,9 @@ export class TaskService {
     const task = await this.#require(taskId);
     if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isTerminalTaskStatus(patch.status)) {
       throw new Error(`task ${taskId} must end through the Task environment lifecycle`);
+    }
+    if (task.admission !== undefined && (patch.title !== undefined || patch.goal !== undefined || patch.constraints !== undefined)) {
+      throw new Error(`task ${taskId} content is bound to proposal version ${task.admission.contentVersion}`);
     }
     if (patch.title !== undefined) assertRequired(patch.title, 'title');
     if (patch.goal !== undefined) assertRequired(patch.goal, 'goal');
@@ -187,6 +206,20 @@ export class TaskService {
    * run is linked into the Task's sequence by the orchestrator through `link`,
    * and its settlement is reported through `onRunSettled`.
    */
+  async advanceWithAttribution(taskId: string, input: {
+    readonly agentId: string;
+    readonly actor: import('./model.ts').TaskActor;
+    readonly reason: string;
+    readonly contentVersion: number;
+    readonly prompt?: string;
+  }): Promise<{ readonly task: Task; readonly runId: string }> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    const task = await this.#require(taskId);
+    return this.#lifecycle.advanceRun(taskId, input.agentId, input.prompt ?? defaultAdvancePrompt(task), {
+      actor: input.actor, reason: input.reason, contentVersion: input.contentVersion,
+    });
+  }
+
   async advance(
     taskId: string,
     options: AdvanceTaskOptions = {},
@@ -268,7 +301,7 @@ export class TaskService {
     // The first run to advance a Task records which agent owns it, so later
     // advances need no explicit agent.
     const task = await this.#store.get(input.taskId);
-    if (task && task.assignedAgentId === undefined) {
+    if (task && task.admission === undefined && task.assignedAgentId === undefined) {
       await this.#store.save({ ...task, assignedAgentId: input.agentId, updatedAt: this.#clock.now() });
     }
   }

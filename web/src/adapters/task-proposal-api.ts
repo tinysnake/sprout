@@ -1,8 +1,9 @@
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.js';
-import type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin } from '../../../src/task/proposal-model.ts';
+import type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin, TaskProposalBeginInput } from '../../../src/task/proposal-model.ts';
+import type { TaskView } from '../../../src/web/views.ts';
 
 // Shared portable types, not a second wire vocabulary. No backend runtime import.
-export type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin } from '../../../src/task/proposal-model.ts';
+export type { TaskProposal, TaskProposalContent, TaskContentVersion, ReviseTaskProposal, ProposalDecision, TaskProposalOrigin, TaskProposalBeginInput } from '../../../src/task/proposal-model.ts';
 export interface TaskProposalBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
@@ -14,6 +15,12 @@ export interface TaskProposalBrowserAdapter {
   revise(id: string, input: ReviseTaskProposal): Promise<TaskProposal>;
   withdraw(id: string, input: ProposalDecision): Promise<TaskProposal>;
   reject(id: string, input: ProposalDecision): Promise<TaskProposal>;
+  begin(id: string, input: TaskProposalBeginInput): Promise<{
+    readonly task: TaskView;
+    readonly duplicate: boolean;
+    readonly initialRunId?: string;
+    readonly initialRunFailed?: boolean;
+  }>;
 }
 /** No authority fields, local command queue, or offline retry; shared transport owns session/CSRF. */
 export function createTaskProposalBrowserAdapter(transport: BrowserTransport): TaskProposalBrowserAdapter {
@@ -33,5 +40,6 @@ export function createTaskProposalBrowserAdapter(transport: BrowserTransport): T
     revise: (id, input) => command(`${detail(id)}/content`, input),
     withdraw: (id, input) => command(`${detail(id)}/withdraw`, input),
     reject: (id, input) => command(`${detail(id)}/reject`, input),
+    begin: (id, input) => transport.request(`${detail(id)}/begin`, post(input)),
   };
 }

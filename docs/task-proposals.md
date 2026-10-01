@@ -68,6 +68,8 @@ actor/proposer fields cannot impersonate an Agent or grant authority.
 | POST | `/api/task-proposals/:id/content` | `{ proposal }` |
 | POST | `/api/task-proposals/:id/withdraw` | `{ proposal }` |
 | POST | `/api/task-proposals/:id/reject` | `{ proposal }` |
+| POST | `/api/task-proposals/:id/begin` | `{ expectedRevision, environmentInstanceId, lead, reason }` → `{ task, duplicate, initialRunId? }` |
+| POST | `/api/tasks/:id/advances` | `{ targetAgentId, reason, prompt? }` → `{ task, runId, advance }` |
 
 Creation accepts content and optional `origin`; validation accepts content
 only. Revision accepts full replacement content, `reason`, and positive integer
@@ -76,23 +78,52 @@ carry stable `code`: unknown targets are 404,
 invalid content is 400, authority/membership refusal is 403, and stale/lifecycle
 conflicts are 409. Unexpected failures expose no raw diagnostics.
 
+For proposal begin, a recovering Task-held Environment lease returns HTTP 409
+with `code: environment-recovering`; other lease reservation refusals return 409
+with `code: environment-unavailable`. Both refusals leave the proposal proposed.
+
 The browser adapter shares portable types with the backend, encodes path ids,
 and uses the existing transport for sessions, CSRF and connection state. It never
 queues or automatically replays a command after disconnect.
 
 ## Execution boundary and next consumer
 
-This capability holds no runner, wake scheduler, Environment pool, context-worker,
-or lease-requiring capability port. Validation, creation and revision cannot
-start work, wake a lead, acquire a lease, or prepare Task context. Proposal ids
-are not legacy Task ids and cannot be passed to legacy Task begin or advance.
+Proposal validation, creation and revision remain lease-free: they cannot start
+work, wake a lead, acquire a lease, or prepare Task context. Proposal ids are not
+legacy Task ids and cannot be passed to legacy Task begin or advance.
 
-#100 owns Human approve-and-begin and must atomically fence consumption of the
-proposal's current revision, record the exact approved content version, and bind
-it to the begun Task. #101 owns subsequent Task control and run admission.
-Neither execution admission nor the complete Tasks page (#102) is implemented
-by #99. The pre-existing Task API remains unchanged; this proposal capability
-adds no implicit bridge that could bypass Human approval.
+#100 owns Human approve-and-begin. The protected runtime exposes one
+`POST /api/task-proposals/:id/begin` command. It resolves the Human from the
+operator session, fences the expected proposal revision, validates the selected
+lead and Environment, and then consumes that revision in the same SQLite
+transaction that inserts the Task begin intent and Task-held lease. The Task
+stores the immutable approved content snapshot, content version, lead,
+Environment binding, and approval actor/reason. A pre-acquisition refusal leaves
+the proposal proposed; once the transaction commits, Worker-context failure
+moves that same Task and lease into recovery on the selected Environment. There
+is no separately durable approved-but-unbegun state.
+
+The Task lead may use `POST /api/tasks/:id/advances` to select a currently
+eligible Project Agent. Each admitted run link records its actor, reason, target,
+and bound content version in the same compare-and-set that enforces one active
+run. Human leads receive no automatic run. Agent leads receive one initial,
+separately recorded run after context preparation succeeds. The Human approval
+command supplies the initial run's actor and reason. If that submission fails
+after begin commits, the response and every idempotent retry report
+`initialRunFailed: true`; the failed attempt's link is not presented as an
+admitted `initialRunId`.
+
+The authenticated runtime refuses direct legacy Task creation, begin, and
+advance routes; the old Task transport remains only for unauthenticated M1 test
+compositions. #101 owns later Task controls and Task content changes, including
+new content versions and admission of subsequent runs against the latest
+version. The complete Tasks page remains #102.
+
+## Risk-to-test map
+
+- Pre-acquisition refusal and post-acquisition Worker failure: `src/task/admission.test.ts`.
+- Atomic proposal revision consumption with Task+lease persistence, SQLite rollback, and restart: the SQLite admission contract in `src/task/admission.test.ts`.
+- Lead authority, Environment compatibility, one-active-run fence, initial-run policy, and attributed advance history: Task admission contract tests plus `web/src/adapters/task-admission-contract.test.ts`.
 
 ## Risk-to-test map
 

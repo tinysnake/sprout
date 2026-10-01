@@ -9,18 +9,35 @@
 
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
-import type { EnvironmentPool } from '../environment/pool.ts';
+import type { AcquireLeaseFailure, AcquireLeaseResult, EnvironmentPool, LeaseState } from '../environment/pool.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
-import type { Task } from './model.ts';
+import type { Task, TaskActor } from './model.ts';
 import { isTerminalTaskStatus } from './model.ts';
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
+
+/** A Task begin cannot reserve an Environment whose lease is already held. */
+export class TaskEnvironmentLeaseRefusal extends Error {
+  readonly reason: AcquireLeaseFailure;
+  readonly state: LeaseState | undefined;
+
+  constructor(instanceId: string, refusal: Extract<AcquireLeaseResult, { readonly ok: false }>, includeLeaseState = false) {
+    const holder = refusal.heldBy ?? (includeLeaseState ? 'another holder' : refusal.reason);
+    const message = includeLeaseState
+      ? `environment ${instanceId} is unavailable: held by ${holder} (${refusal.state ?? 'active'})`
+      : `environment ${instanceId} is unavailable: ${holder}`;
+    super(message);
+    this.name = 'TaskEnvironmentLeaseRefusal';
+    this.reason = refusal.reason;
+    this.state = refusal.state;
+  }
+}
 
 /** Why one Task recovery request cannot apply (#171). */
 export type TaskRecoveryRefusalCode =
@@ -43,6 +60,16 @@ export class TaskRecoveryRefusal extends Error {
     super(message);
     this.name = 'TaskRecoveryRefusal';
     this.code = code;
+  }
+}
+
+/** A concurrent Task advance lost the durable one-active-run admission fence. */
+export class TaskAdvanceConflictError extends Error {
+  readonly code = 'advance-conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskAdvanceConflictError';
   }
 }
 
@@ -74,6 +101,8 @@ export interface TaskEnvironmentRunner {
     readonly projectWorkspacePath?: string;
     readonly taskBootstrapInstructions?: string;
   }): Promise<{ readonly id: string }>;
+  /** Current Environment compatibility, shared with ordinary run admission. */
+  evaluateOptionAdmission?(agentId: string, environmentInstanceId: string): Promise<{ readonly ok: boolean }>;
 }
 
 export interface TaskEnvironmentLifecycleOptions {
@@ -148,6 +177,68 @@ export class TaskEnvironmentLifecycle {
     this.#faults = options.faults;
   }
 
+  /** Agents that are current Project members and can run on this eligible Environment. */
+  async eligibleAgents(projectId: string, environmentInstanceId: string): Promise<readonly string[]> {
+    const project = this.#projects.get(projectId);
+    if (!project || !project.availableEnvironmentInstanceIds.includes(environmentInstanceId)) return [];
+    return (await Promise.all(project.memberships.map(async membership =>
+      await this.#agentEligible(membership.agentId, projectId, environmentInstanceId) ? membership.agentId : undefined,
+    ))).filter((id): id is string => id !== undefined);
+  }
+
+  /** Begin a proposal-backed Task: approval, Task insertion and lease share one durable boundary. */
+  async beginApproved(task: Task, input: {
+    readonly environmentInstanceId: string;
+    readonly contextAgentId: string;
+    readonly consumeProposal: () => void;
+  }): Promise<Task> {
+    if (await this.#store.get(task.id)) throw new Error(`task ${task.id} already exists`);
+    const project = this.#projects.get(task.projectId);
+    if (!project || !project.availableEnvironmentInstanceIds.includes(input.environmentInstanceId)) {
+      throw new Error(`environment ${input.environmentInstanceId} is not available to project ${task.projectId}`);
+    }
+    if (!await this.#agentEligible(input.contextAgentId, task.projectId, input.environmentInstanceId)) {
+      throw new Error(`agent ${input.contextAgentId} is not eligible on environment ${input.environmentInstanceId}`);
+    }
+    const contextAgent = this.#agents.get(input.contextAgentId)!;
+    const acquired = this.#pool.reserveTaskLease({
+      instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
+      taskId: task.id, ttlMs: this.#leaseTtlMs,
+    });
+    if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(input.environmentInstanceId, acquired);
+    const beginning: Task = {
+      ...task,
+      ...(task.admission?.lead.memberKind === 'agent' ? { assignedAgentId: task.admission.lead.memberId } : {}),
+      environmentInstanceId: input.environmentInstanceId,
+      environmentLeaseId: acquired.lease.id,
+      environmentLifecycleState: 'beginning',
+      status: 'in-progress',
+      updatedAt: this.#clock.now(),
+    };
+    try {
+      await this.#store.createBeginningWithLease(beginning, acquired.lease, input.consumeProposal);
+    } catch (error) {
+      this.#pool.abandonReservation(acquired.lease.id);
+      throw error;
+    }
+    this.#faults?.afterBeginningCommit?.();
+    this.#pool.adoptLease(acquired.lease);
+    try {
+      await this.#prepare(beginning, input.contextAgentId);
+    } catch (error) {
+      await this.#toRecovery(beginning, 'beginning');
+      throw error;
+    }
+    const ready: Task = { ...beginning, environmentLifecycleState: 'idle', updatedAt: this.#clock.now() };
+    try {
+      await this.#store.save(ready);
+    } catch (error) {
+      await this.#toRecovery(beginning, 'beginning');
+      throw error;
+    }
+    return ready;
+  }
+
   async begin(taskId: string, options: { readonly agentId?: string; readonly selection?: EnvironmentPreference } = {}): Promise<Task> {
     let task = await this.#require(taskId);
     if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot begin`);
@@ -178,9 +269,7 @@ export class TaskEnvironmentLifecycle {
         instanceId: resolution.instanceId, capability: agent.capability, holderId: task.id,
         taskId: task.id, ttlMs: this.#leaseTtlMs,
       });
-      if (!acquired.ok) {
-        throw new Error(`environment ${resolution.instanceId} is unavailable: held by ${acquired.heldBy ?? 'another holder'} (${acquired.state ?? 'active'})`);
-      }
+      if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(resolution.instanceId, acquired, true);
       // Durable begin intent precedes Worker preparation. The lease remains
       // blocking if the process dies before, during, or after that call.
       task = {
@@ -208,10 +297,14 @@ export class TaskEnvironmentLifecycle {
     return ready;
   }
 
-  async advanceRun(taskId: string, agentId: string, input: string): Promise<{ readonly task: Task; readonly runId: string }> {
+  async advanceRun(taskId: string, agentId: string, input: string, audit?: {
+    readonly actor: TaskActor;
+    readonly reason: string;
+    readonly contentVersion: number;
+  }): Promise<{ readonly task: Task; readonly runId: string }> {
     const task = await this.#require(taskId);
     if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
-    if (task.environmentLifecycleState === 'running') throw new Error(`task ${taskId} already has an active run`);
+    if (task.environmentLifecycleState === 'running') throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} is ${task.environmentLifecycleState ?? 'unbegun'} and cannot advance`);
     }
@@ -220,14 +313,19 @@ export class TaskEnvironmentLifecycle {
     if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id || lease.instanceId !== task.environmentInstanceId) {
       throw new Error(`task ${taskId} lease is not active`);
     }
+    if (task.admission !== undefined && audit === undefined) throw new Error(`task ${taskId} advance requires actor, reason, and content version`);
+    if (audit !== undefined) {
+      if (task.admission === undefined || audit.contentVersion !== task.admission.contentVersion) throw new Error(`task ${taskId} advance content version is not current`);
+      if (!await this.#agentEligible(agentId, task.projectId, task.environmentInstanceId)) throw new Error(`agent ${agentId} is not eligible on the Task's environment`);
+    }
     const runId = this.#ids.run();
-    // Persist the active nested-run fact before the orchestrator can start a worker session.
+    // Persist the active nested-run fact and its complete advance attribution before the Worker can start.
     const running: Task = { ...task, status: 'in-progress', environmentLifecycleState: 'running', activeRunId: runId, updatedAt: this.#clock.now() };
-    const admitted = await this.#store.saveIfUnchanged(running, {
-      environmentLifecycleState: task.environmentLifecycleState,
-      activeRunId: task.activeRunId,
-    });
-    if (!admitted) throw new Error(`task ${taskId} already has an active run`);
+    const expected = { environmentLifecycleState: task.environmentLifecycleState, activeRunId: task.activeRunId };
+    const admitted = audit === undefined
+      ? await this.#store.saveIfUnchanged(running, expected)
+      : await this.#store.admitRun(running, { runId, agentId, actor: audit.actor, reason: audit.reason, contentVersion: audit.contentVersion, now: this.#clock.now() }, expected);
+    if (!admitted) throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     let prepared: { readonly bootstrapInstructions: string };
     try {
       // The active-run admission is durable before this refresh.  A Worker
@@ -239,13 +337,18 @@ export class TaskEnvironmentLifecycle {
       throw error;
     }
     const workspacePath = this.#workspacePath(task.projectId, task.environmentInstanceId);
-    await this.#runs.submit({
-      runId, taskId, agentId, prompt: input, projectId: task.projectId,
-      environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId,
-      projectWorkspaceId: task.projectId,
-      ...(workspacePath !== undefined ? { projectWorkspacePath: workspacePath } : {}),
-      taskBootstrapInstructions: prepared.bootstrapInstructions,
-    });
+    try {
+      await this.#runs.submit({
+        runId, taskId, agentId, prompt: input, projectId: task.projectId,
+        environmentInstanceId: task.environmentInstanceId, environmentLeaseId: task.environmentLeaseId,
+        projectWorkspaceId: task.projectId,
+        ...(workspacePath !== undefined ? { projectWorkspacePath: workspacePath } : {}),
+        taskBootstrapInstructions: prepared.bootstrapInstructions,
+      });
+    } catch (error) {
+      await this.#toRecovery(running, 'running', true);
+      throw error;
+    }
     return { task: running, runId };
   }
 
@@ -291,7 +394,7 @@ export class TaskEnvironmentLifecycle {
     if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
-        await this.#prepare(task, task.assignedAgentId!);
+        await this.#prepare(task, task.admission?.contextAgentId ?? task.assignedAgentId!);
       } catch (error) { await this.#toRecovery(task, 'beginning'); throw error; }
       const resumed = omit({ ...task, status: 'in-progress' as const, environmentLifecycleState: 'idle' as const, updatedAt: this.#clock.now() }, 'recoveryState');
       await this.#store.save(resumed); return resumed;
@@ -483,6 +586,10 @@ export class TaskEnvironmentLifecycle {
       taskTitle: task.title,
       taskGoal: task.goal,
       taskConstraints: task.constraints,
+      ...(task.admission !== undefined ? {
+        taskValidationCriteria: task.admission.validationCriteria,
+        taskContentVersion: task.admission.contentVersion,
+      } : {}),
       taskStatus: task.status,
       priorRunSummaries,
       agentId,
@@ -496,6 +603,16 @@ export class TaskEnvironmentLifecycle {
   #workspacePath(projectId: string, environmentInstanceId: string): string | undefined {
     const project = this.#projects.get(projectId);
     return project === undefined ? undefined : workspaceFor(project, environmentInstanceId)?.path;
+  }
+
+  async #agentEligible(agentId: string, projectId: string, environmentInstanceId: string): Promise<boolean> {
+    const project = this.#projects.get(projectId);
+    const agent = this.#agents.get(agentId);
+    if (!project || !agent || !project.availableEnvironmentInstanceIds.includes(environmentInstanceId)
+      || !project.memberships.some(member => member.agentId === agentId)
+      || this.#pool.requiresLease(environmentInstanceId, agent.capability) !== true) return false;
+    const admission = await this.#runs.evaluateOptionAdmission?.(agentId, environmentInstanceId);
+    return admission?.ok ?? true;
   }
 
   async #require(taskId: string): Promise<Task> {

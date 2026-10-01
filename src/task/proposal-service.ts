@@ -64,6 +64,23 @@ export class TaskProposalService {
     if (!proposal) throw new TaskProposalError('unknown-proposal');
     return proposal;
   }
+  async authorizeActor(projectId: string, actor: ProposalActor): Promise<ProposalActor> {
+    actor = actorSnapshot(actor);
+    await this.#authorize(projectId, actor);
+    return actor;
+  }
+  async beginSnapshot(id: string, actor: ProposalActor, expectedRevision: number): Promise<TaskProposal> {
+    actor = actorSnapshot(actor);
+    const proposal = await this.get(id);
+    await this.#authorize(proposal.projectId, actor);
+    if (actor.memberKind !== 'human') throw new TaskProposalError('authority-required');
+    if (proposal.revision !== revision(expectedRevision)) throw new TaskProposalError('stale-proposal');
+    this.#open(proposal);
+    if (!proposal.versions.some(version => version.version === proposal.currentContentVersion)) {
+      throw new TaskProposalError('unknown-content-version');
+    }
+    return proposal;
+  }
   async list(projectId: string): Promise<readonly TaskProposal[]> {
     await this.#project(projectId);
     return this.#store.listForProject(projectId);

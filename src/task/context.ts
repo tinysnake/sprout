@@ -39,6 +39,8 @@ export interface TaskContext {
   readonly title: string;
   readonly goal: string;
   readonly constraints: readonly string[];
+  readonly validationCriteria?: readonly string[];
+  readonly contentVersion?: number;
   /** The prior runs whose summaries contributed to `text`, newest-last. */
   readonly sourceRunIds: readonly string[];
   readonly text: string;
@@ -87,6 +89,10 @@ export function buildTaskContext(
     title: task.title,
     goal: task.goal,
     constraints: task.constraints,
+    ...(task.admission !== undefined ? {
+      validationCriteria: task.admission.validationCriteria,
+      contentVersion: task.admission.contentVersion,
+    } : {}),
     sourceRunIds: selected.map((link) => link.runId),
     text: lines.join('\n'),
   };
@@ -128,6 +134,13 @@ export function renderTaskPrompt(context: TaskContext, prompt: string): string {
     'Constraints:',
     ...constraintLines,
     '',
+    ...(context.contentVersion !== undefined ? [
+      `Content version: ${context.contentVersion}`,
+      '',
+      'Validation criteria:',
+      ...(context.validationCriteria?.length ? context.validationCriteria.map((criterion) => `- ${criterion}`) : ['- (none declared)']),
+      '',
+    ] : []),
     '## Prior work on this Task',
     'The following are factual summaries of earlier runs. They contain no',
     "transcript and no other agent's private reasoning.",

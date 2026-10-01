@@ -22,6 +22,7 @@ import type {
   TaskRunLink,
   TaskRunSummary,
   TaskStatus,
+  TaskActor,
   TaskWithRuns,
 } from './model.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
@@ -69,6 +70,22 @@ export interface TaskStore {
    * reached through its `TaskLeaseBinding` port, not issued here.
    */
   saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void>;
+
+  /** Insert an approved Task, consume its proposal revision, and bind its lease atomically. */
+  createBeginningWithLease(task: Task, lease: EnvironmentLease, consumeProposal: () => void): Promise<void>;
+
+  /** Atomically admit one attributed run and persist its audit link with the active-run fence. */
+  admitRun(task: Task, input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly actor: TaskActor;
+    readonly reason: string;
+    readonly contentVersion: number;
+    readonly now: number;
+  }, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+  }): Promise<boolean>;
 
   /** Commit a terminal Task state and release its Task lease together. */
   saveTerminalWithLease(task: Task, leaseId: string): Promise<void>;
@@ -147,7 +164,39 @@ export class InMemoryTaskStore implements TaskStore {
   }
 
   async saveBeginningWithLease(task: Task, _lease: EnvironmentLease): Promise<void> {
-    this.#tasks.set(task.id, task);
+    this.#tasks.set(task.id, structuredClone(task));
+  }
+
+  async createBeginningWithLease(task: Task, _lease: EnvironmentLease, consumeProposal: () => void): Promise<void> {
+    if (this.#tasks.has(task.id)) throw new Error(`task ${task.id} already exists`);
+    consumeProposal();
+    this.#tasks.set(task.id, structuredClone(task));
+    this.#links.set(task.id, []);
+  }
+
+  async admitRun(task: Task, input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly actor: TaskActor;
+    readonly reason: string;
+    readonly contentVersion: number;
+    readonly now: number;
+  }, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+  }): Promise<boolean> {
+    const current = this.#tasks.get(task.id);
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId) return false;
+    const links = this.#links.get(task.id) ?? [];
+    if (links.some(link => link.runId === input.runId)) return false;
+    const link: TaskRunLink = {
+      taskId: task.id, runId: input.runId, agentId: input.agentId,
+      actor: structuredClone(input.actor), reason: input.reason, contentVersion: input.contentVersion,
+      requestedAt: input.now, sequence: links.length + 1, linkedAt: input.now,
+    };
+    this.#tasks.set(task.id, structuredClone(task));
+    this.#links.set(task.id, [...links, link]);
+    return true;
   }
 
   async saveTerminalWithLease(task: Task, _leaseId: string): Promise<void> {
