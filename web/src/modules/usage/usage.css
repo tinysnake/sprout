@@ -908,8 +908,8 @@
   line-height: 1.35;
 }
 
-/* Responsive adjustments for narrow screens & phone mode */
-@media (max-width: 640px) {
+/* Compact composition matches the prototype across phone and tablet widths. */
+@media (max-width: 859px) {
   .usage-summary-band {
     grid-template-columns: 1fr;
   }

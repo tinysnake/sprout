@@ -638,3 +638,27 @@ test('Usage F8: tabs rove focus and selection with arrows, Home and End and own 
     app.unmount();
   } finally { await cleanup(); }
 });
+
+test('Usage F10: compact composition applies throughout the prototype tablet range', async () => {
+  const css = await readFile(`${repoRoot}/web/src/modules/usage/usage.css`, 'utf8');
+  const dom = new JSDOM('<style></style>');
+  dom.window.document.querySelector('style')!.textContent = css;
+  const rules = [...dom.window.document.styleSheets[0]!.cssRules];
+  const valueAt = (width: number, selector: string, property: string) => {
+    let value = '';
+    const apply = (rule: any) => {
+      if (rule.selectorText === selector) value = rule.style.getPropertyValue(property) || value;
+      if (rule.media) {
+        const max = /max-width:\s*(\d+)px/.exec(rule.media.mediaText);
+        if (max && width <= Number(max[1])) [...rule.cssRules].forEach(apply);
+      }
+    };
+    rules.forEach(apply); return value.trim();
+  };
+  for (const width of [641, 768, 859]) {
+    assert.equal(valueAt(width, '.usage-summary-band', 'grid-template-columns'), '1fr', `${width}px summary collapses`);
+    assert.equal(valueAt(width, '.usage-view-tabs', 'grid-template-columns'), 'repeat(3, minmax(0, 1fr))', `${width}px tabs collapse`);
+  }
+  assert.equal(valueAt(860, '.usage-view-tabs', 'grid-template-columns'), 'repeat(6, minmax(0, 1fr))');
+  dom.window.close();
+});
