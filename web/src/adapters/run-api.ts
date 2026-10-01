@@ -8,7 +8,7 @@ export interface RunBrowserAdapter {
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
   listRuns(): Promise<{ readonly runs: readonly RunView[]; readonly totals: RunHistoryTotals }>;
   getRun(id: string): Promise<RunView>;
-  getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
+  getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status']; readonly failureReason?: string }>;
   submitRun(input: { readonly agentId: string; readonly prompt: string }): Promise<{ readonly id: string }>;
   stopRun(id: string): Promise<RunView>;
   subscribeRuns(listener: (run: RunView) => void): () => void;

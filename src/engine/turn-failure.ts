@@ -48,3 +48,16 @@ const REASONS: Readonly<Record<EngineTurnFailureCause, string>> = {
 export function sanitizedTurnFailure(engine: string, cause: EngineTurnFailureCause): string {
   return `${engine} turn failed: ${REASONS[cause]}`;
 }
+
+/** Exact product-owned messages only; prefixes never authorize engine prose. */
+export function trustedTurnFailureMessage(message: unknown): string | undefined {
+  if (typeof message !== 'string' || message.length > 200) return undefined;
+  if (message === 'the engine turn failed' || message === 'the engine refused the saved session' ||
+      message === 'the engine session could not be started') return message;
+  for (const engine of ['pi', 'codex', 'agy', 'claude']) {
+    for (const cause of Object.keys(REASONS) as EngineTurnFailureCause[]) {
+      if (message === sanitizedTurnFailure(engine, cause)) return message;
+    }
+  }
+  return undefined;
+}

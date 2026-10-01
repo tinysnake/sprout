@@ -9,7 +9,7 @@ import { PiEngineAdapter } from '../engine/pi.ts';
 import { CodexEngineAdapter, type CodexProcess } from '../engine/codex.ts';
 import { sanitizedTurnFailure } from '../engine/turn-failure.ts';
 import { runFailureEventInput } from '../collaboration/run-failure-events.ts';
-import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
+import { sanitizeEngineTurnResult } from '../worker/diagnostics.ts';
 import type { EngineAdapter } from '../engine/port.ts';
 
 import { AgentRegistry } from '../agent/registry.ts';
@@ -69,7 +69,8 @@ test('bad-model zero-usage Pi failure reaches the run-failure projection', async
   assert.deepEqual(run.events, []);
   const result = sanitizeEngineTurnResult(run.result!);
   assert.equal(result.status, 'failed');
-  if (result.status === 'failed') assert.equal(result.message, WORKER_DIAGNOSTICS.turnFailed);
+  if (result.status === 'failed') assert.equal(result.message, sanitizedTurnFailure('pi', 'error-stop-reason'));
+  assert.match(runFailureEventInput({ ...run, result })?.detail ?? '', /the engine ended the turn with an error stop reason/);
   const event = runFailureEventInput(run);
   assert.equal(event?.kind, 'agent-run-failure');
   assert.equal(event?.disposition, 'informational');

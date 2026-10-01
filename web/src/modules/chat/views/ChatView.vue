@@ -56,7 +56,7 @@ const managingGroup = ref(false);
 const evidenceOpen = ref<string | null>(null);
 const evidence = ref<RoutingEvidenceView | null>(null);
 const evidenceLoading = ref(false);
-const provenance = ref<{ runId?: string; runStatus?: string; inputIds: readonly string[]; batchId?: string } | null>(null);
+const provenance = ref<{ runId?: string; runStatus?: string; failureReason?: string; inputIds: readonly string[]; batchId?: string } | null>(null);
 const evidenceTrigger = ref<HTMLElement | null>(null);
 const seen = new Set<string>();
 const knownEvents = new Set<string>();
@@ -338,7 +338,7 @@ async function resolveProvenance(message: MessageView) {
     // message carries its own durable WakeRequests, so the chain
     // WakeRequest → run outcome is read from server evidence only: the run
     // comes from a wake the server returned for this message, and its outcome
-    // from the `{id,status}` projection (Spec story 65, #180).
+    // from the minimal status + safe failure-reason projection (story 65, #182).
     const wake = evidence.value === null
       ? undefined
       : [...evidence.value.deterministicWakes, ...evidence.value.batches.flatMap((detail) => detail.wakes)]
@@ -348,7 +348,7 @@ async function resolveProvenance(message: MessageView) {
     provenance.value = {
       inputIds: [message.id],
       runId: wake.runId,
-      ...(run !== undefined ? { runStatus: run.status } : {}),
+      ...(run !== undefined ? { runStatus: run.status, ...(run.failureReason ? { failureReason: run.failureReason } : {}) } : {}),
     };
     return;
   }
@@ -360,7 +360,7 @@ async function resolveProvenance(message: MessageView) {
     if (!batch) { try { batch = await service.getRoutingBatch(hint); } catch { /* not a batch */ } }
     const wake = (batch?.wakes ?? trigger?.deterministicWakes ?? []).find((w) => w.agentId === message.authorId);
     const run = wake?.runId ? await service.getRunStatus(wake.runId).catch(() => undefined) : undefined;
-    provenance.value = { inputIds: batch?.inputs.map((item) => item.inputId) ?? (trigger ? [hint] : []), ...(batch ? { batchId: batch.batch.id } : {}), ...(wake?.runId ? { runId: wake.runId } : {}), ...(run ? { runStatus: run.status } : {}) };
+    provenance.value = { inputIds: batch?.inputs.map((item) => item.inputId) ?? (trigger ? [hint] : []), ...(batch ? { batchId: batch.batch.id } : {}), ...(wake?.runId ? { runId: wake.runId } : {}), ...(run ? { runStatus: run.status, ...(run.failureReason ? { failureReason: run.failureReason } : {}) } : {}) };
   } catch { provenance.value = { inputIds: [] }; }
 }
 async function openEvidence(id: string, kind: 'message' | 'event', trigger: Event) {
@@ -487,7 +487,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
                     <p v-if="currentEvidenceState === 'projected'" class="font-bold text-[var(--purple-agent)]">Projected Reply · Non-Routing</p>
                     <p v-if="currentEvidenceState === 'projected'">Assistant output projected on completion cannot trigger downstream wake evaluations.</p>
                     <p v-if="provenance?.runId">Run: <code>{{ provenance.runId }}</code> · {{ provenance.runStatus ?? 'status unavailable' }}</p>
-                    <p v-if="currentEvidenceState === 'run-failed'" class="font-bold text-[var(--red-action)]">Run failed. No reply was produced for this message; the WakeRequest and run outcome above are server evidence.</p>
+                    <p v-if="currentEvidenceState === 'run-failed'" class="font-bold text-[var(--red-action)]">Run failed. No reply was produced for this message. Reason: {{ provenance?.failureReason ?? 'No error outcome was recorded.' }}</p>
                     <p v-if="provenance?.inputIds.length">Triggered by: <code>{{ provenance.inputIds.join(', ') }}</code></p>
                     <p v-if="currentEvidenceState === 'pending'">Collection window open or frozen; wake-model judgement is pending. No outcome has been selected yet.</p>
                     <p v-if="evidence.window">Window: <code>{{ evidence.window.id }}</code> · {{ evidence.window.status }} · deadline {{ time(evidence.window.deadlineAt) }}</p>
@@ -505,6 +505,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
             </div>
             <p v-if="entry.kind === 'event'" class="text-[10px] text-[var(--text-muted)]">{{ entry.event.kind }} · {{ entry.event.disposition }}</p>
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
+            <p v-if="entry.kind === 'event' && entry.event.kind === 'agent-run-failure'" class="mt-1 whitespace-pre-wrap break-words text-[var(--red-action)]">{{ entry.event.detail ?? 'No error outcome was recorded.' }}</p>
           </div>
           </div>
         </div>

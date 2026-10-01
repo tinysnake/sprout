@@ -289,6 +289,39 @@ test('Durable Projected Replies: loop-prevention badge, provenance metadata, and
   }
 });
 
+test('failed-run evidence states safe messages, stop reason, and absent outcome explicitly', async () => {
+  const { dom, vite, cleanup } = await setupPrototypeDom();
+  try {
+    const { renderProjectChat } = await vite.ssrLoadModule('/src/prototype/views/chat-view.ts') as typeof import('./views/chat-view.js');
+    const { stateManager } = await vite.ssrLoadModule('/src/prototype/state.ts') as typeof import('./state.js');
+    const state = structuredClone(stateManager.getSnapshot());
+    const project = state.projects.find((p) => p.id === state.selectedProjectId)!;
+    state.selectedScopeKind = 'project-channel';
+    const message = state.messages.find((m) => m.projectId === project.id && m.authorKind === 'human')!;
+    message.scope = { kind: 'project-channel' };
+    message.disposition = 'addressed';
+    delete message.routingCausalChainId;
+    const cases = [
+      { result: { status: 'failed', message: 'the engine refused the saved session' } as const, reason: /the engine refused the saved session/ },
+      { result: { status: 'failed', message: '', stopReason: 'error' } as const, reason: /stopReason: error/ },
+      { result: undefined, reason: /No error outcome was recorded/ },
+      { result: { status: 'failed', message: '<script>HOSTILE_DIAGNOSTIC</script>'.repeat(1000) } as const, reason: /diagnostic withheld/ },
+    ];
+    for (const item of cases) {
+      message.deterministicRoutingOutcomes = [{ targetAgentId: 'architect', status: 'admitted', reason: 'Direct recipient', runStatus: 'failed', ...(item.result ? { runOutcome: item.result } : {}) }];
+      const root = dom.window.document.getElementById('app')!;
+      root.replaceChildren(renderProjectChat(state, project, root));
+      const trigger = root.querySelector<HTMLButtonElement>(`[data-msg-id="${message.id}"].msg-info-trigger-btn`)!;
+      assert.ok(trigger);
+      trigger.click();
+      const popup = root.querySelector('.projected-reply-popup')!;
+      assert.match(popup.textContent ?? '', /Run failed\. No reply was produced/);
+      assert.match(popup.textContent ?? '', item.reason);
+      assert.doesNotMatch(popup.innerHTML, /HOSTILE_DIAGNOSTIC|<script>/);
+    }
+  } finally { await cleanup(); }
+});
+
 test('Active 30s Collection Window: banner removed from chat timeline per owner review', async () => {
   const { dom, vite, cleanup } = await setupPrototypeDom();
   try {

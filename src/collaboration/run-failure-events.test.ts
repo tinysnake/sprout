@@ -6,9 +6,9 @@
  * 1. **Projection shape** — one Project-scoped terminal failure projects one
  *    `informational` `agent-run-failure` input attributed to the system
  *    producer, keyed by the run id.
- * 2. **Privacy** — the projection carries only the failure class and run
- *    identifiers: never failure text, prompt, raw events, tool output, or host
- *    facts.
+ * 2. **Privacy** — only identifiers, failure class, and exact product-owned
+ *    outcome reasons cross the projection: never arbitrary failure text,
+ *    prompt, raw events, tool output, or host facts.
  * 3. **Exactly-once** — the coordinator publishes it live (covered end-to-end
  *    in `integration.test.ts`) and again from restart reconciliation over the
  *    same delivery key, so a missed publication is repaired without a duplicate.
@@ -86,7 +86,7 @@ test('a Project-scoped terminal failure projects an informational system event w
   assert.equal(input.responsibleAgentIds, undefined, 'only addressed events name responsible Agents');
   assert.match(input.summary, /Agent run failed \(environment\) for architect/);
   assert.doesNotMatch(input.summary, /no available environment for capability: agent-run/);
-  assert.equal(input.detail, 'run run-42 · agent architect');
+  assert.equal(input.detail, 'run run-42 · agent architect · No error outcome was recorded.');
 
   // Privacy: prompt, raw events, and tool output are structurally absent.
   const serialized = JSON.stringify(input);
@@ -107,7 +107,7 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
   }));
   assert.ok(input);
   assert.equal(input.summary, 'Agent run failed (execution) for architect');
-  assert.equal(input.detail, 'run run-42 · agent architect');
+  assert.equal(input.detail, 'run run-42 · agent architect · No error outcome was recorded.');
   assert.equal(input.deliveryKey, 'run-failure:run-42');
   const projected = JSON.stringify(input);
   for (const unsafe of [marker, numberedHost, bareHost, 'engine error']) {
@@ -121,6 +121,22 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
   assert.equal(known.summary, 'Agent run failed (environment) for architect');
   assert.equal(JSON.stringify(known).includes(marker), false);
   assert.equal(JSON.stringify(known).includes(numberedHost), false);
+});
+
+test('failure notices explain persisted error messages, message-less errors, and missing outcomes safely', () => {
+  const cases: readonly [Partial<AgentRun>, RegExp][] = [
+    [{ result: { status: 'failed', message: 'the engine refused the saved session' } }, /the engine refused the saved session/],
+    [{ result: { status: 'failed', message: '' } }, /code: failed/],
+    [{ result: { status: 'failed', message: '', stopReason: 'error' } }, /stopReason: error/],
+    [{}, /No error outcome was recorded/],
+    [{ result: { status: 'failed', message: '<script>HOSTILE_DIAGNOSTIC</script>'.repeat(1000) } }, /diagnostic withheld/],
+  ];
+  for (const [outcome, reason] of cases) {
+    const input = runFailureEventInput(failedRun(outcome));
+    assert.match(input?.detail ?? '', reason);
+    assert.doesNotMatch(JSON.stringify(input), /HOSTILE_DIAGNOSTIC|<script>/);
+    assert.ok((input?.detail?.length ?? 0) < 500, 'notice reason is bounded by product-owned vocabulary');
+  }
 });
 
 test('only Project-scoped terminal failures project an event', () => {

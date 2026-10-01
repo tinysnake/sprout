@@ -3,6 +3,8 @@
  * Strictly aligned with CONTEXT.md and ADRs 0006, 0007, 0008, 0009, and 0010.
  */
 
+import type { EngineTurnResult } from '../../../src/engine/port.ts';
+
 export type OperatorIdentity = {
   id: string;
   name: string;
@@ -203,6 +205,8 @@ export type MessageItem = {
   deterministicRoutingOutcomes?:
     | {
         targetAgentId: string;
+        runStatus?: 'failed' | 'completed' | 'running';
+        runOutcome?: EngineTurnResult;
         targetDisplayName?: string | undefined;
         status: 'admitted' | 'failed' | 'cancelled';
         reason: string;
@@ -264,6 +268,8 @@ export type ResultingWakeRequestRecord = {
    */
   admissionStatus: 'admitted' | 'pending' | 'waiting_capacity' | 'failed' | 'cancelled' | 'failed-closed';
   linkedRunId?: string | undefined;
+  runStatus?: 'failed' | 'completed' | 'running';
+  runOutcome?: EngineTurnResult;
   projectedReplyId?: string | undefined;
   failureReason?: string | undefined;
   terminalResponsibility?: RoutingTerminalResponsibility | undefined;

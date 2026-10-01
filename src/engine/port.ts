@@ -249,6 +249,8 @@ export type EngineTurnResult = { readonly pricingContext?: import('../usage/valu
   | {
       readonly status: 'failed';
       readonly message: string;
+      /** Structured error stop evidence, when exposed by the engine. */
+      readonly stopReason?: 'error';
       readonly tokenUsage?: TokenUsage;
       readonly detailedTokens?: DetailedTokenDimensions;
       readonly engineTurnDurationMs?: number;

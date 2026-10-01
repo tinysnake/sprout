@@ -1,4 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
+import { trustedTurnFailureMessage } from '../engine/turn-failure.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
 
@@ -81,7 +82,7 @@ export function sanitizeEngineTurnResult(result: EngineTurnResult): EngineTurnRe
     ...result,
     message: result.resumeRefused === true
       ? WORKER_DIAGNOSTICS.resumeRefused
-      : WORKER_DIAGNOSTICS.turnFailed,
+      : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed,
   };
 }
 
