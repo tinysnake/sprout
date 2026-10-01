@@ -260,7 +260,9 @@ export class SqliteUsageStore implements UsageStore {
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
       BEFORE INSERT ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
+          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
         (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
           AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
@@ -271,7 +273,9 @@ export class SqliteUsageStore implements UsageStore {
       CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
       BEFORE UPDATE ON usage_activities
       WHEN NOT (
-        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        (NEW.kind = 'agent_run' AND NEW.run_id IS NOT NULL AND length(NEW.run_id) > 0
+          AND NEW.agent_id IS NOT NULL AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
         OR
         (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL AND NEW.attempt_id IS NOT NULL
           AND NEW.batch_id IS NOT NULL AND NEW.project_id IS NOT NULL AND NEW.task_id IS NULL
@@ -291,22 +295,26 @@ export class SqliteUsageStore implements UsageStore {
       CREATE TRIGGER IF NOT EXISTS usage_observation_cost_insert
       BEFORE INSERT ON usage_observations
       WHEN (NEW.cost_estimate_status = 'available' AND (
-        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
-        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
         NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
       )) OR (NEW.billed_cost_status = 'available' AND (
-        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
       ))
       BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
 
       CREATE TRIGGER IF NOT EXISTS usage_observation_cost_update
       BEFORE UPDATE ON usage_observations
       WHEN (NEW.cost_estimate_status = 'available' AND (
-        NEW.cost_estimate_usd_micros IS NULL OR NEW.cost_estimate_usd_micros < 0 OR
-        NEW.cost_estimate_usd_micros > 9007199254740991 OR NEW.valuation_provenance IS NULL OR
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
         NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
       )) OR (NEW.billed_cost_status = 'available' AND (
-        NEW.billed_usd_micros IS NULL OR NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
       ))
       BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
     `);

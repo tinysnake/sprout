@@ -586,3 +586,83 @@ test('valid v25 usage migrates unchanged and reads truthfully after reopen', asy
     } finally { reopened.close(); }
   });
 });
+
+test('v26 migration triggers reject unreadable Agent-run attribution on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      let insertError: unknown;
+      try {
+        store.db.prepare(`INSERT INTO usage_activities
+          (id, kind, run_id, agent_id, engine, model, status, created_at)
+          VALUES ('raw-invalid-run', 'agent_run', 'valid-run', NULL, 'pi', 'model', 'completed', 3)`).run();
+      } catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        await assert.rejects(store.usage.listActivities(), /Invalid usage activity attribution/);
+      }
+      assert.ok(insertError !== undefined, 'raw v26 insert must reject an Agent run without a nonempty agent_id');
+      assert.match(String(insertError), /invalid usage activity attribution/i);
+      assert.equal((await store.usage.listActivities()).length, 1, 'a rejected write leaves existing activity reads clean');
+
+      // Seed an invalid preexisting row solely to exercise the UPDATE trigger independently.
+      store.db.exec('DROP TRIGGER usage_activity_attribution_insert');
+      store.db.prepare(`INSERT INTO usage_activities
+        (id, kind, run_id, agent_id, engine, model, status, created_at)
+        VALUES ('raw-invalid-update', 'agent_run', 'update-run', NULL, 'pi', 'model', 'completed', 4)`).run();
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = 'raw-invalid-update'").run(),
+        /invalid usage activity attribution/i,
+      );
+      store.db.prepare("DELETE FROM usage_activities WHERE id = 'raw-invalid-update'").run();
+      assert.equal((await store.usage.listActivities()).length, 1);
+    } finally { store.close(); }
+  });
+});
+
+test('v26 migration cost triggers reject fractional available amounts on insert and update', async () => {
+  await withV25Usage(async (path) => {
+    const store = new SqliteStore({ filename: path });
+    try {
+      await store.usage.recordActivity({
+        id: 'fractional-cost-activity', kind: 'agent_run',
+        correlation: { runId: 'fractional-cost-run', agentId: 'agent' },
+        engine: 'pi', model: 'model', status: 'completed', createdAt: 10, settledAt: 20,
+      });
+      const insert = (
+        id: string,
+        estimateStatus: 'available' | 'unavailable', estimate: number | null,
+        billedStatus: 'available' | 'unavailable', billed: number | null,
+      ) => store.db.prepare(`INSERT INTO usage_observations
+        (id, activity_id, observed_at, source, source_version, completeness, wall_duration_ms,
+         billed_cost_status, billed_usd_micros, cost_estimate_status, cost_estimate_usd_micros,
+         valuation_provenance, billing_basis)
+        VALUES (?, 'fractional-cost-activity', 20, 'raw-test', '1', 'complete', 10, ?, ?, ?, ?, ?, 'unknown')`)
+        .run(id, billedStatus, billed, estimateStatus, estimate, estimateStatus === 'available' ? 'provider_estimated' : null);
+
+      let insertError: unknown;
+      try { insert('fractional-estimate-insert', 'available', 0.5, 'unavailable', null); }
+      catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        const aggregate = await store.usage.getAggregate({});
+        assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0.5, 'fractional raw estimate is exported by aggregation');
+      }
+      assert.ok(insertError !== undefined, 'v26 trigger must reject fractional available estimates');
+      assert.match(String(insertError), /invalid usage observation cost facts/i);
+
+      insert('integer-estimate-update', 'available', 2, 'unavailable', null);
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_observations SET cost_estimate_usd_micros = 0.5 WHERE id = 'integer-estimate-update'").run(),
+        /invalid usage observation cost facts/i,
+      );
+      assert.throws(
+        () => insert('fractional-bill-insert', 'unavailable', null, 'available', 0.5),
+        /invalid usage observation cost facts/i,
+      );
+      insert('integer-bill-update', 'unavailable', null, 'available', 2);
+      assert.throws(
+        () => store.db.prepare("UPDATE usage_observations SET billed_usd_micros = 0.5 WHERE id = 'integer-bill-update'").run(),
+        /invalid usage observation cost facts/i,
+      );
+    } finally { store.close(); }
+  });
+});
