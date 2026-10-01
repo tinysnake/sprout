@@ -66,7 +66,7 @@ export interface UsageActivityItem {
   readonly provider?: string | undefined;
   readonly modelIdentity: UsageModelIdentity;
   readonly activityTime: string;
-  readonly settlementRange: 'today' | '7d' | '30d';
+  readonly settlementRange: 'today' | '7d' | '30d' | 'older';
   readonly outcome: UsageOutcome;
   readonly sessionMode: 'new' | 'resumed';
   readonly observationState: UsageObservationState;

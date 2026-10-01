@@ -453,6 +453,7 @@ const timeRangeLabels: Record<string, string> = {
   today: 'Today',
   '7d': 'Previous 7 days',
   '30d': 'Previous 30 days',
+  older: 'Earlier retained activity (beyond 30 days)',
 };
 </script>
 

@@ -18,13 +18,14 @@ function mapOutcome(status: string): UsageOutcome {
   return 'completed';
 }
 
-function mapSettlementRange(activity: BackendActivity): 'today' | '7d' | '30d' {
+function mapSettlementRange(activity: BackendActivity): UsageActivityItem['settlementRange'] {
   const ts = activity.settledAt ?? activity.createdAt;
   const now = Date.now();
   const diffMs = now - ts;
   if (diffMs <= 24 * 60 * 60 * 1000) return 'today';
   if (diffMs <= 7 * 24 * 60 * 60 * 1000) return '7d';
-  return '30d';
+  if (diffMs <= 30 * 24 * 60 * 60 * 1000) return '30d';
+  return 'older';
 }
 
 export function mapObservationToItem(

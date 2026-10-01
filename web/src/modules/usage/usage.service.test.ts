@@ -175,3 +175,17 @@ test('FixtureUsageService: returns accurate aggregates and scoped options', asyn
   assert.ok(models.includes('gpt-4o'));
   assert.ok(models.includes('gpt-4o-mini'));
 });
+
+test('ProductionUsageService F9: settlement buckets bound the previous 30 days at exact instants', async (t) => {
+  const now = 100 * 86400000;
+  t.mock.method(Date, 'now', () => now);
+  const day = 86400000;
+  for (const [age, expected] of [[day, 'today'], [day + 1, '7d'], [7 * day, '7d'], [7 * day + 1, '30d'], [30 * day - 1, '30d'], [30 * day, '30d'], [30 * day + 1, 'older']] as const) {
+    const a: UsageActivity = {
+      id: 'boundary-activity', kind: 'agent_run', engine: 'pi', model: 'claude-3-5-sonnet', status: 'completed',
+      createdAt: now - age - 1000, settledAt: now - age, correlation: { runId: 'boundary-run', agentId: 'agent', projectId: 'project' },
+    };
+    const service = new ProductionUsageService(mockAdapter({ activities: [a] }));
+    assert.equal((await service.listActivities())[0]!.settlementRange, expected, `age ${age}ms`);
+  }
+});
