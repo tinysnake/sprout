@@ -25,7 +25,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean } = {}) {
   const store = new InMemoryTaskStore();
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
@@ -42,7 +42,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
     ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => `run-${++nextRun}` },
     runs: { submit: async request => ({ id: request.runId }) },
-    forceReleaseLease: leaseId => pool.releaseTaskLease(leaseId) !== undefined,
+    ...(options.forceRelease === false ? {} : { forceReleaseLease: (leaseId: string) => pool.releaseTaskLease(leaseId) !== undefined }),
   });
   const tasks = new TaskService({ store, lifecycle, runs: { submit: async () => ({ id: 'unused' }) } });
   const proposals = {
@@ -278,6 +278,15 @@ test('accepted completion recovery preserves its intent even when recovery is su
   assert.equal(completed.endDisposition, 'completed');
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'released');
   assert.equal(recycles, 2);
+});
+
+test('Force Release without a lease-release capability preserves unfinished recovery instead of recording cancellation', async () => {
+  const s = await scenario({ forceRelease: false });
+  await s.lifecycle.workerChannelLost('task-1');
+  await assert.rejects(s.lifecycle.forceRelease('task-1', { actor: 'operator', reason: 'attempt unavailable release', unresolvedFacts: ['cleanup unproved'], at: 50 }), /release.*unavailable|capability/i);
+  assert.equal((await s.tasks.get('task-1'))?.environmentLifecycleState, 'recovery');
+  assert.equal((await s.tasks.get('task-1'))?.completedAt, undefined);
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'recovering');
 });
 
 test('Force Release records cancellation disposition without claiming normal context cleanup', async () => {

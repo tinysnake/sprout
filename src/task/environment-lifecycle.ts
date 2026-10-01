@@ -759,6 +759,9 @@ export class TaskEnvironmentLifecycle {
       }
       return [...new Set(affectedRunIds)];
     }
+    if (!task.environmentLeaseId || this.#forceReleaseLease === undefined) {
+      throw new Error('Force Release lease-release capability is unavailable');
+    }
     const forced: Task = omit(
       omit(
         omit(
@@ -779,15 +782,11 @@ export class TaskEnvironmentLifecycle {
       ),
       'pendingCompletionClaimId',
     );
-    if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
-      // One transaction commits the terminal Task row and the Task-held lease
-      // release together, exactly like an ordinary Task end, so the override can
-      // never leave a cancelled Task whose lease is still held.
-      await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
-      this.#forceReleaseLease(task.environmentLeaseId);
-    } else {
-      await this.#store.save(forced);
-    }
+    // One transaction commits the terminal Task row and the Task-held lease
+    // release together. Without the explicit release capability above, unfinished
+    // work remains in recovery rather than claiming terminal cancellation.
+    await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
+    this.#forceReleaseLease(task.environmentLeaseId);
     return [...new Set(affectedRunIds)];
   }
 
