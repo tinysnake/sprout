@@ -23,6 +23,8 @@ const props = defineProps<{
   agent: AgentInstance;
   /** Durable run attribution rows, newest first. */
   attributions: readonly AgentRunAttributionRow[];
+  /** A run identity carried from a Task deep link. */
+  selectedRunId?: string;
   /** True while the connection is unsettled: every control action is refused. */
   disabled?: boolean;
 }>();
@@ -241,6 +243,7 @@ const agentRuns = computed(() =>
     <!-- Section 6: Historical Run Attribution & Provenance (foldable) -->
     <Foldable
       class="foldable-attribution-trace"
+      :default-open="Boolean(selectedRunId)"
       title="Historical Run Attribution & Provenance"
       :subtext="`${agentRuns.length} recorded execution fact${agentRuns.length === 1 ? '' : 's'}`"
     >
@@ -251,6 +254,9 @@ const agentRuns = computed(() =>
         <div
           v-for="run in agentRuns"
           :key="run.runId"
+          :data-run-id="run.runId"
+          :aria-current="run.runId === selectedRunId ? 'true' : undefined"
+          :class="run.runId === selectedRunId ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)]' : ''"
           class="agent-attribution-row flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-1.5 text-xs"
         >
           <div class="min-w-0">

@@ -66,7 +66,7 @@ const project = {
   id: projectId,
   displayName: 'Task Test Project',
   status: 'active',
-  content: { currentVersion: 1, versions: [{ version: 1, memberships: [
+  content: { currentVersion: 1, versions: [{ version: 1, rules: [], memberships: [
     { memberId: 'operator', memberKind: 'human', startedAt: time, responsibilities: [], collaborationInstructions: '' },
     { memberId: 'agent-a', memberKind: 'agent', startedAt: time, responsibilities: [], collaborationInstructions: '' },
   ] }] },
@@ -524,6 +524,67 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     assert.ok(ended?.disabled, 'terminal Tasks expose no new lifecycle command');
     const masterList = doc.querySelector<HTMLElement>('aside[aria-label="Project Task list"]');
     assert.ok(masterList?.className.includes('hidden') && masterList.className.includes('lg:flex'), 'the master list becomes a desktop pane while detail fills the phone');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Tasks links each authority and browser back restores the selected Task', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router } = await mountTasks(vite, doc);
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="run-not-owned"]')?.click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+    assert.equal(router.currentRoute.value.params['taskId'], 'run-not-owned');
+
+    const project = doc.querySelector<HTMLAnchorElement>('[data-task-authority="project"]');
+    const agent = doc.querySelector<HTMLAnchorElement>('[data-task-authority="agent"]');
+    const environment = doc.querySelector<HTMLAnchorElement>('[data-task-authority="environment"]');
+    const run = doc.querySelector<HTMLAnchorElement>('[data-task-run-target="run-human-initiated"]');
+    assert.ok(project, 'Task exposes its Project authority');
+    assert.ok(agent, 'Task exposes its Agent lead authority');
+    assert.ok(environment, 'Task resolves its Environment instance to the managed Environment record');
+    assert.ok(run, 'Task exposes a run attribution destination');
+    for (const link of doc.querySelectorAll<HTMLElement>('[data-task-authority], [data-task-run-target]')) {
+      assert.match(link.className, /min-h-\[44px\]/, 'each Task authority link remains touch-sized');
+    }
+
+    doc.querySelector<HTMLAnchorElement>('[data-task-authority="project"]')!.click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'project-overview');
+    assert.equal(router.currentRoute.value.query['project'], projectId);
+    router.back();
+    await settle(220);
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+    assert.equal(router.currentRoute.value.params['taskId'], 'run-not-owned');
+
+    doc.querySelector<HTMLAnchorElement>('[data-task-authority="environment"]')!.click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'environment-detail');
+    assert.equal(router.currentRoute.value.params['id'], 'env-a');
+    router.back();
+    await settle(220);
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+
+    doc.querySelector<HTMLAnchorElement>('[data-task-authority="agent"]')!.click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'agent-detail');
+    assert.equal(router.currentRoute.value.params['agentId'], 'agent-a');
+    router.back();
+    await settle(220);
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+
+    doc.querySelector<HTMLAnchorElement>('[data-task-run-target="run-human-initiated"]')!.click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'agent-detail');
+    assert.equal(router.currentRoute.value.params['agentId'], 'agent-a');
+    assert.equal(router.currentRoute.value.query['run'], 'run-human-initiated');
+    router.back();
+    await settle(220);
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+    assert.equal(router.currentRoute.value.params['taskId'], 'run-not-owned');
     app.unmount();
   } finally {
     await cleanup();
