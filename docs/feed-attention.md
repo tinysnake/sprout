@@ -12,7 +12,7 @@ state, composed in `src/runtime.ts` as `createFeedProjection` and served by
 | Section | Sources | Notes |
 | --- | --- | --- |
 | **Attention** | Task proposals (`proposed`), pending completion claims, routable blockers, Task recovery, Environment recovery records (`reconciling`/`recovery`), pending enrollments, failed wake-model routing batches and deterministic/admission wake observations, unresolved Project events with disposition `human-action-required` | One item per unresolved source; severity-ranked `action_required` → `attention` → `info`, then newest first |
-| **In-flight work** | Tasks in `beginning`/`running`, runs in `queued`/`running` | Identity and lifecycle only: never a run's prompt, events, result, or failure |
+| **In-flight work** | Tasks in `beginning`/`running`, runs in `queued`/`running` | Lifecycle plus the run's captured configured engine/work model when available; elapsed time starts at the projected `at`. Never a run's prompt, events, result, or failure |
 | **Operational activity** | Project events plus terminal run settlements as fact-form one-liners | Newest first, bounded to 50 items, each summary bounded to 300 characters |
 
 An informational Project event stays activity; it becomes Attention only when
@@ -38,7 +38,8 @@ run is represented by its durable `agent-run-failure` event, never twice.
 - **Deep links are identities.** Each item's `target` names an owning surface
   (`FEED_SURFACE_TEMPLATES`) and resolves through `feedTarget`; the browser
   test pins those templates to the shipped route table in
-  `web/src/router/index.ts`.
+  `web/src/router/index.ts`. Projectless Agent runs link to their authoritative
+  Agent detail page.
 - **Privacy.** Interpolated source text passes `redactSensitiveText` and is
   length-bounded (400 for reasons, 300 for activity summaries). Engine prose,
   prompts, raw run events/results/failures, frozen routing context, and claim

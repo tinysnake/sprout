@@ -75,7 +75,8 @@ export type FeedTargetSurface =
   | 'project-chat'
   | 'project-chat-routing'
   | 'environments'
-  | 'environment-detail';
+  | 'environment-detail'
+  | 'agent-detail';
 
 /**
  * Route templates per surface, keyed by the FeedTarget field each path segment
@@ -90,6 +91,7 @@ export const FEED_SURFACE_TEMPLATES: Readonly<Record<FeedTargetSurface, string>>
   'project-chat-routing': '/project/chat/routing/:batchId',
   environments: '/manage/environments',
   'environment-detail': '/manage/environments/:environmentId',
+  'agent-detail': '/manage/agents/:agentId',
 };
 
 /** The authoritative entity identities one deep link may carry. */
@@ -101,6 +103,7 @@ export interface FeedTargetIdentity {
   readonly batchId?: string;
   /** The Manage Environments route key (enrollment key), not the instance id. */
   readonly environmentId?: string;
+  readonly agentId?: string;
 }
 
 /** One deep-link identity: the owning surface plus a concrete route path. */
@@ -200,6 +203,9 @@ export interface FeedInFlightItem {
   readonly id: string;
   readonly kind: 'task' | 'run';
   readonly lifecycle: string;
+  /** The product-configured engine and work model captured by the active run. */
+  readonly engine?: string;
+  readonly model?: string;
   readonly scopes: readonly string[];
   readonly target?: FeedTarget;
   readonly projectId?: string;
@@ -364,6 +370,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   ]);
 
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const runsById = new Map(runs.map((run) => [run.id, run]));
   const enrollmentsById = new Map(enrollments.map((enrollment) => [enrollment.id, enrollment]));
   // Known Projects = durable authority plus every Project a Task actually
   // references. A proposal, event, or batch in a Project that owns neither is
@@ -573,16 +580,24 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   // In-flight work: Tasks actively beginning/running plus every queued or
-  // running Agent run (story 14). Identity and lifecycle only — a run's
-  // prompt, events, result, and failure are never projected.
+  // running Agent run (story 14). Engine/model come only from the run's
+  // captured product configuration; prompts, events, results, and failures
+  // are never projected.
+  const configuredIdentity = (run: AgentRun | undefined): Pick<FeedInFlightItem, 'engine' | 'model'> => {
+    const option = run?.workOption;
+    if (option === undefined || !usable(option.engine) || !usable(option.workModel)) return {};
+    return { engine: option.engine, model: option.workModel };
+  };
   const inFlight: FeedInFlightItem[] = [];
   for (const task of tasks) {
     if (task.environmentLifecycleState !== 'beginning' && task.environmentLifecycleState !== 'running') continue;
     if (!knownProject(task.projectId)) continue;
+    const activeRun = usable(task.activeRunId) ? runsById.get(task.activeRunId) : undefined;
     inFlight.push({
       id: `task:${task.id}`,
       kind: 'task',
       lifecycle: taskLifecycleSentence(task),
+      ...configuredIdentity(activeRun?.status === 'queued' || activeRun?.status === 'running' ? activeRun : undefined),
       scopes: [task.projectId],
       target: feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id }),
       projectId: task.projectId,
@@ -599,11 +614,12 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         ? feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id })
         : knownProject(run.projectId)
           ? feedTarget({ surface: 'project-chat', projectId: run.projectId })
-          : undefined;
+          : feedTarget({ surface: 'agent-detail', agentId: run.agentId });
     inFlight.push({
       id: `run:${run.id}`,
       kind: 'run',
       lifecycle: boundText(`Run ${run.status} · Agent ${run.agentId}${usable(run.taskId) ? ` · Task ${run.taskId}` : ''}${usable(run.environmentInstanceId) ? ` · Environment ${run.environmentInstanceId}` : ''}`),
+      ...configuredIdentity(run),
       scopes: knownProject(run.projectId) ? [run.projectId] : [],
       ...(target !== undefined ? { target } : {}),
       ...(knownProject(run.projectId) ? { projectId: run.projectId } : {}),
@@ -646,7 +662,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         ? feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id })
         : knownProject(run.projectId)
           ? feedTarget({ surface: 'project-chat', projectId: run.projectId })
-          : undefined;
+          : feedTarget({ surface: 'agent-detail', agentId: run.agentId });
     activityDrafts.push({
       id: `run:${run.id}`,
       kind: 'agent-run',

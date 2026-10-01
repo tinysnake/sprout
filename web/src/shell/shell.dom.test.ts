@@ -188,6 +188,7 @@ test('the Shell ignores read loading and reports offline and reconnecting truthf
     await settle();
 
     const notice = () => doc.querySelector('[data-testid="shell-connection-notice"]');
+    const announcementBeforeRead = doc.querySelector('.shell-announcer')?.textContent?.trim() ?? '';
     assert.equal(notice(), null, 'a connected shell does not warn');
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
@@ -195,7 +196,7 @@ test('the Shell ignores read loading and reports offline and reconnecting truthf
     assert.equal(notice(), null, 'a brief connection check does not insert a shell row');
     await settle(5050);
     assert.equal(notice(), null, 'even a long read is not a connection warning');
-    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), '', 'a read causes no announcement');
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), announcementBeforeRead, 'a read causes no announcement');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
     await settle(60);
@@ -242,11 +243,12 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
     });
     const before = geometry();
     const mainClasses = main.className;
+    const announcementBeforeRead = doc.querySelector('.shell-announcer')?.textContent?.trim() ?? '';
     assert.equal(main.classList.contains('pt-24'), false, 'the hidden notice reserves no top lane');
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(100);
-    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), '',
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), announcementBeforeRead,
       'a read does not change the shared announcement');
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the short-lived refresh banner is not laid out');

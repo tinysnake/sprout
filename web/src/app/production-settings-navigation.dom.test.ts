@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter, pendingEnrollmentSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
@@ -114,6 +115,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
     chatService: new chatModule.FixtureChatService(),
     settingsService: new settingsModule.FixtureSettingsService(),
   };
@@ -413,34 +415,39 @@ test('Feed pending enrollment attention card opens its authoritative detail and 
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-    const { app, pinia, router } = createSproutApp(await deterministicAppOptions(vite));
+    const options = await deterministicAppOptions(vite);
+    options.feedService = createFeedTestAdapter(pendingEnrollmentSnapshot([
+      { id: 'env-pending', displayName: 'Pending Environment' },
+    ]));
+    const { app, pinia, router } = createSproutApp(options);
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
-    await router.push('/feed?scope=infra&urgency=attention');
+    await router.push('/feed?scope=feed:infra&urgency=attention');
     app.mount(appMount);
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    const card = [...dom.window.document.querySelectorAll<HTMLButtonElement>('.feed-attention-card')]
-      .find((item) => item.textContent?.includes('Pending Host Enrollment:'));
-    assert.ok(card, 'the live pending enrollment appears in Attention');
+    const card = dom.window.document.querySelector('[data-attention-id="enrollment:env-pending"]') as HTMLButtonElement | null;
+    assert.ok(card, 'the production Feed projection contains this pending enrollment');
+    assert.match(card.textContent ?? '', /Pending Environment/);
     card.click();
     await new Promise((resolve) => setTimeout(resolve, 40));
 
     assert.equal(router.currentRoute.value.fullPath, '/manage/environments/env-pending');
     const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts') as typeof import('../stores/app.ts');
-    assert.equal(useAppStore(pinia).returnContext?.to, '/feed?scope=infra&urgency=attention&activity=all');
+    assert.equal(useAppStore(pinia).returnContext?.to,
+      router.resolve({ name: 'feed', query: { scope: 'feed:infra', urgency: 'attention', activity: 'all' } }).fullPath);
     app.unmount();
   } finally {
     await cleanup();
   }
 });
 
-test('Feed hides a pending enrollment attention item when its enrollment is absent', async () => {
+test('Feed shows pending enrollment attention only when the Feed projection contains it', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
     const options = await deterministicAppOptions(vite);
-    options.environmentService.listEnvironments = async () => [];
+    assert.ok((await options.environmentService.listEnvironments()).some((environment) => environment.enrollmentStatus === 'pending'));
     const { app, router } = createSproutApp(options);
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
@@ -449,10 +456,10 @@ test('Feed hides a pending enrollment attention item when its enrollment is abse
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.equal(
-      [...dom.window.document.querySelectorAll('.feed-attention-card')]
-        .some((item) => item.textContent?.includes('Pending Host Enrollment:')),
+      [...dom.window.document.querySelectorAll('[data-attention-id]')]
+        .some((item) => item.getAttribute('data-attention-id')?.startsWith('enrollment:')),
       false,
-      'a stale fixture card is not rendered without its live enrollment'
+      'Environment authority does not create a second Feed attention source'
     );
     app.unmount();
   } finally {

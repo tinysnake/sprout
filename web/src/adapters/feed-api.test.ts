@@ -104,6 +104,7 @@ test('every Feed deep-link surface resolves in the shipped route table', async (
     feedTarget({ surface: 'project-chat-routing', projectId: 'proj-1', batchId: 'batch 1' }),
     feedTarget({ surface: 'environments' }),
     feedTarget({ surface: 'environment-detail', environmentId: 'enr-1' }),
+    feedTarget({ surface: 'agent-detail', agentId: 'agent-1' }),
   ];
   for (const template of Object.values(FEED_SURFACE_TEMPLATES)) {
     assert.ok(routeTable.has(normalize(template)), `template ${template} exists in the route table`);

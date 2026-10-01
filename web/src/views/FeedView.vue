@@ -1,645 +1,606 @@
 <script setup lang="ts">
-import { ref, computed, watch, inject, onMounted } from 'vue';
+import { computed, inject, nextTick, onMounted, ref, watch } from 'vue';
+import type { RouteLocationRaw } from 'vue-router';
 import { useRoute, useRouter } from 'vue-router';
+import { FEED_ALL_SCOPE, isFeedDeepLink } from '../../../src/web/feed.ts';
+import type {
+  FeedActivityItem,
+  FeedAttentionItem,
+  FeedBrowserAdapter,
+  FeedInFlightItem,
+  FeedScopeOption,
+  FeedSeverity,
+  FeedSnapshot,
+  FeedTarget,
+} from '../adapters/feed-api.ts';
 import { useAppStore } from '../stores/app.ts';
-import { ENVIRONMENT_SERVICE, type EnvironmentService } from '../modules/environments/ports.ts';
-import type { EnvironmentInstance } from '../modules/environments/types.ts';
 import { useAnnouncer } from '../primitives/announcer.ts';
-import Icon from '../primitives/Icon.vue';
+import { useShellConnection } from '../shell/use-shell-connection.ts';
+import { FEED_API, FEED_CLOCK } from './feed-port.ts';
 import Badge from '../primitives/Badge.vue';
-import StatusDot from '../primitives/StatusDot.vue';
-import FilterPillGroup from '../primitives/FilterPillGroup.vue';
-import FilterPill from '../primitives/FilterPill.vue';
-import Dialog from '../primitives/Dialog.vue';
 import Button from '../primitives/Button.vue';
+import EmptyState from '../primitives/EmptyState.vue';
+import Icon from '../primitives/Icon.vue';
+import StatusDot from '../primitives/StatusDot.vue';
 
+const props = defineProps<{ api?: FeedBrowserAdapter }>();
 const route = useRoute();
 const router = useRouter();
 const appStore = useAppStore();
 const announcer = useAnnouncer();
-const environmentService = inject<EnvironmentService | undefined>(ENVIRONMENT_SERVICE, undefined);
+const connection = useShellConnection().presentation;
+const injectedApi = inject(FEED_API, undefined);
+const api = computed(() => props.api ?? injectedApi);
+const feedClock = inject(FEED_CLOCK, () => Date.now());
 
-const scopes = ['all', 'sprout-m2', 'infra'] as const;
-const urgencies = ['all', 'action_required', 'attention', 'info'] as const;
-const activityKinds = ['all', 'tasks', 'messages', 'envs', 'usage'] as const;
+const urgencyChoices: readonly ('all' | FeedSeverity)[] = [
+  'all',
+  'action_required',
+  'attention',
+  'info',
+];
+const activityChoices = ['all', 'tasks', 'messages', 'envs', 'usage', 'other'] as const;
+type ActivityFilter = (typeof activityChoices)[number];
 
-type Scope = (typeof scopes)[number];
-type Urgency = (typeof urgencies)[number];
-type ActivityKind = (typeof activityKinds)[number];
-
-/** Restores the Feed's own filters from the URL so a return trip is not a reset. */
-function fromQuery<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
-  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+function queryString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
-const activeScope = ref<Scope>(fromQuery(route.query['scope'], scopes, 'all'));
-const activeUrgency = ref<Urgency>(fromQuery(route.query['urgency'], urgencies, 'all'));
-const activeActivityFilter = ref<ActivityKind>(fromQuery(route.query['activity'], activityKinds, 'all'));
+function queryUrgency(value: unknown): 'all' | FeedSeverity {
+  return urgencyChoices.includes(value as 'all' | FeedSeverity)
+    ? (value as 'all' | FeedSeverity)
+    : 'all';
+}
 
-/** The Feed's filters belong in the URL: that is what a return link restores. */
+function queryActivity(value: unknown): ActivityFilter {
+  return activityChoices.includes(value as ActivityFilter) ? (value as ActivityFilter) : 'all';
+}
+
+const activeScope = ref(queryString(route.query['scope']) ?? FEED_ALL_SCOPE);
+const activeUrgency = ref(queryUrgency(route.query['urgency']));
+const activeActivity = ref(queryActivity(route.query['activity']));
+const scopeOptions = ref<readonly FeedScopeOption[]>([]);
+const snapshot = ref<FeedSnapshot>();
+const loading = ref(true);
+const loaded = ref(false);
+const pageError = ref<'offline' | 'authentication' | 'forbidden' | 'failure'>();
+const heading = ref<HTMLHeadingElement>();
+let loadGeneration = 0;
+
+const scopeLabel = computed(
+  () => scopeOptions.value.find((scope) => scope.id === activeScope.value)?.label ?? 'Feed',
+);
 const feedQuery = computed(() => ({
   scope: activeScope.value,
   urgency: activeUrgency.value,
-  activity: activeActivityFilter.value,
+  activity: activeActivity.value,
 }));
 
-watch(feedQuery, (query) => {
-  // Replace, not push: filter changes are refinements of the current page, so
-  // they must not each become a browser history entry the operator has to
-  // press Back through.
-  router.replace({ name: 'feed', query });
+const visibleAttention = computed(() => {
+  const items = snapshot.value?.attention ?? [];
+  if (activeUrgency.value === 'all') return items;
+  return items.filter((item) => item.severity === activeUrgency.value);
 });
-
-interface AttentionItem {
-  id: string;
-  severity: 'action_required' | 'attention' | 'info';
-  category: string;
-  categoryName: string;
-  icon: string;
-  title: string;
-  projectName?: string;
-  summary: string;
-  lifecycleSentence: string;
-  attribution: string;
-  timestamp: string;
-  targetPath: string;
-}
-
-const fixtureAttentionItems: AttentionItem[] = [
-  {
-    id: 'att-1',
-    severity: 'action_required',
-    category: 'task_recovery',
-    categoryName: 'Lease Recovery',
-    icon: 'alert',
-    title: 'Windows Workstation 01 Offline · Lease Recovery Required',
-    projectName: 'Sprout M2 Operator',
-    summary: 'Carrier channel disconnected mid-turn during active Task #104 execution. Task lease locked in recovery.',
-    lifecycleSentence: 'Task #104 · Run #206 interrupted · Lease locked in recovery',
-    attribution: 'Host Worker daemon',
-    timestamp: '14m ago',
-    targetPath: '/manage/environments/env-recovery',
-  },
-  {
-    id: 'att-2',
-    severity: 'action_required',
-    category: 'env_unhealthy',
-    categoryName: 'Worker Health',
-    icon: 'warning',
-    title: 'Protocol Version Incompatible: Legacy Mac mini',
-    projectName: 'Sprout M2 Operator',
-    summary: 'Worker reports protocol v1.8 which is below the minimum required v2.0+. Automatic work admission refused.',
-    lifecycleSentence: 'Enrollment approved · Protocol mismatch v1.8 < v2.0+ · Admission barred',
-    attribution: 'System Overseer',
-    timestamp: '1m ago',
-    targetPath: '/manage/environments/env-incompatible',
-  },
-  {
-    id: 'att-4',
-    severity: 'attention',
-    category: 'env_unhealthy',
-    categoryName: 'Worker Health',
-    icon: 'server',
-    title: 'Linux Container Node Engine Degraded: Codex Login Required',
-    projectName: 'Sprout M2 Operator',
-    summary: 'Codex engine CLI token has expired on container host. Pi and OpenCode engines remain operational.',
-    lifecycleSentence: 'Carrier online · 3 of 4 engines ready · Codex authentication degraded',
-    attribution: 'Health Monitor',
-    timestamp: '45s ago',
-    targetPath: '/manage/environments/env-degraded',
-  },
-  {
-    id: 'att-5',
-    severity: 'info',
-    category: 'task_active',
-    categoryName: 'Active Lease',
-    icon: 'shield',
-    title: 'Active Task-Held Lease on Mac Studio M2 Max',
-    projectName: 'Sprout M2 Operator',
-    summary: 'Task #101 holds exclusive lease across multi-run execution. Running lead @Programmer.',
-    lifecycleSentence: 'Task #101 active · Run running · Lease held continuously',
-    attribution: '@Programmer',
-    timestamp: '10s ago',
-    targetPath: '/manage/environments/env-ready',
-  },
-];
-
-const pendingEnrollmentItems = ref<AttentionItem[]>([]);
-const attentionItems = computed(() => [...fixtureAttentionItems, ...pendingEnrollmentItems.value]);
-
-function pendingEnrollmentCard(environment: EnvironmentInstance): AttentionItem {
+const attentionCounts = computed(() => {
+  const items = snapshot.value?.attention ?? [];
   return {
-    id: `pending-enrollment-${environment.id}`,
-    severity: 'attention',
-    category: 'env_enrollment',
-    categoryName: 'Worker Enrollment',
-    icon: 'check',
-    title: `Pending Host Enrollment: ${environment.displayName}`,
-    summary: environment.trafficLightReason,
-    lifecycleSentence: `Connection ${environment.connectionState} · Platform ${environment.platform} · Awaiting operator approval`,
-    attribution: 'Environment Service',
-    timestamp: 'just now',
-    targetPath: router.resolve({ name: 'environment-detail', params: { id: environment.id } }).href,
+    all: items.length,
+    action_required: items.filter((item) => item.severity === 'action_required').length,
+    attention: items.filter((item) => item.severity === 'attention').length,
+    info: items.filter((item) => item.severity === 'info').length,
   };
+});
+const inFlightItems = computed(() => snapshot.value?.inFlight ?? []);
+const activityItems = computed(() => {
+  const items = snapshot.value?.activity ?? [];
+  return activeActivity.value === 'all'
+    ? items
+    : items.filter((item) => activityGroup(item) === activeActivity.value);
+});
+const activityCounts = computed(() => {
+  const items = snapshot.value?.activity ?? [];
+  return {
+    all: items.length,
+    tasks: items.filter((item) => activityGroup(item) === 'tasks').length,
+    messages: items.filter((item) => activityGroup(item) === 'messages').length,
+    envs: items.filter((item) => activityGroup(item) === 'envs').length,
+    usage: items.filter((item) => activityGroup(item) === 'usage').length,
+    other: items.filter((item) => activityGroup(item) === 'other').length,
+  };
+});
+const totalVisibleItems = computed(
+  () => visibleAttention.value.length + inFlightItems.value.length + activityItems.value.length,
+);
+const pageState = computed(() => {
+  if (!api.value) return 'unavailable';
+  if (loading.value && snapshot.value === undefined) return 'loading';
+  if (snapshot.value === undefined && pageError.value === 'offline') return 'offline';
+  if (snapshot.value === undefined && pageError.value !== undefined) return 'failure';
+  if (snapshot.value !== undefined && totalVisibleItems.value === 0) return 'empty';
+  return 'ready';
+});
+
+function categoryLabel(category: FeedAttentionItem['category']): string {
+  const labels: Record<FeedAttentionItem['category'], string> = {
+    'proposal-pending': 'Task proposal',
+    'task-validation': 'Task validation',
+    'task-blocker': 'Task blocker',
+    'task-recovery': 'Task recovery',
+    'lease-recovery': 'Lease recovery',
+    'enrollment-pending': 'Enrollment',
+    'routing-failure': 'Routing failure',
+    'human-action-required': 'Project event',
+  };
+  return labels[category];
 }
 
-async function loadPendingEnrollments() {
-  // Feed attention is informational only. If its authority is unavailable,
-  // omit pending cards rather than suggesting an unverified decision.
-  pendingEnrollmentItems.value = [];
-  if (!environmentService) return;
+function severityLabel(severity: FeedSeverity): string {
+  if (severity === 'action_required') return 'Action required';
+  return severity === 'attention' ? 'Attention' : 'Info';
+}
+
+function severityVariant(severity: FeedSeverity): 'red' | 'yellow' | 'info' {
+  if (severity === 'action_required') return 'red';
+  return severity === 'attention' ? 'yellow' : 'info';
+}
+
+function severityBorder(severity: FeedSeverity): string {
+  if (severity === 'action_required') return 'border-l-[var(--red-action)]';
+  return severity === 'attention'
+    ? 'border-l-[var(--yellow-attention)]'
+    : 'border-l-[var(--purple-agent)]';
+}
+
+function activityGroup(item: FeedActivityItem): ActivityFilter {
+  const kind = item.kind.toLowerCase();
+  if (kind.includes('task') || (kind === 'agent-run' && item.target?.surface === 'project-task-detail')) return 'tasks';
+  if (/message|routing|wake|chat/.test(kind) || (kind === 'agent-run' && item.target?.surface === 'project-chat')) return 'messages';
+  if (/environment|enrollment|lease|worker|recovery|readiness/.test(kind)) return 'envs';
+  if (/usage|cost|token/.test(kind)) return 'usage';
+  return 'other';
+}
+
+function activityGroupLabel(group: ActivityFilter): string {
+  switch (group) {
+    case 'tasks': return 'Tasks';
+    case 'messages': return 'Chat & routing';
+    case 'envs': return 'Environments';
+    case 'usage': return 'Usage';
+    case 'other': return 'Other';
+    default: return 'All activity';
+  }
+}
+
+function projectName(projectId: string | undefined): string | undefined {
+  if (!projectId) return undefined;
+  return scopeOptions.value.find((scope) => scope.id === projectId)?.label ?? 'Project';
+}
+
+function targetLocation(target: FeedTarget | undefined): RouteLocationRaw | undefined {
+  if (!target || !isFeedDeepLink(target)) return undefined;
+  const projectSurfaces: readonly FeedTarget['surface'][] = [
+    'project-overview',
+    'project-tasks',
+    'project-task-detail',
+    'project-chat',
+    'project-chat-routing',
+  ];
+  if (projectSurfaces.includes(target.surface) && !target.projectId) return undefined;
+  // Check the projection's canonical path against the actual router before
+  // translating its identity into a named route with the Project context.
+  if (router.resolve(target.path).matched.length === 0) return undefined;
+
+  const project = target.projectId ? { project: target.projectId } : {};
+  let location: RouteLocationRaw;
+  switch (target.surface) {
+    case 'project-overview':
+      location = { name: 'project-overview', query: project };
+      break;
+    case 'project-tasks':
+      location = target.proposalId
+        ? { name: 'project-task-proposal', params: { proposalId: target.proposalId }, query: project }
+        : { name: 'project-tasks', query: project };
+      break;
+    case 'project-task-detail':
+      if (!target.taskId) return undefined;
+      location = { name: 'project-task-detail', params: { taskId: target.taskId }, query: project };
+      break;
+    case 'project-chat':
+      location = { name: 'project-chat', query: project };
+      break;
+    case 'project-chat-routing':
+      if (!target.batchId) return undefined;
+      location = { name: 'project-chat-routing', params: { batchId: target.batchId }, query: project };
+      break;
+    case 'environments':
+      location = { name: 'environments' };
+      break;
+    case 'environment-detail':
+      if (!target.environmentId) return undefined;
+      location = { name: 'environment-detail', params: { id: target.environmentId } };
+      break;
+    case 'agent-detail':
+      if (!target.agentId) return undefined;
+      location = { name: 'agent-detail', params: { agentId: target.agentId } };
+      break;
+  }
+  return router.resolve(location).matched.length > 0 ? location : undefined;
+}
+
+function shortTime(at: number): string {
+  if (!Number.isFinite(at)) return 'Time unavailable';
+  const elapsed = Math.max(0, Date.now() - at);
+  if (elapsed < 60_000) return 'just now';
+  if (elapsed < 60 * 60_000) return `${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 24 * 60 * 60_000) return `${Math.floor(elapsed / (60 * 60_000))}h ago`;
+  return `${Math.floor(elapsed / (24 * 60 * 60_000))}d ago`;
+}
+
+function elapsedDuration(at: number): string {
+  if (!Number.isFinite(at)) return 'unavailable';
+  const elapsed = Math.max(0, feedClock() - at);
+  const seconds = Math.floor(elapsed / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainderSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m${remainderSeconds === 0 ? '' : ` ${remainderSeconds}s`}`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  if (hours < 24) return `${hours}h${remainderMinutes === 0 ? '' : ` ${remainderMinutes}m`}`;
+  const days = Math.floor(hours / 24);
+  const remainderHours = hours % 24;
+  return `${days}d${remainderHours === 0 ? '' : ` ${remainderHours}h`}`;
+}
+
+function isoTime(at: number): string | undefined {
+  const date = new Date(at);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function sourceLabel(item: FeedInFlightItem): string {
+  if (item.kind === 'task') return item.taskId ? `Task ${item.taskId}` : 'Task work';
+  return item.runId ? `Agent run ${item.runId}` : 'Agent run';
+}
+
+function safeErrorKind(error: unknown): 'offline' | 'authentication' | 'forbidden' | 'failure' {
+  if (typeof error !== 'object' || error === null) return 'failure';
+  const failure = error as { readonly kind?: unknown; readonly status?: unknown };
+  if (failure.kind === 'unavailable') return 'offline';
+  if (failure.kind === 'authentication-required' || failure.status === 401) return 'authentication';
+  if (failure.kind === 'forbidden' || failure.status === 403) return 'forbidden';
+  return 'failure';
+}
+
+function errorHeading(kind: 'offline' | 'authentication' | 'forbidden' | 'failure'): string {
+  switch (kind) {
+    case 'offline': return 'Feed is offline';
+    case 'authentication': return 'Operator sign-in required';
+    case 'forbidden': return 'Feed is unavailable to this operator';
+    default: return 'Feed could not be loaded';
+  }
+}
+
+function errorDescription(kind: 'offline' | 'authentication' | 'forbidden' | 'failure'): string {
+  switch (kind) {
+    case 'offline': return 'Sprout could not be reached. Check the connection and retry to load current Feed facts.';
+    case 'authentication': return 'Sign in to load current Attention, in-flight work, and activity.';
+    case 'forbidden': return 'The current operator session cannot read Feed facts.';
+    default: return 'The Feed request failed. Retry to load the latest authoritative snapshot.';
+  }
+}
+
+function announceSnapshot(value: FeedSnapshot): void {
+  announcer.announce(
+    `Feed updated for ${scopeLabel.value}: ${value.attention.length} Attention items, ${value.inFlight.length} in-flight items, and ${value.activity.length} activity items.`,
+  );
+}
+
+async function loadInitial(): Promise<void> {
+  const currentApi = api.value;
+  if (!currentApi) {
+    loading.value = false;
+    announcer.announce('Feed is unavailable because its production read service is not configured.');
+    return;
+  }
+
+  const generation = ++loadGeneration;
+  loading.value = true;
+  pageError.value = undefined;
+  announcer.announce('Loading Feed facts.');
   try {
-    const environments = await environmentService.listEnvironments();
-    pendingEnrollmentItems.value = environments
-      .filter((environment) => environment.enrollmentStatus === 'pending')
-      .map(pendingEnrollmentCard);
-  } catch {
-    pendingEnrollmentItems.value = [];
+    // Load the canonical scope catalog first so an old URL can never widen or
+    // alias a real Project when its identity is no longer present.
+    const allScopes = await currentApi.load({ scope: FEED_ALL_SCOPE });
+    if (generation !== loadGeneration) return;
+    scopeOptions.value = allScopes.scopes;
+    const requested = queryString(route.query['scope']) ?? FEED_ALL_SCOPE;
+    const selected = allScopes.scopes.some((option) => option.id === requested)
+      ? requested
+      : FEED_ALL_SCOPE;
+    activeScope.value = selected;
+    activeUrgency.value = queryUrgency(route.query['urgency']);
+    activeActivity.value = queryActivity(route.query['activity']);
+    const result = selected === FEED_ALL_SCOPE
+      ? allScopes
+      : await currentApi.load({ scope: selected });
+    if (generation !== loadGeneration) return;
+    snapshot.value = result;
+    scopeOptions.value = result.scopes;
+    pageError.value = undefined;
+    loaded.value = true;
+    announceSnapshot(result);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    pageError.value = safeErrorKind(error);
+    loaded.value = true;
+    announcer.announce(`${errorHeading(pageError.value)}. ${errorDescription(pageError.value)}`);
+  } finally {
+    if (generation === loadGeneration) loading.value = false;
   }
 }
 
-onMounted(loadPendingEnrollments);
-
-const selectedTask = ref<any>(null);
-const isTaskDetailOpen = ref(false);
-
-function openTaskDetail(task: any) {
-  selectedTask.value = task;
-  isTaskDetailOpen.value = true;
-}
-
-function navigateToTaskEnv() {
-  if (selectedTask.value?.targetPath) {
-    const target = selectedTask.value.targetPath;
-    const label = `Task #${selectedTask.value.id}`;
-    isTaskDetailOpen.value = false;
-    handleNavigate(target, label);
-  }
-}
-
-const activeTasks = ref([
-  {
-    id: '101',
-    projectName: 'Sprout M2 Operator',
-    title: 'Continuous Integration & Host Verification Pipeline',
-    lead: 'Programmer',
-    environment: 'Mac Studio M2 Max',
-    engine: 'Pi (gemini-2.5-pro)',
-    goal: 'Establish persistent host worker pipelines and verify carrier streaming.',
-    targetPath: '/manage/environments/env-ready',
-  },
-  {
-    id: '104',
-    projectName: 'Sprout M2 Operator',
-    title: 'Distributed Agent Orchestration & Safety Validation',
-    lead: 'Architect',
-    environment: 'Windows Workstation 01',
-    engine: 'Codex (gpt-5-codex)',
-    goal: 'Validate carrier disconnect recovery and operator force release procedures.',
-    targetPath: '/manage/environments/env-recovery',
-  },
-  {
-    id: '107',
-    projectName: 'o7 Minesweeper',
-    title: 'Accessibility Verification & Operator Surface Diagnostics',
-    lead: 'Foreman',
-    environment: 'Local Worker',
-    engine: 'Pi (claude-3-7-sonnet)',
-    goal: 'Verify operator control accessibility, focus trapping, and screen-reader semantics.',
-    targetPath: '/manage/environments',
-  },
-]);
-
-const activities = ref([
-  {
-    id: 'act-1',
-    kind: 'envs',
-    badgeKind: 'green' as const,
-    title: 'Readiness probe passed on Mac Studio M2 Max',
-    projectName: 'Sprout M2 Operator',
-    subtitle: 'Carrier probe confirmed protocol v2.1 & all 4 engines ready (14ms latency).',
-    relativeTime: 'just now',
-    timestamp: '10:14:00',
-    targetPath: '/manage/environments/env-ready',
-  },
-  {
-    id: 'act-2',
-    kind: 'messages',
-    badgeKind: 'blue' as const,
-    title: '@Programmer sent message to #general',
-    projectName: 'Sprout M2 Operator',
-    subtitle: 'Verified Reka UI AlertDialog focus trap and escape dismissal.',
-    relativeTime: '2m ago',
-    timestamp: '10:12:00',
-    targetPath: '/project/chat',
-  },
-  {
-    id: 'act-3',
-    kind: 'envs',
-    badgeKind: 'red' as const,
-    title: 'Windows Workstation 01 carrier disconnected',
-    projectName: 'Sprout M2 Operator',
-    subtitle: 'Carrier heartbeat lost; task-held lease #104 automatically locked in recovery.',
-    relativeTime: '14m ago',
-    timestamp: '10:00:00',
-    targetPath: '/manage/environments/env-recovery',
-  },
-  {
-    id: 'act-4',
-    kind: 'tasks',
-    badgeKind: 'purple' as const,
-    title: 'Task #101 acquired exclusive lease',
-    projectName: 'Sprout M2 Operator',
-    subtitle: 'Acquired exclusive lease on Mac Studio M2 Max with guaranteed exclusivity.',
-    relativeTime: '18m ago',
-    timestamp: '09:56:00',
-    targetPath: '/manage/environments/env-ready',
-  },
-  {
-    id: 'act-5',
-    kind: 'usage',
-    badgeKind: 'yellow' as const,
-    title: 'Usage telemetry milestone: 1.14M tokens recorded',
-    projectName: 'Sprout M2 Operator',
-    subtitle: 'Work-model runs (1.10M tokens) and Project routing attempts (42.6K tokens) tracked separately.',
-    relativeTime: '25m ago',
-    timestamp: '09:49:00',
-    targetPath: '/manage/usage',
-  },
-]);
-
-const filteredAttentionItems = computed(() => {
-  let list = attentionItems.value;
-  if (activeScope.value !== 'all') {
-    if (activeScope.value === 'sprout-m2') {
-      list = list.filter((i) => i.projectName === 'Sprout M2 Operator');
-    } else if (activeScope.value === 'infra') {
-      list = list.filter((i) => i.category.startsWith('env_'));
+async function loadScope(scope: string, clearCurrent: boolean): Promise<void> {
+  const currentApi = api.value;
+  if (!currentApi) return;
+  const generation = ++loadGeneration;
+  loading.value = true;
+  pageError.value = undefined;
+  if (clearCurrent) snapshot.value = undefined;
+  announcer.announce(`Loading Feed for ${scopeLabel.value}.`);
+  try {
+    const result = await currentApi.load({ scope });
+    if (generation !== loadGeneration) return;
+    scopeOptions.value = result.scopes;
+    if (!result.scopes.some((option) => option.id === scope)) {
+      activeScope.value = FEED_ALL_SCOPE;
+      const all = scope === FEED_ALL_SCOPE ? result : await currentApi.load({ scope: FEED_ALL_SCOPE });
+      if (generation !== loadGeneration) return;
+      snapshot.value = all;
+      pageError.value = undefined;
+      announceSnapshot(all);
+      return;
     }
+    snapshot.value = result;
+    pageError.value = undefined;
+    announceSnapshot(result);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    pageError.value = safeErrorKind(error);
+    announcer.announce(`${errorHeading(pageError.value)}. ${errorDescription(pageError.value)}`);
+  } finally {
+    if (generation === loadGeneration) loading.value = false;
   }
-  if (activeUrgency.value === 'action_required') {
-    return list.filter((i) => i.severity === 'action_required');
-  }
-  if (activeUrgency.value === 'attention') {
-    return list.filter((i) => i.severity === 'attention');
-  }
-  if (activeUrgency.value === 'info') {
-    return list.filter((i) => i.severity === 'info');
-  }
-  return list;
-});
+}
 
-const actionRequiredCount = computed(
-  () => attentionItems.value.filter((i) => i.severity === 'action_required').length
-);
-const attentionCount = computed(
-  () => attentionItems.value.filter((i) => i.severity === 'attention').length
-);
-const infoCount = computed(
-  () => attentionItems.value.filter((i) => i.severity === 'info').length
-);
+function retry(): void {
+  if (snapshot.value === undefined) void loadInitial();
+  else void loadScope(activeScope.value, false);
+}
 
-const filteredActivities = computed(() => {
-  if (activeActivityFilter.value === 'all') return activities.value;
-  return activities.value.filter((a) => a.kind === activeActivityFilter.value);
-});
+function updateFeedUrl(): void {
+  const resolved = router.resolve({ name: 'feed', query: feedQuery.value });
+  if (resolved.fullPath !== route.fullPath) {
+    void router.replace({ name: 'feed', query: feedQuery.value });
+  }
+}
 
-function handleNavigate(path: string, label: string) {
-  // Return to the exact Feed context the operator left, filters included,
-  // rather than a bare `/feed` that would silently reset their scope.
+async function navigateTo(target: FeedTarget | undefined, label: string): Promise<void> {
+  const destination = targetLocation(target);
+  if (!destination) {
+    announcer.announce('This Feed item has no validated destination.');
+    return;
+  }
   appStore.setReturnContext({
     title: 'Back to Feed',
     to: router.resolve({ name: 'feed', query: feedQuery.value }).fullPath,
   });
-  announcer.announce(`Opening ${label}. Back to Feed is available.`);
-  const base = router.options.history.base;
-  const basePrefix = base.endsWith('/') ? base : `${base}/`;
-  const routePath = base !== '/' && path.startsWith(basePrefix)
-    ? `/${path.slice(basePrefix.length)}`
-    : path;
-  router.push(routePath);
+  announcer.announce(`Opening ${label}.`);
+  await router.push(destination);
+  await nextTick();
+  announcer.announce(`Opened ${label}. Back to Feed is available.`);
 }
+
+watch(activeScope, (scope, previous) => {
+  if (!loaded.value || scope === previous) return;
+  void loadScope(scope, true);
+});
+
+watch([activeScope, activeUrgency, activeActivity], () => {
+  if (loaded.value) updateFeedUrl();
+});
+
+watch(
+  () => [route.query['scope'], route.query['urgency'], route.query['activity']] as const,
+  ([scope, urgency, activity]) => {
+    if (!loaded.value) return;
+    const requestedScope = queryString(scope) ?? FEED_ALL_SCOPE;
+    activeScope.value = scopeOptions.value.some((option) => option.id === requestedScope)
+      ? requestedScope
+      : FEED_ALL_SCOPE;
+    activeUrgency.value = queryUrgency(urgency);
+    activeActivity.value = queryActivity(activity);
+  },
+);
+
+watch([activeUrgency, activeActivity], () => {
+  if (snapshot.value) {
+    announcer.announce(
+      `Feed filters updated. ${visibleAttention.value.length} Attention items and ${activityItems.value.length} activity items shown.`,
+    );
+  }
+});
+
+onMounted(() => {
+  void nextTick(() => heading.value?.focus());
+  void loadInitial();
+});
 </script>
 
 <template>
-  <div class="p-4 sm:p-6 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
-    <!-- 1. Top Header -->
-    <div class="flex flex-col gap-2 border-b border-[var(--border-subtle)] pb-4">
-      <div class="flex items-center justify-between gap-3 flex-wrap">
-        <h2 class="text-base sm:text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
-          <Icon name="feed" :size="20" />
-          <span>Operations Feed & Human Attention</span>
-        </h2>
-        <Badge variant="info">Cross-Project Landing Surface</Badge>
-      </div>
-      <p class="text-xs text-[var(--text-secondary)]">
-        Central surface for cross-project discovery, urgent Human interventions, active work telemetry, and background collaboration history.
-      </p>
-
-      <!-- Top Scope Selector Dropdown -->
-      <div class="mt-1">
-        <div class="inline-flex items-center gap-2 p-1.5 rounded-[var(--radius-sm)] bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
-          <span class="text-[var(--text-secondary)] pl-1">
-            <Icon name="project" :size="15" />
-          </span>
-          <label for="feed-scope-select" class="text-xs text-[var(--text-muted)] font-semibold">Scope:</label>
+  <div class="feed-view min-h-full bg-[var(--bg-app)]" :data-state="pageState" :aria-busy="loading">
+    <div class="mx-auto flex w-full max-w-[1920px] flex-col gap-4 p-4 pb-28 sm:p-6 md:pb-8">
+      <header class="flex flex-col gap-3 border-b border-[var(--border-subtle)] pb-4 sm:flex-row sm:items-center sm:justify-between">
+        <div class="min-w-0">
+          <h1 ref="heading" tabindex="-1" class="flex items-center gap-2 text-lg font-bold text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)] sm:text-xl">
+            <Icon name="feed" :size="20" /> Operations Feed & Human Attention
+          </h1>
+          <p class="mt-1 text-xs text-[var(--text-secondary)]">A read-only view of work that needs attention, work in progress, and recent operational activity.</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <label for="feed-scope-select" class="sr-only">Project scope</label>
           <select
             id="feed-scope-select"
             v-model="activeScope"
-            class="bg-transparent text-xs text-[var(--text-primary)] font-medium border-0 cursor-pointer pr-4 focus:ring-0 focus:outline-none"
-            aria-label="Select Project Scope"
+            class="min-h-[44px] min-w-[12rem] max-w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm text-[var(--text-primary)]"
+            :disabled="scopeOptions.length === 0 || pageState === 'unavailable'"
           >
-            <option value="all" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">All Projects (Sprout Workspace)</option>
-            <option value="sprout-m2" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">Sprout M2 Operator</option>
-            <option value="infra" class="bg-[var(--bg-surface)] text-[var(--text-primary)]">Infrastructure & Hosts</option>
+            <option v-for="scope in scopeOptions" :key="scope.id" :value="scope.id">
+              {{ scope.label }} · {{ scope.attentionCount }} Attention
+            </option>
           </select>
+          <span class="inline-flex min-h-[44px] items-center gap-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-secondary)]" :data-connection="connection.status">
+            <StatusDot :status="connection.status" size="sm" />
+            <span>{{ connection.label }}</span>
+          </span>
+          <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="loading || pageState === 'unavailable'" @click="retry">
+            <Icon name="refresh" :size="14" /><span>Refresh</span>
+          </Button>
         </div>
+      </header>
+
+      <div v-if="connection.label !== 'Operator Online'" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-secondary)]" :data-connection-notice="connection.status">
+        <strong class="text-[var(--text-primary)]">{{ connection.label }}.</strong> {{ connection.announce }}
       </div>
-    </div>
 
-    <!-- 2. Split Board Layout (Adapted for Ultra-wide: 2-column split board on lg+) -->
-    <div class="flex flex-col lg:flex-row gap-6 w-full">
-      <!-- Left Column: Attention Queue & Live In-Flight Work -->
-      <div class="flex-1 min-w-0 flex flex-col gap-6">
-        <!-- Section 1: Prominent Human Attention Section -->
-        <section class="flex flex-col gap-3">
-          <div class="flex items-center justify-between gap-2 flex-wrap">
-            <div class="flex items-center gap-2">
-              <Icon name="alert" :size="18" class="text-[var(--yellow-attention)]" />
-              <h3 class="text-sm font-bold text-[var(--text-primary)]">Human Attention Required</h3>
-              <Badge variant="red">{{ actionRequiredCount }} Action</Badge>
-            </div>
-            <span class="text-[11px] text-[var(--text-muted)]">Discovery only; mutations happen on authoritative pages</span>
-          </div>
+      <section v-if="pageState === 'unavailable'" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-4" aria-labelledby="feed-unavailable-heading">
+        <h2 id="feed-unavailable-heading" class="font-bold">Feed is unavailable</h2>
+        <p class="mt-1 text-sm text-[var(--text-secondary)]">The production Feed read service is not configured for this page.</p>
+      </section>
+      <section v-else-if="pageState === 'loading'" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6" aria-labelledby="feed-loading-heading">
+        <h2 id="feed-loading-heading" class="font-bold">Loading Feed</h2>
+        <p class="mt-1 text-sm text-[var(--text-secondary)]">Reading current Attention, in-flight work, Project scopes, and activity.</p>
+      </section>
+      <section v-else-if="pageState === 'offline' || pageState === 'failure'" class="rounded border border-[var(--red-action-border)] bg-[var(--bg-surface)] p-4" :data-error-kind="pageError" aria-labelledby="feed-error-heading">
+        <h2 id="feed-error-heading" class="font-bold">{{ errorHeading(pageError ?? 'failure') }}</h2>
+        <p class="mt-1 text-sm text-[var(--text-secondary)]">{{ errorDescription(pageError ?? 'failure') }}</p>
+        <Button variant="secondary" size="sm" class="mt-3 min-h-[44px]" @click="retry">Retry Feed</Button>
+      </section>
+      <div v-else-if="pageError" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-sm text-[var(--text-secondary)]" data-refresh-warning>
+        The latest refresh failed. Showing the last Feed snapshot from {{ scopeLabel }}.
+        <Button variant="secondary" size="sm" class="ml-2 min-h-[44px]" @click="retry">Retry</Button>
+      </div>
 
-          <!-- 4 Streamlined Urgency Pills using FilterPillGroup -->
-          <FilterPillGroup label="Filter attention items by urgency">
-            <FilterPill
-              filter-key="all"
-              label="All"
-              :count="attentionItems.length"
-              status="purple"
-              :active="activeUrgency === 'all'"
-              @click="activeUrgency = 'all'"
-            />
-            <FilterPill
-              filter-key="action_required"
-              label="Action Required"
-              :count="actionRequiredCount"
-              status="red"
-              :active="activeUrgency === 'action_required'"
-              @click="activeUrgency = 'action_required'"
-            />
-            <FilterPill
-              filter-key="attention"
-              label="Attention"
-              :count="attentionCount"
-              status="yellow"
-              :active="activeUrgency === 'attention'"
-              @click="activeUrgency = 'attention'"
-            />
-            <FilterPill
-              filter-key="info"
-              label="Info"
-              :count="infoCount"
-              status="neutral"
-              :active="activeUrgency === 'info'"
-              @click="activeUrgency = 'info'"
-            />
-          </FilterPillGroup>
+      <template v-if="snapshot">
+        <div v-if="pageState === 'empty'" class="rounded border border-[var(--green-ready-border)] bg-[var(--green-ready-bg)] p-4 text-sm text-[var(--text-primary)]" data-empty-state>
+          No Attention, in-flight work, or activity is currently recorded for {{ scopeLabel }}.
+        </div>
 
-          <!-- Attention Cards List -->
-          <div class="grid grid-cols-1 xl:grid-cols-2 gap-3 mt-1">
-            <button
-              v-for="item in filteredAttentionItems"
-              :key="item.id"
-              type="button"
-              class="feed-attention-card text-left p-4 rounded-[var(--radius-md)] border bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs hover:border-[var(--border-strong)] transition-all cursor-pointer select-none"
-              :class="item.severity === 'action_required' ? 'border-l-4 border-l-[var(--red-action)] border-[var(--border-subtle)]' : item.severity === 'attention' ? 'border-l-4 border-l-[var(--yellow-attention)] border-[var(--border-subtle)]' : 'border-l-4 border-l-[var(--purple-agent)] border-[var(--border-subtle)]'"
-              @click="handleNavigate(item.targetPath, item.title)"
-            >
-              <div class="w-full">
-                <div class="flex items-center justify-between gap-2 mb-2">
-                  <div class="flex items-center gap-1.5 flex-wrap">
-                    <span class="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--bg-surface-elevated)] text-[var(--text-secondary)]">
-                      <Icon :name="item.icon" :size="12" />
-                      <span>{{ item.categoryName }}</span>
-                    </span>
-                    <Badge v-if="item.projectName" variant="info">{{ item.projectName }}</Badge>
-                  </div>
-                  <StatusDot :status="item.severity === 'action_required' ? 'red' : item.severity === 'attention' ? 'yellow' : 'blue'" size="sm" />
+        <div class="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.85fr)]">
+          <div class="flex min-w-0 flex-col gap-4">
+            <section class="flex min-w-0 flex-col gap-3" aria-labelledby="feed-attention-heading">
+              <div class="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-3">
+                <div class="flex items-center gap-2">
+                  <Icon name="alert" :size="18" class="text-[var(--yellow-attention)]" />
+                  <h2 id="feed-attention-heading" class="text-sm font-bold">Human Attention</h2>
+                  <Badge variant="red">{{ attentionCounts.action_required }} Action</Badge>
+                  <Badge variant="yellow">{{ attentionCounts.attention }} Attention</Badge>
+                  <Badge variant="info">{{ attentionCounts.info }} Info</Badge>
                 </div>
-
-                <strong class="text-xs sm:text-sm font-bold text-[var(--text-primary)] leading-tight block mb-1">
-                  {{ item.title }}
-                </strong>
-                <div class="text-[11px] font-mono text-[var(--text-muted)] mb-2">
-                  {{ item.lifecycleSentence }}
-                </div>
-                <p class="text-xs text-[var(--text-secondary)] leading-relaxed">
-                  {{ item.summary }}
-                </p>
+                <span class="text-[11px] text-[var(--text-muted)]">Actions stay on their authoritative pages</span>
               </div>
 
-              <div class="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 w-full text-[11px] text-[var(--text-muted)]">
-                <div class="flex items-center gap-1.5 font-mono text-[10px]">
-                  <span>{{ item.attribution }}</span>
-                  <span>•</span>
-                  <span>{{ item.timestamp }}</span>
-                </div>
+              <div class="flex flex-wrap gap-2" role="group" aria-label="Filter Attention by urgency">
+                <button v-for="urgency in urgencyChoices" :key="urgency" type="button" class="min-h-[44px] rounded border px-3 text-xs focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="activeUrgency === urgency ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)] font-bold text-[var(--text-primary)]' : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)]'" :aria-pressed="activeUrgency === urgency" @click="activeUrgency = urgency">
+                  {{ urgency === 'all' ? 'All' : severityLabel(urgency) }} ({{ attentionCounts[urgency] }})
+                </button>
               </div>
-            </button>
-          </div>
-        </section>
 
-        <!-- Section 2: Live In-Flight Work -->
-        <section class="flex flex-col gap-3">
-          <div class="flex items-center justify-between gap-2 flex-wrap">
-            <div class="flex items-center gap-2">
-              <Icon name="tasks" :size="18" />
-              <h3 class="text-sm font-bold text-[var(--text-primary)]">Live In-Flight Work</h3>
-              <Badge variant="info">{{ activeTasks.length }} Active</Badge>
-            </div>
-            <span class="text-[11px] text-[var(--text-muted)]">Active task leases held continuously</span>
-          </div>
-
-          <div class="grid grid-cols-1 xl:grid-cols-3 gap-3">
-            <button
-              v-for="task in activeTasks"
-              :key="task.id"
-              type="button"
-              class="feed-task-card text-left p-4 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col justify-between gap-3 shadow-xs cursor-pointer select-none hover:border-[var(--border-strong)] transition-all"
-              @click="openTaskDetail(task)"
-            >
-              <div>
-                <div class="flex items-start justify-between gap-2 mb-2">
-                  <div>
-                    <div class="flex items-center gap-1.5 flex-wrap mb-1">
-                      <Badge variant="info">{{ task.projectName }}</Badge>
-                      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--purple-agent-bg)] text-[var(--purple-agent)] border border-[var(--purple-agent-border)]">
-                        Task active · Lease held
-                      </span>
+              <div v-if="visibleAttention.length" class="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
+                <button v-for="item in visibleAttention" :key="item.id" type="button" class="min-h-[132px] rounded border border-l-4 border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 text-left shadow-xs transition-colors hover:border-[var(--border-strong)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="severityBorder(item.severity)" :data-attention-id="item.id" @click="navigateTo(item.target, item.reason)">
+                  <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Badge :variant="severityVariant(item.severity)">{{ severityLabel(item.severity) }}</Badge>
+                      <Badge variant="secondary">{{ categoryLabel(item.category) }}</Badge>
+                      <Badge v-if="projectName(item.target.projectId)" variant="info">{{ projectName(item.target.projectId) }}</Badge>
                     </div>
-                    <h4 class="text-xs sm:text-sm font-bold text-[var(--text-primary)]">
-                      #{{ task.id }}: {{ task.title }}
-                    </h4>
+                    <time v-if="isoTime(item.at)" class="text-[10px] text-[var(--text-muted)]" :datetime="isoTime(item.at)">{{ shortTime(item.at) }}</time>
                   </div>
-                  <StatusDot status="blue" size="sm" class="shrink-0 mt-1" />
-                </div>
-
-                <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] text-xs flex flex-col gap-1 text-[var(--text-secondary)]">
-                  <div class="flex justify-between flex-wrap gap-1 text-[11px]">
-                    <span><strong>Lead:</strong> @{{ task.lead }} · <strong>Env:</strong> {{ task.environment }}</span>
-                    <span class="font-mono text-[10px]">{{ task.engine }}</span>
-                  </div>
-                  <div class="text-[10px] text-[var(--text-muted)] mt-0.5 line-clamp-2">
-                    Goal: {{ task.goal }}
-                  </div>
-                </div>
+                  <strong class="block text-sm leading-snug text-[var(--text-primary)]">{{ item.reason }}</strong>
+                  <p class="mt-2 text-xs text-[var(--text-secondary)]">{{ item.lifecycle }}</p>
+                </button>
               </div>
-            </button>
-          </div>
-        </section>
-      </div>
+              <EmptyState v-else icon="check" :title="activeUrgency === 'all' ? 'All clear in this scope' : 'No matching Attention items'" :description="activeUrgency === 'all' ? 'No unresolved source currently requires Human attention.' : 'Choose another urgency filter to see the remaining Attention items.'" />
+            </section>
 
-      <!-- Right Column: Recent Operational Activity Stream (Split Board on Large/Ultra-wide) -->
-      <div class="w-full lg:w-[380px] xl:w-[440px] shrink-0 flex flex-col gap-4">
-        <!-- Section 3: Recent Operational Activity Stream -->
-        <section class="flex flex-col gap-3 sticky top-4">
-          <div class="flex items-center justify-between gap-2 flex-wrap">
-            <div class="flex items-center gap-2">
-              <Icon name="lightning" :size="18" />
-              <h3 class="text-sm font-bold text-[var(--text-primary)]">Recent Operational Activity</h3>
-              <Badge variant="info">{{ activities.length }} Total</Badge>
+            <section class="flex min-w-0 flex-col gap-3" aria-labelledby="feed-inflight-heading">
+              <div class="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-3">
+                <div class="flex items-center gap-2">
+                  <Icon name="tasks" :size="18" />
+                  <h2 id="feed-inflight-heading" class="text-sm font-bold">In-flight Work</h2>
+                  <Badge variant="info">{{ inFlightItems.length }} Active</Badge>
+                </div>
+                <span class="text-[11px] text-[var(--text-muted)]">Identity, configuration, and lifecycle</span>
+              </div>
+              <div v-if="inFlightItems.length" class="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
+                <template v-for="item in inFlightItems" :key="item.id">
+                  <button v-if="targetLocation(item.target)" type="button" class="min-h-[92px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 text-left transition-colors hover:border-[var(--border-strong)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :data-inflight-id="item.id" @click="navigateTo(item.target, sourceLabel(item))">
+                    <div class="flex flex-wrap items-center justify-between gap-2"><Badge variant="info">{{ item.kind === 'task' ? 'Task' : 'Agent run' }}</Badge><span v-if="projectName(item.projectId)" class="text-xs text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></div>
+                    <strong class="mt-2 block text-sm text-[var(--text-primary)]">{{ sourceLabel(item) }}</strong>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Engine: {{ item.engine ?? 'unavailable' }} · Model: {{ item.model ?? 'unavailable' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Elapsed {{ elapsedDuration(item.at) }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">{{ item.lifecycle }}</p>
+                  </button>
+                  <article v-else class="min-h-[92px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" :data-inflight-id="item.id">
+                    <Badge variant="info">{{ item.kind === 'task' ? 'Task' : 'Agent run' }}</Badge>
+                    <strong class="mt-2 block text-sm text-[var(--text-primary)]">{{ sourceLabel(item) }}</strong>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Engine: {{ item.engine ?? 'unavailable' }} · Model: {{ item.model ?? 'unavailable' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Elapsed {{ elapsedDuration(item.at) }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">{{ item.lifecycle }}</p>
+                  </article>
+                </template>
+              </div>
+              <EmptyState v-else icon="tasks" title="No in-flight work" description="No Task is beginning or running and no Agent run is queued or running in this scope." />
+            </section>
+          </div>
+
+          <section class="flex min-w-0 flex-col gap-3" aria-labelledby="feed-activity-heading">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-3">
+              <div class="flex items-center gap-2">
+                <Icon name="lightning" :size="18" />
+                <h2 id="feed-activity-heading" class="text-sm font-bold">Operational Activity</h2>
+                <Badge variant="info">{{ activityItems.length }} Shown</Badge>
+              </div>
+              <span class="text-[11px] text-[var(--text-muted)]">Sanitized facts · newest first</span>
             </div>
-            <span class="text-[11px] text-[var(--text-muted)]">Audit log scoped</span>
-          </div>
-
-          <!-- 5 Streamlined Activity Filter Pills -->
-          <FilterPillGroup label="Filter activity stream">
-            <FilterPill
-              filter-key="all"
-              label="All"
-              :count="activities.length"
-              status="purple"
-              :active="activeActivityFilter === 'all'"
-              @click="activeActivityFilter = 'all'"
-            />
-            <FilterPill
-              filter-key="tasks"
-              label="Tasks"
-              :count="1"
-              status="neutral"
-              :active="activeActivityFilter === 'tasks'"
-              @click="activeActivityFilter = 'tasks'"
-            />
-            <FilterPill
-              filter-key="messages"
-              label="Chat"
-              :count="1"
-              status="green"
-              :active="activeActivityFilter === 'messages'"
-              @click="activeActivityFilter = 'messages'"
-            />
-            <FilterPill
-              filter-key="envs"
-              label="Envs"
-              :count="2"
-              status="yellow"
-              :active="activeActivityFilter === 'envs'"
-              @click="activeActivityFilter = 'envs'"
-            />
-            <FilterPill
-              filter-key="usage"
-              label="Usage"
-              :count="1"
-              status="neutral"
-              :active="activeActivityFilter === 'usage'"
-              @click="activeActivityFilter = 'usage'"
-            />
-          </FilterPillGroup>
-
-          <!-- Activity List Items -->
-          <div class="p-1 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-0.5 shadow-xs">
-            <button
-              v-for="act in filteredActivities"
-              :key="act.id"
-              type="button"
-              class="text-left p-3 rounded flex items-center justify-between gap-3 hover:bg-[var(--bg-surface-elevated)] transition-colors cursor-pointer select-none"
-              @click="handleNavigate(act.targetPath, act.title)"
-            >
-              <div class="flex items-center shrink-0">
-                <StatusDot :status="act.badgeKind" size="sm" />
-              </div>
-
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-1.5 flex-wrap">
-                  <strong class="text-xs text-[var(--text-primary)]">{{ act.title }}</strong>
-                  <Badge variant="info">{{ act.projectName }}</Badge>
+            <div class="flex flex-wrap gap-2" role="group" aria-label="Filter operational activity">
+              <button v-for="group in activityChoices" :key="group" type="button" class="min-h-[44px] rounded border px-2.5 text-xs focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="activeActivity === group ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)] font-bold text-[var(--text-primary)]' : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)]'" :aria-pressed="activeActivity === group" @click="activeActivity = group">
+                {{ activityGroupLabel(group) }} ({{ activityCounts[group] }})
+              </button>
+            </div>
+            <ol v-if="activityItems.length" class="flex flex-col gap-2" aria-label="Recent operational activity">
+              <li v-for="item in activityItems" :key="item.id" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+                <button v-if="targetLocation(item.target)" type="button" class="flex min-h-[64px] w-full items-start gap-3 p-3 text-left transition-colors hover:bg-[var(--bg-surface-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :data-activity-id="item.id" @click="navigateTo(item.target, activityGroupLabel(activityGroup(item)))">
+                  <StatusDot status="blue" size="sm" class="mt-1 shrink-0" />
+                  <span class="min-w-0 flex-1">
+                    <span class="flex flex-wrap items-center gap-2"><Badge variant="secondary">{{ activityGroupLabel(activityGroup(item)) }}</Badge><span v-if="projectName(item.projectId)" class="text-[10px] text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></span>
+                    <span class="mt-1 block text-xs text-[var(--text-primary)]">{{ item.summary }}</span>
+                  </span>
+                  <time v-if="isoTime(item.at)" class="shrink-0 text-[10px] text-[var(--text-muted)]" :datetime="isoTime(item.at)">{{ shortTime(item.at) }}</time>
+                </button>
+                <div v-else class="flex min-h-[64px] items-start gap-3 p-3" :data-activity-id="item.id">
+                  <StatusDot status="blue" size="sm" class="mt-1 shrink-0" />
+                  <span class="min-w-0 flex-1">
+                    <span class="flex flex-wrap items-center gap-2"><Badge variant="secondary">{{ activityGroupLabel(activityGroup(item)) }}</Badge><span v-if="projectName(item.projectId)" class="text-[10px] text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></span>
+                    <span class="mt-1 block text-xs text-[var(--text-primary)]">{{ item.summary }}</span>
+                  </span>
+                  <time v-if="isoTime(item.at)" class="shrink-0 text-[10px] text-[var(--text-muted)]" :datetime="isoTime(item.at)">{{ shortTime(item.at) }}</time>
                 </div>
-                <div class="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
-                  {{ act.subtitle }}
-                </div>
-              </div>
-
-              <div class="flex items-center gap-2 shrink-0">
-                <span class="text-[10px] text-[var(--text-muted)] font-mono">{{ act.relativeTime }}</span>
-                <Icon name="chevron-right" :size="14" class="text-[var(--text-muted)]" />
-              </div>
-            </button>
-          </div>
-        </section>
-      </div>
-    </div>
-    <!-- Task Detail Modal -->
-    <Dialog
-      v-if="selectedTask"
-      :open="isTaskDetailOpen"
-      :title="`Task #${selectedTask.id}: ${selectedTask.title}`"
-      :description="`Project: ${selectedTask.projectName} · Lead: @${selectedTask.lead}`"
-      @update:open="isTaskDetailOpen = $event"
-    >
-      <div class="flex flex-col gap-3 text-xs text-[var(--text-secondary)]">
-        <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
-          <div class="flex items-center justify-between gap-2">
-            <Badge variant="info">{{ selectedTask.projectName }}</Badge>
-            <span class="font-mono text-[11px] text-[var(--text-muted)]">{{ selectedTask.engine }}</span>
-          </div>
-          <strong class="text-sm text-[var(--text-primary)]">#{{ selectedTask.id }}: {{ selectedTask.title }}</strong>
-          <p class="text-xs text-[var(--text-secondary)]">Goal: {{ selectedTask.goal }}</p>
+              </li>
+            </ol>
+            <EmptyState v-else icon="lightning" title="No matching activity" description="No sanitized activity facts match this scope and activity filter." />
+          </section>
         </div>
-
-        <div class="grid grid-cols-2 gap-2">
-          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
-            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Lead Agent</span>
-            <strong class="text-[var(--text-primary)]">@{{ selectedTask.lead }}</strong>
-          </div>
-          <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1">
-            <span class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Environment</span>
-            <strong class="text-[var(--text-primary)]">{{ selectedTask.environment }}</strong>
-          </div>
-        </div>
-
-        <div class="p-3 rounded bg-[var(--purple-agent-bg)] border border-[var(--purple-agent-border)] text-[var(--purple-agent)] flex flex-col gap-1">
-          <strong class="text-xs font-bold flex items-center gap-1.5">
-            <Icon name="shield" :size="14" />
-            <span>Task-Held Exclusive Lease</span>
-          </strong>
-          <p class="text-[11px] text-[var(--text-secondary)]">
-            Exclusive lease is held continuously on host {{ selectedTask.environment }} across turns and validation steps.
-          </p>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button variant="secondary" size="sm" @click="isTaskDetailOpen = false">
-          Close
-        </Button>
-        <Button variant="primary" size="sm" @click="navigateToTaskEnv">
-          <Icon name="environments" :size="13" />
-          <span>Inspect Host Environment</span>
-        </Button>
       </template>
-    </Dialog>
+    </div>
   </div>
 </template>
