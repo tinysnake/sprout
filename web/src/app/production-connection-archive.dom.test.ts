@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
@@ -113,6 +114,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
     chatService: new chatModule.FixtureChatService(),
   };
 }

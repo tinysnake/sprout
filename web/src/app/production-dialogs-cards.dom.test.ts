@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter, taskWorkSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
@@ -113,6 +114,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
     chatService: new chatModule.FixtureChatService(),
   };
 }
@@ -239,7 +241,7 @@ test('Production Web: strict non-product copy boundary across all reachable rout
   }
 });
 
-test('Production Web: task card and agent card interactive details inspection', async () => {
+test('Production Web: Task in-flight work opens its authoritative Task detail', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
@@ -247,7 +249,9 @@ test('Production Web: task card and agent card interactive details inspection', 
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    const options = await deterministicAppOptions(vite);
+    options.feedService = createFeedTestAdapter(taskWorkSnapshot('test-project', '101'));
+    const { app, router } = createSproutApp(options);
     app.mount(appMount);
     const doc = dom.window.document;
 
@@ -277,13 +281,14 @@ test('Production Web: task card and agent card interactive details inspection', 
     await router.isReady();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    const allButtons = Array.from(doc.querySelectorAll('button'));
-    const feedTaskCard = allButtons.find((b) => b.textContent?.includes('#101:'));
-    assert.ok(feedTaskCard, 'Feed task card found');
+    const feedTaskCard = doc.querySelector('[data-inflight-id="task:101"]') as HTMLButtonElement | null;
+    assert.ok(feedTaskCard, 'Feed Task work card is available');
     feedTaskCard.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
+    assert.equal(router.currentRoute.value.path, '/project/tasks/101');
+    assert.equal(router.currentRoute.value.query['project'], 'test-project');
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/);
 
     app.unmount();
   } finally {

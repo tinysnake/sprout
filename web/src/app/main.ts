@@ -17,6 +17,8 @@ import { createMessageBrowserAdapter } from '../adapters/message-api.js';
 import { createRoutingBrowserAdapter } from '../adapters/routing-api.js';
 import { createRunBrowserAdapter } from '../adapters/run-api.js';
 import { createTaskBrowserAdapter, type TaskBrowserAdapter } from '../adapters/task-api.js';
+import { createFeedBrowserAdapter, type FeedBrowserAdapter } from '../adapters/feed-api.js';
+import { FEED_API } from '../views/feed-port.js';
 import { TASKS_API } from '../modules/tasks/types.js';
 import { createProjectAccessBrowserAdapter, createProjectBrowserAdapter } from '../adapters/project-api.js';
 import { createBrowserTransport } from '../transport/browser-transport.js';
@@ -58,6 +60,8 @@ export interface SproutAppOptions {
   projectService?: ProjectManagementService;
   /** Production Task proposal, run-history, lease, and control authority. */
   taskService?: TaskBrowserAdapter;
+  /** Production read-only Attention, in-flight work, scope, and activity authority. */
+  feedService?: FeedBrowserAdapter;
   /** Production Chat authority; tests inject a fixture explicitly, never by default. */
   chatService?: ChatService;
   /** Production Usage authority; tests inject a fixture explicitly, never by default. */
@@ -101,6 +105,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.taskService) {
     app.provide(TASKS_API, options.taskService);
+  }
+  if (options.feedService) {
+    app.provide(FEED_API, options.feedService);
   }
   if (options.chatService) {
     app.provide(CHAT_SERVICE, options.chatService);
@@ -154,6 +161,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       environments: environmentService,
     });
     const taskService = createTaskBrowserAdapter(transport);
+    const feedService = createFeedBrowserAdapter(transport);
     const chatService = new ProductionChatService({
       conversations: createConversationBrowserAdapter(transport),
       messages: createMessageBrowserAdapter(transport),
@@ -173,6 +181,7 @@ if (typeof window !== 'undefined' && !(window as unknown as Record<string, unkno
       agentService,
       projectService,
       taskService,
+      feedService,
       chatService,
       usageService,
       connectionSource: transport,

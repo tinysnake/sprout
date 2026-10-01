@@ -515,10 +515,12 @@ test('the projection never exposes engine prose, prompts, raw results, frozen ro
 });
 
 test('in-flight work projects current Tasks and runs as lifecycle identity only', async () => {
-  const snapshot = await projectFeed(sources(mixedWorld()));
+  const world = mixedWorld();
+  world.runs.push(makeRun({ id: 'run-unscoped', status: 'running' }));
+  const snapshot = await projectFeed(sources(world));
   assert.deepEqual(
     snapshot.inFlight.map((item) => item.id).sort(),
-    ['run:run-live', 'run:run-nested', 'task:task-live'],
+    ['run:run-live', 'run:run-nested', 'run:run-unscoped', 'task:task-live'],
     'terminal runs and resting Tasks are not in flight',
   );
   const taskItem = snapshot.inFlight.find((item) => item.kind === 'task');
@@ -526,6 +528,8 @@ test('in-flight work projects current Tasks and runs as lifecycle identity only'
   assert.deepEqual(taskItem?.target?.path, '/project/tasks/task-live');
   const runItem = snapshot.inFlight.find((item) => item.id === 'run:run-live');
   assert.match(runItem?.lifecycle ?? '', /^Run running · Agent agent-scout/);
+  assert.equal(snapshot.inFlight.find((item) => item.id === 'run:run-unscoped')?.target?.surface, 'agent-detail');
+  assert.equal(snapshot.inFlight.find((item) => item.id === 'run:run-unscoped')?.target?.path, '/manage/agents/agent-scout');
   assert.ok(!JSON.stringify(snapshot.inFlight).includes('PROMPT_SECRET'), 'a run projects no prompt');
 });
 
@@ -575,6 +579,7 @@ test('items whose source has no owning Project are omitted rather than deep-link
 test('isFeedDeepLink accepts canonical targets and rejects malformed identities', () => {
   assert.ok(isFeedDeepLink({ surface: 'project-task-detail', taskId: 'task-1', path: '/project/tasks/task-1' }));
   assert.ok(isFeedDeepLink({ surface: 'project-tasks', proposalId: 'p 1', path: '/project/tasks?proposal=p%201' }));
+  assert.ok(isFeedDeepLink({ surface: 'agent-detail', agentId: 'agent-1', path: '/manage/agents/agent-1' }));
   assert.ok(!isFeedDeepLink({ surface: 'project-task-detail', path: '/project/tasks/task-1' }), 'a detail link without its Task id is invalid');
   assert.ok(!isFeedDeepLink({ surface: 'project-task-detail', taskId: 'task-1', path: '/project/tasks/other' }), 'a path that disagrees with its identity is invalid');
   assert.ok(!isFeedDeepLink({ surface: 'made-up', path: '/made-up' }), 'unknown surface');

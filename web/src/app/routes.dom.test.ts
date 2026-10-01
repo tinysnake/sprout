@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter, recoveryAttentionSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 import { createServer, type ViteDevServer } from 'vite';
 
@@ -109,6 +110,7 @@ async function deterministicAppOptions(vite: ViteDevServer) {
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
     chatService: new chatModule.FixtureChatService(),
     usageService: new usageModule.FixtureUsageService(),
   };
@@ -223,16 +225,18 @@ test('the return context restores the Feed with the filters the operator had set
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    const options = await deterministicAppOptions(vite);
+    options.feedService = createFeedTestAdapter(recoveryAttentionSnapshot('env-recovery'));
+    const { app, router } = createSproutApp(options);
     app.mount(mount);
 
     // Narrow the Feed, then deep-link out of it.
-    await router.push('/feed?scope=infra&urgency=attention&activity=envs');
+    await router.push('/feed?scope=feed:infra&urgency=action_required&activity=envs');
     await router.isReady();
     await settle(80);
 
-    const attentionCard = doc.querySelector('.feed-attention-card') as HTMLButtonElement;
-    assert.ok(attentionCard, 'an attention card is available in the narrowed Feed');
+    const attentionCard = doc.querySelector('[data-attention-id="lease-recovery:env-recovery"]') as HTMLButtonElement | null;
+    assert.ok(attentionCard, 'a scoped recovery attention item is available in Feed');
     attentionCard.click();
     await settle(120);
 
@@ -247,7 +251,7 @@ test('the return context restores the Feed with the filters the operator had set
     assert.equal(router.currentRoute.value.path, '/feed', 'the return control restores the Feed');
     assert.deepEqual(
       router.currentRoute.value.query,
-      { scope: 'infra', urgency: 'attention', activity: 'envs' },
+      { scope: 'feed:infra', urgency: 'action_required', activity: 'envs' },
       'the Feed filters the operator had set are restored, not reset'
     );
 

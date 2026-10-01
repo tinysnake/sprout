@@ -38,7 +38,8 @@ run is represented by its durable `agent-run-failure` event, never twice.
 - **Deep links are identities.** Each item's `target` names an owning surface
   (`FEED_SURFACE_TEMPLATES`) and resolves through `feedTarget`; the browser
   test pins those templates to the shipped route table in
-  `web/src/router/index.ts`.
+  `web/src/router/index.ts`. Projectless Agent runs link to their authoritative
+  Agent detail page.
 - **Privacy.** Interpolated source text passes `redactSensitiveText` and is
   length-bounded (400 for reasons, 300 for activity summaries). Engine prose,
   prompts, raw run events/results/failures, frozen routing context, and claim

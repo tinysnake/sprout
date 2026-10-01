@@ -75,7 +75,8 @@ export type FeedTargetSurface =
   | 'project-chat'
   | 'project-chat-routing'
   | 'environments'
-  | 'environment-detail';
+  | 'environment-detail'
+  | 'agent-detail';
 
 /**
  * Route templates per surface, keyed by the FeedTarget field each path segment
@@ -90,6 +91,7 @@ export const FEED_SURFACE_TEMPLATES: Readonly<Record<FeedTargetSurface, string>>
   'project-chat-routing': '/project/chat/routing/:batchId',
   environments: '/manage/environments',
   'environment-detail': '/manage/environments/:environmentId',
+  'agent-detail': '/manage/agents/:agentId',
 };
 
 /** The authoritative entity identities one deep link may carry. */
@@ -101,6 +103,7 @@ export interface FeedTargetIdentity {
   readonly batchId?: string;
   /** The Manage Environments route key (enrollment key), not the instance id. */
   readonly environmentId?: string;
+  readonly agentId?: string;
 }
 
 /** One deep-link identity: the owning surface plus a concrete route path. */
@@ -599,7 +602,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         ? feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id })
         : knownProject(run.projectId)
           ? feedTarget({ surface: 'project-chat', projectId: run.projectId })
-          : undefined;
+          : feedTarget({ surface: 'agent-detail', agentId: run.agentId });
     inFlight.push({
       id: `run:${run.id}`,
       kind: 'run',
@@ -646,7 +649,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         ? feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id })
         : knownProject(run.projectId)
           ? feedTarget({ surface: 'project-chat', projectId: run.projectId })
-          : undefined;
+          : feedTarget({ surface: 'agent-detail', agentId: run.agentId });
     activityDrafts.push({
       id: `run:${run.id}`,
       kind: 'agent-run',
