@@ -12,7 +12,7 @@ state, composed in `src/runtime.ts` as `createFeedProjection` and served by
 | Section | Sources | Notes |
 | --- | --- | --- |
 | **Attention** | Task proposals (`proposed`), pending completion claims, routable blockers, Task recovery, Environment recovery records (`reconciling`/`recovery`), pending enrollments, failed wake-model routing batches and deterministic/admission wake observations, unresolved Project events with disposition `human-action-required` | One item per unresolved source; severity-ranked `action_required` → `attention` → `info`, then newest first |
-| **In-flight work** | Tasks in `beginning`/`running`, runs in `queued`/`running` | Identity and lifecycle only: never a run's prompt, events, result, or failure |
+| **In-flight work** | Tasks in `beginning`/`running`, runs in `queued`/`running` | Lifecycle plus the run's captured configured engine/work model when available; elapsed time starts at the projected `at`. Never a run's prompt, events, result, or failure |
 | **Operational activity** | Project events plus terminal run settlements as fact-form one-liners | Newest first, bounded to 50 items, each summary bounded to 300 characters |
 
 An informational Project event stays activity; it becomes Attention only when

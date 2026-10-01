@@ -249,7 +249,15 @@ function mixedWorld(): World {
     ],
     runs: [
       makeRun({ id: 'run-live', status: 'running', projectId: 'proj-mine', createdAt: 700, prompt: 'PROMPT_SECRET_9182', events: [{ type: 'tool-output', text: 'RAW_TOOL_OUTPUT_SECRET' }] }),
-      makeRun({ id: 'run-nested', status: 'running', projectId: 'proj-core', taskId: 'task-live', createdAt: 690, prompt: 'PROMPT_SECRET_NESTED' }),
+      makeRun({
+        id: 'run-nested',
+        status: 'running',
+        projectId: 'proj-core',
+        taskId: 'task-live',
+        createdAt: 690,
+        prompt: 'PROMPT_SECRET_NESTED',
+        workOption: { id: 'primary', engine: 'codex', workModel: 'gpt-5.4', effort: 'high' },
+      }),
       makeRun({ id: 'run-done', status: 'completed', projectId: 'proj-core', createdAt: 100, completedAt: 650, prompt: 'PROMPT_SECRET_DONE', result: { status: 'completed', text: 'RESULT_SECRET_DONE' }, events: [{ type: 'message', text: 'ENGINE_PROSE_SECRET', final: true }] }),
       makeRun({ id: 'run-failed-legacy', status: 'failed', createdAt: 90, completedAt: 95, prompt: 'PROMPT_SECRET_FAILED', failure: 'FAILURE_TEXT_SECRET', failureClass: 'execution' }),
     ],
@@ -514,7 +522,7 @@ test('the projection never exposes engine prose, prompts, raw results, frozen ro
   for (const item of snapshot.activity) assert.ok(item.summary.length <= 300);
 });
 
-test('in-flight work projects current Tasks and runs as lifecycle identity only', async () => {
+test('in-flight work projects current Tasks and runs with configured identity and lifecycle only', async () => {
   const world = mixedWorld();
   world.runs.push(makeRun({ id: 'run-unscoped', status: 'running' }));
   const snapshot = await projectFeed(sources(world));
@@ -525,12 +533,48 @@ test('in-flight work projects current Tasks and runs as lifecycle identity only'
   );
   const taskItem = snapshot.inFlight.find((item) => item.kind === 'task');
   assert.equal(taskItem?.lifecycle, 'Task active · Agent run active · Lease held');
+  assert.equal(taskItem?.engine, 'codex');
+  assert.equal(taskItem?.model, 'gpt-5.4');
   assert.deepEqual(taskItem?.target?.path, '/project/tasks/task-live');
   const runItem = snapshot.inFlight.find((item) => item.id === 'run:run-live');
   assert.match(runItem?.lifecycle ?? '', /^Run running · Agent agent-scout/);
   assert.equal(snapshot.inFlight.find((item) => item.id === 'run:run-unscoped')?.target?.surface, 'agent-detail');
   assert.equal(snapshot.inFlight.find((item) => item.id === 'run:run-unscoped')?.target?.path, '/manage/agents/agent-scout');
   assert.ok(!JSON.stringify(snapshot.inFlight).includes('PROMPT_SECRET'), 'a run projects no prompt');
+});
+
+test('in-flight cards expose configured engine and work model identifiers without run content', async () => {
+  const task = makeTask({
+    id: 'task-configured',
+    projectId: 'project-configured',
+    status: 'in-progress',
+    environmentLifecycleState: 'running',
+    activeRunId: 'run-configured',
+  });
+  const run = makeRun({
+    id: 'run-configured',
+    status: 'running',
+    projectId: 'project-configured',
+    taskId: 'task-configured',
+    prompt: 'PROMPT_SECRET_CONFIGURED',
+    events: [{ type: 'message', text: 'ENGINE_PROSE_SECRET', final: true }],
+    workOption: { id: 'primary', engine: 'codex', workModel: 'gpt-5.4', effort: 'high' },
+  });
+  const snapshot = await projectFeed(sources({
+    projects: [{ id: 'project-configured', displayName: 'Configured Project' }],
+    tasks: [task],
+    runs: [run],
+  }));
+  const taskItem = snapshot.inFlight.find((item) => item.id === 'task:task-configured');
+  const runItem = snapshot.inFlight.find((item) => item.id === 'run:run-configured');
+
+  assert.equal(taskItem?.engine, 'codex');
+  assert.equal(taskItem?.model, 'gpt-5.4');
+  assert.equal(runItem?.engine, 'codex');
+  assert.equal(runItem?.model, 'gpt-5.4');
+  const wire = JSON.stringify(snapshot);
+  assert.ok(!wire.includes('PROMPT_SECRET_CONFIGURED'));
+  assert.ok(!wire.includes('ENGINE_PROSE_SECRET'));
 });
 
 test('operational activity is bounded, sanitized, and newest first', async () => {

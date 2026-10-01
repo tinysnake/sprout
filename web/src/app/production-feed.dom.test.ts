@@ -104,7 +104,7 @@ const baseSnapshot: FeedSnapshot = {
     {
       id: 'run:run-1', kind: 'run', lifecycle: 'Run running · Agent agent-1 · Task task-1',
       scopes: ['all'], target: feedTarget({ surface: 'project-task-detail', projectId: 'all', taskId: 'task-1' }),
-      projectId: 'all', taskId: 'task-1', runId: 'run-1', agentId: 'agent-1', at: 1_700_000_000_003,
+      projectId: 'all', taskId: 'task-1', runId: 'run-1', agentId: 'agent-1', engine: 'codex', model: 'gpt-5.4', at: 1_700_000_000_003,
     },
     {
       id: 'run:run-unscoped', kind: 'run', lifecycle: 'Run running · Agent agent-2',
@@ -166,17 +166,37 @@ async function routeToFeed(url = '/app/feed'): Promise<void> {
   dom.window.document.body.innerHTML = '<div id="app"></div>';
 }
 
-test('production Feed wires its read adapter, restores namespaced scope context, and reports explicit states', async () => {
+test('production Feed wires its read adapter, restores namespaced scope context, and reports explicit states', async (t) => {
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FEED_CLOCK } = (await vite.ssrLoadModule('/src/views/feed-port.ts')) as typeof import('../views/feed-port.ts');
     const feed = createFeedService();
     await routeToFeed('/app/feed?scope=all&urgency=action_required&activity=all');
     const { app, router } = createSproutApp({ routerBase: '/app/', feedService: feed.service, connectionSource: feed.service });
+    app.provide(FEED_CLOCK, () => 1_700_000_120_003);
     await router.isReady();
     app.mount(dom.window.document.getElementById('app')!);
     await settle();
 
     assert.equal(dom.window.document.querySelector('.feed-view')?.getAttribute('data-state'), 'ready');
+    await t.test('in-flight cards show configured engine, model, and elapsed duration', () => {
+      const card = dom.window.document.querySelector('[data-inflight-id="run:run-1"]');
+      assert.ok(card);
+      assert.match(card.textContent ?? '', /Engine: codex/);
+      assert.match(card.textContent ?? '', /Model: gpt-5\.4/);
+      assert.match(card.textContent ?? '', /Elapsed 2m/);
+    });
+    await t.test('every interactive Feed control meets the 44px minimum height', () => {
+      const controls = [...dom.window.document.querySelectorAll(
+        '.feed-view button, .feed-view select, .feed-view input, .feed-view textarea, .feed-view a[href], .feed-view [role="button"]',
+      )];
+      assert.ok(controls.length > 0, 'the rendered Feed contains interactive controls');
+      for (const control of controls) {
+        const match = control.className.match(/(?:^|\s)min-h-\[(\d+)px\](?:\s|$)/);
+        assert.ok(match, `${control.tagName} declares a minimum height`);
+        assert.ok(Number(match[1]) >= 44, `${control.tagName} minimum height is at least 44px`);
+      }
+    });
     assert.deepEqual(feed.calls.slice(0, 2).map((filter) => filter.scope), ['feed:all', 'all']);
     let scope = dom.window.document.querySelector('#feed-scope-select') as HTMLSelectElement;
     assert.equal(scope.value, 'all', 'Project id "all" remains distinct from synthetic feed:all');

@@ -16,7 +16,7 @@ import type {
 import { useAppStore } from '../stores/app.ts';
 import { useAnnouncer } from '../primitives/announcer.ts';
 import { useShellConnection } from '../shell/use-shell-connection.ts';
-import { FEED_API } from './feed-port.ts';
+import { FEED_API, FEED_CLOCK } from './feed-port.ts';
 import Badge from '../primitives/Badge.vue';
 import Button from '../primitives/Button.vue';
 import EmptyState from '../primitives/EmptyState.vue';
@@ -31,6 +31,7 @@ const announcer = useAnnouncer();
 const connection = useShellConnection().presentation;
 const injectedApi = inject(FEED_API, undefined);
 const api = computed(() => props.api ?? injectedApi);
+const feedClock = inject(FEED_CLOCK, () => Date.now());
 
 const urgencyChoices: readonly ('all' | FeedSeverity)[] = [
   'all',
@@ -233,6 +234,22 @@ function shortTime(at: number): string {
   if (elapsed < 60 * 60_000) return `${Math.floor(elapsed / 60_000)}m ago`;
   if (elapsed < 24 * 60 * 60_000) return `${Math.floor(elapsed / (60 * 60_000))}h ago`;
   return `${Math.floor(elapsed / (24 * 60 * 60_000))}d ago`;
+}
+
+function elapsedDuration(at: number): string {
+  if (!Number.isFinite(at)) return 'unavailable';
+  const elapsed = Math.max(0, feedClock() - at);
+  const seconds = Math.floor(elapsed / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainderSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m${remainderSeconds === 0 ? '' : ` ${remainderSeconds}s`}`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  if (hours < 24) return `${hours}h${remainderMinutes === 0 ? '' : ` ${remainderMinutes}m`}`;
+  const days = Math.floor(hours / 24);
+  const remainderHours = hours % 24;
+  return `${days}d${remainderHours === 0 ? '' : ` ${remainderHours}h`}`;
 }
 
 function isoTime(at: number): string | undefined {
@@ -522,18 +539,22 @@ onMounted(() => {
                   <h2 id="feed-inflight-heading" class="text-sm font-bold">In-flight Work</h2>
                   <Badge variant="info">{{ inFlightItems.length }} Active</Badge>
                 </div>
-                <span class="text-[11px] text-[var(--text-muted)]">Identity and lifecycle only</span>
+                <span class="text-[11px] text-[var(--text-muted)]">Identity, configuration, and lifecycle</span>
               </div>
               <div v-if="inFlightItems.length" class="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
                 <template v-for="item in inFlightItems" :key="item.id">
                   <button v-if="targetLocation(item.target)" type="button" class="min-h-[92px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 text-left transition-colors hover:border-[var(--border-strong)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :data-inflight-id="item.id" @click="navigateTo(item.target, sourceLabel(item))">
                     <div class="flex flex-wrap items-center justify-between gap-2"><Badge variant="info">{{ item.kind === 'task' ? 'Task' : 'Agent run' }}</Badge><span v-if="projectName(item.projectId)" class="text-xs text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></div>
                     <strong class="mt-2 block text-sm text-[var(--text-primary)]">{{ sourceLabel(item) }}</strong>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Engine: {{ item.engine ?? 'unavailable' }} · Model: {{ item.model ?? 'unavailable' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Elapsed {{ elapsedDuration(item.at) }}</p>
                     <p class="mt-1 text-xs text-[var(--text-secondary)]">{{ item.lifecycle }}</p>
                   </button>
                   <article v-else class="min-h-[92px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4" :data-inflight-id="item.id">
                     <Badge variant="info">{{ item.kind === 'task' ? 'Task' : 'Agent run' }}</Badge>
                     <strong class="mt-2 block text-sm text-[var(--text-primary)]">{{ sourceLabel(item) }}</strong>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Engine: {{ item.engine ?? 'unavailable' }} · Model: {{ item.model ?? 'unavailable' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-secondary)]">Elapsed {{ elapsedDuration(item.at) }}</p>
                     <p class="mt-1 text-xs text-[var(--text-secondary)]">{{ item.lifecycle }}</p>
                   </article>
                 </template>
@@ -552,7 +573,7 @@ onMounted(() => {
               <span class="text-[11px] text-[var(--text-muted)]">Sanitized facts · newest first</span>
             </div>
             <div class="flex flex-wrap gap-2" role="group" aria-label="Filter operational activity">
-              <button v-for="group in activityChoices" :key="group" type="button" class="min-h-[40px] rounded border px-2.5 text-xs focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="activeActivity === group ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)] font-bold text-[var(--text-primary)]' : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)]'" :aria-pressed="activeActivity === group" @click="activeActivity = group">
+              <button v-for="group in activityChoices" :key="group" type="button" class="min-h-[44px] rounded border px-2.5 text-xs focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="activeActivity === group ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)] font-bold text-[var(--text-primary)]' : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)]'" :aria-pressed="activeActivity === group" @click="activeActivity = group">
                 {{ activityGroupLabel(group) }} ({{ activityCounts[group] }})
               </button>
             </div>
