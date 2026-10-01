@@ -1106,10 +1106,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       holders: {
         clearIdleTask: (taskId) => taskLifecycle.clearIdleRecovery(taskId),
         resumeTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'resume');
+          await taskControls.recoverForHuman(taskId, { action: 'resume', reason: 'Human resolved Environment recovery' });
         },
         discardTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'discard');
+          await taskControls.recoverForHuman(taskId, { action: 'discard', reason: 'Human discarded Environment recovery' });
         },
         forceReleaseTask: (input) => taskLifecycle.forceRelease(input.taskId, input),
       },

@@ -291,6 +291,7 @@ export class TaskEnvironmentLifecycle {
     }
     if (task.admission !== undefined && audit === undefined) throw new Error(`task ${taskId} advance requires actor, reason, and content version`);
     if (audit !== undefined) {
+      this.#assertLeadOrHuman(task, audit.actor);
       if (task.admission === undefined || audit.contentVersion !== task.admission.contentVersion) throw new Error(`task ${taskId} advance content version is not current`);
       if (!await this.#agentEligible(agentId, task.projectId, task.environmentInstanceId)) throw new Error(`agent ${agentId} is not eligible on the Task's environment`);
     }
@@ -361,6 +362,10 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#require(taskId);
     if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') return task;
     if (task.activeRunId) throw new Error(`task ${taskId} cannot end while run ${task.activeRunId} is active`);
+    if (task.admission !== undefined && (task.environmentLifecycleState !== 'ending'
+      || !task.controlHistory?.some(event => event.action === 'end-requested' && event.actor.memberKind === 'human'))) {
+      throw new Error('Human-authorized accepted completion or discard is required before Task end');
+    }
     if (task.environmentLifecycleState === 'ending') return this.#recycleThenRelease(task);
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} is ${task.environmentLifecycleState ?? 'unbegun'} and cannot end`);
@@ -370,8 +375,9 @@ export class TaskEnvironmentLifecycle {
     return this.#recycleThenRelease(ending);
   }
 
-  async recover(taskId: string, action: TaskRecoveryAction): Promise<Task> {
+  async recover(taskId: string, action: TaskRecoveryAction, actor?: TaskActor): Promise<Task> {
     const task = await this.#require(taskId);
+    if (task.admission !== undefined) this.#assertHuman(task, actor);
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
     if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     if (task.recoveryState === 'ending') {
@@ -434,6 +440,7 @@ export class TaskEnvironmentLifecycle {
   /** Pause stops future admissions immediately while preserving an active run and its lease. */
   async requestPause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.pauseState !== undefined) return task;
     if (!['running', 'idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')
       || !task.environmentLeaseId) throw new Error(`task ${taskId} cannot be paused in its current lifecycle`);
@@ -465,6 +472,7 @@ export class TaskEnvironmentLifecycle {
   /** Resume is an explicit Human action; it never admits a run by itself. */
   async resumePause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.pauseState === undefined) throw new Error(`task ${taskId} is not paused`);
     if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} cannot resume while work is active or recovery is unresolved`);
@@ -489,6 +497,7 @@ export class TaskEnvironmentLifecycle {
 
   async raiseBlocker(taskId: string, actor: TaskActor, blocker: TaskBlocker): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertLeadOrHuman(task, actor);
     if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
       || task.pendingCompletionClaimId !== undefined) throw new Error(`task ${taskId} cannot be blocked in its current lifecycle`);
     this.#assertActiveTaskLease(task);
@@ -504,6 +513,7 @@ export class TaskEnvironmentLifecycle {
 
   async clearBlocker(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.blocker === undefined || task.activeRunId !== undefined || task.environmentLifecycleState !== 'blocked') {
       throw new Error(`task ${taskId} has no clearable blocker`);
     }
@@ -520,6 +530,8 @@ export class TaskEnvironmentLifecycle {
 
   async submitCompletionClaim(taskId: string, claim: TaskCompletionClaim): Promise<Task> {
     const task = await this.#require(taskId);
+    if (task.admission !== undefined && (claim.actor.memberId !== task.admission.lead.memberId
+      || claim.actor.memberKind !== task.admission.lead.memberKind)) throw new Error('Task lead authority is required');
     if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
       || task.blocker !== undefined || task.pendingCompletionClaimId !== undefined) {
       throw new Error(`task ${taskId} cannot accept a completion claim in its current lifecycle`);
@@ -542,6 +554,8 @@ export class TaskEnvironmentLifecycle {
     readonly reason: string;
   }): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
+    if (input.decision !== 'accept' && input.decision !== 'correct') throw new Error('invalid validation decision');
     const claim = task.completionClaims?.find(item => item.id === input.claimId);
     if (task.pendingCompletionClaimId !== input.claimId || claim === undefined
       || task.environmentLifecycleState !== 'awaiting-validation' || task.activeRunId !== undefined) {
@@ -580,6 +594,7 @@ export class TaskEnvironmentLifecycle {
 
   async discardForHuman(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} cannot be discarded in its current lifecycle`);
     }
@@ -597,6 +612,7 @@ export class TaskEnvironmentLifecycle {
 
   async recordInterruptRequest(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.pauseState !== 'requested' || task.activeRunId === undefined || task.environmentLifecycleState !== 'running') {
       throw new Error(`task ${taskId} has no active run awaiting Interrupt`);
     }
@@ -619,11 +635,12 @@ export class TaskEnvironmentLifecycle {
 
   async recoverForHuman(taskId: string, action: TaskRecoveryAction, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
     if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     const at = this.#clock.now();
     const next: Task = { ...task, controlHistory: [...(task.controlHistory ?? []), { action: 'recovery-requested', actor, at, recoveryAction: action, reason }], updatedAt: at };
     await this.#saveControlTransition(task, next, 'recovery');
-    return this.recover(taskId, action);
+    return this.recover(taskId, action, actor);
   }
 
   /** Enter the retained human-validation gap without releasing the Task lease. */
@@ -819,6 +836,21 @@ export class TaskEnvironmentLifecycle {
       || this.#pool.requiresLease(environmentInstanceId, agent.capability) !== true) return false;
     const admission = await this.#runs.evaluateOptionAdmission?.(agentId, environmentInstanceId);
     return admission?.ok ?? true;
+  }
+
+  #assertHuman(task: Task, actor: TaskActor | undefined): void {
+    if (actor?.memberKind !== 'human' || !actor.memberId
+      || (task.admission !== undefined && actor.memberId !== task.admission.approvedBy.memberId)) {
+      throw new Error('Human authority is required');
+    }
+  }
+
+  #assertLeadOrHuman(task: Task, actor: TaskActor): void {
+    if (actor?.memberKind === 'human') return this.#assertHuman(task, actor);
+    if (actor?.memberKind !== 'agent' || !task.admission
+      || task.admission.lead.memberKind !== 'agent' || task.admission.lead.memberId !== actor.memberId) {
+      throw new Error('Task lead authority is required');
+    }
   }
 
   #assertActiveTaskLease(task: Task): void {

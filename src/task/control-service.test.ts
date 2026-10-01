@@ -60,6 +60,26 @@ async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
   return { store, pool, lifecycle, tasks, controls, begun };
 }
 
+test('lower lifecycle and service seams reject Agent escalation into Human Task controls', async () => {
+  const s = await scenario();
+  for (const attempt of [
+    () => s.lifecycle.requestPause('task-1', lead, 'spoof pause'),
+    () => s.lifecycle.resumePause('task-1', lead, 'spoof resume'),
+    () => s.lifecycle.clearBlocker('task-1', lead, 'spoof correction'),
+    () => s.lifecycle.validateCompletionClaim('task-1', lead, { claimId: 'claim-1', decision: 'accept', reason: 'self approve' }),
+    () => s.lifecycle.discardForHuman('task-1', lead, 'spoof discard'),
+    () => s.lifecycle.recoverForHuman('task-1', 'discard', lead, 'spoof recovery'),
+    () => s.lifecycle.recordInterruptRequest('task-1', lead, 'spoof interrupt'),
+    () => s.tasks.end('task-1'),
+    () => s.tasks.advanceWithAttribution('task-1', { agentId: 'pi', actor: { memberId: 'other-agent', memberKind: 'agent' }, reason: 'steal advance', contentVersion: 1 }),
+  ]) await assert.rejects(attempt, /authority|Human|accepted|authorized/i);
+  assert.equal((await s.tasks.get('task-1'))?.environmentLifecycleState, 'idle');
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
+  await s.lifecycle.workerChannelLost('task-1');
+  await assert.rejects(s.tasks.recover('task-1', 'discard'), /authority|Human/i);
+  assert.equal((await s.tasks.get('task-1'))?.environmentLifecycleState, 'recovery');
+});
+
 test('Pause blocks admission, Interrupt settles the active run as stopped, and the Task lease remains held', async () => {
   const s = await scenario();
   await s.lifecycle.advanceRun('task-1', 'pi', 'continue', { actor: lead, reason: 'bounded step', contentVersion: 1 });
