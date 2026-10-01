@@ -45,7 +45,7 @@ test('authenticated Task controls preserve authority, validation recovery, priva
     const { task } = await begunResponse.json() as { task: TaskView };
     const path = `/api/tasks/${task.id}`;
     const leaseId = (await runtime.tasks.get(task.id))!.environmentLeaseId!;
-    for (const action of ['pause', 'interrupt', 'resume', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery', 'content']) {
+    for (const action of ['pause', 'interrupt', 'resume', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery', 'content']) {
       assert.equal((await post(`${path}/${action}`, {}, false)).status, 401, action);
       assert.equal((await post(`${path}/${action}`, {}, true, false)).status, 403, action);
       assert.equal((await post(`${path}/${action}`, { actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400, action);

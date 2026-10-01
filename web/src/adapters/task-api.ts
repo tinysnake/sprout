@@ -34,6 +34,7 @@ export type TaskControlAction =
   | 'pause'
   | 'interrupt'
   | 'resume'
+  | 'subordinate-stop'
   | 'blockers'
   | 'clear-blocker'
   | 'completion-claims'
@@ -62,6 +63,7 @@ export interface TaskBrowserAdapter {
   pause(id: string, reason: string): Promise<TaskView>;
   interrupt(id: string, reason: string): Promise<TaskView>;
   resume(id: string, reason: string): Promise<TaskView>;
+  stopSubordinate(id: string, input: { readonly runId: string; readonly reason: string }): Promise<TaskView>;
   raiseBlocker(id: string, input: TaskBlockerInput): Promise<TaskView>;
   clearBlocker(id: string, reason: string): Promise<TaskView>;
   submitCompletionClaim(id: string, input: TaskCompletionClaimInput): Promise<TaskView>;
@@ -102,6 +104,7 @@ export function createTaskBrowserAdapter(transport: BrowserTransport): TaskBrows
     pause: (id, reason) => control(id, 'pause', { reason }),
     interrupt: (id, reason) => control(id, 'interrupt', { reason }),
     resume: (id, reason) => control(id, 'resume', { reason }),
+    stopSubordinate: (id, input) => control(id, 'subordinate-stop', input),
     raiseBlocker: (id, input) => control(id, 'blockers', input),
     clearBlocker: (id, reason) => control(id, 'clear-blocker', { reason }),
     submitCompletionClaim: (id, input) => control(id, 'completion-claims', input),

@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import type { ServerResponse } from 'node:http';
 
 import type { Task } from '../task/model.ts';
-import type { TaskControlService } from '../task/control-service.ts';
+import { TaskControlError, type TaskControlService } from '../task/control-service.ts';
 import type { ApiRequestContext } from './router.ts';
 import { createTaskControlRouter } from './task-control-router.ts';
 
 const task: Task = { id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'in-progress', createdAt: 1, updatedAt: 1 };
 
-async function invoke(options: { readonly session?: boolean; readonly body: unknown }) {
+async function invoke(options: { readonly session?: boolean; readonly body: unknown; readonly action?: string; readonly stopFailure?: TaskControlError }) {
   let status = 0;
   let responseBody = '';
   const response = {
@@ -20,11 +20,17 @@ async function invoke(options: { readonly session?: boolean; readonly body: unkn
   const controls = {
     pauseForHuman: async () => { commands += 1; return task; },
     submitCompletionClaimForHuman: async () => { commands += 1; return task; },
+    stopSubordinateForHumanLead: async () => {
+      commands += 1;
+      if (options.stopFailure) throw options.stopFailure;
+      return task;
+    },
   } as unknown as TaskControlService;
   const router = createTaskControlRouter({ controls });
+  const action = options.action ?? 'pause';
   const context: ApiRequestContext = {
-    method: 'POST', response, pathname: '/api/tasks/task-1/pause', searchParams: new URLSearchParams(),
-    segments: ['api', 'tasks', 'task-1', 'pause'],
+    method: 'POST', response, pathname: `/api/tasks/task-1/${action}`, searchParams: new URLSearchParams(),
+    segments: ['api', 'tasks', 'task-1', action],
     ...(options.session ? { operatorSessionId: 'authenticated-session' } : {}),
     readBody: async () => options.body as Record<string, unknown>,
   };
@@ -37,6 +43,24 @@ test('Task control routes require the authenticated Human transport context', as
   assert.equal(result.handled, true);
   assert.equal(result.status, 401);
   assert.equal(result.commands, 0);
+});
+
+test('subordinate stop routes use the authenticated lead and reject forged actors', async () => {
+  const stopped = await invoke({ session: true, action: 'subordinate-stop', body: { runId: 'run-1', reason: 'Stop the initiated run.' } });
+  assert.equal(stopped.handled, true);
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.commands, 1);
+
+  const forged = await invoke({ session: true, action: 'subordinate-stop', body: { runId: 'run-1', reason: 'Stop the run.', actor: { memberId: 'pi', memberKind: 'agent' } } });
+  assert.equal(forged.status, 400);
+  assert.equal(forged.commands, 0);
+
+  const notLead = await invoke({
+    session: true, action: 'subordinate-stop', body: { runId: 'run-1', reason: 'Borrow lead authority.' },
+    stopFailure: new TaskControlError('authority-required', 'only the current Task lead can use this route'),
+  });
+  assert.equal(notLead.status, 403);
+  assert.equal(notLead.body.code, 'authority-required');
 });
 
 test('Task control HTTP commands reject caller-selected actor authority', async () => {

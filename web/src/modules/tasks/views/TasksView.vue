@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { TaskActor, TaskContent, TaskControlEvent } from '../../../../../src/task/model.ts';
+import type { TaskActor, TaskBlockerResponsibility, TaskContent, TaskControlEvent } from '../../../../../src/task/model.ts';
 import type { TaskProposal, TaskProposalContent, TaskContentVersion } from '../../../../../src/task/proposal-model.ts';
-import type { TaskView, TaskWithRunsView } from '../../../../../src/web/views.ts';
+import type { TaskView, TaskWithRunsView, TaskRunLinkView } from '../../../../../src/web/views.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
 import { useShellConnection } from '../../../shell/use-shell-connection.ts';
 import Badge from '../../../primitives/Badge.vue';
@@ -61,6 +61,7 @@ const beginLeadKey = ref('');
 const beginReason = ref('');
 const controlReason = ref('');
 const advanceTargetId = ref('');
+const stopRunId = ref('');
 const taskTitle = ref('');
 const taskGoal = ref('');
 const taskConstraints = ref('');
@@ -69,7 +70,9 @@ const taskLeadKey = ref('');
 const taskRevisionReason = ref('');
 const blockerReason = ref('');
 const blockerAction = ref('');
-const blockerCondition = ref('');
+const blockerResponsibleKind = ref<TaskBlockerResponsibility['kind']>('external-condition');
+const blockerResponsibleMemberKey = ref('');
+const blockerResponsibleValue = ref('');
 const completionOutcome = ref('');
 const completionEvidence = ref('');
 const completionChanges = ref('');
@@ -163,6 +166,16 @@ const advanceAgents = computed(() => {
     .map((row) => row.agentId) ?? []);
   return activeProjectAgents.value.filter((member) => eligible.has(member.memberId));
 });
+const blockerResponsibleMembers = computed(() => blockerResponsibleKind.value === 'human'
+  ? currentProjectMembers.value.filter((member) => member.memberKind === 'human')
+  : blockerResponsibleKind.value === 'agent' ? activeProjectAgents.value : []);
+const blockerResponsibilityReady = computed(() => {
+  if (blockerResponsibleKind.value === 'human' || blockerResponsibleKind.value === 'agent') {
+    const actor = actorFromKey(blockerResponsibleMemberKey.value);
+    return Boolean(actor && actor.memberKind === blockerResponsibleKind.value);
+  }
+  return blockerResponsibleValue.value.trim().length > 0;
+});
 const proposalCurrent = computed(() => selectedProposalVersion.value);
 const taskContent = computed<TaskContent | undefined>(() => {
   const task = selectedTask.value?.task;
@@ -207,6 +220,22 @@ const selectedProposalIsHumanProposed = computed(() => {
   return Boolean(proposal && currentHuman.value && proposal.proposer.memberKind === 'human' && proposal.proposer.memberId === currentHuman.value.memberId);
 });
 
+function canStopSubordinateRun(run: TaskRunLinkView): boolean {
+  const task = selectedTask.value?.task;
+  const lead = taskContent.value?.lead;
+  return Boolean(task && task.environmentLifecycleState === 'running' && lead?.memberKind === 'human'
+    && currentHuman.value?.memberId === lead.memberId && run.runId === task.activeRunId
+    && run.actor?.memberKind === lead.memberKind && run.actor.memberId === lead.memberId);
+}
+async function stopSubordinateRun(run: TaskRunLinkView): Promise<void> {
+  const currentApi = api.value;
+  const task = selectedTask.value?.task;
+  if (!currentApi || !task || stopRunId.value !== run.runId || actionReasonRequired.value) return;
+  const stopped = await perform('Task lead stop requested. The Task and its Environment lease remain active.', async () => {
+    await currentApi.stopSubordinate(task.id, { runId: run.runId, reason: controlReason.value.trim() });
+  });
+  if (stopped) stopRunId.value = '';
+}
 function actorKey(actor: TaskActor): string { return JSON.stringify(actor); }
 function actorFromKey(value: string): TaskActor | undefined {
   try {
@@ -222,6 +251,11 @@ function actorName(actor: TaskActor | { readonly memberId: string; readonly memb
   if (actor.memberKind === 'human') return 'You';
   if (actor.memberKind === 'system') return 'Sprout';
   return agentName(actor.memberId);
+}
+function blockerResponsibleName(responsible: TaskBlockerResponsibility): string {
+  if (responsible.kind === 'recovery') return `Recovery mechanism · ${responsible.mechanism}`;
+  if (responsible.kind === 'external-condition') return `External condition · ${responsible.condition}`;
+  return actorName({ memberId: responsible.memberId, memberKind: responsible.kind });
 }
 function proposalStage(proposal: TaskProposal): string {
   if (proposal.status === 'proposed') return 'Proposed';
@@ -326,8 +360,18 @@ function errorState(error: unknown): { readonly code?: string; readonly message:
     if (failure.status === 409) {
       if (failure.code === 'advance-conflict') return { code: failure.code, message: 'Another Task action changed this Task before the advance completed. Review the refreshed state before trying again.' };
       if (failure.code === 'environment-recovering') return { code: failure.code, message: 'The Environment is recovering. Task advancement is held until recovery is resolved.' };
+      if (failure.code === 'pause-retry-required') return { code: failure.code, message: 'Task advancement is still gated. The Human must retry or cancel the pause request, then refresh the Task before trying again.' };
       if (failure.code === 'lifecycle-conflict') return { code: failure.code, message: 'This Task changed before the action completed. Review its refreshed lifecycle before trying again.' };
       if (failure.code === 'stale-proposal') return { code: failure.code, message: 'This proposal changed before the decision completed. Review its current version before trying again.' };
+      if (failure.code === 'project-read-only') return { code: failure.code, message: 'This Project is read-only. Refresh its current state before trying another Task action.' };
+      if (failure.code === 'agent-read-only') return { code: failure.code, message: 'This Agent no longer has writable Project access. Refresh the current membership before retrying this Task action.' };
+      if (failure.code === 'proposal-closed') return { code: failure.code, message: 'This proposal is no longer open. Review its refreshed status before trying again.' };
+      if (failure.code === 'lead-ineligible') return { code: failure.code, message: 'The selected Task lead is no longer eligible for this Environment. Refresh the Task and choose a current lead.' };
+      if (failure.code === 'environment-ineligible') return { code: failure.code, message: 'The selected Environment is no longer available to this Project. Refresh the available Environment facts before beginning.' };
+      if (failure.code === 'no-compatible-agent') return { code: failure.code, message: 'No current Project Agent can work in the selected Environment. Review Project resources before beginning.' };
+      if (failure.code === 'target-ineligible') return { code: failure.code, message: 'The selected Agent is no longer eligible for this Task Environment. Refresh and choose an eligible Project Agent.' };
+      if (failure.code === 'not-awaiting-recovery') return { code: failure.code, message: 'This Task is no longer awaiting recovery. Review its refreshed lifecycle before choosing another action.' };
+      if (failure.code === 'lease-cannot-resume') return { code: failure.code, message: 'The Task Environment lease could not be resumed. Keep the Task in recovery and review the current recovery facts.' };
       return { ...(failure.code ? { code: failure.code } : {}), message: 'Sprout refused this Task action. Review the refreshed state before trying again.' };
     }
     return { ...(failure.code ? { code: failure.code } : {}), message: failure.message || 'The Task request could not be completed.' };
@@ -582,11 +626,23 @@ async function addBlocker(): Promise<void> {
   const task = selectedTask.value?.task;
   const lead = taskContent.value?.lead;
   if (!currentApi || !task || !lead) return;
+  let responsible: TaskBlockerResponsibility;
+  if (blockerResponsibleKind.value === 'human' || blockerResponsibleKind.value === 'agent') {
+    const actor = actorFromKey(blockerResponsibleMemberKey.value);
+    if (!actor || actor.memberKind !== blockerResponsibleKind.value) return;
+    responsible = { kind: blockerResponsibleKind.value, memberId: actor.memberId };
+  } else if (blockerResponsibleKind.value === 'recovery') {
+    if (!blockerResponsibleValue.value.trim()) return;
+    responsible = { kind: 'recovery', mechanism: blockerResponsibleValue.value.trim() };
+  } else {
+    if (!blockerResponsibleValue.value.trim()) return;
+    responsible = { kind: 'external-condition', condition: blockerResponsibleValue.value.trim() };
+  }
   const saved = await perform('Task blocker recorded.', async () => {
     await currentApi.raiseBlocker(task.id, {
       reason: blockerReason.value.trim(),
       requiredAction: blockerAction.value.trim(),
-      responsible: { kind: 'external-condition', condition: blockerCondition.value.trim() },
+      responsible,
       nextAdvancer: lead,
     });
   });
@@ -594,7 +650,9 @@ async function addBlocker(): Promise<void> {
     blockerOpen.value = false;
     blockerReason.value = '';
     blockerAction.value = '';
-    blockerCondition.value = '';
+    blockerResponsibleKind.value = 'external-condition';
+    blockerResponsibleMemberKey.value = '';
+    blockerResponsibleValue.value = '';
   }
 }
 async function submitCompletionClaim(): Promise<void> {
@@ -679,6 +737,7 @@ watch(() => [openTaskId.value, openProposalId.value, selectedProjectId.value] as
   }
 });
 watch(() => [openTaskId.value, openProposalId.value] as const, async ([taskId, proposalId]) => {
+  stopRunId.value = '';
   if (!taskId && !proposalId) return;
   await nextTick();
   detailHeading.value?.focus();
@@ -881,16 +940,16 @@ onMounted(() => { void loadIndex(); });
                 <template v-else-if="selectedTask.task.environmentLifecycleState === 'recovery'"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="recoverTask('resume')">Resume Task recovery</Button><Button variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || actionReasonRequired" @click="recoverTask('discard')">Discard through recovery</Button></template>
                 <Button v-if="terminalTask" variant="secondary" size="sm" class="min-h-[44px]" disabled>Task ended</Button>
               </div>
-              <div v-if="blockerOpen" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3"><h4 class="font-bold">Record a routable blocker</h4>              <label class="flex flex-col gap-1 text-xs">Blocker reason<input v-model="blockerReason" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">Required next action<input v-model="blockerAction" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">External condition owner<input v-model="blockerCondition" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><div class="flex flex-wrap gap-2"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !blockerReason.trim() || !blockerAction.trim() || !blockerCondition.trim()" @click="addBlocker">Save blocker</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="blockerOpen = false">Cancel</Button></div></div>
+              <div v-if="blockerOpen" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3"><h4 class="font-bold">Record a routable blocker</h4><label class="flex flex-col gap-1 text-xs">Blocker reason<input v-model="blockerReason" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">Required next action<input v-model="blockerAction" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">Responsible kind<select id="blocker-responsible-kind" v-model="blockerResponsibleKind" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3"><option value="human">Human</option><option value="agent">Agent</option><option value="recovery">Recovery mechanism</option><option value="external-condition">External condition</option></select></label><label v-if="blockerResponsibleKind === 'human' || blockerResponsibleKind === 'agent'" class="flex flex-col gap-1 text-xs">Responsible Human or Agent<select id="blocker-responsible-member" v-model="blockerResponsibleMemberKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3"><option value="" disabled>Select a current Project member</option><option v-for="member in blockerResponsibleMembers" :key="`${member.memberKind}:${member.memberId}`" :value="actorKey({ memberId: member.memberId, memberKind: member.memberKind })">{{ member.memberKind === 'human' ? 'You' : agentName(member.memberId) }}</option></select></label><label v-else class="flex flex-col gap-1 text-xs">{{ blockerResponsibleKind === 'recovery' ? 'Recovery mechanism' : 'External condition' }}<input v-model="blockerResponsibleValue" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><div class="flex flex-wrap gap-2"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !blockerReason.trim() || !blockerAction.trim() || !blockerResponsibilityReady" @click="addBlocker">Save blocker</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="blockerOpen = false">Cancel</Button></div></div>
             </section>
 
-            <section v-if="selectedTask.task.blocker" class="rounded border border-[var(--red-action-border)] bg-[var(--bg-surface)] p-4 sm:p-5"><h3 class="font-bold">Task blocker</h3><p class="mt-2 text-sm">{{ selectedTask.task.blocker.reason }}</p><p class="mt-1 text-xs text-[var(--text-secondary)]">Required action: {{ selectedTask.task.blocker.requiredAction }}</p><p class="mt-1 text-xs text-[var(--text-muted)]">Responsible: {{ selectedTask.task.blocker.responsible.kind === 'external-condition' ? selectedTask.task.blocker.responsible.condition : actorName(selectedTask.task.blocker.responsible) }} · Next advancer: {{ actorName(selectedTask.task.blocker.nextAdvancer) }}</p></section>
+            <section v-if="selectedTask.task.blocker" class="rounded border border-[var(--red-action-border)] bg-[var(--bg-surface)] p-4 sm:p-5"><h3 class="font-bold">Task blocker</h3><p class="mt-2 text-sm">{{ selectedTask.task.blocker.reason }}</p><p class="mt-1 text-xs text-[var(--text-secondary)]">Required action: {{ selectedTask.task.blocker.requiredAction }}</p><p class="mt-1 text-xs text-[var(--text-muted)]">Responsible: {{ blockerResponsibleName(selectedTask.task.blocker.responsible) }} · Next advancer: {{ actorName(selectedTask.task.blocker.nextAdvancer) }}</p></section>
             <section v-if="selectedTask.task.environmentLifecycleState === 'recovery'" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-4 sm:p-5" role="status"><h3 class="font-bold">Environment recovery holds the Task lease</h3><p class="mt-2 text-sm">No new run is admitted while this Task remains in recovery. Resume or discard uses the current recovery authority for the same Environment instance.</p><p v-if="selectedTask.task.forcedRelease" class="mt-2 text-xs text-[var(--text-secondary)]">The recorded disposition says cleanup proof was not established.</p></section>
 
             <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5">
               <h3 class="font-bold">Run timeline</h3>
               <p class="text-xs text-[var(--text-secondary)] mt-1">Curated run facts only. Engine output and prompts are not displayed.</p>
-              <ol v-if="selectedTask.runs.length" class="mt-3 flex flex-col gap-2"><li v-for="run in selectedTask.runs" :key="run.runId" class="rounded bg-[var(--bg-surface-elevated)] p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><strong>Run {{ run.sequence }} · {{ run.summary?.status ?? (run.runId === selectedTask.task.activeRunId ? 'running' : 'queued') }}</strong><span class="text-xs text-[var(--text-muted)]">{{ actorName({ memberId: run.agentId, memberKind: 'agent' }) }} · {{ formatTime(run.linkedAt) }}</span></div><div class="mt-1 text-xs text-[var(--text-secondary)]">Task content {{ run.contentVersion ? `v${run.contentVersion}` : 'version unavailable' }}{{ run.requestedAt ? ` · requested ${formatTime(run.requestedAt)}` : '' }}</div></li></ol>
+              <ol v-if="selectedTask.runs.length" class="mt-3 flex flex-col gap-2"><li v-for="run in selectedTask.runs" :key="run.runId" class="rounded bg-[var(--bg-surface-elevated)] p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><strong>Run {{ run.sequence }} · {{ run.summary?.status ?? (run.runId === selectedTask.task.activeRunId ? 'running' : 'queued') }}</strong><span class="text-xs text-[var(--text-muted)]">{{ actorName({ memberId: run.agentId, memberKind: 'agent' }) }} · {{ formatTime(run.linkedAt) }}</span></div><div class="mt-1 text-xs text-[var(--text-secondary)]">Task content {{ run.contentVersion ? `v${run.contentVersion}` : 'version unavailable' }}{{ run.requestedAt ? ` · requested ${formatTime(run.requestedAt)}` : '' }}</div><div v-if="canStopSubordinateRun(run)" class="mt-2"><Button v-if="stopRunId !== run.runId" data-action="stop-subordinate" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl" @click="stopRunId = run.runId">Stop run</Button><div v-else class="flex flex-col items-start gap-2" role="group" :aria-label="`Confirm stop for Run ${run.sequence}`"><p class="text-xs text-[var(--text-secondary)]">This stops the subordinate Agent run. The Task and its Environment lease stay active.</p><div class="flex flex-wrap gap-2"><Button variant="ghost" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="stopSubordinateRun(run)">Confirm stop run</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="stopRunId = ''">Cancel</Button></div></div></div></li></ol>
               <p v-else class="mt-3 text-sm text-[var(--text-muted)]">No Agent runs have been admitted.</p>
             </section>
             <section v-if="selectedTask.task.controlHistory?.length" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5"><h3 class="font-bold">Task decision timeline</h3><ol class="mt-3 flex flex-col gap-2"><li v-for="(event, index) in selectedTask.task.controlHistory" :key="`${event.at}:${event.action}:${index}`" class="rounded bg-[var(--bg-surface-elevated)] p-3 text-xs"><div class="flex flex-wrap justify-between gap-2"><strong>{{ actionLabel(event) }}</strong><span>{{ actorName(event.actor) }} · {{ formatTime(event.at) }}</span></div><p v-if="'reason' in event" class="mt-1 text-[var(--text-secondary)]">{{ event.reason }}</p></li></ol></section>

@@ -42,6 +42,7 @@ test('Task browser adapter uses encoded production proposal, Task, run, and cont
   await adapter.end('task/one two', 'Retry safe completion cleanup.');
   await adapter.discard('task/one two', 'Abandon the proposed work.');
   await adapter.recover('task/one two', { action: 'resume', reason: 'Recovery evidence is ready.' });
+  await adapter.stopSubordinate('task/one two', { runId: 'run/one', reason: 'Stop this run.' });
   await adapter.getContentVersion('proposal/one two', 4);
 
   assert.equal(calls.at(-1)?.path, '/api/task-proposals/proposal%2Fone%20two/versions/4');
@@ -58,7 +59,9 @@ test('Task browser adapter uses encoded production proposal, Task, run, and cont
     '/api/tasks/task%2Fone%20two/end',
     '/api/tasks/task%2Fone%20two/discard',
     '/api/tasks/task%2Fone%20two/recovery',
+    '/api/tasks/task%2Fone%20two/subordinate-stop',
   ]);
+  assert.deepEqual(JSON.parse(String(calls.at(-2)?.init?.body)), { runId: 'run/one', reason: 'Stop this run.' });
   assert.equal(calls[3]?.init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), { targetAgentId: 'agent-a', reason: 'Continue verified work.' });
   assert.deepEqual(JSON.parse(String(calls[5]?.init?.body)), { reason: 'Hold further runs.' });

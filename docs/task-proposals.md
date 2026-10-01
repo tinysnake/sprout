@@ -128,6 +128,11 @@ Once begun, the protected Task controls remain independent of proposal approval:
   pause request still has an active run and settles that run as `stopped`.
   `POST /api/tasks/:id/resume` clears the Human pause without automatically
   admitting another run.
+- `POST /api/tasks/:id/subordinate-stop` accepts `{ runId, reason }`. The
+  authenticated Human must be the current Human Task lead, and the stored run
+  attribution must name that same lead as its initiator. The browser cannot
+  supply an actor; Agent Task leads continue to use the internal control
+  service for this capability.
 - `POST /api/tasks/:id/blockers` accepts only `reason`, `requiredAction`,
   `responsible`, and `nextAdvancer`. Responsibility is a current Human/Agent,
   an external condition, or a recovery mechanism. The blocker holds the Task

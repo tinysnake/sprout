@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom';
 import type { TaskView, TaskWithRunsView } from '../../../../src/web/views.ts';
 import type { TaskProposal } from '../../../../src/task/proposal-model.ts';
 import { BrowserRequestError } from '../../transport/browser-transport.ts';
-import type { TaskBrowserAdapter } from '../../adapters/task-api.ts';
+import type { TaskBlockerInput, TaskBrowserAdapter } from '../../adapters/task-api.ts';
 import type { ProjectManagementService, ProjectOverviewData } from '../projects/types.ts';
 import { createShellConnectionController } from '../../shell/connection.ts';
 
@@ -104,9 +104,12 @@ const proposal: TaskProposal = {
 function appServices(conflictCodes: readonly string[] = []) {
   const idle = task('run-idle', 'idle');
   const humanLedIdle = { ...idle, admission: { ...idle.admission!, lead: { memberId: 'operator', memberKind: 'human' as const } } };
+  const humanLedRunning = task('run-running', 'running', { activeRunId: 'run-private', status: 'in-progress' });
+  const humanLedRunningWithLead = { ...humanLedRunning, admission: { ...humanLedRunning.admission!, lead: { memberId: 'operator', memberKind: 'human' as const } } };
   const allTasks = [
-    task('run-running', 'running', { activeRunId: 'run-private', status: 'in-progress' }),
+    humanLedRunningWithLead,
     humanLedIdle,
+    task('run-not-owned', 'running', { activeRunId: 'run-human-initiated', status: 'in-progress' }),
     task('pause-requested', 'running', { activeRunId: 'run-pausing', pauseState: 'requested' }),
     task('paused', 'idle', { pauseState: 'paused' }),
     task('blocked', 'blocked', { status: 'blocked', blocker: { reason: 'External approval is pending.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
@@ -117,12 +120,16 @@ function appServices(conflictCodes: readonly string[] = []) {
     task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled' }),
   ];
   const details = new Map(allTasks.map((entry) => [entry.id, taskDetail(entry,
-    entry.activeRunId ? [{ runId: entry.activeRunId, agentId: 'agent-a', sequence: 1, linkedAt: time, contentVersion: 1 }] : entry.id === 'completed'
+    entry.activeRunId ? [{ runId: entry.activeRunId, agentId: 'agent-a', sequence: 1, linkedAt: time, contentVersion: 1,
+      actor: entry.id === 'run-running' ? { memberId: 'operator', memberKind: 'human' as const }
+        : entry.id === 'run-not-owned' ? { memberId: 'operator', memberKind: 'human' as const }
+          : { memberId: 'agent-a', memberKind: 'agent' as const } }] : entry.id === 'completed'
       ? [{ runId: 'run-settled', agentId: 'agent-a', sequence: 1, linkedAt: time, contentVersion: 1, summary: { status: 'completed', summary: 'PRIVATE-RUN-SUMMARY', recordedAt: time } }]
       : [],
   )]));
   let nextConflict = 0;
   const calls: string[] = [];
+  const blockerCalls: TaskBlockerInput[] = [];
   const api = {
     state: () => ({ status: 'online', connection: 'online', loading: false }),
     subscribeState: () => () => undefined,
@@ -150,9 +157,39 @@ function appServices(conflictCodes: readonly string[] = []) {
     async reviseTaskContent() { calls.push('revise-content'); return allTasks[1]!; },
     async pause(id: string) { calls.push(`pause:${id}`); return allTasks[0]!; },
     async interrupt(id: string) { calls.push(`interrupt:${id}`); return allTasks[0]!; },
+    async stopSubordinate(id: string, input: { runId: string }) {
+      calls.push(`stop-subordinate:${id}:${input.runId}`);
+      const detail = details.get(id);
+      assert.ok(detail);
+      const { activeRunId: _activeRunId, ...rest } = detail.task;
+      const updatedTask: TaskView = { ...rest, environmentLifecycleState: 'idle' };
+      details.set(id, taskDetail(updatedTask, detail.runs.map((run) => run.runId === input.runId
+        ? { ...run, summary: { status: 'stopped', summary: 'Stopped', recordedAt: time } }
+        : run)));
+      return updatedTask;
+    },
     async resume(id: string) { calls.push(`resume:${id}`); return allTasks[0]!; },
-    async raiseBlocker() { calls.push('raise-blocker'); return allTasks[1]!; },
-    async clearBlocker() { calls.push('clear-blocker'); return allTasks[1]!; },
+    async raiseBlocker(id: string, input: TaskBlockerInput) {
+      calls.push('raise-blocker');
+      blockerCalls.push(input);
+      const detail = details.get(id);
+      assert.ok(detail);
+      const updatedTask: TaskView = {
+        ...detail.task, status: 'blocked', environmentLifecycleState: 'blocked',
+        blocker: { ...input, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time },
+      };
+      details.set(id, taskDetail(updatedTask, detail.runs));
+      return updatedTask;
+    },
+    async clearBlocker(id: string) {
+      calls.push('clear-blocker');
+      const detail = details.get(id);
+      assert.ok(detail);
+      const { blocker: _blocker, ...rest } = detail.task;
+      const updatedTask: TaskView = { ...rest, status: 'in-progress', environmentLifecycleState: 'idle' };
+      details.set(id, taskDetail(updatedTask, detail.runs));
+      return updatedTask;
+    },
     async submitCompletionClaim(id: string) { calls.push(`completion-claim:${id}`); return allTasks[1]!; },
     async validate(id: string, input: { decision: string }) { calls.push(`validate:${id}:${input.decision}`); return allTasks[1]!; },
     async end(id: string) { calls.push(`end:${id}`); return allTasks[1]!; },
@@ -163,19 +200,19 @@ function appServices(conflictCodes: readonly string[] = []) {
     async listProjects() { return [project]; },
     async loadOverview() { return overview; },
   } as unknown as ProjectManagementService;
-  return { api, projects, allTasks, calls };
+  return { api, projects, allTasks, calls, blockerCalls };
 }
 
 async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = []) {
   const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
-  const { api, projects, calls } = appServices(codes);
+  const { api, projects, calls, blockerCalls } = appServices(codes);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
   const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);
   await settle();
-  return { app, router, calls };
+  return { app, router, calls, blockerCalls };
 }
 
 async function enterField(doc: Document, dom: JSDOM, labelText: string, value: string): Promise<void> {
@@ -185,6 +222,14 @@ async function enterField(doc: Document, dom: JSDOM, labelText: string, value: s
   field.value = value;
   field.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await settle(30);
+}
+
+function selectOption(doc: Document, dom: JSDOM, id: string, value: string): HTMLSelectElement {
+  const field = doc.querySelector<HTMLSelectElement>(`#${id}`);
+  assert.ok(field, `select #${id} exists`);
+  field.value = value;
+  field.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  return field;
 }
 
 function clickButton(doc: Document, text: string): HTMLButtonElement {
@@ -249,8 +294,12 @@ test('Project Tasks creates proposals through validation and the production adap
   }
 });
 
-test('Project Tasks presents typed advance conflicts as distinct operator states', async () => {
-  const codes = ['advance-conflict', 'environment-recovering', 'lifecycle-conflict'];
+test('Project Tasks presents typed 409 conflicts with actionable guidance', async () => {
+  const codes = [
+    'advance-conflict', 'environment-recovering', 'lifecycle-conflict', 'pause-retry-required',
+    'stale-proposal', 'project-read-only', 'agent-read-only', 'proposal-closed', 'lead-ineligible', 'environment-ineligible',
+    'no-compatible-agent', 'target-ineligible', 'not-awaiting-recovery', 'lease-cannot-resume',
+  ];
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
     const { app } = await mountTasks(vite, doc, codes);
@@ -274,6 +323,17 @@ test('Project Tasks presents typed advance conflicts as distinct operator states
       /Another Task action changed this Task/,
       /Environment is recovering/,
       /This Task changed before the action completed/,
+      /Task advancement is still gated.*Human must retry or cancel the pause request/i,
+      /proposal changed before the decision completed/,
+      /Project is read-only/,
+      /Agent no longer has writable Project access/,
+      /proposal is no longer open/,
+      /Task lead is no longer eligible/,
+      /Environment is no longer available/,
+      /No current Project Agent/,
+      /selected Agent is no longer eligible/,
+      /no longer awaiting recovery/,
+      /lease could not be resumed/,
     ];
     for (let index = 0; index < codes.length; index += 1) {
       const advance = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Advance Task lead work'));
@@ -294,6 +354,65 @@ async function openTaskRecord(router: { push: (location: unknown) => Promise<unk
   await router.push({ name: 'project-task-detail', params: { taskId: id }, query: { project: projectId } });
   await settle();
 }
+
+test('Project Tasks confirms a Task lead stop only for a run attributed to that lead', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router, calls } = await mountTasks(vite, doc);
+    await openTaskRecord(router, 'run-running');
+    await enterField(doc, dom, 'Reason for this action', 'Stop the delegated run after review.');
+    clickButton(doc, 'Stop run');
+    await settle();
+    assert.match(doc.body.textContent ?? '', /The Task and its Environment lease stay active/);
+    clickButton(doc, 'Confirm stop run');
+    await settle(180);
+    assert.ok(calls.includes('stop-subordinate:run-running:run-private'));
+    assert.match(doc.body.textContent ?? '', /Run 1 · stopped/);
+
+    await openTaskRecord(router, 'run-not-owned');
+    assert.equal(doc.querySelector('[data-action="stop-subordinate"]'), null,
+      'a run initiated by someone other than the Task lead has no stop control');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Tasks creates and renders each blocker responsibility kind', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router, blockerCalls } = await mountTasks(vite, doc);
+    const cases = [
+      { kind: 'human', member: JSON.stringify({ memberId: 'operator', memberKind: 'human' }), responsible: { kind: 'human', memberId: 'operator' }, rendered: 'Responsible: You' },
+      { kind: 'agent', member: JSON.stringify({ memberId: 'agent-a', memberKind: 'agent' }), responsible: { kind: 'agent', memberId: 'agent-a' }, rendered: 'Responsible: Project Agent' },
+      { kind: 'recovery', value: 'Environment cleanup worker', responsible: { kind: 'recovery', mechanism: 'Environment cleanup worker' }, rendered: 'Responsible: Recovery mechanism · Environment cleanup worker' },
+      { kind: 'external-condition', value: 'Approval arrives', responsible: { kind: 'external-condition', condition: 'Approval arrives' }, rendered: 'Responsible: External condition · Approval arrives' },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      await openTaskRecord(router, 'run-idle');
+      clickButton(doc, 'Record blocker');
+      await settle();
+      await enterField(doc, dom, 'Blocker reason', `Waiting for responsibility case ${index}.`);
+      await enterField(doc, dom, 'Required next action', 'Complete the named action.');
+      selectOption(doc, dom, 'blocker-responsible-kind', entry.kind);
+      await settle();
+      if ('member' in entry) selectOption(doc, dom, 'blocker-responsible-member', entry.member);
+      else await enterField(doc, dom, entry.kind === 'recovery' ? 'Recovery mechanism' : 'External condition', entry.value);
+      await settle();
+      clickButton(doc, 'Save blocker');
+      await settle(180);
+      assert.deepEqual(blockerCalls.at(-1)?.responsible, entry.responsible);
+      assert.match(doc.body.textContent ?? '', new RegExp(entry.rendered));
+      if (entry.kind === 'recovery') assert.doesNotMatch(doc.body.textContent ?? '', /Unknown actor/);
+      await enterField(doc, dom, 'Reason for this action', 'The blocker is resolved.');
+      clickButton(doc, 'Clear blocker');
+      await settle(180);
+    }
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
 
 test('Project Tasks exposes authorized proposal, intervention, validation, discard, and recovery actions', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
@@ -367,7 +486,7 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     await settle();
     await enterField(doc, dom, 'Blocker reason', 'Waiting for an external approval.');
     await enterField(doc, dom, 'Required next action', 'Record the approval outcome.');
-    await enterField(doc, dom, 'External condition owner', 'Approval arrives.');
+    await enterField(doc, dom, 'External condition', 'Approval arrives.');
     clickButton(doc, 'Save blocker');
     await settle(180);
     assert.ok(calls.includes('raise-blocker'));
