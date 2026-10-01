@@ -161,7 +161,7 @@ test('a daemon that dies mid-turn fails the turn instead of hanging it', async (
   assert.equal(result.status, 'failed');
   assert.match(
     result.status === 'failed' ? result.message : '',
-    /codex app-server closed unexpectedly/,
+    /codex turn failed: the engine connection was lost/,
   );
 });
 

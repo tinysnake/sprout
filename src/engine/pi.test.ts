@@ -285,7 +285,7 @@ test('a process that exits without settling the turn fails it instead of hanging
   assert.equal(result.status, 'failed');
   assert.match(
     result.status === 'failed' ? result.message : '',
-    /exited without settling the turn/,
+    /the engine ended the turn without a recognized outcome/,
   );
 });
 

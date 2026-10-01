@@ -31,5 +31,5 @@ test('a spawn failure fails the turn instead of hanging or crashing', async () =
   const turn = session.run('anything');
   const result = await turn.completion;
 
-  assert.deepEqual(result, { status: 'failed', message: 'pi failed to start: spawn ENOENT' });
+  assert.deepEqual(result, { status: 'failed', message: 'pi turn failed: the engine rejected the turn start' });
 });

@@ -10,6 +10,7 @@ import type {
   StartSessionRequest,
 } from './port.ts';
 import { EventQueue } from './event-queue.ts';
+import { classifyEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
 import { mapPiEvent, newPiTurnState } from './pi-protocol.ts';
 
 /**
@@ -161,14 +162,14 @@ export class PiSession implements EngineSession {
       : spawnPi(this.#binaryPath, args, this.#workingDirectory, this.#options.env, prompt);
     this.#current = turnProcess;
 
-    turnProcess.onExit((code) => {
+    turnProcess.onExit(() => {
       // The process ending without a terminal event means the turn did not
       // complete; without this the caller would wait for a settlement that can
       // never arrive.
       if (!settled) {
         finish({
           status: 'failed',
-          message: state.failure ?? `pi exited without settling the turn (code ${String(code)})`,
+          message: state.failure ?? sanitizedTurnFailure('pi', 'unexpected-termination'),
         });
       }
     });
@@ -176,7 +177,7 @@ export class PiSession implements EngineSession {
       // Spawn failures fire 'error' without 'exit'; without this the turn
       // would hang forever after a bad working directory or missing binary.
       if (!settled) {
-        finish({ status: 'failed', message: `pi failed to start: ${error.message}` });
+        finish({ status: 'failed', message: sanitizedTurnFailure('pi', classifyEngineTurnFailure(error) ?? 'turn-start-rejected') });
       }
     });
 

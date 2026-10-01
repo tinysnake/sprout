@@ -1,6 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult } from './port.ts';
 import type { JsonRpcNotification } from './jsonrpc.ts';
-import { sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
+import { classifyEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Codex `app-server` notifications into the engine-neutral run
@@ -104,7 +104,7 @@ export function mapCodexNotification(
       // An error object is the engine's own report that the turn failed; its
       // message is an upstream body and is never read (#182).
       if (turn?.error !== undefined && turn.error !== null) {
-        return failTurn('turn-error');
+        return failTurn(classifyEngineTurnFailure(turn.error) ?? 'turn-error');
       }
       if (status === 'interrupted') {
         return { events: [], finish: { status: 'interrupted' } };
@@ -142,7 +142,7 @@ export function mapCodexNotification(
       }
       // The notification's message is engine/provider text (potentially a raw
       // upstream body); only the stable failure class is reported (#182).
-      return failTurn('engine-error');
+      return failTurn(classifyEngineTurnFailure(params?.error ?? params) ?? 'engine-error');
     }
 
     default:

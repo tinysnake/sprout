@@ -1,5 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
-import { trustedTurnFailureMessage } from '../engine/turn-failure.ts';
+import { classifyEngineTurnFailure, sanitizedTurnFailure, trustedTurnFailureMessage } from '../engine/turn-failure.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
 
@@ -76,13 +76,28 @@ export function staticRefusalReason(reason: string): string | undefined {
 }
 
 /** Replace an engine-owned failure message before it crosses Worker JSON-RPC. */
-export function sanitizeEngineTurnResult(result: EngineTurnResult): EngineTurnResult {
+export function sanitizeEngineTurnResult(result: EngineTurnResult, engine?: string): EngineTurnResult {
   if (result.status !== 'failed') return result;
+  const cause = classifyEngineTurnFailure(result);
+  const message = result.resumeRefused === true
+    ? WORKER_DIAGNOSTICS.resumeRefused
+    : cause !== undefined && engine !== undefined
+      ? trustedTurnFailureMessage(sanitizedTurnFailure(engine, cause)) ?? WORKER_DIAGNOSTICS.turnFailed
+      : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed;
+  // Select the neutral result fields explicitly. Never spread a decoded engine
+  // error, response body, code or diagnostic into Worker JSON-RPC/journal data.
   return {
-    ...result,
-    message: result.resumeRefused === true
-      ? WORKER_DIAGNOSTICS.resumeRefused
-      : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed,
+    status: 'failed', message,
+    ...(result.stopReason === 'error' ? { stopReason: result.stopReason } : {}),
+    ...(result.resumeRefused === true ? { resumeRefused: true } : {}),
+    ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
+    ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
+    ...(result.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: result.engineTurnDurationMs } : {}),
+    ...(result.costEstimate !== undefined ? { costEstimate: result.costEstimate } : {}),
+    ...(result.billingBasis !== undefined ? { billingBasis: result.billingBasis } : {}),
+    ...(result.source !== undefined ? { source: result.source } : {}),
+    ...(result.sourceVersion !== undefined ? { sourceVersion: result.sourceVersion } : {}),
+    ...(result.pricingContext !== undefined ? { pricingContext: result.pricingContext } : {}),
   };
 }
 

@@ -19,6 +19,12 @@
  * said about it: the engine's own text stays inside the engine boundary.
  */
 export type EngineTurnFailureCause =
+  | 'model-rejected'
+  | 'auth-rejected'
+  | 'rate-limited'
+  | 'timeout'
+  | 'connection-lost'
+  | 'context-overflow'
   /** The engine ended the turn with an error stop reason (Pi `stopReason: "error"`). */
   | 'error-stop-reason'
   /** The engine sent an explicit error event/notification on the protocol channel. */
@@ -31,6 +37,12 @@ export type EngineTurnFailureCause =
   | 'unexpected-termination';
 
 const REASONS: Readonly<Record<EngineTurnFailureCause, string>> = {
+  'model-rejected': 'the engine rejected the model',
+  'auth-rejected': 'authentication was rejected',
+  'rate-limited': 'the engine rate limit was reached',
+  'timeout': 'the engine request timed out',
+  'connection-lost': 'the engine connection was lost',
+  'context-overflow': 'the context exceeded the model limit',
   'error-stop-reason': 'the engine ended the turn with an error stop reason',
   'engine-error': 'the engine reported an error',
   'turn-error': 'the engine settled the turn as failed',
@@ -47,6 +59,73 @@ const REASONS: Readonly<Record<EngineTurnFailureCause, string>> = {
  */
 export function sanitizedTurnFailure(engine: string, cause: EngineTurnFailureCause): string {
   return `${engine} turn failed: ${REASONS[cause]}`;
+}
+
+const ERROR_CODES: Readonly<Record<string, EngineTurnFailureCause>> = {
+  model_not_found: 'model-rejected', unknown_model: 'model-rejected',
+  invalid_model: 'model-rejected', model_unavailable: 'model-rejected',
+  model_rejected: 'model-rejected', unsupported_model: 'model-rejected',
+  authentication_error: 'auth-rejected', invalid_api_key: 'auth-rejected',
+  unauthorized: 'auth-rejected', permission_denied: 'auth-rejected',
+  rate_limit_exceeded: 'rate-limited', rate_limit_error: 'rate-limited',
+  usage_limit_reached: 'rate-limited',
+  etimedout: 'timeout', request_timeout: 'timeout', timeout: 'timeout',
+  econnreset: 'connection-lost', econnrefused: 'connection-lost',
+  enotfound: 'connection-lost', eai_again: 'connection-lost',
+  epipe: 'connection-lost', connection_error: 'connection-lost',
+  context_length_exceeded: 'context-overflow', context_window_exceeded: 'context-overflow',
+  // Codex app-server's codexErrorInfo enum (including object variants).
+  contextwindowexceeded: 'context-overflow', usagelimitexceeded: 'rate-limited',
+  httpconnectionfailed: 'connection-lost', responsestreamconnectionfailed: 'connection-lost',
+  responsestreamdisconnected: 'connection-lost', responsestreamfailed: 'connection-lost',
+  responsestreamdisconnectedmaxretries: 'connection-lost',
+};
+
+/**
+ * Inspect only named machine fields inside the engine boundary. No message,
+ * prompt, content, stderr or tool output is searched for diagnostic keywords.
+ * Some Pi providers serialize an HTTP status + JSON error into errorMessage;
+ * parse that envelope locally, but never return its body or free-form message.
+ */
+export function classifyEngineTurnFailure(raw: unknown, depth = 0): EngineTurnFailureCause | undefined {
+  if (depth > 5 || typeof raw !== 'object' || raw === null) return undefined;
+  const signal = raw as Record<string, unknown>;
+  for (const key of ['code', 'errorCode', 'type']) {
+    const code = signal[key];
+    if (typeof code === 'string' && Object.hasOwn(ERROR_CODES, code.toLowerCase())) return ERROR_CODES[code.toLowerCase()];
+  }
+  // Explicit nested codes are more specific than a broad HTTP status.
+  for (const key of ['error', 'cause', 'data']) {
+    const cause = classifyEngineTurnFailure(signal[key], depth + 1);
+    if (cause !== undefined) return cause;
+  }
+  for (const key of ['status', 'statusCode', 'httpStatusCode']) {
+    switch (signal[key]) {
+      case 401: case 403: return 'auth-rejected';
+      case 429: return 'rate-limited';
+      case 408: case 504: return 'timeout';
+    }
+  }
+  const info = signal['codexErrorInfo'];
+  if (typeof info === 'string' && Object.hasOwn(ERROR_CODES, info.toLowerCase())) return ERROR_CODES[info.toLowerCase()];
+  if (typeof info === 'object' && info !== null) {
+    for (const [variant, details] of Object.entries(info)) {
+      if (!Object.hasOwn(ERROR_CODES, variant.toLowerCase())) continue;
+      return classifyEngineTurnFailure(details, depth + 1) ?? ERROR_CODES[variant.toLowerCase()];
+    }
+  }
+  const encoded = signal['errorMessage'];
+  if (typeof encoded === 'string' && encoded.length <= 32_768) {
+    // A plain sentence (even one prefixed with a status) conveys no class.
+    const envelope = /^(?:([45]\d{2}) )?(\{[\s\S]*\})$/.exec(encoded.trim());
+    if (envelope !== null) {
+      try {
+        return classifyEngineTurnFailure(JSON.parse(envelope[2]!), depth + 1) ??
+          classifyEngineTurnFailure({ statusCode: Number(envelope[1]) }, depth + 1);
+      } catch { /* Malformed JSON provides no structured evidence. */ }
+    }
+  }
+  return undefined;
 }
 
 /** Exact product-owned messages only; prefixes never authorize engine prose. */

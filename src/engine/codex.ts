@@ -18,7 +18,7 @@ import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
-import { sanitizedTurnFailure } from './turn-failure.ts';
+import { classifyEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
 
 /**
  * Codex engine adapter (ADR-0001).
@@ -349,12 +349,14 @@ export class CodexSession implements EngineSession {
         turnId = startedTurnId;
         this.#turnId = startedTurnId;
       })
-      .catch(() => {
-        // The rejection carries engine/provider text (a JSON-RPC error can echo
-        // an upstream body); only the stable failure class is persisted (#182).
+      .catch((error: unknown) => {
+        // Classify machine fields locally; a dead transport has a typed cause.
+        // Never use the JSON-RPC message to construct a public diagnostic.
+        const cause = error instanceof JsonRpcTransportError ? 'connection-lost'
+          : classifyEngineTurnFailure(error) ?? 'turn-start-rejected';
         finish({
           status: 'failed',
-          message: sanitizedTurnFailure('codex', 'turn-start-rejected'),
+          message: sanitizedTurnFailure('codex', cause),
         });
       });
 
@@ -400,11 +402,11 @@ export class CodexSession implements EngineSession {
    * interrupted. Any other close means the daemon died mid-turn, which is an
    * observable failure. Automatic daemon restart is O4 work.
    */
-  handleTransportClosed(reason: string): void {
+  handleTransportClosed(_reason: string): void {
     this.#settleTurn?.(
       this.#closed
         ? { status: 'interrupted' }
-        : { status: 'failed', message: `codex app-server closed unexpectedly: ${reason}` },
+        : { status: 'failed', message: sanitizedTurnFailure('codex', 'connection-lost') },
     );
   }
 
