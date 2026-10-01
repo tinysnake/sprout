@@ -17,6 +17,13 @@ import '../modules/usage/usage.css';
 import { emptyUsageAggregate, type UsageAggregate } from '../../../src/usage/model.ts';
 import type { UsageAggregateFilter } from '../../../src/usage/store.ts';
 import { mapObservationToItem } from '../modules/usage/adapters/production-adapter.ts';
+import { sanitizeOperatorText } from '../../../src/environment/privacy.ts';
+
+// Escape markup via Vue and redact operator/telemetry prose at the display boundary.
+// Keep query identities untouched: presentation redaction must not change attribution.
+function displayText(value: unknown): string {
+  return sanitizeOperatorText(value == null ? '' : String(value), { fallback: '', maxLength: 4000 });
+}
 
 const props = defineProps<{
   service?: UsageManagementService;
@@ -172,21 +179,21 @@ function activityKindClass(kind: UsageActivityItem['kind']): string {
 }
 
 function projectName(projectId: string): string {
-  return projects.value.find((project) => project.id === projectId)?.displayName ?? projectId;
+  return displayText(projects.value.find((project) => project.id === projectId)?.displayName ?? projectId);
 }
 
 function agentName(agentId: string | undefined): string {
   if (!agentId) return 'No Agent owner';
-  return agents.value.find((agent) => agent.id === agentId)?.displayName ?? agentId;
+  return displayText(agents.value.find((agent) => agent.id === agentId)?.displayName ?? agentId);
 }
 
 function modelLabel(activity: UsageActivityItem): string {
-  return `${activity.provider ? `${activity.provider} / ` : ''}${activity.model}`;
+  return `${activity.provider ? `${displayText(activity.provider)} / ` : ''}${displayText(activity.model)}`;
 }
 
 function modelIdentityLabel(activity: UsageActivityItem): string {
   const identity = activity.modelIdentity;
-  return `Source: ${identity.source} / Provider: ${identity.provider} / Version: ${identity.version}`;
+  return `Source: ${displayText(identity.source)} / Provider: ${displayText(identity.provider)} / Version: ${displayText(identity.version)}`;
 }
 
 function modelGroupKey(activity: UsageActivityItem): string {
@@ -571,7 +578,7 @@ const timeRangeLabels: Record<string, string> = {
               @change="selectedActivityId = undefined"
             >
               <option value="all">All Projects</option>
-              <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.displayName }}</option>
+              <option v-for="p in projects" :key="p.id" :value="p.id">{{ displayText(p.displayName) }}</option>
             </select>
           </label>
 
@@ -584,7 +591,7 @@ const timeRangeLabels: Record<string, string> = {
               @change="selectedActivityId = undefined"
             >
               <option value="all">All Agents</option>
-              <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.displayName }}</option>
+              <option v-for="a in agents" :key="a.id" :value="a.id">{{ displayText(a.displayName) }}</option>
             </select>
           </label>
 
@@ -597,7 +604,7 @@ const timeRangeLabels: Record<string, string> = {
               @change="selectedActivityId = undefined"
             >
               <option value="all">All Models</option>
-              <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+              <option v-for="m in models" :key="m" :value="m">{{ displayText(m) }}</option>
             </select>
           </label>
 
@@ -692,7 +699,7 @@ const timeRangeLabels: Record<string, string> = {
                 </span>
                 <span class="usage-row-cost">
                   <strong>{{ costLabel(activity) }}</strong>
-                  <small>{{ activity.costValuation.provenance?.replaceAll('_', ' ') ?? 'No valuation provenance' }}</small>
+                  <small>{{ displayText(activity.costValuation.provenance?.replaceAll('_', ' ') ?? 'No valuation provenance') }}</small>
                 </span>
                 <span class="usage-row-chevron" aria-hidden="true">
                   <Icon name="chevron-right" :size="14" />
@@ -708,7 +715,7 @@ const timeRangeLabels: Record<string, string> = {
                       {{ activity.id }}
                       <span class="status-pill" :class="outcomeClass(activity)">{{ formatOutcome(activity) }}</span>
                     </h3>
-                    <p>{{ activityKindLabel(activity.kind) }} / {{ projectName(activity.projectId) }} / {{ activity.activityTime }}</p>
+                    <p>{{ activityKindLabel(activity.kind) }} / {{ projectName(activity.projectId) }} / {{ displayText(activity.activityTime) }}</p>
                   </div>
                 </div>
 
@@ -718,13 +725,13 @@ const timeRangeLabels: Record<string, string> = {
                     <dl class="usage-fact-list">
                       <div><dt>Activity kind</dt><dd>{{ activityKindLabel(activity.kind) }}</dd></div>
                       <div><dt>Project</dt><dd>{{ projectName(activity.projectId) }}</dd></div>
-                      <div><dt>Task</dt><dd>{{ activity.taskId ?? 'Not applicable' }}</dd></div>
+                      <div><dt>Task</dt><dd>{{ displayText(activity.taskId ?? 'Not applicable') }}</dd></div>
                       <div><dt>Agent</dt><dd>{{ agentName(activity.agentId) }}</dd></div>
                       <div><dt>Model</dt><dd>{{ modelLabel(activity) }}</dd></div>
-                      <div><dt>Model source</dt><dd>{{ activity.modelIdentity.source }}</dd></div>
-                      <div><dt>Model provider</dt><dd>{{ activity.modelIdentity.provider }}</dd></div>
-                      <div><dt>Model version</dt><dd>{{ activity.modelIdentity.version }}</dd></div>
-                      <div><dt>Session</dt><dd>{{ activity.sessionMode === 'resumed' ? 'Resumed invocation' : 'New invocation' }}</dd></div>
+                      <div><dt>Model source</dt><dd>{{ displayText(activity.modelIdentity.source) }}</dd></div>
+                      <div><dt>Model provider</dt><dd>{{ displayText(activity.modelIdentity.provider) }}</dd></div>
+                      <div><dt>Model version</dt><dd>{{ displayText(activity.modelIdentity.version) }}</dd></div>
+                      <div><dt>Session</dt><dd>{{ displayText(activity.sessionMode === 'resumed' ? 'Resumed invocation' : 'New invocation') }}</dd></div>
                     </dl>
                   </div>
 
@@ -732,16 +739,16 @@ const timeRangeLabels: Record<string, string> = {
                     <h4>Duration and outcome</h4>
                     <dl class="usage-fact-list">
                       <div><dt>Model activity duration</dt><dd>{{ formatDuration(activity.wallDurationMs, activity.durationStatus) }}</dd></div>
-                      <div><dt>Duration source</dt><dd>{{ activity.durationSource }}</dd></div>
-                      <div><dt>Engine duration</dt><dd>{{ activity.engineDurationMs === undefined ? 'Not reported' : formatDuration(activity.engineDurationMs, 'complete') }}</dd></div>
+                      <div><dt>Duration source</dt><dd>{{ displayText(activity.durationSource) }}</dd></div>
+                      <div><dt>Engine duration</dt><dd>{{ displayText(activity.engineDurationMs === undefined ? 'Not reported' : formatDuration(activity.engineDurationMs, 'complete')) }}</dd></div>
                       <div><dt>Outcome</dt><dd>{{ formatOutcome(activity) }}</dd></div>
-                      <div><dt>Outcome note</dt><dd>{{ activity.outcomeReason ?? 'No additional outcome note.' }}</dd></div>
+                      <div><dt>Outcome note</dt><dd>{{ displayText(activity.outcomeReason ?? 'No additional outcome note.') }}</dd></div>
                     </dl>
                   </div>
 
                   <div class="usage-detail-block">
                     <h4>Token dimensions</h4>
-                    <p class="usage-source-note">{{ activity.tokenDimensions.source }} / {{ activity.tokenDimensions.status }} measurement; provider or engine fact, not a local estimate</p>
+                    <p class="usage-source-note">{{ displayText(activity.tokenDimensions.source) }} / {{ displayText(activity.tokenDimensions.status) }} measurement; provider or engine fact, not a local estimate</p>
                     <dl class="usage-fact-list token-facts">
                       <div><dt>Total input</dt><dd>{{ formatNumber(activity.tokenDimensions.totalInput) }}</dd></div>
                       <div><dt>Uncached input</dt><dd>{{ formatNumber(activity.tokenDimensions.uncachedInput) }}</dd></div>
@@ -759,27 +766,27 @@ const timeRangeLabels: Record<string, string> = {
                       <div><dt>Attributable billed cost</dt><dd class="unavailable-value">Unavailable</dd></div>
                       <div><dt>Why billed cost is unavailable</dt><dd>No settled per-activity provider invoice is exposed by this interface.</dd></div>
                       <div><dt>API-equivalent estimate</dt><dd>{{ costLabel(activity) }}</dd></div>
-                      <div><dt>Valuation provenance</dt><dd>{{ activity.costValuation.provenance?.replaceAll('_', ' ') ?? 'Unavailable' }}</dd></div>
-                      <div><dt>Billing basis</dt><dd>{{ activity.costValuation.billingBasis.replaceAll('_', ' ') }}</dd></div>
-                      <div><dt>Valuation source</dt><dd>{{ activity.costValuation.source ?? 'Unavailable' }}</dd></div>
-                      <div><dt>Coverage</dt><dd>{{ activity.costValuation.note }}</dd></div>
+                      <div><dt>Valuation provenance</dt><dd>{{ displayText(activity.costValuation.provenance?.replaceAll('_', ' ') ?? 'Unavailable') }}</dd></div>
+                      <div><dt>Billing basis</dt><dd>{{ displayText(activity.costValuation.billingBasis.replaceAll('_', ' ')) }}</dd></div>
+                      <div><dt>Valuation source</dt><dd>{{ displayText(activity.costValuation.source ?? 'Unavailable') }}</dd></div>
+                      <div><dt>Coverage</dt><dd>{{ displayText(activity.costValuation.note) }}</dd></div>
                     </dl>
                   </div>
                 </div>
 
                 <div class="usage-detail-footer">
                   <strong>Measurement coverage</strong>
-                  <span>{{ activity.coverageNote }}</span>
-                  <span class="usage-state-label" :class="activity.observationState">{{ activity.observationState }}</span>
+                  <span>{{ displayText(activity.coverageNote) }}</span>
+                  <span class="usage-state-label" :class="activity.observationState">{{ displayText(activity.observationState) }}</span>
                 </div>
 
                 <details v-if="activity.observationHistory && activity.observationHistory.length > 0" class="usage-history-details">
                   <summary>Observation history and corrections ({{ activity.observationHistory.length }})</summary>
                   <div class="usage-history-list">
                     <div v-for="(entry, idx) in activity.observationHistory" :key="idx" class="usage-history-entry">
-                      <div><strong>{{ entry.status }}</strong> / {{ entry.timestamp }}</div>
-                      <div>{{ entry.source }}</div>
-                      <small>{{ entry.note }}<template v-if="entry.supersedes"> Supersedes {{ entry.supersedes }}.</template></small>
+                      <div><strong>{{ displayText(entry.status) }}</strong> / {{ displayText(entry.timestamp) }}</div>
+                      <div>{{ displayText(entry.source) }}</div>
+                      <small>{{ displayText(entry.note) }}<template v-if="entry.supersedes"> Supersedes {{ displayText(entry.supersedes) }}.</template></small>
                       <span v-if="entry.usdMicros !== undefined">{{ formatUsd(entry.usdMicros) }} API-equivalent</span>
                       <span v-else>Value unavailable</span>
                     </div>
@@ -839,7 +846,7 @@ const timeRangeLabels: Record<string, string> = {
 
                 <div class="usage-task-calendar">
                   <strong>Task calendar elapsed</strong>
-                  {{ Math.max(...splitOngoing(taskActs).finalized.map((a) => a.taskCalendarElapsedMs ?? 0)) > 0 ? formatDuration(Math.max(...splitOngoing(taskActs).finalized.map((a) => a.taskCalendarElapsedMs ?? 0)), 'complete') : 'Unavailable' }} / not summed into model time
+                  {{ displayText(Math.max(...splitOngoing(taskActs).finalized.map((a) => a.taskCalendarElapsedMs ?? 0)) > 0 ? formatDuration(Math.max(...splitOngoing(taskActs).finalized.map((a) => a.taskCalendarElapsedMs ?? 0)), 'complete') : 'Unavailable') }} / not summed into model time
                 </div>
 
                 <div class="usage-aggregate-activities">
@@ -854,7 +861,7 @@ const timeRangeLabels: Record<string, string> = {
                   >
                     <span>{{ act.id }}</span>
                     <span>{{ activityKindLabel(act.kind) }}</span>
-                    <span>{{ act.activityTime }}</span>
+                    <span>{{ displayText(act.activityTime) }}</span>
                   </button>
                 </div>
               </article>
@@ -888,7 +895,7 @@ const timeRangeLabels: Record<string, string> = {
 
                 <div class="usage-task-calendar">
                   <strong>Task calendar elapsed observed so far</strong>
-                  {{ Math.max(...splitOngoing(taskActs).provisional.map((a) => a.taskCalendarElapsedMs ?? 0)) > 0 ? formatDuration(Math.max(...splitOngoing(taskActs).provisional.map((a) => a.taskCalendarElapsedMs ?? 0)), 'complete') : 'Unavailable' }} / not summed into model time
+                  {{ displayText(Math.max(...splitOngoing(taskActs).provisional.map((a) => a.taskCalendarElapsedMs ?? 0)) > 0 ? formatDuration(Math.max(...splitOngoing(taskActs).provisional.map((a) => a.taskCalendarElapsedMs ?? 0)), 'complete') : 'Unavailable') }} / not summed into model time
                 </div>
 
                 <div class="usage-aggregate-activities">
@@ -903,7 +910,7 @@ const timeRangeLabels: Record<string, string> = {
                   >
                     <span>{{ act.id }}</span>
                     <span>{{ activityKindLabel(act.kind) }}</span>
-                    <span>{{ act.activityTime }}</span>
+                    <span>{{ displayText(act.activityTime) }}</span>
                   </button>
                 </div>
               </article>
@@ -992,7 +999,7 @@ const timeRangeLabels: Record<string, string> = {
                         >
                           <span>{{ act.id }}</span>
                           <span>{{ activityKindLabel(act.kind) }}</span>
-                          <span>{{ act.activityTime }}</span>
+                          <span>{{ displayText(act.activityTime) }}</span>
                         </button>
                       </div>
                     </section>
@@ -1050,7 +1057,7 @@ const timeRangeLabels: Record<string, string> = {
                         >
                           <span>{{ act.id }}</span>
                           <span>{{ activityKindLabel(act.kind) }}</span>
-                          <span>{{ act.activityTime }}</span>
+                          <span>{{ displayText(act.activityTime) }}</span>
                         </button>
                       </div>
                     </section>
@@ -1102,7 +1109,7 @@ const timeRangeLabels: Record<string, string> = {
                 </div>
 
                 <div class="usage-subtotal-line">
-                  Projects: {{ [...new Set((isProv ? splitOngoing(agentActs).provisional : splitOngoing(agentActs).finalized).map((a) => projectName(a.projectId)))].join(', ') }}
+                  Projects: {{ displayText([...new Set((isProv ? splitOngoing(agentActs).provisional : splitOngoing(agentActs).finalized).map((a) => projectName(a.projectId)))].join(', ')) }}
                 </div>
 
                 <div class="usage-aggregate-activities">
@@ -1117,7 +1124,7 @@ const timeRangeLabels: Record<string, string> = {
                   >
                     <span>{{ act.id }}</span>
                     <span>{{ activityKindLabel(act.kind) }}</span>
-                    <span>{{ act.activityTime }}</span>
+                    <span>{{ displayText(act.activityTime) }}</span>
                   </button>
                 </div>
               </article>
@@ -1146,14 +1153,14 @@ const timeRangeLabels: Record<string, string> = {
                   v-if="(isProv ? splitOngoing(mActs).provisional : splitOngoing(mActs).finalized).length > 0"
                   class="usage-aggregate-row"
                   data-usage-aggregate="true"
-                  :data-model-name="mActs[0]?.model"
-                  :data-model-key="key"
+                  :data-model-name="displayText(mActs[0]?.model)"
+                  :data-model-key="displayText(key)"
                   :data-usage-provisional="isProv"
                 >
                   <div class="usage-aggregate-header">
                     <div>
                       <h3>{{ isProv ? `${modelLabel(mActs[0]!)} — Provisional observed so far` : modelLabel(mActs[0]!) }}</h3>
-                      <p>{{ activityKindLabel(mActs[0]!.kind) }} / {{ mActs[0]!.engine ?? 'wake model' }} / {{ modelIdentityLabel(mActs[0]!) }} {{ isProv ? 'Ongoing activity is observed so far and excluded from finalized totals.' : 'Finalized activities only.' }}</p>
+                      <p>{{ activityKindLabel(mActs[0]!.kind) }} / {{ displayText(mActs[0]!.engine ?? 'wake model') }} / {{ modelIdentityLabel(mActs[0]!) }} {{ isProv ? 'Ongoing activity is observed so far and excluded from finalized totals.' : 'Finalized activities only.' }}</p>
                     </div>
                     <div class="usage-aggregate-metrics">
                       <span>{{ formatDuration(aggregateMetrics(isProv ? splitOngoing(mActs).provisional : splitOngoing(mActs).finalized).duration, aggregateMetrics(isProv ? splitOngoing(mActs).provisional : splitOngoing(mActs).finalized).durationStatus) }} model time</span>
@@ -1191,7 +1198,7 @@ const timeRangeLabels: Record<string, string> = {
                     >
                       <span>{{ act.id }}</span>
                       <span>{{ activityKindLabel(act.kind) }}</span>
-                      <span>{{ act.activityTime }}</span>
+                      <span>{{ displayText(act.activityTime) }}</span>
                     </button>
                   </div>
                 </article>
@@ -1234,7 +1241,7 @@ const timeRangeLabels: Record<string, string> = {
                   >
                     <div class="usage-aggregate-header">
                       <div>
-                        <h3>{{ (timeRangeLabels[range] ?? range) }} — Work-model Agent runs{{ isProv ? ' — Provisional observed so far' : '' }}</h3>
+                        <h3>{{ displayText((timeRangeLabels[range] ?? range)) }} — Work-model Agent runs{{ isProv ? ' — Provisional observed so far' : '' }}</h3>
                         <p>Agent run{{ isProv ? ' Ongoing activity is observed so far and excluded from finalized totals.' : ' Finalized activities only.' }}</p>
                       </div>
                       <div class="usage-aggregate-metrics">
@@ -1273,7 +1280,7 @@ const timeRangeLabels: Record<string, string> = {
                       >
                         <span>{{ act.id }}</span>
                         <span>{{ activityKindLabel(act.kind) }}</span>
-                        <span>{{ act.activityTime }}</span>
+                        <span>{{ displayText(act.activityTime) }}</span>
                       </button>
                     </div>
                   </article>
@@ -1291,7 +1298,7 @@ const timeRangeLabels: Record<string, string> = {
                   >
                     <div class="usage-aggregate-header">
                       <div>
-                        <h3>{{ (timeRangeLabels[range] ?? range) }} — Project-owned Routing attempts{{ isProv ? ' — Provisional observed so far' : '' }}</h3>
+                        <h3>{{ displayText((timeRangeLabels[range] ?? range)) }} — Project-owned Routing attempts{{ isProv ? ' — Provisional observed so far' : '' }}</h3>
                         <p>Routing attempt{{ isProv ? ' Ongoing activity is observed so far and excluded from finalized totals.' : ' Finalized activities only.' }}</p>
                       </div>
                       <div class="usage-aggregate-metrics">
@@ -1330,7 +1337,7 @@ const timeRangeLabels: Record<string, string> = {
                       >
                         <span>{{ act.id }}</span>
                         <span>{{ activityKindLabel(act.kind) }}</span>
-                        <span>{{ act.activityTime }}</span>
+                        <span>{{ displayText(act.activityTime) }}</span>
                       </button>
                     </div>
                   </article>
@@ -1350,7 +1357,7 @@ const timeRangeLabels: Record<string, string> = {
               {{ activeDetail.id }}
               <span class="status-pill" :class="outcomeClass(activeDetail)">{{ formatOutcome(activeDetail) }}</span>
             </h3>
-            <p>{{ activityKindLabel(activeDetail.kind) }} / {{ projectName(activeDetail.projectId) }} / {{ activeDetail.activityTime }}</p>
+            <p>{{ activityKindLabel(activeDetail.kind) }} / {{ projectName(activeDetail.projectId) }} / {{ displayText(activeDetail.activityTime) }}</p>
           </div>
         </div>
 
@@ -1360,13 +1367,13 @@ const timeRangeLabels: Record<string, string> = {
             <dl class="usage-fact-list">
               <div><dt>Activity kind</dt><dd>{{ activityKindLabel(activeDetail.kind) }}</dd></div>
               <div><dt>Project</dt><dd>{{ projectName(activeDetail.projectId) }}</dd></div>
-              <div><dt>Task</dt><dd>{{ activeDetail.taskId ?? 'Not applicable' }}</dd></div>
+              <div><dt>Task</dt><dd>{{ displayText(activeDetail.taskId ?? 'Not applicable') }}</dd></div>
               <div><dt>Agent</dt><dd>{{ agentName(activeDetail.agentId) }}</dd></div>
               <div><dt>Model</dt><dd>{{ modelLabel(activeDetail) }}</dd></div>
-              <div><dt>Model source</dt><dd>{{ activeDetail.modelIdentity.source }}</dd></div>
-              <div><dt>Model provider</dt><dd>{{ activeDetail.modelIdentity.provider }}</dd></div>
-              <div><dt>Model version</dt><dd>{{ activeDetail.modelIdentity.version }}</dd></div>
-              <div><dt>Session</dt><dd>{{ activeDetail.sessionMode === 'resumed' ? 'Resumed invocation' : 'New invocation' }}</dd></div>
+              <div><dt>Model source</dt><dd>{{ displayText(activeDetail.modelIdentity.source) }}</dd></div>
+              <div><dt>Model provider</dt><dd>{{ displayText(activeDetail.modelIdentity.provider) }}</dd></div>
+              <div><dt>Model version</dt><dd>{{ displayText(activeDetail.modelIdentity.version) }}</dd></div>
+              <div><dt>Session</dt><dd>{{ displayText(activeDetail.sessionMode === 'resumed' ? 'Resumed invocation' : 'New invocation') }}</dd></div>
             </dl>
           </div>
 
@@ -1374,16 +1381,16 @@ const timeRangeLabels: Record<string, string> = {
             <h4>Duration and outcome</h4>
             <dl class="usage-fact-list">
               <div><dt>Model activity duration</dt><dd>{{ formatDuration(activeDetail.wallDurationMs, activeDetail.durationStatus) }}</dd></div>
-              <div><dt>Duration source</dt><dd>{{ activeDetail.durationSource }}</dd></div>
-              <div><dt>Engine duration</dt><dd>{{ activeDetail.engineDurationMs === undefined ? 'Not reported' : formatDuration(activeDetail.engineDurationMs, 'complete') }}</dd></div>
+              <div><dt>Duration source</dt><dd>{{ displayText(activeDetail.durationSource) }}</dd></div>
+              <div><dt>Engine duration</dt><dd>{{ displayText(activeDetail.engineDurationMs === undefined ? 'Not reported' : formatDuration(activeDetail.engineDurationMs, 'complete')) }}</dd></div>
               <div><dt>Outcome</dt><dd>{{ formatOutcome(activeDetail) }}</dd></div>
-              <div><dt>Outcome note</dt><dd>{{ activeDetail.outcomeReason ?? 'No additional outcome note.' }}</dd></div>
+              <div><dt>Outcome note</dt><dd>{{ displayText(activeDetail.outcomeReason ?? 'No additional outcome note.') }}</dd></div>
             </dl>
           </div>
 
           <div class="usage-detail-block">
             <h4>Token dimensions</h4>
-            <p class="usage-source-note">{{ activeDetail.tokenDimensions.source }} / {{ activeDetail.tokenDimensions.status }} measurement; provider or engine fact, not a local estimate</p>
+            <p class="usage-source-note">{{ displayText(activeDetail.tokenDimensions.source) }} / {{ displayText(activeDetail.tokenDimensions.status) }} measurement; provider or engine fact, not a local estimate</p>
             <dl class="usage-fact-list token-facts">
               <div><dt>Total input</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.totalInput) }}</dd></div>
               <div><dt>Uncached input</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.uncachedInput) }}</dd></div>
@@ -1401,27 +1408,27 @@ const timeRangeLabels: Record<string, string> = {
               <div><dt>Attributable billed cost</dt><dd class="unavailable-value">Unavailable</dd></div>
               <div><dt>Why billed cost is unavailable</dt><dd>No settled per-activity provider invoice is exposed by this interface.</dd></div>
               <div><dt>API-equivalent estimate</dt><dd>{{ costLabel(activeDetail) }}</dd></div>
-              <div><dt>Valuation provenance</dt><dd>{{ activeDetail.costValuation.provenance?.replaceAll('_', ' ') ?? 'Unavailable' }}</dd></div>
-              <div><dt>Billing basis</dt><dd>{{ activeDetail.costValuation.billingBasis.replaceAll('_', ' ') }}</dd></div>
-              <div><dt>Valuation source</dt><dd>{{ activeDetail.costValuation.source ?? 'Unavailable' }}</dd></div>
-              <div><dt>Coverage</dt><dd>{{ activeDetail.costValuation.note }}</dd></div>
+              <div><dt>Valuation provenance</dt><dd>{{ displayText(activeDetail.costValuation.provenance?.replaceAll('_', ' ') ?? 'Unavailable') }}</dd></div>
+              <div><dt>Billing basis</dt><dd>{{ displayText(activeDetail.costValuation.billingBasis.replaceAll('_', ' ')) }}</dd></div>
+              <div><dt>Valuation source</dt><dd>{{ displayText(activeDetail.costValuation.source ?? 'Unavailable') }}</dd></div>
+              <div><dt>Coverage</dt><dd>{{ displayText(activeDetail.costValuation.note) }}</dd></div>
             </dl>
           </div>
         </div>
 
         <div class="usage-detail-footer">
           <strong>Measurement coverage</strong>
-          <span>{{ activeDetail.coverageNote }}</span>
-          <span class="usage-state-label" :class="activeDetail.observationState">{{ activeDetail.observationState }}</span>
+          <span>{{ displayText(activeDetail.coverageNote) }}</span>
+          <span class="usage-state-label" :class="activeDetail.observationState">{{ displayText(activeDetail.observationState) }}</span>
         </div>
 
         <details v-if="activeDetail.observationHistory && activeDetail.observationHistory.length > 0" class="usage-history-details">
           <summary>Observation history and corrections ({{ activeDetail.observationHistory.length }})</summary>
           <div class="usage-history-list">
             <div v-for="(entry, idx) in activeDetail.observationHistory" :key="idx" class="usage-history-entry">
-              <div><strong>{{ entry.status }}</strong> / {{ entry.timestamp }}</div>
-              <div>{{ entry.source }}</div>
-              <small>{{ entry.note }}<template v-if="entry.supersedes"> Supersedes {{ entry.supersedes }}.</template></small>
+              <div><strong>{{ displayText(entry.status) }}</strong> / {{ displayText(entry.timestamp) }}</div>
+              <div>{{ displayText(entry.source) }}</div>
+              <small>{{ displayText(entry.note) }}<template v-if="entry.supersedes"> Supersedes {{ displayText(entry.supersedes) }}.</template></small>
               <span v-if="entry.usdMicros !== undefined">{{ formatUsd(entry.usdMicros) }} API-equivalent</span>
               <span v-else>Value unavailable</span>
             </div>

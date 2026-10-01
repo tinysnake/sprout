@@ -522,3 +522,41 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
     app.unmount();
   } finally { await cleanup(); }
 });
+
+
+test('Usage F5: hostile display and telemetry strings are redacted across all tabs and details', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { FixtureUsageService } = await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts');
+    const original = new FixtureUsageService();
+    const path = ['','home','synthetic-operator','private-proof'].join('/');
+    const credential = 'token=' + 'synthetic-credential-proof';
+    const address = [192, 168, 88, 99].join('.');
+    const hostile = `Safe context ${path} ${credential} ${address}`;
+    const acts = original.rawActivities.map((a: any) => ({ ...a,
+      modelIdentity: { source: hostile, provider: hostile, version: hostile },
+      durationSource: hostile, outcomeReason: hostile, coverageNote: hostile,
+      tokenDimensions: { ...a.tokenDimensions, source: hostile },
+      costValuation: { ...a.costValuation, note: hostile, source: hostile, sourceVersion: hostile },
+      observationHistory: [{ timestamp: hostile, source: hostile, status: hostile, note: hostile, supersedes: hostile }],
+    }));
+    const fixture = new FixtureUsageService({ activities: acts,
+      projects: (await original.listProjects()).map((p: any) => ({ ...p, displayName: hostile })),
+      agents: (await original.listAgents()).map((a: any) => ({ ...a, displayName: hostile })),
+    });
+    const { app } = await mountedPage(vite, mount, fixture);
+    for (const tab of ['run', 'task', 'project', 'agent', 'model', 'time']) {
+      (doc.querySelector(`[data-usage-tab="${tab}"]`) as HTMLButtonElement).click();
+      await settle(80);
+      (doc.querySelector('.usage-tab-surface [data-usage-activity]') as HTMLButtonElement)?.click();
+      await settle(30);
+      const text = doc.body.textContent ?? '';
+      for (const sentinel of [path, credential, address]) {
+        assert.ok(!text.includes(sentinel), `${tab}: hostile text absent`);
+        assert.ok(!doc.body.innerHTML.includes(sentinel), `${tab}: hostile attribute absent`);
+      }
+      assert.match(text, /Safe context/);
+    }
+    app.unmount();
+  } finally { await cleanup(); }
+});
