@@ -87,6 +87,11 @@ export class TaskControlService {
     return this.#lifecycle.resumePause(taskId, actor, commandReason(input?.reason));
   }
 
+  async cancelPauseForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
+    const actor = await this.#humanForTask(taskId);
+    return this.#lifecycle.cancelPauseRetryForHuman(taskId, actor, commandReason(input?.reason));
+  }
+
   async raiseBlocker(taskId: string, actorInput: TaskActor, input: unknown): Promise<Task> {
     const task = await this.#task(taskId);
     const actor = await this.#authorizeLeadOrHuman(task, actorInput);

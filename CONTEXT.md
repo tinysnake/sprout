@@ -181,7 +181,7 @@ The Human-authorized act that selects one environment instance for a Task, acqui
 _Avoid_: Start, first agent run
 
 **Task pause request**:
-The admission hold created by a Human's first Pause action while an agent run remains active: no new run may begin, but the current run may settle. The next Human control is Interrupt, which requests an Agent run stop.
+The admission hold created by a Human's Pause action: no new run may begin, while a current run may settle naturally. If the request cannot be recorded after repeated state conflicts, queued admissions remain gated until the Human retries Pause or explicitly cancels the request; when a run is still active, the next control is Interrupt.
 _Avoid_: Agent run stop, blocked, Task end
 
 **Task pause**:

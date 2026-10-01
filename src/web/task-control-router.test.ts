@@ -6,6 +6,7 @@ import type { Task } from '../task/model.ts';
 import type { TaskControlService } from '../task/control-service.ts';
 import type { ApiRequestContext } from './router.ts';
 import { createTaskControlRouter } from './task-control-router.ts';
+import { TaskPauseRetryRequired } from '../task/environment-lifecycle.ts';
 
 const task: Task = { id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'in-progress', createdAt: 1, updatedAt: 1 };
 
@@ -31,6 +32,57 @@ async function invoke(options: { readonly session?: boolean; readonly body: unkn
   const handled = await router.handle(context);
   return { handled, status, body: JSON.parse(responseBody) as { task?: unknown; code?: string }, commands };
 }
+
+test('Pause CAS exhaustion returns explicit Human retry and cancellation guidance', async () => {
+  let status = 0;
+  let responseBody = '';
+  const response = {
+    writeHead(code: number) { status = code; return this; },
+    end(body?: string) { responseBody = body ?? ''; return this; },
+  } as unknown as ServerResponse;
+  const controls = {
+    pauseForHuman: async () => { throw new TaskPauseRetryRequired(); },
+  } as unknown as TaskControlService;
+  const router = createTaskControlRouter({ controls });
+  const context: ApiRequestContext = {
+    method: 'POST', response, pathname: '/api/tasks/task-1/pause', searchParams: new URLSearchParams(),
+    segments: ['api', 'tasks', 'task-1', 'pause'], operatorSessionId: 'authenticated-session',
+    readBody: async () => ({ reason: 'hold before next run' }),
+  };
+  assert.equal(await router.handle(context), true);
+  assert.equal(status, 409);
+  assert.deepEqual(JSON.parse(responseBody), {
+    code: 'pause-retry-required',
+    error: 'Pause could not be recorded after repeated Task changes; retry Human Pause or explicitly cancel the outstanding Pause request',
+  });
+});
+
+test('cancel-pause dispatches only the authenticated Human command shape', async () => {
+  let status = 0;
+  let responseBody = '';
+  let commands = 0;
+  const response = {
+    writeHead(code: number) { status = code; return this; },
+    end(body?: string) { responseBody = body ?? ''; return this; },
+  } as unknown as ServerResponse;
+  const controls = {
+    cancelPauseForHuman: async (_taskId: string, input: { reason: string }) => {
+      commands += 1;
+      assert.equal(input.reason, 'release pending hold');
+      return task;
+    },
+  } as unknown as TaskControlService;
+  const router = createTaskControlRouter({ controls });
+  const context: ApiRequestContext = {
+    method: 'POST', response, pathname: '/api/tasks/task-1/cancel-pause', searchParams: new URLSearchParams(),
+    segments: ['api', 'tasks', 'task-1', 'cancel-pause'], operatorSessionId: 'authenticated-session',
+    readBody: async () => ({ reason: 'release pending hold' }),
+  };
+  assert.equal(await router.handle(context), true);
+  assert.equal(status, 200);
+  assert.equal(commands, 1);
+  assert.ok(JSON.parse(responseBody).task);
+});
 
 test('Task control routes require the authenticated Human transport context', async () => {
   const result = await invoke({ body: { reason: 'pause' } });

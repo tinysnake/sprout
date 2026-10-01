@@ -67,6 +67,7 @@ test('lower lifecycle and service seams reject Agent escalation into Human Task 
   for (const attempt of [
     () => s.lifecycle.reviseContent('task-1', lead, { expectedContentVersion: 1, content: { title: 'Stolen task', goal: 'Stolen goal', constraints: [], validationCriteria: ['none'], lead }, reason: 'steal content authority' }),
     () => s.lifecycle.requestPause('task-1', lead, 'spoof pause'),
+    () => s.lifecycle.cancelPauseRetryForHuman('task-1', lead, 'spoof cancellation'),
     () => s.lifecycle.resumePause('task-1', lead, 'spoof resume'),
     () => s.lifecycle.clearBlocker('task-1', lead, 'spoof correction'),
     () => s.lifecycle.validateCompletionClaim('task-1', lead, { claimId: 'claim-1', decision: 'accept', reason: 'self approve' }),

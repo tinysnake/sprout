@@ -38,6 +38,39 @@ class PauseRaceStore extends InMemoryTaskStore {
   }
 }
 
+class PauseExhaustionStore extends InMemoryTaskStore {
+  readonly firstPauseWriteStarted: Promise<void>;
+  #startPauseWrite!: () => void;
+  #releasePauseWrite!: () => void;
+  readonly #firstPauseWriteGate = new Promise<void>((resolve) => { this.#releasePauseWrite = resolve; });
+  #failedAttempts = 3;
+  #pauseAttempts = 0;
+
+  constructor() {
+    super();
+    this.firstPauseWriteStarted = new Promise<void>((resolve) => { this.#startPauseWrite = resolve; });
+  }
+
+  get pauseAttempts(): number { return this.#pauseAttempts; }
+  releaseFirstPauseWrite(): void { this.#releasePauseWrite(); }
+  allowPauseWrites(): void { this.#failedAttempts = 0; }
+
+  override async saveIfUnchanged(task: Task, expected: Parameters<InMemoryTaskStore['saveIfUnchanged']>[1]): Promise<boolean> {
+    if (task.pauseState === 'requested' || task.pauseState === 'paused') {
+      this.#pauseAttempts += 1;
+      if (this.#pauseAttempts === 1) {
+        this.#startPauseWrite();
+        await this.#firstPauseWriteGate;
+      }
+      if (this.#failedAttempts > 0) {
+        this.#failedAttempts -= 1;
+        return false;
+      }
+    }
+    return super.saveIfUnchanged(task, expected);
+  }
+}
+
 const definition: EnvironmentDefinition = { id: 'mac', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
 const instance: EnvironmentInstance = { id: 'mac-1', definitionId: 'mac', workingDirectory: '/work' };
 const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
@@ -55,7 +88,8 @@ function build(options: { worker?: TaskContextWorker; store?: InMemoryTaskStore;
   const store = options.store ?? new InMemoryTaskStore();
   const pool = options.pool ?? new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const submitted: { runId: string }[] = [];
-  const lifecycle = new TaskEnvironmentLifecycle({ store, pool, agents, projects, ...(options.worker !== undefined ? { worker: options.worker } : {}), ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' }, runs: { submit: async (request) => { submitted.push({ runId: request.runId }); return { id: request.runId }; } } });
+  let nextRun = 0;
+  const lifecycle = new TaskEnvironmentLifecycle({ store, pool, agents, projects, ...(options.worker !== undefined ? { worker: options.worker } : {}), ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => `run-${++nextRun}` }, runs: { submit: async (request) => { submitted.push({ runId: request.runId }); return { id: request.runId }; } } });
   return { store, pool, lifecycle, submitted };
 }
 
@@ -179,6 +213,71 @@ test('Pause retries after natural settlement wins its compare-and-set before lat
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
 });
 
+test('Pause CAS exhaustion keeps queued admission gated until the Human retries or cancels the request', async () => {
+  const store = new PauseExhaustionStore();
+  const scenario = build({ store });
+  await store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'run-1');
+
+  const pausePending = scenario.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'hold before next run');
+  await store.firstPauseWriteStarted;
+  await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'completed'));
+  const queuedAdmission = scenario.lifecycle.advanceRun('task-1', 'pi', 'run-2');
+  let admissionSettled = false;
+  void queuedAdmission.then(() => { admissionSettled = true; }, () => { admissionSettled = true; });
+
+  store.releaseFirstPauseWrite();
+  await assert.rejects(pausePending, /retry Human Pause/);
+  await setImmediate();
+  assert.equal(store.pauseAttempts, 3);
+  assert.equal(admissionSettled, false);
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1']);
+  assert.equal((await store.get('task-1'))?.pauseState, 'retry-required');
+  assert.equal((await store.get('task-1'))?.activeRunId, undefined);
+  await assert.rejects(scenario.lifecycle.resumePause('task-1', { memberId: 'operator', memberKind: 'human' }, 'bypass required resolution'), /retried or explicitly cancelled/);
+  await assert.rejects(scenario.lifecycle.discardForHuman('task-1', { memberId: 'operator', memberKind: 'human' }, 'bypass required resolution'), /retried or explicitly cancelled/);
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+
+  store.allowPauseWrites();
+  const retried = await scenario.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'confirm the hold');
+  assert.equal(retried.pauseState, 'paused');
+  await assert.rejects(queuedAdmission, /paused/i);
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1']);
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+});
+
+test('Human cancellation releases admission after exhausted Pause CAS', async () => {
+  const store = new PauseExhaustionStore();
+  const scenario = build({ store });
+  await store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'run-1');
+  const actor = { memberId: 'operator', memberKind: 'human' } as const;
+
+  const pausePending = scenario.lifecycle.requestPause('task-1', actor, 'hold before next run');
+  await store.firstPauseWriteStarted;
+  await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'completed'));
+  const queuedAdmission = scenario.lifecycle.advanceRun('task-1', 'pi', 'run-2');
+  let admissionSettled = false;
+  void queuedAdmission.then(() => { admissionSettled = true; }, () => { admissionSettled = true; });
+
+  store.releaseFirstPauseWrite();
+  await assert.rejects(pausePending, /retry Human Pause/);
+  await setImmediate();
+  assert.equal(store.pauseAttempts, 3);
+  assert.equal(admissionSettled, false);
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1']);
+
+  const cancelled = await scenario.lifecycle.cancelPauseRetryForHuman('task-1', actor, 'cancel the pending hold');
+  assert.equal(cancelled.pauseState, undefined);
+  assert.equal(cancelled.controlHistory?.at(-1)?.action, 'pause-request-cancelled');
+  await queuedAdmission;
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1', 'run-2']);
+  assert.equal((await store.get('task-1'))?.activeRunId, 'run-2');
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+});
+
 test('Human pause blocks later admission, Interrupt settles stopped, and the Task lease stays held until resume', async () => {
   const scenario = build();
   await scenario.store.create(task());
@@ -236,6 +335,48 @@ test('SQLite restart preserves pause state and its attributed control history be
     assert.equal(restored?.pauseState, 'paused');
     assert.deepEqual(restored?.controlHistory?.map(event => event.action), ['paused']);
     assert.equal(runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+    restarted.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('SQLite restart preserves retry-required Pause intent for Human resolution', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-pause-retry-restart-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    await first.tasks.create(task());
+    let pauseAttempts = 0;
+    const saveIfUnchanged = first.tasks.saveIfUnchanged.bind(first.tasks);
+    first.tasks.saveIfUnchanged = async (next, expected) => {
+      if (next.pauseState === 'paused' || next.pauseState === 'requested') {
+        pauseAttempts += 1;
+        if (pauseAttempts <= 3) return false;
+      }
+      return saveIfUnchanged(next, expected);
+    };
+    const initial = sqliteLifecycle(first);
+    const begun = await initial.lifecycle.begin('task-1');
+    await assert.rejects(initial.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'hold for review'), /retry Human Pause/);
+    assert.equal(pauseAttempts, 3);
+    assert.equal((await first.tasks.get('task-1'))?.pauseState, 'retry-required');
+    first.close();
+
+    const restarted = new SqliteStore({ filename });
+    const recovery = sqliteLifecycle(restarted);
+    const restored = await restarted.tasks.get('task-1');
+    assert.equal(restored?.pauseState, 'retry-required');
+    assert.equal(restored?.controlHistory?.at(-1)?.action, 'pause-retry-required');
+    assert.equal(recovery.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+    const queuedAdmission = recovery.lifecycle.advanceRun('task-1', 'pi', 'held until Human resolution');
+    let admissionSettled = false;
+    void queuedAdmission.then(() => { admissionSettled = true; }, () => { admissionSettled = true; });
+    await setImmediate();
+    assert.equal(admissionSettled, false);
+    const cancelled = await recovery.lifecycle.cancelPauseRetryForHuman('task-1', { memberId: 'operator', memberKind: 'human' }, 'release the pending hold');
+    assert.equal(cancelled.pauseState, undefined);
+    assert.equal(cancelled.controlHistory?.at(-1)?.action, 'pause-request-cancelled');
+    await queuedAdmission;
+    assert.equal((await restarted.tasks.get('task-1'))?.activeRunId, 'run-1');
     restarted.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

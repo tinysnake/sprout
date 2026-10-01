@@ -65,6 +65,9 @@ export interface TaskStore {
     },
   ): Promise<boolean>;
 
+  /** Persist Pause retry-required intent without replacing concurrently settled Task fields. */
+  recordPauseRetryRequired(taskId: string, actor: TaskActor, at: number, reason: string): Promise<Task | undefined>;
+
   /**
    * Commit a Task's beginning intent and its Task lease together.
    *
@@ -170,6 +173,18 @@ export class InMemoryTaskStore implements TaskStore {
       || serializeTaskControlDocument(current) !== expected.controlDocument) return false;
     this.#tasks.set(task.id, task);
     return true;
+  }
+
+  async recordPauseRetryRequired(taskId: string, actor: TaskActor, at: number, reason: string): Promise<Task | undefined> {
+    const current = this.#tasks.get(taskId);
+    if (!current || current.pauseState !== undefined) return current;
+    const retryRequired: Task = {
+      ...current,
+      pauseState: 'retry-required',
+      controlHistory: [...(current.controlHistory ?? []), { action: 'pause-retry-required', actor, at, reason }],
+    };
+    this.#tasks.set(taskId, retryRequired);
+    return retryRequired;
   }
 
   async saveBeginningWithLease(task: Task, _lease: EnvironmentLease): Promise<void> {

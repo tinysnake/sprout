@@ -47,6 +47,14 @@ export class TaskRecoveryRefusal extends Error {
 /** A test process may throw this immediately after a durable commit. */
 export class DurableWriteCrash extends Error {}
 
+/** A Human Pause remains gated and requires an explicit retry or cancellation. */
+export class TaskPauseRetryRequired extends Error {
+  constructor() {
+    super('Pause could not be recorded after repeated Task changes; retry Human Pause or explicitly cancel the outstanding Pause request');
+    this.name = 'TaskPauseRetryRequired';
+  }
+}
+
 /** #33 replaces this contract implementation with the Worker protocol. */
 export interface TaskContextWorker {
   prepare(input: TaskContextMaterialization): Promise<{ readonly bootstrapInstructions: string }>;
@@ -133,6 +141,7 @@ export class TaskEnvironmentLifecycle {
   readonly #forceReleaseLease: NonNullable<TaskEnvironmentLifecycleOptions['forceReleaseLease']> | undefined;
   readonly #faults: NonNullable<TaskEnvironmentLifecycleOptions['faults']> | undefined;
   readonly #admissionPauseTails = new Map<string, Promise<void>>();
+  readonly #pauseRetryGates = new Map<string, { readonly promise: Promise<void>; readonly resolve: () => void }>();
 
   constructor(options: TaskEnvironmentLifecycleOptions) {
     this.#store = options.store;
@@ -278,7 +287,7 @@ export class TaskEnvironmentLifecycle {
     readonly reason: string;
     readonly contentVersion: number;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
-    return this.#withAdmissionPauseLock(taskId, () => this.#advanceRun(taskId, agentId, input, audit));
+    return this.#withAdmissionPauseLock(taskId, () => this.#advanceRun(taskId, agentId, input, audit), true);
   }
 
   async #advanceRun(taskId: string, agentId: string, input: string, audit?: {
@@ -380,6 +389,7 @@ export class TaskEnvironmentLifecycle {
   async end(taskId: string): Promise<Task> {
     const task = await this.#require(taskId);
     if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') return task;
+    if (task.pauseState === 'retry-required') throw new Error(`task ${taskId} Pause must be retried or explicitly cancelled before Task end`);
     if (task.activeRunId) throw new Error(`task ${taskId} cannot end while run ${task.activeRunId} is active`);
     if (task.admission !== undefined && (task.environmentLifecycleState !== 'ending'
       || !task.controlHistory?.some(event => event.action === 'end-requested' && event.actor.memberKind === 'human'))) {
@@ -424,7 +434,7 @@ export class TaskEnvironmentLifecycle {
     }
     // A lost nested session is a visible interrupted fact, never an automatic relaunch.
     const requestedPause = task.pauseState === 'requested'
-      ? [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'pause-requested')
+      ? [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'pause-requested' && 'reason' in event)
       : undefined;
     if (task.pauseState === 'requested' && requestedPause === undefined) throw new Error('Task pause request has no durable Human action');
     const resumed = omit(omit({
@@ -498,7 +508,7 @@ export class TaskEnvironmentLifecycle {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const task = await this.#require(taskId);
       this.#assertHuman(task, actor);
-      if (task.pauseState !== undefined) return task;
+      if (task.pauseState === 'requested' || task.pauseState === 'paused') return task;
       if (!['running', 'idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')
         || !task.environmentLeaseId) throw new Error(`task ${taskId} cannot be paused in its current lifecycle`);
       const lease = this.#pool.getLease(task.environmentLeaseId);
@@ -522,15 +532,49 @@ export class TaskEnvironmentLifecycle {
         updatedAt: task.updatedAt,
         controlDocument: serializeTaskControlDocument(task),
       });
-      if (saved) return next;
+      if (saved) {
+        this.#resolvePauseRetryGate(taskId);
+        return next;
+      }
     }
-    throw new Error(`task ${taskId} changed repeatedly before pause was recorded; retry Human Pause`);
+    this.#getPauseRetryGate(taskId);
+    const retryRequired = await this.#store.recordPauseRetryRequired(taskId, actor, this.#clock.now(), reason);
+    if (retryRequired?.pauseState !== 'retry-required') this.#resolvePauseRetryGate(taskId);
+    throw new TaskPauseRetryRequired();
+  }
+
+  /** Only the Human may cancel an outstanding Pause request after CAS exhaustion. */
+  async cancelPauseRetryForHuman(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    return this.#withAdmissionPauseLock(taskId, async () => {
+      const task = await this.#require(taskId);
+      this.#assertHuman(task, actor);
+      if (task.pauseState !== 'retry-required') {
+        throw new Error(`task ${taskId} has no retry-required Pause request to cancel`);
+      }
+      const { pauseState: _pause, ...rest } = task;
+      const at = this.#clock.now();
+      const next: Task = {
+        ...rest,
+        controlHistory: [...(task.controlHistory ?? []), { action: 'pause-request-cancelled', actor, at, reason }],
+        updatedAt: at,
+      };
+      const saved = await this.#store.saveIfUnchanged(next, {
+        environmentLifecycleState: task.environmentLifecycleState,
+        activeRunId: task.activeRunId,
+        updatedAt: task.updatedAt,
+        controlDocument: serializeTaskControlDocument(task),
+      });
+      if (!saved) throw new Error(`task ${taskId} changed before the Pause cancellation was recorded`);
+      this.#resolvePauseRetryGate(taskId);
+      return next;
+    });
   }
 
   /** Resume is an explicit Human action; it never admits a run by itself. */
   async resumePause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    if (task.pauseState === 'retry-required') throw new Error(`task ${taskId} Pause must be retried or explicitly cancelled before resume`);
     if (task.pauseState === undefined) throw new Error(`task ${taskId} is not paused`);
     if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} cannot resume while work is active or recovery is unresolved`);
@@ -653,6 +697,7 @@ export class TaskEnvironmentLifecycle {
   async discardForHuman(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    if (task.pauseState === 'retry-required') throw new Error(`task ${taskId} Pause must be retried or explicitly cancelled before discard`);
     if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
       throw new Error(`task ${taskId} cannot be discarded in its current lifecycle`);
     }
@@ -801,6 +846,7 @@ export class TaskEnvironmentLifecycle {
     // release together. Without the explicit release capability above, unfinished
     // work remains in recovery rather than claiming terminal cancellation.
     await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
+    this.#resolvePauseRetryGate(taskId);
     this.#forceReleaseLease(task.environmentLeaseId);
     return [...new Set(affectedRunIds)];
   }
@@ -826,6 +872,7 @@ export class TaskEnvironmentLifecycle {
       // crash before it leaves `ending` recoverable; a crash after it is already
       // terminal with a released lease, so retry/discard never gets stuck.
       await this.#store.saveTerminalWithLease(ended, task.environmentLeaseId);
+      this.#resolvePauseRetryGate(task.id);
       this.#faults?.afterTerminalCommit?.();
       this.#pool.releaseTaskLease(task.environmentLeaseId);
       return ended;
@@ -941,18 +988,56 @@ export class TaskEnvironmentLifecycle {
       || lease.instanceId !== task.environmentInstanceId) throw new Error(`task ${task.id} lease is not active`);
   }
 
-  async #withAdmissionPauseLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.#admissionPauseTails.get(taskId) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => { release = resolve; });
-    this.#admissionPauseTails.set(taskId, tail);
-    await previous;
-    try {
-      return await action();
-    } finally {
-      release();
-      if (this.#admissionPauseTails.get(taskId) === tail) this.#admissionPauseTails.delete(taskId);
+  async #withAdmissionPauseLock<T>(taskId: string, action: () => Promise<T>, waitForPauseRetryResolution = false): Promise<T> {
+    while (true) {
+      if (waitForPauseRetryResolution) await this.#awaitPauseRetryResolution(taskId);
+      const previous = this.#admissionPauseTails.get(taskId) ?? Promise.resolve();
+      let releaseTail!: () => void;
+      const tail = new Promise<void>((resolve) => { releaseTail = resolve; });
+      this.#admissionPauseTails.set(taskId, tail);
+      await previous;
+      let released = false;
+      const release = (): void => {
+        if (released) return;
+        released = true;
+        releaseTail();
+        if (this.#admissionPauseTails.get(taskId) === tail) this.#admissionPauseTails.delete(taskId);
+      };
+      try {
+        if (waitForPauseRetryResolution && (await this.#store.get(taskId))?.pauseState === 'retry-required') {
+          const gate = this.#getPauseRetryGate(taskId);
+          release();
+          await gate.promise;
+          continue;
+        }
+        return await action();
+      } finally {
+        release();
+      }
     }
+  }
+
+  async #awaitPauseRetryResolution(taskId: string): Promise<void> {
+    let gate = this.#pauseRetryGates.get(taskId);
+    if (!gate && (await this.#store.get(taskId))?.pauseState === 'retry-required') gate = this.#getPauseRetryGate(taskId);
+    await gate?.promise;
+  }
+
+  #getPauseRetryGate(taskId: string): { readonly promise: Promise<void>; readonly resolve: () => void } {
+    const current = this.#pauseRetryGates.get(taskId);
+    if (current) return current;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    const gate = { promise, resolve };
+    this.#pauseRetryGates.set(taskId, gate);
+    return gate;
+  }
+
+  #resolvePauseRetryGate(taskId: string): void {
+    const gate = this.#pauseRetryGates.get(taskId);
+    if (!gate) return;
+    this.#pauseRetryGates.delete(taskId);
+    gate.resolve();
   }
 
   async #saveControlTransition(current: Task, next: Task, operation: string): Promise<void> {

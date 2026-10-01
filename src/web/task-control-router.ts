@@ -1,7 +1,7 @@
 import { TaskControlError, type TaskControlService } from '../task/control-service.ts';
 import type { Task } from '../task/model.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
-import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
+import { TaskPauseRetryRequired, TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import { toTaskView } from './views.ts';
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 
@@ -20,7 +20,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
       if (context.method !== 'POST' || context.segments.length !== 4
         || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
       const action = context.segments[3] ?? '';
-      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
+      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
       if (!supported.has(action)) return false;
       if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
       try {
@@ -39,6 +39,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
           case 'pause':
           case 'interrupt':
           case 'resume':
+          case 'cancel-pause':
           case 'clear-blocker':
           case 'end':
           case 'discard':
@@ -48,6 +49,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
             if (action === 'pause') task = await controls.pauseForHuman(taskId, { reason: body.reason });
             else if (action === 'interrupt') task = await controls.interruptForHuman(taskId, { reason: body.reason });
             else if (action === 'resume') task = await controls.resumeForHuman(taskId, { reason: body.reason });
+            else if (action === 'cancel-pause') task = await controls.cancelPauseForHuman(taskId, { reason: body.reason });
             else if (action === 'clear-blocker') task = await controls.clearBlockerForHuman(taskId, { reason: body.reason });
             else if (action === 'end') task = await controls.endForHuman(taskId, { reason: body.reason });
             else task = await controls.discardForHuman(taskId, { reason: body.reason });
@@ -89,6 +91,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
         if (task === undefined) return json(context, 400, { code: 'invalid-command', error: 'unsupported Task control' });
         return json(context, 200, { task: toTaskView(task) });
       } catch (error) {
+        if (error instanceof TaskPauseRetryRequired) return json(context, 409, { code: 'pause-retry-required', error: error.message });
         if (error instanceof TaskControlError) {
           const status = error.code === 'unknown-task' ? 404 : error.code === 'authority-required' ? 403
             : error.code === 'invalid-command' ? 400 : 409;

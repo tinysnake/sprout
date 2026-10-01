@@ -206,6 +206,22 @@ export class SqliteTaskStore implements TaskStore {
     return changed.changes === 1;
   }
 
+  async recordPauseRetryRequired(taskId: string, actor: import('./model.ts').TaskActor, at: number, reason: string): Promise<Task | undefined> {
+    return this.#transactions.immediate(() => {
+      const row = this.#db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
+      if (!row) return undefined;
+      const current = toTask(row);
+      if (current.pauseState !== undefined) return current;
+      const retryRequired: Task = {
+        ...current,
+        pauseState: 'retry-required',
+        controlHistory: [...(current.controlHistory ?? []), { action: 'pause-retry-required', actor, at, reason }],
+      };
+      this.#db.prepare('UPDATE tasks SET control_document = ? WHERE id = ?').run(taskControlDocument(retryRequired), taskId);
+      return retryRequired;
+    });
+  }
+
   async saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void> {
     const leases = this.#requireLeases();
     this.#transactions.immediate(() => {

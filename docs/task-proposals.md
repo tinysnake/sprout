@@ -124,8 +124,12 @@ Once begun, the protected Task controls remain independent of proposal approval:
   Agent lead must remain eligible on the bound Environment.
 
 - `POST /api/tasks/:id/pause` immediately holds admission; an active run may
-  settle naturally. `POST /api/tasks/:id/interrupt` is available only while a
-  pause request still has an active run and settles that run as `stopped`.
+  settle naturally. If repeated state conflicts prevent the Pause from being
+  recorded, queued admissions remain gated while the request is retry-required.
+  The Human may retry `/pause` to record the hold or use
+  `POST /api/tasks/:id/cancel-pause` with `{ reason }` to explicitly cancel it.
+  `POST /api/tasks/:id/interrupt` is available only while a recorded pause
+  request still has an active run and settles that run as `stopped`.
   `POST /api/tasks/:id/resume` clears the Human pause without automatically
   admitting another run.
 - `POST /api/tasks/:id/blockers` accepts only `reason`, `requiredAction`,
@@ -179,9 +183,9 @@ restores the prior pause, blocker, or validation gap without replaying work.
   `web/src/adapters/task-proposal-contract.test.ts`.
 - Encoded identities and disconnected command non-replay:
   `web/src/adapters/task-proposal-api.test.ts`.
-- Pause/Interrupt, retained lease, unexpected restart, and Task-lead escalation:
-  `src/task/control-service.test.ts`, `src/task/environment-lifecycle.test.ts`,
-  and `src/run/orchestrator.test.ts`.
+- Pause/Interrupt, retained lease, unexpected restart, exhausted Pause CAS and
+  Human resolution, and Task-lead escalation: `src/task/control-service.test.ts`,
+  `src/task/environment-lifecycle.test.ts`, and `src/run/orchestrator.test.ts`.
 - Claim/blocker shape, Human validation/correction, end/recovery disposition,
   Force Release integration, and hostile HTTP actor fields:
   `src/task/control-service.test.ts`, `src/web/task-control-router.test.ts`,
