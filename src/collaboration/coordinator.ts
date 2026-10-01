@@ -899,17 +899,21 @@ export class CollaborationCoordinator {
       const run = await this.#runs.load?.(runId);
       const origins = new Set<string>();
       for (const wake of wakes) {
-        if (wake.projectId !== event.projectId ||
-            (wake.runId !== runId && wake.runId !== run?.retryOfRunId)) continue;
+        // Missing run links are not causal evidence: two unset IDs must never
+        // make an unrelated pending wake an origin of this failure notice.
+        if (wake.projectId !== event.projectId || wake.runId === undefined ||
+            (wake.runId !== runId &&
+             (run?.retryOfRunId === undefined || wake.runId !== run.retryOfRunId))) continue;
         const source = await this.#resolveWakeSource(wake);
         const inputs = source?.kind === 'batch' ? source.assigned : source ? [source.input] : [];
         for (const input of inputs) {
           if (!isProjectEvent(input) && input.projectId === event.projectId) origins.add(input.scopeId);
         }
       }
-      // Placement is reconstructed from durable causality on every read. This
-      // also covers a fast settlement published before admitWake committed,
-      // and historical events, without duplicating facts or waking anyone.
+      // Placement is reconstructed from durable causality on every read. A
+      // fast settlement published before admitWake commits gains its origin
+      // only once that link is durable; historical events use the same path,
+      // without duplicating facts or waking anyone.
       // Historical identifier-only events retain their durable identity while
       // their read projection explains the persisted outcome. No replay or
       // mutation of the Project record is needed after deploying this repair.
