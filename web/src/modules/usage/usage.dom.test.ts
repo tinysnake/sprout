@@ -498,7 +498,9 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
     const { FixtureUsageService } = await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts');
     const fixture = new FixtureUsageService();
     const calls: any[] = [];
-    const authority = new FixtureUsageService();
+    // Details/list are stale and truncated; aggregate authority has newer token facts.
+    const authority = new FixtureUsageService({ activities: fixture.rawActivities.map((a: any) => a.id === 'act-203'
+      ? { ...a, tokenDimensions: { ...a.tokenDimensions, total: 888888 } } : a) });
     const aggregate = authority.getAggregate.bind(authority);
     fixture.getAggregate = async (filter: any) => { calls.push(filter); return aggregate(filter); };
     const list = fixture.listActivities.bind(fixture);
@@ -507,10 +509,11 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
     for (const tab of ['run', 'task', 'project', 'agent', 'model', 'time']) {
       (doc.querySelector(`[data-usage-tab="${tab}"]`) as HTMLButtonElement).click();
       await settle(100);
-      assert.ok(calls.some(f => f.groupBy === (tab === 'time' ? undefined : tab) && f.timeZone === 'UTC'), `aggregate query for ${tab}`);
+      assert.ok(calls.some(f => f.groupBy === (tab === 'time' ? undefined : tab) && f.timeZone === 'UTC'
+        && f.kind === (['run','task','agent'].includes(tab) ? 'agent_run' : undefined)), `aggregate query for ${tab}`);
     }
     assert.match(doc.body.textContent ?? '', /Activity list incomplete/);
-    assert.match(doc.querySelector('[data-usage-summary-kind="agent_run"]')?.textContent ?? '', /181,500 tokens/);
+    assert.match(doc.querySelector('[data-usage-summary-kind="agent_run"]')?.textContent ?? '', /1,008,988 tokens/, 'summary uses newer aggregate facts, not stale list/details');
     const project = doc.querySelector('[data-usage-filter="projectId"]') as HTMLSelectElement;
     project.value = 'proj-minesweeper';
     project.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));

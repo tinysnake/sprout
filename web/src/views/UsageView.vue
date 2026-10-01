@@ -55,6 +55,7 @@ let loadGeneration = 0;
 const tabLabels: Record<UsageTab, string> = {
   run: 'Agent run',
   task: 'Task',
+const scopedActivityIds = ref(new Set<string>());
   project: 'Project',
   agent: 'Agent',
   model: 'Model',
@@ -90,13 +91,17 @@ async function loadData() {
     ...(timeRangeFilter.value === 'all' ? {} : { from: to - days[timeRangeFilter.value] * 86400000, to }),
   };
   try {
-    const [scope, fetchedActivities, fetchedProjects, fetchedAgents, fetchedModels] = await Promise.all([
-      service.getAggregate({ ...filter, groupBy: activeTab.value === 'time' ? undefined : activeTab.value }),
+    const [overview, scope, fetchedActivities, fetchedProjects, fetchedAgents, fetchedModels] = await Promise.all([
+      service.getAggregate(filter),
+      service.getAggregate({ ...filter,
+        kind: ['run', 'task', 'agent'].includes(activeTab.value) ? 'agent_run' : undefined,
+        groupBy: activeTab.value === 'time' ? undefined : activeTab.value,
+      }),
       service.listActivities(filter),
       service.listProjects(), service.listAgents(), service.listModels(),
     ]);
     // The aggregate's identities, not a potentially paginated list, define the constituents.
-    const identities = [...scope.activityIdentities, ...(scope.provisionalTotals?.activityIdentities ?? [])];
+    const identities = [...overview.activityIdentities, ...(overview.provisionalTotals?.activityIdentities ?? [])];
     const items = new Map(fetchedActivities.map(item => [item.id, item]));
     const missing = identities.filter(identity => !items.has(identity.activityId));
     const recovered = await Promise.all(missing.map(async identity => {
@@ -116,7 +121,8 @@ async function loadData() {
       return [identity.activityId, aggregate] as const;
     }));
     if (generation !== loadGeneration) return;
-    listIncomplete.value = missing.length > 0 || recovered.some(item => !item);
+    scopedActivityIds.value = new Set([...scope.activityIdentities, ...(scope.provisionalTotals?.activityIdentities ?? [])].map(identity => identity.activityId));
+    listIncomplete.value = missing.length > 0;
     activities.value = identities.flatMap(identity => items.has(identity.activityId) ? [items.get(identity.activityId)!] : []);
     authoritativeActivities.value = new Map(totals);
     projects.value = fetchedProjects;
@@ -378,8 +384,12 @@ const routingActivities = computed(() => filteredActivities.value.filter((a) => 
 // Groupings for views
 const taskGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
-  for (const activity of workActivities.value) {
+  for (const activity of scopedWorkActivities.value) {
     const key = activity.taskId ?? 'unassigned';
+// Scope-query constituents drive each tab; summary kinds remain separate across all retained activity.
+const scopedActivities = computed(() => filteredActivities.value.filter(a => scopedActivityIds.value.has(a.id)));
+const scopedWorkActivities = computed(() => scopedActivities.value.filter(a => a.kind === 'agent_run'));
+
     groups.set(key, [...(groups.get(key) ?? []), activity]);
   }
   return groups;
@@ -387,7 +397,7 @@ const taskGroups = computed(() => {
 
 const projectGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
-  for (const activity of filteredActivities.value) {
+  for (const activity of scopedActivities.value) {
     groups.set(activity.projectId, [...(groups.get(activity.projectId) ?? []), activity]);
   }
   return groups;
@@ -395,7 +405,7 @@ const projectGroups = computed(() => {
 
 const agentGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
-  for (const activity of workActivities.value) {
+  for (const activity of scopedWorkActivities.value) {
     if (!activity.agentId) continue;
     groups.set(activity.agentId, [...(groups.get(activity.agentId) ?? []), activity]);
   }
@@ -404,7 +414,7 @@ const agentGroups = computed(() => {
 
 const modelGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
-  for (const activity of filteredActivities.value) {
+  for (const activity of scopedActivities.value) {
     const key = modelGroupKey(activity);
     groups.set(key, [...(groups.get(key) ?? []), activity]);
   }
@@ -413,13 +423,13 @@ const modelGroups = computed(() => {
 
 const timeGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
-  for (const activity of filteredActivities.value) {
+  for (const activity of scopedActivities.value) {
     groups.set(activity.settlementRange, [...(groups.get(activity.settlementRange) ?? []), activity]);
   }
   return [...groups.entries()].sort(([a], [b]) => (rangeRank[a] ?? 99) - (rangeRank[b] ?? 99));
 });
 
-const backingActivities = computed(() => ['run', 'task', 'agent'].includes(activeTab.value) ? workActivities.value : filteredActivities.value);
+const backingActivities = computed(() => scopedActivities.value);
 const backingAggregates = computed(() => {
   const entries: { label: string; acts: readonly UsageActivityItem[] }[] = [
     { label: 'Work-model Agent runs', acts: workActivities.value },
@@ -718,7 +728,7 @@ const timeRangeLabels: Record<string, string> = {
 
           <div v-else class="usage-activity-list" role="table" aria-label="Agent runs usage table">
             <div
-              v-for="activity in workActivities"
+              v-for="activity in scopedWorkActivities"
               :key="activity.id"
               class="usage-activity-item"
               :class="{ open: selectedActivityId === activity.id }"
