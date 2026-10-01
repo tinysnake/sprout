@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createFeedTestAdapter, pendingEnrollmentSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
+import type { BrowserEventSource } from '../transport/browser-transport.ts';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
 const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
@@ -437,6 +438,94 @@ test('Feed pending enrollment attention card opens its authoritative detail and 
     assert.equal(useAppStore(pinia).returnContext?.to,
       router.resolve({ name: 'feed', query: { scope: 'feed:infra', urgency: 'attention', activity: 'all' } }).fullPath);
     app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('production page composition shares one transport, CSRF token, connection state, and authentication expiry', async () => {
+  const { vite, cleanup } = await setupProductionDom();
+  try {
+    const [{ createProductionAppOptions }, transportModule] = await Promise.all([
+      vite.ssrLoadModule('/src/app/main.ts') as Promise<typeof import('../app/main.ts')>,
+      vite.ssrLoadModule('/src/transport/browser-transport.ts') as Promise<typeof import('../transport/browser-transport.ts')>,
+    ]);
+    const calls: { path: string; method: string; csrf: string | null }[] = [];
+    let nextTimer = 0;
+    const staleTimers = new Map<number, () => void>();
+    let authenticationRevoked = false;
+    const source: BrowserEventSource = {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      addEventListener() {},
+      close() {},
+    };
+    const transport = transportModule.createBrowserTransport({
+      fetch: async (input, init) => {
+        const path = String(input);
+        const method = init?.method ?? 'GET';
+        const csrf = new Headers(init?.headers).get('x-sprout-csrf');
+        calls.push({ path, method, csrf });
+        if (authenticationRevoked) return new Response('{}', { status: 401 });
+        if (path === '/api/auth/session' && method === 'POST') {
+          return new Response(JSON.stringify({ csrfToken: 'test-csrf-token' }), { status: 200 });
+        }
+        if (path === '/api/tasks/task-1/pause') {
+          return new Response(JSON.stringify({ task: {} }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      },
+      eventSource: () => source,
+      setTimeout: ((callback: TimerHandler) => {
+        const id = ++nextTimer;
+        if (typeof callback === 'function') staleTimers.set(id, callback as () => void);
+        return id;
+      }) as typeof globalThis.setTimeout,
+      clearTimeout: ((id: ReturnType<typeof globalThis.setTimeout>) => {
+        staleTimers.delete(Number(id));
+      }) as typeof globalThis.clearTimeout,
+    });
+    const options = createProductionAppOptions(transport);
+    assert.equal(options.connectionSource, transport);
+
+    const sharedReaders = [
+      options.feedService!, options.taskService!, options.chatService!,
+      options.operatorSession!, options.settingsService!,
+    ];
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    const unsubscribe = transport.events(() => undefined);
+    source.onerror?.(new Event('error'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'reconnecting'),
+      'Feed, Tasks, Chat, Settings, and Shell observe the same unsettled transport');
+    source.onopen?.(new Event('open'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    [...staleTimers.values()].at(-1)?.();
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'stale'),
+      'the same liveness timeout marks every page stale');
+    source.onerror?.(new Event('error'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'reconnecting'));
+    source.onopen?.(new Event('open'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    unsubscribe();
+
+    await options.operatorSession!.signIn('test-only-credential');
+    await options.taskService!.pause('task-1', 'verify shared CSRF');
+    assert.equal(calls.find((call) => call.path === '/api/tasks/task-1/pause')?.csrf, 'test-csrf-token',
+      'the session adapter installs CSRF proof used by the Task adapter');
+
+    authenticationRevoked = true;
+    const authRequired = (error: unknown) => error instanceof transportModule.BrowserRequestError
+      && error.kind === 'authentication-required';
+    await assert.rejects(options.feedService!.load(), authRequired);
+    await assert.rejects(options.taskService!.listTasks('project-1'), authRequired);
+    await assert.rejects(options.chatService!.listScopes('project-1'), authRequired);
+    await assert.rejects(options.settingsService!.loadSettings(), authRequired);
+    await assert.rejects(options.operatorSession!.listSessions(), authRequired);
+    await assert.rejects(options.environmentService!.listEnvironments(), authRequired);
+    await assert.rejects(options.agentService!.listAgents(), authRequired);
+    await assert.rejects(options.projectService!.listProjects(), authRequired);
+    await assert.rejects(options.usageService!.getAggregate({}), authRequired);
   } finally {
     await cleanup();
   }
