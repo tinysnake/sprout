@@ -85,6 +85,8 @@ import type { TaskProposalStore } from './task/proposal-store.ts';
 import { createTaskProposalRouter } from './web/task-proposal-router.ts';
 import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
 import { createTaskControlRouter } from './web/task-control-router.ts';
+import { createFeedRouter } from './web/feed-router.ts';
+import { createFeedProjection } from './web/feed.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
@@ -1644,6 +1646,33 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     };
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
+    // The read-only Feed projection (#103): one derived snapshot over the
+    // authoritative Task, proposal, Project-event, enrollment, recovery, run,
+    // and routing state. It stores and mutates nothing — Attention clears only
+    // when its source clears, and its router serves GET with no dismiss or
+    // snooze command.
+    const feed = createFeedProjection({
+      projects: async () => {
+        const refs = (await projectService.list()).map((project) => ({ id: project.id, displayName: project.displayName }));
+        const known = new Set(refs.map((ref) => ref.id));
+        for (const configured of projects.list()) {
+          if (!known.has(configured.id)) refs.push({ id: configured.id, displayName: configured.id });
+        }
+        return refs;
+      },
+      tasks: () => tasks.list(),
+      proposals: async () => {
+        const ids = new Set((await projectService.list()).map((project) => project.id));
+        for (const configured of projects.list()) ids.add(configured.id);
+        return (await Promise.all([...ids].map((id) => taskProposals.list(id)))).flat();
+      },
+      events: () => collaboration.listEvents(),
+      enrollments: () => enrollments.list(),
+      recoveries: () => recovery.list(),
+      runs: () => orchestrator.list(),
+      routingBatches: () => collaboration.listRoutingBatches(),
+    });
+
     const api = createRunApi({
       orchestrator,
       agents,
@@ -1688,6 +1717,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createTaskProposalRouter({ proposals: taskProposals }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
         createTaskControlRouter({ controls: taskControls }),
+        // The read-only Feed/Attention projection (#103) through the same
+        // additive seam: one GET snapshot, no dismiss or snooze command.
+        createFeedRouter({ feed }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
