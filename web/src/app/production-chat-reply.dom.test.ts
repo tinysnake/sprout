@@ -509,9 +509,11 @@ test('a failed run and an empty #182-style completion never render a phantom rep
     await sendInComposer(page, 'This run fails instead of replying.');
     await waitFor('the failing input', () => messageElement(page, 'This run fails instead of replying'));
     await waitFor('the failed run to settle', () => settledRuns(1));
-    // Project events belong to the Project channel, not the direct timeline.
-    // Verify the Project entry there, then return to the originating direct
-    // message to inspect its independent server-backed wake → run evidence.
+    // The failure notice must be visible without leaving the originating chat.
+    const originNotice = await waitFor('failure notice in the originating direct chat', () =>
+      page.doc.querySelector<HTMLElement>('[data-event-id]'));
+    assert.match(originNotice.textContent ?? '', /Agent run failed/);
+    // The same event remains the durable Project record.
     await page.push(`/project/chat/${page.server.channelScopeId}?project=${PROJECT_ID}`);
     const failureEntry = await waitFor('the #180 failure entry in the Project timeline', () =>
       [...page.doc.querySelectorAll<HTMLElement>('[data-event-id]')]

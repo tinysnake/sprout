@@ -93,7 +93,7 @@ const archivedDirectAgent = computed(() => {
 const activeMessages = computed(() => messages.value.filter((m) => m.scopeId === activeScope.value?.id));
 const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
-  ...(activeScope.value?.kind === 'project' ? events.value.map((event) => ({ kind: 'event' as const, event })) : []),
+  ...events.value.filter((event) => activeScope.value?.kind === 'project' || event.originScopeIds?.includes(activeScopeId.value)).map((event) => ({ kind: 'event' as const, event })),
 ].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 // A background read may refuse Send, but must not interrupt draft entry.

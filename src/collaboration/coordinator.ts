@@ -889,8 +889,29 @@ export class CollaborationCoordinator {
   }
 
   /** Durable state for observability: every Project event on record. */
-  listEvents(projectId?: string): Promise<readonly ProjectEvent[]> {
-    return this.#store.listEvents(projectId);
+  async listEvents(projectId?: string): Promise<readonly ProjectEvent[]> {
+    const events = await this.#store.listEvents(projectId);
+    const wakes = await this.#store.listWakeRequests();
+    return Promise.all(events.map(async (event) => {
+      if (event.kind !== 'agent-run-failure' || event.producer.kind !== 'system' ||
+          !event.deliveryKey.startsWith('run-failure:')) return event;
+      const runId = event.deliveryKey.slice('run-failure:'.length);
+      const run = await this.#runs.load?.(runId);
+      const origins = new Set<string>();
+      for (const wake of wakes) {
+        if (wake.projectId !== event.projectId ||
+            (wake.runId !== runId && wake.runId !== run?.retryOfRunId)) continue;
+        const source = await this.#resolveWakeSource(wake);
+        const inputs = source?.kind === 'batch' ? source.assigned : source ? [source.input] : [];
+        for (const input of inputs) {
+          if (!isProjectEvent(input) && input.projectId === event.projectId) origins.add(input.scopeId);
+        }
+      }
+      // Placement is reconstructed from durable causality on every read. This
+      // also covers a fast settlement published before admitWake committed,
+      // and historical events, without duplicating facts or waking anyone.
+      return { ...event, originScopeIds: [...origins] };
+    }));
   }
 
   /** Durable state for observability: every wake request on record. */

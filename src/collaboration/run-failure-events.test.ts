@@ -195,6 +195,30 @@ function streamlessAdmitter(runs: readonly AgentRun[]): RunAdmitter {
   };
 }
 
+test('failure notice follows the real Message → wake → run into its originating direct chat', async () => {
+  const scopes = buildCollaborationScopes({ projects: [project] });
+  const scopeId = await scopes.openDirect(project.id, ['operator', 'architect']);
+  const run = failedRun();
+  const coordinator = new CollaborationCoordinator({
+    scopes: scopes.scopes,
+    store: new InMemoryCollaborationStore(),
+    runs: { ...streamlessAdmitter([run]), async submit() { return run; } },
+  });
+  const delivered = await coordinator.deliver({
+    scopeId, author: { id: 'operator', kind: 'human' }, body: 'Please investigate',
+    recipients: ['architect'], deliveryKey: 'origin-failure',
+  });
+  assert.equal(delivered.wakes[0]?.runId, run.id);
+  await coordinator.reconcile();
+  const events = await coordinator.listEvents(project.id);
+  assert.deepEqual((events[0] as unknown as { originScopeIds: string[] }).originScopeIds, [scopeId]);
+  assert.equal(events.length, 1, 'the same durable Project event is exposed, not a fabricated reply');
+  assert.equal((await coordinator.listMessages()).length, 1);
+  assert.equal((await coordinator.listWakeRequests()).length, 1, 'failure notice never wakes an Agent');
+  await coordinator.reconcile();
+  assert.equal((await coordinator.listEvents(project.id)).length, 1);
+});
+
 test('restart reconciliation publishes a missed failure event exactly once', async () => {
   const marker = 'ARBITRARY_RECONCILIATION_OUTPUT';
   const run = failedRun({ failure: `engine failed: ${marker} at ${['fixture', 'node', '12345'].join('')}`, failureClass: 'execution' });
