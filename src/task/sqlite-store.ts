@@ -417,7 +417,7 @@ interface TaskRunRow {
   readonly requested_at: number | null;
 }
 
-type TaskControlDocument = Pick<Task, 'blocker' | 'completionClaims' | 'pendingCompletionClaimId' | 'pauseState' | 'controlHistory' | 'endDisposition'>;
+type TaskControlDocument = Pick<Task, 'blocker' | 'completionClaims' | 'pendingCompletionClaimId' | 'pauseState' | 'controlHistory' | 'endDisposition' | 'forcedRelease'>;
 
 const taskControlDocument = serializeTaskControlDocument;
 

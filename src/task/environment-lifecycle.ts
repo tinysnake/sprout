@@ -7,6 +7,7 @@
  * five commands; they do not recreate this ordering themselves.
  */
 
+import { sanitizeOperatorText } from '../environment/privacy.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
@@ -348,7 +349,7 @@ export class TaskEnvironmentLifecycle {
       ...task,
       status: run.status === 'failed' ? 'blocked' : task.blocker !== undefined ? 'blocked' : 'in-progress',
       environmentLifecycleState: run.status === 'failed' || task.blocker !== undefined ? 'blocked' : 'idle',
-      ...(run.status === 'failed' ? { blockerReason: `run ${run.id} failed: ${run.failure ?? 'no failure detail'}`,
+      ...(run.status === 'failed' ? { blockerReason: `run ${run.id} failed; inspect the bounded run summary`,
         ...(task.admission !== undefined ? { blocker: this.#unfinishedBlocker(task, `run ${run.id} failed`) } : {}),
       } : {}),
       ...(requestedPause !== undefined ? { pauseState: 'paused' as const,
@@ -667,6 +668,11 @@ export class TaskEnvironmentLifecycle {
 
   async recordSubordinateStopRequest(taskId: string, actor: TaskActor, runId: string, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
+    this.#assertLeadOrHuman(task, actor);
+    const link = (await this.#store.listRuns(taskId)).find(item => item.runId === runId);
+    if (!link?.actor || link.actor.memberKind !== actor.memberKind || link.actor.memberId !== actor.memberId) {
+      throw new Error('Task lead stop authority is limited to runs they initiated');
+    }
     if (task.activeRunId !== runId || task.environmentLifecycleState !== 'running') throw new Error(`run ${runId} is not active for Task ${taskId}`);
     this.#assertActiveTaskLease(task);
     const at = this.#clock.now();
@@ -735,6 +741,7 @@ export class TaskEnvironmentLifecycle {
     },
   ): Promise<readonly string[]> {
     const task = await this.#require(taskId);
+    if (task.admission !== undefined) this.#assertHuman(task, { memberId: input.actor, memberKind: 'human' });
     const affectedRunIds = (await this.#store.listRuns(taskId)).map((link) => link.runId);
     if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
     if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
@@ -761,6 +768,8 @@ export class TaskEnvironmentLifecycle {
             completedAt: input.at,
             environmentLifecycleState: 'discarded' as const,
             endDisposition: 'cancelled' as const,
+            forcedRelease: { actor: input.actor, reason: sanitizeOperatorText(input.reason, { maxLength: 2000, fallback: 'Human Force Release' }),
+              unresolvedFacts: input.unresolvedFacts.map(fact => sanitizeOperatorText(fact, { maxLength: 2000, fallback: 'unresolved cleanup proof' })), at: input.at },
             blockerReason: 'Force Released by the Human operator; unresolved facts recorded.',
             updatedAt: input.at,
           },

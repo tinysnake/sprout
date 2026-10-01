@@ -167,10 +167,10 @@ test('#171 task recovery actions refuse actionably instead of the protected gene
     });
 
     // The witnessed review sequence: resume succeeds (the Task returns to
-    // deliberate blocked work), then a discard that no longer applies.
+    // its exact idle state), then a discard that no longer applies.
     const resumed = await post('resume');
     assert.equal(resumed.status, 200);
-    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'blocked');
+    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'idle');
 
     const discarded = await post('discard');
     assert.equal(discarded.status, 409);

@@ -164,6 +164,7 @@ export interface Task {
   readonly controlHistory?: readonly TaskControlEvent[];
   /** Durable intent survives cleanup/release recovery without changing disposition. */
   readonly endDisposition?: 'completed' | 'cancelled';
+  readonly forcedRelease?: { readonly actor: string; readonly reason: string; readonly unresolvedFacts: readonly string[]; readonly at: number };
   /** Fixed only by Task begin; absent for an unbegun Task. */
   readonly environmentInstanceId?: string;
   /** The Task-held lease, never a nested run-held lease. */
@@ -186,6 +187,7 @@ export function serializeTaskControlDocument(task: Task): string | null {
     ...(task.pauseState !== undefined ? { pauseState: task.pauseState } : {}),
     ...(task.controlHistory !== undefined ? { controlHistory: task.controlHistory } : {}),
     ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
+    ...(task.forcedRelease !== undefined ? { forcedRelease: task.forcedRelease } : {}),
   };
   return Object.keys(document).length > 0 ? JSON.stringify(document) : null;
 }

@@ -12,6 +12,7 @@ import { InMemoryTaskStore } from './store.ts';
 import { TaskService } from './service.ts';
 import { TaskControlService } from './control-service.ts';
 import type { Task, TaskActor } from './model.ts';
+import { toTaskView } from '../web/views.ts';
 
 const definition: EnvironmentDefinition = { id: 'local', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
 const instance: EnvironmentInstance = { id: 'local-1', definitionId: 'local' };
@@ -72,6 +73,7 @@ test('lower lifecycle and service seams reject Agent escalation into Human Task 
     () => s.lifecycle.discardForHuman('task-1', lead, 'spoof discard'),
     () => s.lifecycle.recoverForHuman('task-1', 'discard', lead, 'spoof recovery'),
     () => s.lifecycle.recordInterruptRequest('task-1', lead, 'spoof interrupt'),
+    () => s.lifecycle.forceRelease('task-1', { actor: 'pi', reason: 'steal release', unresolvedFacts: ['not checked'], at: 50 }),
     () => s.tasks.end('task-1'),
     () => s.tasks.advanceWithAttribution('task-1', { agentId: 'pi', actor: { memberId: 'other-agent', memberKind: 'agent' }, reason: 'steal advance', contentVersion: 1 }),
   ]) await assert.rejects(attempt, /authority|Human|accepted|authorized/i);
@@ -123,6 +125,16 @@ test('a failed nested run blocks unfinished Task work instead of making the Task
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
 });
 
+test('failure diagnostics remain bounded summaries rather than leaking into Task blockers', async () => {
+  const s = await scenario();
+  const advanced = await s.lifecycle.advanceRun('task-1', 'pi', 'work', { actor: lead, reason: 'step', contentVersion: 1 });
+  const diagnostic = 'untrusted diagnostic '.repeat(1000);
+  await s.tasks.onRunSettled({ taskId: 'task-1', run: { ...run(advanced.runId, 'failed'), failure: diagnostic } });
+  const current = (await s.tasks.getWithRuns('task-1'))!;
+  assert.ok(current.runs[0]!.summary!.summary.length <= 4000);
+  assert.doesNotMatch(current.task.blockerReason ?? '', /untrusted diagnostic/);
+});
+
 test('unexpected interruption during a pause request recovers into paused state without replay', async () => {
   const s = await scenario();
   const advance = await s.lifecycle.advanceRun('task-1', 'pi', 'continue', { actor: lead, reason: 'bounded step', contentVersion: 1 });
@@ -149,6 +161,7 @@ test('Task leads can stop only a subordinate run they initiated without releasin
   const other = await scenario();
   const humanAdvance = await other.lifecycle.advanceRun('task-1', 'pi', 'Human initiated', { actor: human, reason: 'operator step', contentVersion: 1 });
   await assert.rejects(other.controls.stopSubordinateForLead('task-1', lead, { runId: humanAdvance.runId, reason: 'steal authority' }), /only a run they initiated/);
+  await assert.rejects(other.lifecycle.recordSubordinateStopRequest('task-1', lead, humanAdvance.runId, 'bypass the service'), /initiated|authority/);
   assert.equal((await other.tasks.get('task-1'))?.activeRunId, humanAdvance.runId);
 });
 
@@ -253,6 +266,8 @@ test('Force Release records cancellation disposition without claiming normal con
   assert.equal(forced?.status, 'cancelled');
   assert.equal(forced?.environmentLifecycleState, 'discarded');
   assert.equal(forced?.endDisposition, 'cancelled');
+  assert.equal(toTaskView(forced!).taskContextState, 'cleanup-unproved-force-release');
+  assert.deepEqual(forced?.forcedRelease?.unresolvedFacts, ['context recycle not proved']);
   assert.equal(s.pool.getLease(leaseId)?.state, 'released');
 });
 

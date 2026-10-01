@@ -108,13 +108,20 @@ command supplies the initial run's actor and reason.
 
 The authenticated runtime refuses direct legacy Task creation, begin, and
 advance routes; the old Task transport remains only for unauthenticated M1 test
-compositions. #101 owns later Task controls and Task content changes, including
-new content versions and admission of subsequent runs against the latest
-version. The complete Tasks page remains #102.
+compositions. The Task control boundary below owns Human interventions and
+versioned content changes; subsequent runs bind the latest version. The complete
+Tasks page remains #102.
 
 ## Task control boundary (#101)
 
 Once begun, the protected Task controls remain independent of proposal approval:
+
+- `POST /api/tasks/:id/content` accepts `{ expectedContentVersion, content,
+  reason }`, where content contains title, goal, constraints, validation criteria,
+  and lead. Only the Human may revise it. Stale versions are refused; revisions
+  preserve prior content in curated history and never replace the Environment,
+  replay an active run, or rewrite its version or a pending claim. A replacement
+  Agent lead must remain eligible on the bound Environment.
 
 - `POST /api/tasks/:id/pause` immediately holds admission; an active run may
   settle naturally. `POST /api/tasks/:id/interrupt` is available only while a
@@ -129,8 +136,9 @@ Once begun, the protected Task controls remain independent of proposal approval:
   `validationEvidence`, `durableChanges`, `limitations`, and
   `recommendedDisposition`. It rejects unknown keys (including reasoning or
   transcript fields), empty required evidence, and non-factual nested values.
-  A claim is not completion; the Task retains its lease while awaiting Human
-  validation.
+  Claims automatically record the latest admitted run's content version (or the
+  current version when there has been no run). A claim is not completion; the
+  Task retains its lease while awaiting Human validation.
 - `POST /api/tasks/:id/validation` accepts `{ claimId, decision: "accept" |
   "correct", reason }`. Acceptance begins safe cleanup toward completion;
   correction returns to deliberate work without releasing the lease.
@@ -138,14 +146,20 @@ Once begun, the protected Task controls remain independent of proposal approval:
   `POST /api/tasks/:id/discard` records cancellation intent and uses the same
   cleanup-then-release sequence. `POST /api/tasks/:id/recovery` is Human-only;
   retries of an accepted completion preserve that completed intent. Force
-  Release remains the Environment recovery service's explicit emergency path.
+  Release remains the Environment recovery service's explicit emergency path;
+  its permanent Task disposition exposes `cleanup-unproved-force-release`, not
+  a false claim that context was recycled.
 
 All routes derive the Human from the authenticated operator boundary and reject
 caller-supplied actors. Agent Task leads receive only internal bounded
 advancement, subordinate stop, blocker, and completion-claim capabilities.
 Task, nested-run, pause/validation, and Environment lease state remain distinct;
 terminal `done` or `cancelled` is not recorded until normal context cleanup and
-lease release have committed together.
+lease release have committed together. A lost cleanup acknowledgement can be
+retried: the Worker freshly proves context absence under the authenticated
+Project sentinel without touching Project work. Failed/interrupted runs expose
+a system-attributed routable blocker requiring Human inspection. Idle recovery
+restores the prior pause, blocker, or validation gap without replaying work.
 
 ## Risk-to-test map
 
@@ -170,7 +184,12 @@ lease release have committed together.
   and `src/run/orchestrator.test.ts`.
 - Claim/blocker shape, Human validation/correction, end/recovery disposition,
   Force Release integration, and hostile HTTP actor fields:
-  `src/task/control-service.test.ts` and `src/web/task-control-router.test.ts`.
+  `src/task/control-service.test.ts`, `src/web/task-control-router.test.ts`,
+  and the authenticated runtime HTTP journey in `src/web/task-controls-contract.test.ts`.
+- Content/claim version binding, concurrent Pause/settlement, bounded diagnostic
+  summaries, and lower-layer authority: `src/task/control-service.test.ts`.
+- Lost cleanup acknowledgement, fresh sentinel proof, and Project preservation:
+  `src/worker/workspace.test.ts`.
 
 Reference inheritance: the work-status/ownership/live-execution separation
 already adopted from Paperclip by ADR-0006 is retained. Sprout's proposal authority
