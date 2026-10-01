@@ -374,10 +374,11 @@ test('HTTP serialization omits smuggled Routing ownership in aggregate identitie
       projectId: 'project', agentId: 'agent', taskId: 'task', runId: 'run', environmentInstanceId: 'environment',
       model: 'wake', status: 'completed', createdAt: 1,
     };
+    const hostileCorrelation = { ...identity, apiToken: 'routing-correlation-token', prompt: 'routing correlation prompt' };
     const aggregate = await h.usage.getAggregate({});
     h.usage.getAggregate = async () => ({ ...aggregate, activityIdentities: [identity] } as unknown as UsageAggregate);
     h.usage.listActivities = async () => [{
-      id: 'routing', kind: 'routing_attempt', correlation: { ...identity },
+      id: 'routing', kind: 'routing_attempt', correlation: hostileCorrelation,
       engine: 'routing', model: 'wake', status: 'completed', createdAt: 1,
     } as unknown as UsageActivity];
     for (const route of ['aggregate', 'activities']) {
@@ -394,7 +395,88 @@ test('HTTP serialization omits smuggled Routing ownership in aggregate identitie
       for (const forbidden of ['agentId', 'taskId', 'runId', 'environmentInstanceId']) {
         assert.equal(Object.hasOwn(exported, forbidden), false, `Routing must not export ${forbidden}`);
       }
+      if (route === 'activities') {
+        assert.equal(Object.hasOwn(exported, 'apiToken'), false, 'Routing correlation must not forward unknown token fields');
+        assert.equal(Object.hasOwn(exported, 'prompt'), false, 'Routing correlation must not forward unknown prompt fields');
+      }
       assert.equal(identity.agentId, 'agent', 'serialization must not mutate service facts');
     }
+  } finally { await h.api.close(); }
+});
+
+test('HTTP aggregate serialization keeps only documented coverage counters at every nesting level', async () => {
+  const h = await openUsageHarness();
+  try {
+    const baseline = await h.usage.getAggregate({});
+    const baseFields = Object.fromEntries(Object.entries(baseline).filter(([key]) =>
+      !['workModelSubtotal', 'routingModelSubtotal', 'provisionalTotals', 'groups'].includes(key),
+    )) as unknown as UsageAggregate;
+    const expectedTokenCoverage = { complete: 2, partial: 3, unavailable: 4 };
+    const expectedCostCoverage = { available: 5, pending: 6, unavailable: 7 };
+    const expectedProvenance = { provider_estimated: 8, harness_calculated: 9, locally_estimated: 10 };
+    const hostileMarkers: string[] = [];
+    const withHostileCoverage = (label: string): UsageAggregate => {
+      const markers = [
+        `${label}-coverage-api-token`,
+        `${label}-coverage-prompt`,
+        `${label}-coverage-prompt-text`,
+        `${label}-token-dimensions-api-token`,
+        `${label}-token-dimensions-prompt`,
+        `${label}-cost-api-token`,
+        `${label}-cost-prompt`,
+        `${label}-cost-prompt-text`,
+        `${label}-provenance-api-token`,
+        `${label}-provenance-prompt`,
+      ];
+      hostileMarkers.push(...markers);
+      return {
+        ...baseFields,
+        tokenCoverage: { ...expectedTokenCoverage, apiToken: markers[0], prompt: markers[1], promptText: markers[2] },
+        tokens: { ...baseFields.tokens, totalTokens: 12, apiToken: markers[3], prompt: markers[4] } as unknown as UsageAggregate['tokens'],
+        costCoverage: { ...expectedCostCoverage, apiToken: markers[5], prompt: markers[6], promptText: markers[7] },
+        cost: {
+          ...baseFields.cost,
+          byProvenance: {
+            ...expectedProvenance,
+            apiToken: markers[8],
+            prompt: markers[9],
+            unknownProvenance: 11,
+          },
+        },
+      } as unknown as UsageAggregate;
+    };
+
+    const root = withHostileCoverage('root');
+    const hostileAggregate = {
+      ...root,
+      workModelSubtotal: withHostileCoverage('work'),
+      routingModelSubtotal: withHostileCoverage('routing'),
+      provisionalTotals: withHostileCoverage('provisional'),
+      groups: { sample: withHostileCoverage('group') },
+    } as unknown as UsageAggregate;
+    h.usage.getAggregate = async () => hostileAggregate;
+
+    const response = await fetch(`${h.base}/api/usage/aggregate`);
+    assert.equal(response.status, 200);
+    const responseText = await response.text();
+    assert.deepEqual(hostileMarkers.filter((marker) => responseText.includes(marker)), []);
+
+    const payload = JSON.parse(responseText) as Record<string, unknown>;
+    const assertWhitelistedCoverage = (value: unknown, path: string): void => {
+      assert.ok(value && typeof value === 'object', `${path} is an aggregate object`);
+      const aggregate = value as Record<string, unknown>;
+      assert.deepEqual(aggregate.tokenCoverage, expectedTokenCoverage, `${path}.tokenCoverage`);
+      assert.deepEqual(aggregate.tokens, { status: 'unavailable', totalTokens: 12 }, `${path}.tokens`);
+      assert.deepEqual(aggregate.costCoverage, expectedCostCoverage, `${path}.costCoverage`);
+      const cost = aggregate.cost as { byProvenance: unknown };
+      assert.deepEqual(cost.byProvenance, expectedProvenance, `${path}.cost.byProvenance`);
+      if (aggregate.workModelSubtotal !== undefined) assertWhitelistedCoverage(aggregate.workModelSubtotal, `${path}.workModelSubtotal`);
+      if (aggregate.routingModelSubtotal !== undefined) assertWhitelistedCoverage(aggregate.routingModelSubtotal, `${path}.routingModelSubtotal`);
+      if (aggregate.provisionalTotals !== undefined) assertWhitelistedCoverage(aggregate.provisionalTotals, `${path}.provisionalTotals`);
+      if (aggregate.groups && typeof aggregate.groups === 'object') {
+        for (const [key, group] of Object.entries(aggregate.groups)) assertWhitelistedCoverage(group, `${path}.groups.${key}`);
+      }
+    };
+    assertWhitelistedCoverage(payload, 'root');
   } finally { await h.api.close(); }
 });

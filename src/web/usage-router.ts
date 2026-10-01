@@ -28,6 +28,37 @@ export interface UsageRouterOptions {
   readonly usage: UsageService;
 }
 
+const TOKEN_DIMENSION_FIELDS = [
+  'inputTokens', 'uncachedInputTokens', 'cachedInputTokens', 'cacheWriteInputTokens',
+  'outputTokens', 'reasoningOutputTokens', 'totalTokens',
+] as const;
+const TOKEN_COVERAGE_FIELDS = ['complete', 'partial', 'unavailable'] as const;
+const COST_COVERAGE_FIELDS = ['available', 'pending', 'unavailable'] as const;
+const COST_PROVENANCE_FIELDS = ['provider_estimated', 'harness_calculated', 'locally_estimated'] as const;
+const TOKEN_TOTAL_STATUSES = new Set(['complete', 'observed_incomplete', 'unavailable']);
+
+function numericFields(value: unknown, fields: readonly string[]): Record<string, number> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  const result: Record<string, number> = {};
+  for (const field of fields) {
+    const candidate = source[field];
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0) {
+      result[field] = candidate;
+    }
+  }
+  return result;
+}
+
+function tokenTotals(value: unknown): Record<string, number | string> {
+  const result: Record<string, number | string> = numericFields(value, TOKEN_DIMENSION_FIELDS);
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const status = (value as Record<string, unknown>).status;
+    if (typeof status === 'string' && TOKEN_TOTAL_STATUSES.has(status)) result.status = status;
+  }
+  return result;
+}
+
 function json(context: ApiRequestContext, status: number, body: unknown): boolean {
   context.response.writeHead(status, {
     'content-type': 'application/json',
@@ -75,14 +106,35 @@ export function sanitizeUsagePayload<T>(value: T, keyName?: string): T {
       // Service types are not a transport trust boundary: validate ownership
       // again for both flattened drill-down identities and nested correlations.
       if (routing && forbiddenOwnership.has(key)) continue;
-      if (routing && key === 'correlation' && typeof val === 'object' && val !== null) {
-        sanitized[key] = sanitizeUsagePayload(Object.fromEntries(
-          Object.entries(val).filter(([field]) => !forbiddenOwnership.has(field)),
-        ));
+      if (routing && key === 'correlation' && typeof val === 'object' && val !== null && !Array.isArray(val)) {
+        const correlation = val as Record<string, unknown>;
+        const safeCorrelation: Record<string, unknown> = {};
+        for (const field of ['attemptId', 'batchId', 'projectId']) {
+          if (typeof correlation[field] === 'string') {
+            safeCorrelation[field] = sanitizeUsagePayload(correlation[field], field);
+          }
+        }
+        sanitized[key] = safeCorrelation;
         continue;
       }
-      if ((/tokens?$/i.test(key) && !/secret|auth|access|session|bearer|cookie/i.test(key)) || key === 'tokenCoverage') {
-        sanitized[key] = sanitizeUsagePayload(val, key);
+      if (key === 'tokenCoverage') {
+        sanitized[key] = numericFields(val, TOKEN_COVERAGE_FIELDS);
+        continue;
+      }
+      if (key === 'costCoverage') {
+        sanitized[key] = numericFields(val, COST_COVERAGE_FIELDS);
+        continue;
+      }
+      if (key === 'byProvenance') {
+        sanitized[key] = numericFields(val, COST_PROVENANCE_FIELDS);
+        continue;
+      }
+      if (key === 'tokens') {
+        sanitized[key] = tokenTotals(val);
+        continue;
+      }
+      if ((TOKEN_DIMENSION_FIELDS as readonly string[]).includes(key)) {
+        if (typeof val === 'number' && Number.isSafeInteger(val) && val >= 0) sanitized[key] = val;
         continue;
       }
       if (/password|secret|token|credential|authorization/i.test(key)) {
