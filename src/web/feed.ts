@@ -6,7 +6,7 @@
  * `docs/prototype-feed-attention.md`). Everything here is derived read-only
  * from authoritative domain state through {@link FeedSources}: Task proposals,
  * completion claims awaiting validation, routable blockers, Task and lease
- * recovery, pending enrollments, failed wake-model routing batches, and
+ * recovery, pending enrollments, failed wake observations and routing batches, and
  * Project events declared `human-action-required`.
  *
  * The projection stores nothing and mutates nothing. There is deliberately no
@@ -22,10 +22,10 @@
  * length-bounded before it becomes part of an item.
  *
  * **Scoping.** Every item carries the scope ids it belongs to. A Project item
- * belongs to its Project; a generic infrastructure fact belongs to `infra`;
+ * belongs to its Project; a generic infrastructure fact belongs to `feed:infra`;
  * an infrastructure fact that directly blocks a Project's Task (a recovery
  * record holding that Task's lease) additionally belongs to that Project's
- * scope — the transcolation rule (story 17). The implicit `all` scope includes
+ * scope — the transcolation rule (story 17). The implicit `feed:all` scope includes
  * every item.
  *
  * Deep links are identities, not controls: `target` names the owning domain
@@ -34,6 +34,7 @@
  */
 
 import { redactSensitiveText } from '../environment/privacy.ts';
+import type { CollaborationAttentionResolution, FailedWakeInput } from '../collaboration/attention.ts';
 import type { ProjectEvent } from '../collaboration/events.ts';
 import type { RoutingBatch } from '../collaboration/routing.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
@@ -42,10 +43,10 @@ import type { AgentRun } from '../run/model.ts';
 import type { Task } from '../task/model.ts';
 import type { TaskProposal } from '../task/proposal-model.ts';
 
-/** The implicit scope that includes every Feed item. */
-export const FEED_ALL_SCOPE = 'all';
+/** Synthetic scopes contain a colon, which sanitizeProjectId cannot preserve. */
+export const FEED_ALL_SCOPE = 'feed:all';
 /** The generic infrastructure scope; never a Project id. */
-export const FEED_INFRASTRUCTURE_SCOPE = 'infra';
+export const FEED_INFRASTRUCTURE_SCOPE = 'feed:infra';
 /** Newest-first bound on the operational activity stream. */
 export const FEED_ACTIVITY_LIMIT = 50;
 /** The character bound on any summary or reason text the Feed emits. */
@@ -173,6 +174,8 @@ export interface FeedSources {
   recoveries(): Promise<readonly EnvironmentRecoveryRecord[]>;
   runs(): Promise<readonly AgentRun[]>;
   routingBatches(): Promise<readonly RoutingBatch[]>;
+  wakeFailures(): Promise<readonly FailedWakeInput[]>;
+  attentionResolutions(): Promise<readonly CollaborationAttentionResolution[]>;
 }
 
 /** One unresolved Human Attention item. Cleared only by its source clearing. */
@@ -185,10 +188,10 @@ export interface FeedAttentionItem {
   /** The disambiguated `Task · Run · Lease` state sentence (story 15). */
   readonly lifecycle: string;
   readonly target: FeedTarget;
-  /** Scope ids this item belongs to: Project ids and/or `infra`. */
+  /** Scope ids this item belongs to: Project ids and/or `feed:infra`. */
   readonly scopes: readonly string[];
   /** The authoritative source this item projects; never a second copy. */
-  readonly source: { readonly kind: 'proposal' | 'task' | 'recovery' | 'enrollment' | 'routing-batch' | 'event'; readonly id: string };
+  readonly source: { readonly kind: 'proposal' | 'task' | 'recovery' | 'enrollment' | 'routing-batch' | 'wake-input' | 'event'; readonly id: string };
   readonly at: number;
 }
 
@@ -235,7 +238,7 @@ export interface FeedSnapshot {
 }
 
 export interface FeedFilter {
-  /** `all`, `infra`, or a Project id. Absent means `all`. */
+  /** `feed:all`, `feed:infra`, or a Project id. Absent means `feed:all`. */
   readonly scope?: string;
   /** Restricts attention to one urgency tier; never hides in-flight or activity. */
   readonly urgency?: FeedSeverity;
@@ -347,7 +350,7 @@ export function filterFeed(snapshot: FeedSnapshot, filter: FeedFilter = {}): Fee
  * and activity newest first, scopes as `all`, Projects by id, then `infra`.
  */
 export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
-  const [projects, tasks, proposals, events, enrollments, recoveries, runs, batches] = await Promise.all([
+  const [projects, tasks, proposals, events, enrollments, recoveries, runs, batches, wakeFailures, resolutions] = await Promise.all([
     sources.projects(),
     sources.tasks(),
     sources.proposals(),
@@ -356,6 +359,8 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     sources.recoveries(),
     sources.runs(),
     sources.routingBatches(),
+    sources.wakeFailures(),
+    sources.attentionResolutions(),
   ]);
 
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
@@ -384,6 +389,8 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   }
 
   const attention: FeedAttentionItem[] = [];
+  const resolved = (kind: CollaborationAttentionResolution['kind'], sourceId: string, projectId: string, sourceVersion = 0): boolean =>
+    resolutions.some(r => r.kind === kind && r.sourceId === sourceId && r.projectId === projectId && r.sourceVersion >= sourceVersion);
 
   // 1. Task proposals awaiting Human approval and begin authority (ADR-0006).
   for (const proposal of proposals) {
@@ -429,7 +436,8 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     }
 
     // 3. Routable blockers with owner, action, and next advancer (ADR-0006).
-    if (task.blocker !== undefined) {
+    if (task.blocker !== undefined && !['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
+      && !['done', 'cancelled', 'failed'].includes(task.status)) {
       attention.push({
         id: `blocker:${task.id}`,
         severity: 'action_required',
@@ -509,7 +517,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   // A batch in `frozen` is transient (the sweep re-submits it) and a batch in
   // `routed`/`suppressed` settled deliberately, so neither is attention.
   for (const batch of batches) {
-    if (batch.status !== 'failed' || !knownProject(batch.projectId)) continue;
+    if (batch.status !== 'failed' || !knownProject(batch.projectId) || resolved('routing-batch', batch.id, batch.projectId)) continue;
     const detail = usable(batch.error) ? boundText(batch.error, 200) : '';
     attention.push({
       id: `routing-failure:${batch.id}`,
@@ -524,11 +532,28 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     });
   }
 
+  // Deterministic addressing and admission failures live beside batch failures.
+  // The read port excludes Message bodies, target identities, and diagnostic prose.
+  for (const failure of wakeFailures) {
+    if (!knownProject(failure.projectId) || resolved('wake-input', failure.inputId, failure.projectId, failure.version)) continue;
+    attention.push({
+      id: `wake-failure:${failure.inputId}`,
+      severity: 'action_required',
+      category: 'routing-failure',
+      reason: `Routing failed for ${failure.failedTargetCount} addressed Agent target(s); inspect the input's routing evidence.`,
+      lifecycle: 'Routing failed · Input preserved · Human correction required',
+      target: feedTarget({ surface: failure.inputKind === 'event' ? 'project-overview' : 'project-chat', projectId: failure.projectId }),
+      scopes: [failure.projectId],
+      source: { kind: 'wake-input', id: failure.inputId },
+      at: failure.at,
+    });
+  }
+
   // 8. Authoritative human-action-required Project events (ADR-0007). Other
   // dispositions never become attention: an addressed event has an Agent, and
   // an informational event is background activity.
   for (const event of events) {
-    if (event.disposition !== 'human-action-required' || !knownProject(event.projectId)) continue;
+    if (event.disposition !== 'human-action-required' || !knownProject(event.projectId) || resolved('event', event.id, event.projectId)) continue;
     attention.push({
       id: `event:${event.id}`,
       severity: 'action_required',

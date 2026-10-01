@@ -86,6 +86,7 @@ import { createTaskProposalRouter } from './web/task-proposal-router.ts';
 import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
 import { createTaskControlRouter } from './web/task-control-router.ts';
 import { createFeedRouter } from './web/feed-router.ts';
+import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
 import { createFeedProjection } from './web/feed.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
@@ -1671,6 +1672,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       recoveries: () => recovery.list(),
       runs: () => orchestrator.list(),
       routingBatches: () => collaboration.listRoutingBatches(),
+      wakeFailures: () => openedStoresForCatalog.collaboration.listWakeFailures(),
+      attentionResolutions: () => openedStoresForCatalog.collaboration.listAttentionResolutions(),
     });
 
     const api = createRunApi({
@@ -1720,6 +1723,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // The read-only Feed/Attention projection (#103) through the same
         // additive seam: one GET snapshot, no dismiss or snooze command.
         createFeedRouter({ feed }),
+        createCollaborationAttentionRouter({ store: openedStoresForCatalog.collaboration }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can

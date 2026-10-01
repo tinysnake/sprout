@@ -36,6 +36,8 @@ function storeSources(store: SqliteStore): FeedSources {
     recoveries: () => store.recovery.list(),
     runs: () => store.runs.list(),
     routingBatches: async () => [],
+    wakeFailures: () => store.collaboration.listWakeFailures(),
+    attentionResolutions: () => store.collaboration.listAttentionResolutions(),
   };
 }
 
@@ -250,7 +252,7 @@ test('a restart reconstructs the identical Feed snapshot from reopened durable s
       'attention derives from the reopened facts with nothing dismissed and nothing duplicated',
     );
     const lease = after.attention.find((item) => item.category === 'lease-recovery');
-    assert.deepEqual(lease?.scopes, ['infra', PROJECT_ID], 'the Task-held lease recovery transcolates after restart');
+    assert.deepEqual(lease?.scopes, ['feed:infra', PROJECT_ID], 'the Task-held lease recovery transcolates after restart');
     assert.deepEqual(after.inFlight.map((item) => item.id), ['run:run-live'], 'a resting blocked Task is not in flight');
     assert.ok(after.activity.some((item) => item.id === 'run:run-done'), 'settled-run activity is durable, not cached');
     const wire = JSON.stringify(after);

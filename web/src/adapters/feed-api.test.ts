@@ -28,18 +28,23 @@ function stubTransport(handler: (url: string, init?: RequestInit) => Response | 
 }
 
 test('load fetches the one GET route and encodes scope and urgency filters', async () => {
-  const snapshot = { attention: [], inFlight: [], activity: [], scopes: [{ id: 'all', kind: 'all', label: 'All Projects', attentionCount: 0 }] };
+  const snapshot = { attention: [], inFlight: [], activity: [], scopes: [{ id: 'feed:all', kind: 'all', label: 'All Projects', attentionCount: 0 }] };
   const { transport, calls } = stubTransport(() => new Response(JSON.stringify(snapshot), { status: 200 }));
   const feed = createFeedBrowserAdapter(transport);
 
   assert.deepEqual(await feed.load(), snapshot);
   await feed.load({ scope: 'project/with space', urgency: 'action_required' });
   await feed.load({ urgency: 'info' });
+  for (const scope of ['all', 'infra', 'feed:all', 'feed:infra']) await feed.load({ scope });
 
   assert.deepEqual(calls.map((call) => call.url), [
     '/api/feed',
     '/api/feed?scope=project%2Fwith+space&urgency=action_required',
     '/api/feed?urgency=info',
+    '/api/feed?scope=all',
+    '/api/feed?scope=infra',
+    '/api/feed?scope=feed%3Aall',
+    '/api/feed?scope=feed%3Ainfra',
   ]);
   for (const call of calls) {
     assert.equal(call.init?.method ?? 'GET', 'GET', 'the Feed adapter never issues a command');

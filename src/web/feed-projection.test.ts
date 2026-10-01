@@ -26,6 +26,7 @@ import {
 } from './feed.ts';
 import { DEFAULT_ROUTING_BOUNDS, type RoutingBatch, type RoutingContextManifest } from '../collaboration/routing.ts';
 import type { ProjectEvent } from '../collaboration/events.ts';
+import { sanitizeProjectId } from '../project/authority-model.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord } from '../environment/recovery.ts';
 import type { AgentRun } from '../run/model.ts';
@@ -158,6 +159,8 @@ function sources(world: Partial<World>): FeedSources {
     recoveries: async () => world.recoveries ?? [],
     runs: async () => world.runs ?? [],
     routingBatches: async () => world.batches ?? [],
+    wakeFailures: async () => [],
+    attentionResolutions: async () => [],
   };
 }
 
@@ -254,6 +257,23 @@ function mixedWorld(): World {
   };
 }
 
+test('literal all and infra Projects have distinct scopes and counters', async () => {
+  for (const id of ['all', 'infra']) assert.equal(sanitizeProjectId(id), id);
+  for (const token of ['feed:all', 'feed:infra']) assert.notEqual(sanitizeProjectId(token), token);
+  const snapshot = await projectFeed(sources({
+    projects: ['all', 'infra'].map(id => ({ id, displayName: id })),
+    proposals: ['all', 'infra'].map(id => makeProposal({ id: `p-${id}`, projectId: id })),
+    enrollments: [makeEnrollment({ id: 'enr', environmentInstanceId: 'env' })],
+  }));
+  assert.equal(new Set(snapshot.scopes.map(s => s.id)).size, 4);
+  for (const id of ['all', 'infra']) {
+    assert.deepEqual(filterFeed(snapshot, { scope: id }).attention.map(i => i.id), [`proposal:p-${id}`]);
+    assert.equal(snapshot.scopes.find(s => s.id === id)?.attentionCount, 1);
+  }
+  assert.deepEqual(filterFeed(snapshot, { scope: 'feed:infra' }).attention.map(i => i.id), ['enrollment:enr']);
+  assert.equal(filterFeed(snapshot, { scope: 'feed:all' }).attention.length, 3);
+});
+
 test('attention derives from proposals, validation claims, blockers, recovery, enrollment, routing failures, and human-action-required events', async () => {
   const snapshot = await projectFeed(sources(mixedWorld()));
 
@@ -339,11 +359,11 @@ test('every attention item carries severity, category, reason, lifecycle, and a 
       || (item.source.kind === 'event' && world.events.some((event) => event.id === item.source.id));
     assert.ok(sourceExists, `source ${item.source.kind}:${item.source.id} exists`);
     for (const scope of item.scopes) {
-      assert.ok(scope === 'infra' || world.projects.some((project) => project.id === scope), `scope ${scope} is a known scope`);
+      assert.ok(scope === 'feed:infra' || world.projects.some((project) => project.id === scope), `scope ${scope} is a known scope`);
     }
   }
   const scopeIds = snapshot.scopes.map((option) => option.id);
-  assert.deepEqual(scopeIds, ['all', 'proj-core', 'proj-mine', 'infra']);
+  assert.deepEqual(scopeIds, ['feed:all', 'proj-core', 'proj-mine', 'feed:infra']);
   assert.equal(snapshot.scopes[0]?.kind, 'all');
   assert.equal(snapshot.scopes[3]?.kind, 'infrastructure');
 });
@@ -352,9 +372,9 @@ test('infrastructure recovery that blocks a Project transcolates into that scope
   const snapshot = await projectFeed(sources(mixedWorld()));
 
   const lease = snapshot.attention.find((item) => item.category === 'lease-recovery');
-  assert.deepEqual(lease?.scopes, ['infra', 'proj-mine'], 'the Task-held lease recovery belongs to infrastructure and the blocked Project');
+  assert.deepEqual(lease?.scopes, ['feed:infra', 'proj-mine'], 'the Task-held lease recovery belongs to infrastructure and the blocked Project');
   const enrollment = snapshot.attention.find((item) => item.category === 'enrollment-pending');
-  assert.deepEqual(enrollment?.scopes, ['infra'], 'a generic enrollment never appears in a Project scope');
+  assert.deepEqual(enrollment?.scopes, ['feed:infra'], 'a generic enrollment never appears in a Project scope');
 
   const inMine = filterFeed(snapshot, { scope: 'proj-mine' });
   assert.deepEqual(
@@ -364,20 +384,34 @@ test('infrastructure recovery that blocks a Project transcolates into that scope
   );
   assert.ok(!inMine.attention.some((item) => item.category === 'enrollment-pending'));
 
-  const infra = filterFeed(snapshot, { scope: 'infra' });
+  const infra = filterFeed(snapshot, { scope: 'feed:infra' });
   assert.deepEqual(
     infra.attention.map((item) => item.id).sort(),
     ['enrollment:enr-1', 'lease-recovery:rec-1'],
   );
   assert.ok(!infra.attention.some((item) => item.source.kind === 'task'));
 
-  const all = filterFeed(snapshot, { scope: 'all' });
+  const all = filterFeed(snapshot, { scope: 'feed:all' });
   assert.equal(all.attention.length, snapshot.attention.length);
 
   const mineOption = snapshot.scopes.find((option) => option.id === 'proj-mine');
   assert.equal(mineOption?.attentionCount, inMine.attention.length, 'scope counters agree with the filtered view');
-  const infraOption = snapshot.scopes.find((option) => option.id === 'infra');
+  const infraOption = snapshot.scopes.find((option) => option.id === 'feed:infra');
   assert.equal(infraOption?.attentionCount, infra.attention.length);
+});
+
+test('terminal Tasks retain blocker history without permanent blocker Attention', async () => {
+  const original = mixedWorld().tasks.find(task => task.id === 'task-blk')!;
+  for (const terminal of [
+    { status: 'cancelled' as const, environmentLifecycleState: 'ended' as const },
+    { status: 'cancelled' as const, environmentLifecycleState: 'discarded' as const },
+    { status: 'done' as const, environmentLifecycleState: 'ended' as const },
+  ]) {
+    const task = { ...original, ...terminal };
+    const snapshot = await projectFeed(sources({ tasks: [task] }));
+    assert.equal(snapshot.attention.length, 0, 'terminal Task state clears the work condition even while blocker history remains');
+    assert.ok(task.blocker);
+  }
 });
 
 test('an urgency filter narrows attention only; in-flight work and activity stay visible', async () => {
@@ -534,7 +568,7 @@ test('items whose source has no owning Project are omitted rather than deep-link
   assert.deepEqual(ghostActivity?.scopes, [], 'durable activity still shows, globally, without a phantom deep link');
   assert.equal(ghostActivity?.target, undefined);
   const dangling = snapshot.attention.find((item) => item.id === 'lease-recovery:rec-dangling');
-  assert.deepEqual(dangling?.scopes, ['infra'], 'a recovery record whose Task is gone stays infrastructure-only');
+  assert.deepEqual(dangling?.scopes, ['feed:infra'], 'a recovery record whose Task is gone stays infrastructure-only');
   assert.equal(dangling?.target?.surface, 'environments');
 });
 

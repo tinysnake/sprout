@@ -89,6 +89,8 @@ function sources(world: MutableWorld): FeedSources {
       createdAt: 300,
     }],
     routingBatches: async () => [],
+    wakeFailures: async () => [],
+    attentionResolutions: async () => [],
   };
 }
 
@@ -120,6 +122,29 @@ interface FeedBody {
   scopes: { id: string; attentionCount: number }[];
 }
 
+test('HTTP scope parsing distinguishes literal all and infra Projects from synthetic scopes', async () => {
+  const tasks = ['all', 'infra'].map(projectId => ({ ...blockerTask(), id: `task-${projectId}`, projectId }));
+  const world: MutableWorld = { tasks, enrollments: [pendingEnrollment()], promptMarker: '' };
+  const credential = privateInput();
+  const { api, base } = await startApi(world, { auth: true, credential });
+  try {
+    const session = await signIn(base, credential);
+    const headers = { cookie: session.cookie };
+    for (const id of ['all', 'infra']) {
+      const response = await fetch(`${base}/api/feed?scope=${id}`, { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json() as FeedBody;
+      assert.deepEqual(body.attention.map(i => i.id), [`blocker:task-${id}`]);
+      assert.equal(body.scopes.find(s => s.id === id)?.attentionCount, 1);
+    }
+    const infrastructure = await (await fetch(`${base}/api/feed?scope=feed%3Ainfra`, { headers })).json() as FeedBody;
+    assert.deepEqual(infrastructure.attention.map(i => i.id), ['enrollment:enr-api']);
+    const all = await (await fetch(`${base}/api/feed?scope=feed%3Aall`, { headers })).json() as FeedBody;
+    assert.equal(all.attention.length, 3);
+    assert.equal(new Set(all.scopes.map(s => s.id)).size, all.scopes.length);
+  } finally { await api.close(); }
+});
+
 test('GET /api/feed requires the operator session and serves the derived snapshot', async () => {
   const world: MutableWorld = { tasks: [blockerTask()], enrollments: [pendingEnrollment()], promptMarker: 'PROMPT_API_SECRET' };
   const credential = privateInput();
@@ -137,7 +162,7 @@ test('GET /api/feed requires the operator session and serves the derived snapsho
     assert.match(body.attention[0]?.lifecycle ?? '', /Task blocked/);
     assert.equal(body.attention[0]?.target.path, '/project/tasks/task-api');
     assert.deepEqual(body.inFlight.map((item) => item.id), ['run:run-api']);
-    assert.deepEqual(body.scopes.map((option) => option.id), ['all', PROJECT_ID, 'infra']);
+    assert.deepEqual(body.scopes.map((option) => option.id), ['feed:all', PROJECT_ID, 'feed:infra']);
     assert.ok(!JSON.stringify(body).includes('PROMPT_API_SECRET'), 'the wire never carries run internals');
 
     const filteredResponse = await fetch(
@@ -148,7 +173,7 @@ test('GET /api/feed requires the operator session and serves the derived snapsho
     assert.deepEqual(filtered.attention.map((item) => item.id), ['blocker:task-api'], 'scope and urgency filter server-side');
     assert.equal(filtered.inFlight.length, 1, 'urgency never hides in-flight work');
 
-    const infra = await (await fetch(`${base}/api/feed?scope=infra`, { headers: { cookie: session.cookie } })).json() as FeedBody;
+    const infra = await (await fetch(`${base}/api/feed?scope=feed%3Ainfra`, { headers: { cookie: session.cookie } })).json() as FeedBody;
     assert.deepEqual(infra.attention.map((item) => item.id), ['enrollment:enr-api']);
 
     assert.equal((await fetch(`${base}/api/feed?scope=ghost`, { headers: { cookie: session.cookie } })).status, 400, 'unknown scope refuses');
