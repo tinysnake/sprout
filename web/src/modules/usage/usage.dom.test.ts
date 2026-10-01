@@ -593,3 +593,22 @@ test('Usage F6: backing tables expose every constituent and its measurement and 
     app.unmount();
   } finally { await cleanup(); }
 });
+
+test('Usage F7: constituent drill-down controls have a computed minimum 44px target', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { app } = await mountedPage(vite, mount);
+    (doc.querySelector('[data-usage-tab="project"]') as HTMLButtonElement).click();
+    await settle(80);
+    const css = await readFile(`${repoRoot}/web/src/modules/usage/usage.css`, 'utf8');
+    const style = doc.createElement('style'); style.textContent = css; doc.head.append(style);
+    const controls = doc.querySelectorAll('.usage-activity-link');
+    assert.ok(controls.length > 0);
+    for (const control of controls) {
+      const computed = doc.defaultView!.getComputedStyle(control);
+      assert.ok(parseFloat(computed.minHeight) >= 44, 'constituent target minimum height >=44px');
+    }
+    style.remove();
+    app.unmount();
+  } finally { await cleanup(); }
+});

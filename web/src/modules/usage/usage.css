@@ -626,7 +626,7 @@
 }
 
 .usage-activity-link {
-  min-height: 32px;
+  min-height: 44px;
   padding: 5px 8px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
