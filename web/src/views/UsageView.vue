@@ -84,6 +84,7 @@ async function loadData() {
   const generation = ++loadGeneration;
   isLoading.value = true;
   queryError.value = false;
+  listIncomplete.value = false;
   activities.value = [];
   authoritativeActivities.value = new Map();
   const to = Date.now() + 1;
@@ -270,17 +271,9 @@ function costCoverageText(acts: readonly UsageActivityItem[]): string {
   return `${available} available / ${pending} pending / ${unavailable} unavailable estimates`;
 }
 
-const filteredActivities = computed(() => {
-  return activities.value.filter((activity) => {
-    const inRange =
-      timeRangeFilter.value === 'all' ||
-      (rangeRank[activity.settlementRange] ?? 99) <= (rangeRank[timeRangeFilter.value] ?? 99);
-    const inProject = projectFilter.value === 'all' || activity.projectId === projectFilter.value;
-    const inAgent = agentFilter.value === 'all' || activity.agentId === agentFilter.value;
-    const inModel = modelFilter.value === 'all' || activity.model === modelFilter.value;
-    return inRange && inProject && inAgent && inModel;
-  });
-});
+// Absolute bounds and attribution are decided by the query authority, never re-filtered
+// through display buckets (which can age while details are being fetched).
+const filteredActivities = computed(() => activities.value);
 
 const activeDetail = computed(() => {
   if (!selectedActivityId.value) return undefined;
@@ -507,7 +500,7 @@ const timeRangeLabels: Record<string, string> = {
       <p v-if="listIncomplete" role="status">Activity list incomplete; totals use authoritative aggregate constituents, not the truncated list.</p>
       <p class="usage-boundary-note">Settlement ranges use UTC and half-open instant bounds. Known subtotals are observed, incomplete when coverage has gaps.</p>
       <!-- 3. Summary Band (Work-model Agent runs & Project-owned Routing attempts separate) -->
-      <section class="usage-summary-band" aria-label="Usage summary">
+      <section v-if="!isLoading && !queryError" class="usage-summary-band" aria-label="Usage summary">
         <!-- Work-model Agent runs -->
         <section class="usage-summary-kind" data-usage-summary-kind="agent_run">
           <div class="usage-summary-kind-heading">
@@ -683,7 +676,7 @@ const timeRangeLabels: Record<string, string> = {
       </section>
 
       <!-- 5. Coverage Strip -->
-      <section class="usage-coverage-strip" aria-label="Telemetry coverage">
+      <section v-if="!isLoading && !queryError" class="usage-coverage-strip" aria-label="Telemetry coverage">
         <div>
           <strong>Work-model coverage</strong>
           <span>{{ coverageText(workActivities) }} / {{ costCoverageText(workActivities) }}</span>
@@ -701,7 +694,8 @@ const timeRangeLabels: Record<string, string> = {
       <!-- 6. Tab Surfaces -->
       <section id="usage-tab-panel" class="usage-tab-surface" role="tabpanel" :aria-labelledby="`usage-tab-${activeTab}`" :aria-label="`${tabLabels[activeTab]} view`">
         <!-- 6a. Empty State -->
-        <div v-if="filteredActivities.length === 0" class="usage-empty-state">
+        <p v-if="isLoading || queryError">Authoritative usage evidence is {{ isLoading ? 'loading' : 'unavailable' }}.</p>
+        <div v-else-if="filteredActivities.length === 0" class="usage-empty-state">
           <span class="usage-empty-icon">
             <Icon name="search" :size="24" />
           </span>
@@ -1501,7 +1495,7 @@ const timeRangeLabels: Record<string, string> = {
       </div>
 
       <!-- All visual aggregates and constituent evidence have semantic table equivalents. -->
-      <UsageBackingTable :activities="backingActivities" :aggregates="backingAggregates" />
+      <UsageBackingTable v-if="!isLoading && !queryError" :activities="backingActivities" :aggregates="backingAggregates" />
       </template>
     </div>
   </div>

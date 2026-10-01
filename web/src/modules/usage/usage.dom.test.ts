@@ -522,6 +522,7 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
     range.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
     await settle(100);
     assert.ok(calls.some(f => f.projectId === 'proj-minesweeper' && typeof f.from === 'number' && typeof f.to === 'number' && f.to - f.from === 30 * 86400000));
+    assert.ok(doc.querySelector('.usage-tab-surface [data-usage-activity="act-204"]'), 'query constituent survives stale display bucket; bounds belong to the authority');
     app.unmount();
   } finally { await cleanup(); }
 });
