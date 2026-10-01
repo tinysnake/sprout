@@ -91,6 +91,20 @@ test('cleanup can retry through a replacement Worker after a transient failure',
   assert.equal(existsSync(join(workspace, '.sprout', 'workspace-sentinel.json')), true);
 });
 
+test('cleanup retries after a lost acknowledgement prove absence without deleting Project work', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-cleanup-ack-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const first = new WorkerWorkspace(root);
+  await first.prepare(materialization());
+  const workspace = onlyWorkspace(root);
+  writeFileSync(join(workspace, 'work.txt'), 'durable work');
+  await first.recycle(recycle()); // The core may crash before recording release.
+  await new WorkerWorkspace(root).recycle(recycle());
+  assert.equal(readFileSync(join(workspace, 'work.txt'), 'utf8'), 'durable work');
+  rmSync(join(workspace, '.sprout', 'workspace-sentinel.json'));
+  await assert.rejects(new WorkerWorkspace(root).recycle(recycle()), /sentinel|ENOENT/i);
+});
+
 test('a planted Project symlink cannot escape the Worker root during prepare, cwd resolution, or recycle', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-worker-symlink-root-'));
   const outside = mkdtempSync(join(tmpdir(), 'sprout-worker-symlink-outside-'));
