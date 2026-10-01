@@ -86,13 +86,14 @@ export interface TaskBlocker {
   readonly requiredAction: string;
   readonly responsible: TaskBlockerResponsibility;
   readonly nextAdvancer: TaskActor;
-  readonly createdBy: TaskActor;
+  readonly createdBy: TaskActor | { readonly memberKind: 'system'; readonly memberId: 'sprout' };
   readonly createdAt: number;
 }
 
 /** Fact-form completion evidence. No free-form reasoning or transcript field exists. */
 export interface TaskCompletionClaim {
   readonly id: string;
+  readonly contentVersion: number;
   readonly actor: TaskActor;
   readonly at: number;
   readonly outcomeSummary: string;
@@ -102,7 +103,16 @@ export interface TaskCompletionClaim {
   readonly recommendedDisposition: 'complete' | 'continue';
 }
 
+export interface TaskContent {
+  readonly title: string;
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly validationCriteria: readonly string[];
+  readonly lead: TaskActor;
+}
+
 export type TaskControlEvent =
+  | { readonly action: 'content-revised'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly contentVersion: number; readonly previous: TaskContent; readonly content: TaskContent }
   | { readonly action: 'pause-requested'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
   | { readonly action: 'paused' | 'interrupt-requested' | 'resumed'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
   | { readonly action: 'subordinate-run-stop-requested'; readonly actor: TaskActor; readonly at: number; readonly runId: string; readonly reason: string }

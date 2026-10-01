@@ -30,6 +30,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
   const projects = new ProjectRegistry([{ id: 'project', goal: 'Goal', rules: [], availableEnvironmentInstanceIds: ['local-1'], memberships: [{ agentId: 'pi', responsibilities: [], collaborationInstructions: '' }] }]);
   let lifecycle!: TaskEnvironmentLifecycle;
+  let nextRun = 0;
   const task = (): Task => ({
     id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'todo', assignedAgentId: 'pi',
     admission: { proposalId: 'proposal', proposalRevision: 1, contentVersion: 1, validationCriteria: ['tests pass'], lead, contextAgentId: 'pi', approvedBy: human, approvedAt: 1, approvalReason: 'approved' },
@@ -38,7 +39,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
   lifecycle = new TaskEnvironmentLifecycle({
     store, pool, agents, projects,
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
-    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => `run-${++nextRun}` },
     runs: { submit: async request => ({ id: request.runId }) },
     forceReleaseLease: leaseId => pool.releaseTaskLease(leaseId) !== undefined,
   });
@@ -63,6 +64,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker } = {}) {
 test('lower lifecycle and service seams reject Agent escalation into Human Task controls', async () => {
   const s = await scenario();
   for (const attempt of [
+    () => s.lifecycle.reviseContent('task-1', lead, { expectedContentVersion: 1, content: { title: 'Stolen task', goal: 'Stolen goal', constraints: [], validationCriteria: ['none'], lead }, reason: 'steal content authority' }),
     () => s.lifecycle.requestPause('task-1', lead, 'spoof pause'),
     () => s.lifecycle.resumePause('task-1', lead, 'spoof resume'),
     () => s.lifecycle.clearBlocker('task-1', lead, 'spoof correction'),
@@ -96,6 +98,17 @@ test('Pause blocks admission, Interrupt settles the active run as stopped, and t
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
 });
 
+test('natural settlement racing Human Pause preserves the admission hold and current content', async () => {
+  const s = await scenario();
+  const advanced = await s.lifecycle.advanceRun('task-1', 'pi', 'work', { actor: lead, reason: 'step', contentVersion: 1 });
+  await Promise.all([
+    s.controls.pauseForHuman('task-1', { reason: 'hold the next step' }),
+    s.tasks.onRunSettled({ taskId: 'task-1', run: run(advanced.runId, 'completed') }),
+  ]);
+  assert.equal((await s.tasks.get('task-1'))?.pauseState, 'paused');
+  await assert.rejects(s.lifecycle.advanceRun('task-1', 'pi', 'no replay', { actor: lead, reason: 'next', contentVersion: 1 }), /paused/);
+});
+
 test('a failed nested run blocks unfinished Task work instead of making the Task terminal', async () => {
   const s = await scenario();
   const advance = await s.lifecycle.advanceRun('task-1', 'pi', 'work', { actor: lead, reason: 'step', contentVersion: 1 });
@@ -104,6 +117,9 @@ test('a failed nested run blocks unfinished Task work instead of making the Task
   assert.equal(blocked?.status, 'blocked');
   assert.equal(blocked?.environmentLifecycleState, 'blocked');
   assert.equal(blocked?.completedAt, undefined);
+  assert.equal(blocked?.blocker?.responsible.kind, 'human');
+  assert.match(blocked?.blocker?.requiredAction ?? '', /inspect/i);
+  assert.deepEqual(blocked?.blocker?.nextAdvancer, lead);
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
 });
 
@@ -151,6 +167,27 @@ test('Task leads can raise routable blockers, but another Agent cannot use that 
   await assert.rejects(s.lifecycle.advanceRun('task-1', 'pi', 'blocked', { actor: lead, reason: 'advance', contentVersion: 1 }), /blocker/);
 });
 
+test('Human content revisions preserve active-run and claim versions, then bind the next run to the new version', async () => {
+  const s = await scenario();
+  const first = await s.lifecycle.advanceRun('task-1', 'pi', 'version one', { actor: lead, reason: 'step', contentVersion: 1 });
+  const content = { title: 'Revised task', goal: 'Revised goal', constraints: ['keep work'], validationCriteria: ['new check'], lead };
+  const revised = await s.controls.reviseForHuman('task-1', { expectedContentVersion: 1, content, reason: 'clarify acceptance' });
+  assert.equal(revised.activeRunId, first.runId);
+  assert.equal(revised.admission?.contentVersion, 2);
+  assert.equal((await s.tasks.getWithRuns('task-1'))?.runs[0]?.contentVersion, 1);
+  await assert.rejects(s.controls.reviseForHuman('task-1', { expectedContentVersion: 1, content, reason: 'stale overwrite' }), /stale/i);
+  await s.tasks.onRunSettled({ taskId: 'task-1', run: run(first.runId, 'completed') });
+  const claimed = await s.controls.submitCompletionClaim('task-1', lead, {
+    outcomeSummary: 'Delivered the prior approved scope', validationEvidence: ['prior check passed'], durableChanges: [], limitations: ['new check pending'], recommendedDisposition: 'continue',
+  });
+  assert.equal(claimed.completionClaims?.[0]?.contentVersion, 1);
+  await s.controls.validateForHuman('task-1', { claimId: 'claim-1', decision: 'correct', reason: 'use revised criteria' });
+  const next = await s.tasks.advanceWithAttribution('task-1', { agentId: 'pi', actor: lead, reason: 'new version', contentVersion: 2 });
+  assert.equal(next.task.admission?.contentVersion, 2);
+  assert.equal((await s.tasks.getWithRuns('task-1'))?.runs[1]?.contentVersion, 2);
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
+});
+
 test('Human correction retains the same lease and returns the Task to deliberate advancement', async () => {
   const s = await scenario();
   await s.controls.submitCompletionClaim('task-1', lead, {
@@ -163,6 +200,20 @@ test('Human correction retains the same lease and returns the Task to deliberate
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
   const next = await s.lifecycle.advanceRun('task-1', 'pi', 'continue after correction', { actor: lead, reason: 'correction', contentVersion: 1 });
   assert.equal(next.task.environmentLifecycleState, 'running');
+});
+
+test('idle validation recovery preserves the pending claim and Human validation gap', async () => {
+  const s = await scenario();
+  await s.controls.submitCompletionClaim('task-1', lead, {
+    outcomeSummary: 'Delivered', validationEvidence: ['acceptance check passed'], durableChanges: [], limitations: [], recommendedDisposition: 'complete',
+  });
+  await s.lifecycle.workerChannelLost('task-1');
+  const recovered = await s.controls.recoverForHuman('task-1', { action: 'resume', reason: 'context inspected' });
+  assert.equal(recovered.environmentLifecycleState, 'awaiting-validation');
+  assert.equal(recovered.pendingCompletionClaimId, 'claim-1');
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
+  const completed = await s.controls.validateForHuman('task-1', { claimId: 'claim-1', decision: 'accept', reason: 'verified' });
+  assert.equal(completed.status, 'done');
 });
 
 test('accepted completion recovery preserves its intent even when recovery is submitted as discard', async () => {

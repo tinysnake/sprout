@@ -20,7 +20,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
       if (context.method !== 'POST' || context.segments.length !== 4
         || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
       const action = context.segments[3] ?? '';
-      const supported = new Set(['pause', 'interrupt', 'resume', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
+      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
       if (!supported.has(action)) return false;
       if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
       try {
@@ -29,6 +29,13 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
         if (!isRecord(body)) return json(context, 400, { code: 'invalid-command', error: 'a JSON command object is required' });
         let task: Task | undefined;
         switch (action) {
+          case 'content':
+            if (!onlyKeys(body, ['expectedContentVersion', 'content', 'reason'])
+              || typeof body.expectedContentVersion !== 'number' || typeof body.reason !== 'string') {
+              return json(context, 400, { code: 'invalid-command', error: 'expectedContentVersion, content, and reason are required' });
+            }
+            task = await controls.reviseForHuman(taskId, { expectedContentVersion: body.expectedContentVersion, content: body.content, reason: body.reason });
+            break;
           case 'pause':
           case 'interrupt':
           case 'resume':

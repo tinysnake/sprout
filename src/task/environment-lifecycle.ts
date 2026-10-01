@@ -14,7 +14,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
-import { serializeTaskControlDocument, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim } from './model.ts';
+import { serializeTaskControlDocument, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim, type TaskContent } from './model.ts';
 import { isTerminalTaskStatus } from './model.ts';
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
@@ -331,7 +331,7 @@ export class TaskEnvironmentLifecycle {
   }
 
   /** Nested settlement changes Task progress only; it never releases the outer lease. */
-  async settleRun(taskId: string, run: AgentRun): Promise<void> {
+  async settleRun(taskId: string, run: AgentRun, retry = false): Promise<void> {
     const task = await this.#store.get(taskId);
     if (!task || task.activeRunId !== run.id) return; // idempotent restart redelivery
     if (run.status === 'queued' || run.status === 'running') return;
@@ -348,14 +348,23 @@ export class TaskEnvironmentLifecycle {
       ...task,
       status: run.status === 'failed' ? 'blocked' : task.blocker !== undefined ? 'blocked' : 'in-progress',
       environmentLifecycleState: run.status === 'failed' || task.blocker !== undefined ? 'blocked' : 'idle',
-      ...(run.status === 'failed' ? { blockerReason: `run ${run.id} failed: ${run.failure ?? 'no failure detail'}` } : {}),
+      ...(run.status === 'failed' ? { blockerReason: `run ${run.id} failed: ${run.failure ?? 'no failure detail'}`,
+        ...(task.admission !== undefined ? { blocker: this.#unfinishedBlocker(task, `run ${run.id} failed`) } : {}),
+      } : {}),
       ...(requestedPause !== undefined ? { pauseState: 'paused' as const,
         controlHistory: [...(task.controlHistory ?? []), {
           action: 'paused' as const, actor: requestedPause.actor, at: this.#clock.now(), reason: requestedPause.reason,
         }] } : {}),
       updatedAt: this.#clock.now(),
     };
-    await this.#store.save(omit(next, 'activeRunId'));
+    const saved = await this.#store.saveIfUnchanged(omit(next, 'activeRunId'), {
+      environmentLifecycleState: task.environmentLifecycleState, activeRunId: task.activeRunId,
+      updatedAt: task.updatedAt, controlDocument: serializeTaskControlDocument(task),
+    });
+    if (!saved) {
+      if (retry) throw new Error('Task changed repeatedly during run settlement; reconciliation is required');
+      await this.settleRun(taskId, run, true);
+    }
   }
 
   async end(taskId: string): Promise<Task> {
@@ -398,6 +407,11 @@ export class TaskEnvironmentLifecycle {
       const resumed = omit({ ...task, status: 'in-progress' as const, environmentLifecycleState: 'idle' as const, updatedAt: this.#clock.now() }, 'recoveryState');
       await this.#store.save(resumed); return resumed;
     }
+    if (!task.activeRunId && ['idle', 'blocked', 'awaiting-validation'].includes(task.recoveryState ?? '')) {
+      const restored = omit({ ...task, environmentLifecycleState: task.recoveryState!, updatedAt: this.#clock.now() }, 'recoveryState');
+      await this.#store.save(restored);
+      return restored;
+    }
     // A lost nested session is a visible interrupted fact, never an automatic relaunch.
     const requestedPause = task.pauseState === 'requested'
       ? [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'pause-requested')
@@ -408,6 +422,7 @@ export class TaskEnvironmentLifecycle {
       status: 'blocked' as const,
       environmentLifecycleState: 'blocked' as const,
       blockerReason: task.blockerReason ?? 'nested run interrupted; advance deliberately to resume',
+      ...(task.admission !== undefined && task.blocker === undefined ? { blocker: this.#unfinishedBlocker(task, 'nested run interrupted') } : {}),
       ...(requestedPause !== undefined ? { pauseState: 'paused' as const,
         controlHistory: [...(task.controlHistory ?? []), { action: 'paused' as const, actor: requestedPause.actor, at: this.#clock.now(), reason: requestedPause.reason }] } : {}),
       updatedAt: this.#clock.now(),
@@ -435,6 +450,33 @@ export class TaskEnvironmentLifecycle {
     if (task.environmentLifecycleState === 'recovery' || !task.environmentLeaseId) return;
     if (!['beginning', 'idle', 'blocked', 'awaiting-validation', 'running', 'ending'].includes(task.environmentLifecycleState ?? '')) return;
     await this.#toRecovery(task, task.environmentLifecycleState!, task.activeRunId !== undefined);
+  }
+
+  /** Human revisions never mutate an already admitted run or pending claim. */
+  async reviseContent(taskId: string, actor: TaskActor, input: {
+    readonly expectedContentVersion: number; readonly content: TaskContent; readonly reason: string;
+  }): Promise<Task> {
+    const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
+    if (!task.admission || !Number.isSafeInteger(input.expectedContentVersion)
+      || task.admission.contentVersion !== input.expectedContentVersion) throw new Error('stale Task content version');
+    if (isTerminalTaskStatus(task.status) || ['ending', 'ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
+      || task.recoveryState === 'ending') throw new Error('Task end intent cannot be revised');
+    const at = this.#clock.now();
+    const contentVersion = task.admission.contentVersion + 1;
+    const { assignedAgentId: _assigned, ...rest } = task;
+    const next: Task = {
+      ...rest, title: input.content.title, goal: input.content.goal, constraints: [...input.content.constraints],
+      ...(input.content.lead.memberKind === 'agent' ? { assignedAgentId: input.content.lead.memberId } : {}),
+      admission: { ...task.admission, contentVersion, validationCriteria: [...input.content.validationCriteria], lead: { ...input.content.lead } },
+      controlHistory: [...(task.controlHistory ?? []), {
+        action: 'content-revised', actor, at, reason: input.reason, contentVersion,
+        previous: { title: task.title, goal: task.goal, constraints: [...task.constraints], validationCriteria: [...task.admission.validationCriteria], lead: { ...task.admission.lead } },
+        content: structuredClone(input.content),
+      }], updatedAt: at,
+    };
+    await this.#saveControlTransition(task, next, 'content revision');
+    return next;
   }
 
   /** Pause stops future admissions immediately while preserving an active run and its lease. */
@@ -836,6 +878,14 @@ export class TaskEnvironmentLifecycle {
       || this.#pool.requiresLease(environmentInstanceId, agent.capability) !== true) return false;
     const admission = await this.#runs.evaluateOptionAdmission?.(agentId, environmentInstanceId);
     return admission?.ok ?? true;
+  }
+
+  #unfinishedBlocker(task: Task, reason: string): TaskBlocker {
+    return {
+      reason, requiredAction: 'Inspect unfinished work and clear this blocker before deliberately advancing',
+      responsible: { kind: 'human', memberId: task.admission!.approvedBy.memberId },
+      nextAdvancer: { ...task.admission!.lead }, createdBy: { memberKind: 'system', memberId: 'sprout' }, createdAt: this.#clock.now(),
+    };
   }
 
   #assertHuman(task: Task, actor: TaskActor | undefined): void {

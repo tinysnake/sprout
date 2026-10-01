@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
 import type { AgentRun } from '../run/model.ts';
-import type { Task, TaskActor, TaskBlocker, TaskBlockerResponsibility, TaskCompletionClaim } from './model.ts';
+import type { Task, TaskActor, TaskBlocker, TaskBlockerResponsibility, TaskCompletionClaim, TaskContent } from './model.ts';
 import type { TaskService } from './service.ts';
 import type { TaskEnvironmentLifecycle, TaskRecoveryAction } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 
 export type TaskBlockerInput = Omit<TaskBlocker, 'createdBy' | 'createdAt'>;
-export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at'>;
+export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at' | 'contentVersion'>;
 export type TaskControlErrorCode = 'unknown-task' | 'authority-required' | 'invalid-command' | 'lifecycle-conflict';
 
 export class TaskControlError extends Error {
@@ -46,6 +46,21 @@ export class TaskControlService {
     this.#runs = options.runs;
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? (() => `claim-${randomUUID()}`);
+  }
+
+  async reviseForHuman(taskId: string, input: {
+    readonly expectedContentVersion: number; readonly content: unknown; readonly reason: string;
+  }): Promise<Task> {
+    const actor = await this.#humanForTask(taskId);
+    const task = await this.#task(taskId);
+    const content = validateContent(input?.content);
+    const lead = await this.#proposals.authorizeActor(task.projectId, content.lead);
+    if (lead.memberKind === 'agent' && !(await this.#lifecycle.eligibleAgents(task.projectId, task.environmentInstanceId!)).includes(lead.memberId)) {
+      throw new TaskControlError('invalid-command', 'the new Task lead is not eligible on the bound Environment');
+    }
+    return this.#lifecycle.reviseContent(taskId, actor, {
+      expectedContentVersion: input.expectedContentVersion, content: { ...content, lead }, reason: commandReason(input.reason),
+    });
   }
 
   async pauseForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
@@ -102,7 +117,10 @@ export class TaskControlService {
     const task = await this.#task(taskId);
     const actor = await this.#authorizeLead(task, actorInput);
     const claimInput = validateClaim(input);
-    const claim: TaskCompletionClaim = { ...claimInput, id: this.#id(), actor, at: this.#now() };
+    const links = (await this.#tasks.getWithRuns(taskId))?.runs ?? [];
+    const contentVersion = links.at(-1)?.contentVersion ?? task.admission?.contentVersion;
+    if (contentVersion === undefined) throw new TaskControlError('lifecycle-conflict', 'claim requires an admitted Task content version');
+    const claim: TaskCompletionClaim = { ...claimInput, id: this.#id(), actor, at: this.#now(), contentVersion };
     return this.#lifecycle.submitCompletionClaim(taskId, claim);
   }
 
@@ -248,6 +266,17 @@ function validateResponsibilityShape(value: unknown): TaskBlockerResponsibility 
     return { kind: 'recovery', mechanism: text(value.mechanism, 'mechanism', 2000) };
   }
   throw new TaskControlError('invalid-command', 'unknown blocker responsibility kind');
+}
+
+function validateContent(value: unknown): TaskContent {
+  if (!isRecord(value) || !hasOnly(value, ['title', 'goal', 'constraints', 'validationCriteria', 'lead'])) {
+    throw new TaskControlError('invalid-command', 'content requires title, goal, constraints, validationCriteria, and lead only');
+  }
+  return {
+    title: text(value.title, 'title', 500), goal: text(value.goal, 'goal', 4000),
+    constraints: stringList(value.constraints, 'constraints', false),
+    validationCriteria: stringList(value.validationCriteria, 'validationCriteria', true), lead: actorSnapshot(value.lead),
+  };
 }
 
 function validateClaim(value: unknown): TaskCompletionClaimInput {
