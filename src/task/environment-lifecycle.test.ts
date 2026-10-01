@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 
 import { AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
@@ -14,6 +15,28 @@ import type { AgentRun } from '../run/model.ts';
 import { InMemoryTaskStore } from './store.ts';
 import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { Task } from './model.ts';
+
+class PauseRaceStore extends InMemoryTaskStore {
+  readonly pauseWriteStarted: Promise<void>;
+  #startPauseWrite!: () => void;
+  #releasePauseWrite!: () => void;
+  readonly #pauseWriteGate = new Promise<void>((resolve) => { this.#releasePauseWrite = resolve; });
+
+  constructor() {
+    super();
+    this.pauseWriteStarted = new Promise<void>((resolve) => { this.#startPauseWrite = resolve; });
+  }
+
+  releasePauseWrite(): void { this.#releasePauseWrite(); }
+
+  override async saveIfUnchanged(task: Task, expected: Parameters<InMemoryTaskStore['saveIfUnchanged']>[1]): Promise<boolean> {
+    if (task.pauseState === 'requested') {
+      this.#startPauseWrite();
+      await this.#pauseWriteGate;
+    }
+    return super.saveIfUnchanged(task, expected);
+  }
+}
 
 const definition: EnvironmentDefinition = { id: 'mac', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
 const instance: EnvironmentInstance = { id: 'mac-1', definitionId: 'mac', workingDirectory: '/work' };
@@ -126,6 +149,34 @@ test('begin binds a Task-owned non-expiring lease; nested settlement retains it 
   assert.equal(ended.environmentLifecycleState, 'ended');
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
   assert.deepEqual(calls, ['prepare', 'prepare', 'recycle']);
+});
+
+test('Pause retries after natural settlement wins its compare-and-set before later admission', async () => {
+  const store = new PauseRaceStore();
+  const scenario = build({ store });
+  await store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'go');
+
+  const pausePending = scenario.lifecycle.requestPause('task-1', { memberId: 'operator', memberKind: 'human' }, 'hold before next run');
+  await store.pauseWriteStarted;
+  await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'completed'));
+  const settled = await store.get('task-1');
+  assert.equal(settled?.environmentLifecycleState, 'idle');
+  assert.equal(settled?.activeRunId, undefined);
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
+  const competingAdmission = scenario.lifecycle.advanceRun('task-1', 'pi', 'run-2');
+  await setImmediate();
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1']);
+  assert.equal((await store.get('task-1'))?.activeRunId, undefined);
+
+  store.releasePauseWrite();
+  const paused = await pausePending;
+  assert.equal(paused.pauseState, 'paused');
+  assert.deepEqual(paused.controlHistory?.map((event) => event.action), ['paused']);
+  await assert.rejects(competingAdmission, /paused/i);
+  assert.deepEqual(scenario.submitted.map((item) => item.runId), ['run-1']);
+  assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
 });
 
 test('Human pause blocks later admission, Interrupt settles stopped, and the Task lease stays held until resume', async () => {

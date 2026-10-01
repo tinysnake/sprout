@@ -132,6 +132,7 @@ export class TaskEnvironmentLifecycle {
   readonly #onRecovery: NonNullable<TaskEnvironmentLifecycleOptions['onRecovery']> | undefined;
   readonly #forceReleaseLease: NonNullable<TaskEnvironmentLifecycleOptions['forceReleaseLease']> | undefined;
   readonly #faults: NonNullable<TaskEnvironmentLifecycleOptions['faults']> | undefined;
+  readonly #admissionPauseTails = new Map<string, Promise<void>>();
 
   constructor(options: TaskEnvironmentLifecycleOptions) {
     this.#store = options.store;
@@ -273,6 +274,14 @@ export class TaskEnvironmentLifecycle {
   }
 
   async advanceRun(taskId: string, agentId: string, input: string, audit?: {
+    readonly actor: TaskActor;
+    readonly reason: string;
+    readonly contentVersion: number;
+  }): Promise<{ readonly task: Task; readonly runId: string }> {
+    return this.#withAdmissionPauseLock(taskId, () => this.#advanceRun(taskId, agentId, input, audit));
+  }
+
+  async #advanceRun(taskId: string, agentId: string, input: string, audit?: {
     readonly actor: TaskActor;
     readonly reason: string;
     readonly contentVersion: number;
@@ -482,34 +491,40 @@ export class TaskEnvironmentLifecycle {
 
   /** Pause stops future admissions immediately while preserving an active run and its lease. */
   async requestPause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
-    const task = await this.#require(taskId);
-    this.#assertHuman(task, actor);
-    if (task.pauseState !== undefined) return task;
-    if (!['running', 'idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')
-      || !task.environmentLeaseId) throw new Error(`task ${taskId} cannot be paused in its current lifecycle`);
-    const lease = this.#pool.getLease(task.environmentLeaseId);
-    if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id) {
-      throw new Error(`task ${taskId} lease is not active`);
+    return this.#withAdmissionPauseLock(taskId, () => this.#requestPause(taskId, actor, reason));
+  }
+
+  async #requestPause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const task = await this.#require(taskId);
+      this.#assertHuman(task, actor);
+      if (task.pauseState !== undefined) return task;
+      if (!['running', 'idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')
+        || !task.environmentLeaseId) throw new Error(`task ${taskId} cannot be paused in its current lifecycle`);
+      const lease = this.#pool.getLease(task.environmentLeaseId);
+      if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id) {
+        throw new Error(`task ${taskId} lease is not active`);
+      }
+      if ((task.environmentLifecycleState === 'running') !== (task.activeRunId !== undefined)) {
+        throw new Error(`task ${taskId} active run state is inconsistent`);
+      }
+      const at = this.#clock.now();
+      const action = task.activeRunId === undefined ? 'paused' as const : 'pause-requested' as const;
+      const next: Task = {
+        ...task,
+        pauseState: action === 'paused' ? 'paused' : 'requested',
+        controlHistory: [...(task.controlHistory ?? []), { action, actor, at, reason }],
+        updatedAt: at,
+      };
+      const saved = await this.#store.saveIfUnchanged(next, {
+        environmentLifecycleState: task.environmentLifecycleState,
+        activeRunId: task.activeRunId,
+        updatedAt: task.updatedAt,
+        controlDocument: serializeTaskControlDocument(task),
+      });
+      if (saved) return next;
     }
-    if ((task.environmentLifecycleState === 'running') !== (task.activeRunId !== undefined)) {
-      throw new Error(`task ${taskId} active run state is inconsistent`);
-    }
-    const at = this.#clock.now();
-    const action = task.activeRunId === undefined ? 'paused' as const : 'pause-requested' as const;
-    const next: Task = {
-      ...task,
-      pauseState: action === 'paused' ? 'paused' : 'requested',
-      controlHistory: [...(task.controlHistory ?? []), { action, actor, at, reason }],
-      updatedAt: at,
-    };
-    const saved = await this.#store.saveIfUnchanged(next, {
-      environmentLifecycleState: task.environmentLifecycleState,
-      activeRunId: task.activeRunId,
-      updatedAt: task.updatedAt,
-      controlDocument: serializeTaskControlDocument(task),
-    });
-    if (!saved) throw new Error(`task ${taskId} changed before pause was recorded`);
-    return next;
+    throw new Error(`task ${taskId} changed repeatedly before pause was recorded; retry Human Pause`);
   }
 
   /** Resume is an explicit Human action; it never admits a run by itself. */
@@ -924,6 +939,20 @@ export class TaskEnvironmentLifecycle {
     const lease = task.environmentLeaseId === undefined ? undefined : this.#pool.getLease(task.environmentLeaseId);
     if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id
       || lease.instanceId !== task.environmentInstanceId) throw new Error(`task ${task.id} lease is not active`);
+  }
+
+  async #withAdmissionPauseLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#admissionPauseTails.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    this.#admissionPauseTails.set(taskId, tail);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.#admissionPauseTails.get(taskId) === tail) this.#admissionPauseTails.delete(taskId);
+    }
   }
 
   async #saveControlTransition(current: Task, next: Task, operation: string): Promise<void> {
