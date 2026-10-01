@@ -403,7 +403,7 @@ test('Usage: filters and clear filters work, showing empty state when no activit
 
     projectSelect.value = 'proj-docs-portal';
     projectSelect.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
-    modelSelect.value = 'claude-3-5-sonnet';
+    modelSelect.value = [...modelSelect.options].find(option => option.textContent === 'claude-3-5-sonnet')!.value;
     modelSelect.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
     agentSelect.value = 'programmer';
     agentSelect.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
@@ -537,6 +537,7 @@ test('Usage F5: hostile display and telemetry strings are redacted across all ta
     const address = [192, 168, 88, 99].join('.');
     const hostile = `Safe context ${path} ${credential} ${address}`;
     const acts = original.rawActivities.map((a: any) => ({ ...a,
+      model: hostile, provider: hostile,
       modelIdentity: { source: hostile, provider: hostile, version: hostile },
       durationSource: hostile, outcomeReason: hostile, coverageNote: hostile,
       tokenDimensions: { ...a.tokenDimensions, source: hostile },

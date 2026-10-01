@@ -46,16 +46,21 @@ const activities = ref<readonly UsageActivityItem[]>([]);
 const projects = ref<readonly UsageProjectOption[]>([]);
 const agents = ref<readonly UsageAgentOption[]>([]);
 const models = ref<readonly string[]>([]);
+// DOM option values are opaque indexes; raw model telemetry stays in query state only.
+const modelSelection = computed({
+  get: () => modelFilter.value === 'all' ? 'all' : String(models.value.indexOf(modelFilter.value)),
+  set: (value: string) => { modelFilter.value = value === 'all' ? 'all' : models.value[Number(value)] ?? 'all'; },
+});
 const isLoading = ref(true);
 const queryError = ref(false);
 const listIncomplete = ref(false);
 const authoritativeActivities = ref(new Map<string, UsageAggregate>());
+const scopedActivityIds = ref(new Set<string>());
 let loadGeneration = 0;
 
 const tabLabels: Record<UsageTab, string> = {
   run: 'Agent run',
   task: 'Task',
-const scopedActivityIds = ref(new Set<string>());
   project: 'Project',
   agent: 'Agent',
   model: 'Model',
@@ -381,15 +386,15 @@ function aggregateCoverageDetails(acts: readonly UsageActivityItem[]) {
 const workActivities = computed(() => filteredActivities.value.filter((a) => a.kind === 'agent_run'));
 const routingActivities = computed(() => filteredActivities.value.filter((a) => a.kind === 'routing_attempt'));
 
+// Scope-query constituents drive each tab; summary kinds remain separate across all retained activity.
+const scopedActivities = computed(() => filteredActivities.value.filter(a => scopedActivityIds.value.has(a.id)));
+const scopedWorkActivities = computed(() => scopedActivities.value.filter(a => a.kind === 'agent_run'));
+
 // Groupings for views
 const taskGroups = computed(() => {
   const groups = new Map<string, UsageActivityItem[]>();
   for (const activity of scopedWorkActivities.value) {
     const key = activity.taskId ?? 'unassigned';
-// Scope-query constituents drive each tab; summary kinds remain separate across all retained activity.
-const scopedActivities = computed(() => filteredActivities.value.filter(a => scopedActivityIds.value.has(a.id)));
-const scopedWorkActivities = computed(() => scopedActivities.value.filter(a => a.kind === 'agent_run'));
-
     groups.set(key, [...(groups.get(key) ?? []), activity]);
   }
   return groups;
@@ -657,13 +662,13 @@ const timeRangeLabels: Record<string, string> = {
           <label>
             Model
             <select
-              v-model="modelFilter"
+              v-model="modelSelection"
               class="usage-filter-select"
               data-usage-filter="model"
               @change="selectedActivityId = undefined"
             >
               <option value="all">All Models</option>
-              <option v-for="m in models" :key="m" :value="m">{{ displayText(m) }}</option>
+              <option v-for="(m, index) in models" :key="index" :value="String(index)">{{ displayText(m) }}</option>
             </select>
           </label>
 
