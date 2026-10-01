@@ -25,7 +25,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor } = {}) {
   const store = new InMemoryTaskStore();
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
@@ -34,7 +34,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   let nextRun = 0;
   const task = (): Task => ({
     id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'todo', assignedAgentId: 'pi',
-    admission: { proposalId: 'proposal', proposalRevision: 1, contentVersion: 1, validationCriteria: ['tests pass'], lead, contextAgentId: 'pi', approvedBy: human, approvedAt: 1, approvalReason: 'approved' },
+    admission: { proposalId: 'proposal', proposalRevision: 1, contentVersion: 1, validationCriteria: ['tests pass'], lead: options.taskLead ?? lead, contextAgentId: 'pi', approvedBy: human, approvedAt: 1, approvalReason: 'approved' },
     createdAt: 1, updatedAt: 1,
   });
   lifecycle = new TaskEnvironmentLifecycle({
@@ -174,6 +174,25 @@ test('unexpected interruption during a pause request recovers into paused state 
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
   await assert.rejects(s.lifecycle.advanceRun('task-1', 'pi', 'must remain paused', { actor: lead, reason: 'next', contentVersion: 1 }), /paused/i);
   assert.equal((await s.tasks.getWithRuns('task-1'))?.runs[0]?.runId, advance.runId, 'recovery never creates a replacement run');
+});
+
+test('an authenticated Human Task lead can stop its own subordinate run, while another lead cannot borrow the browser stop', async () => {
+  const own = await scenario({ taskLead: human });
+  const advance = await own.lifecycle.advanceRun('task-1', 'pi', 'Human lead delegated work', {
+    actor: human, reason: 'delegate a bounded run', contentVersion: 1,
+  });
+  const stopped = await own.controls.stopSubordinateForHumanLead('task-1', { runId: advance.runId, reason: 'stop the delegated run' });
+  assert.equal(stopped.environmentLifecycleState, 'idle');
+  assert.equal((await own.tasks.getWithRuns('task-1'))?.runs[0]?.summary?.status, 'stopped');
+  assert.equal(own.pool.getLease(own.begun.environmentLeaseId!)?.state, 'active');
+
+  const other = await scenario();
+  const humanAdvance = await other.lifecycle.advanceRun('task-1', 'pi', 'Human initiated work', {
+    actor: human, reason: 'operator step', contentVersion: 1,
+  });
+  await assert.rejects(other.controls.stopSubordinateForHumanLead('task-1', { runId: humanAdvance.runId, reason: 'borrow Agent lead authority' }), /current Task lead/);
+  await assert.rejects(other.controls.stopSubordinateForLead('task-1', lead, { runId: humanAdvance.runId, reason: 'stop a run I did not initiate' }), /only a run they initiated/);
+  assert.equal((await other.tasks.get('task-1'))?.activeRunId, humanAdvance.runId);
 });
 
 test('Task leads can stop only a subordinate run they initiated without releasing the outer lease', async () => {

@@ -114,7 +114,7 @@ export const MANAGE_ITEMS: readonly NavigationItem[] = [
 ];
 
 /** Route params that mean "the operator opened one record", not "the destination root". */
-const DETAIL_PARAMS: readonly string[] = ['id', 'taskId'];
+const DETAIL_PARAMS: readonly string[] = ['id', 'taskId', 'proposalId'];
 
 export function destinationOf(route: RouteLocationNormalizedLoaded): DestinationKey {
   for (const record of route.matched) {

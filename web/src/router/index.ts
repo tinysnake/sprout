@@ -16,7 +16,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import EnvironmentsView from '../modules/environments/views/EnvironmentsView.vue';
 import AgentsView from '../modules/agents/views/AgentsView.vue';
 import FeedView from '../views/FeedView.vue';
-import ProjectView from '../views/ProjectView.vue';
+import TasksView from '../modules/tasks/views/TasksView.vue';
 import ProjectsView from '../modules/projects/views/ProjectsView.vue';
 import ChatView from '../modules/chat/views/ChatView.vue';
 import RoutingInspectorView from '../modules/chat/views/RoutingInspectorView.vue';
@@ -48,13 +48,19 @@ export const routes: RouteRecordRaw[] = [
       {
         path: 'tasks',
         name: 'project-tasks',
-        component: ProjectView,
+        component: TasksView,
+        meta: { destination: 'project', tab: 'tasks' },
+      },
+      {
+        path: 'tasks/proposals/:proposalId',
+        name: 'project-task-proposal',
+        component: TasksView,
         meta: { destination: 'project', tab: 'tasks' },
       },
       {
         path: 'tasks/:taskId',
         name: 'project-task-detail',
-        component: ProjectView,
+        component: TasksView,
         meta: { destination: 'project', tab: 'tasks' },
       },
       {

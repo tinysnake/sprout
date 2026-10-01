@@ -251,27 +251,13 @@ test('Production Web: task card and agent card interactive details inspection', 
     app.mount(appMount);
     const doc = dom.window.document;
 
-    // 1. In Project Tasks: click task card to open Task Detail Dialog
+    // 1. Project Tasks now uses production authority instead of prototype cards.
     await router.push('/project/tasks');
     await router.isReady();
     await new Promise((resolve) => setTimeout(resolve, 80));
-
-    const taskBtn = doc.querySelector('button h4')?.closest('button') as HTMLButtonElement;
-    assert.ok(taskBtn, 'Task card button found in Project Tasks');
-    taskBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    // Verify Dedicated Task Detail Page (prototype-aligned)
-    assert.match(doc.body.textContent ?? '', /Task Operating Stage & Specification/);
-    assert.match(doc.body.textContent ?? '', /Nested Agent Runs Timeline/);
-    assert.match(doc.body.textContent ?? '', /Inspect Host Environment/);
-
-    // Click 'Back to Tasks List' to return to list mode
-    const backBtn = doc.querySelector('.back-to-tasks-btn') as HTMLButtonElement;
-    assert.ok(backBtn, 'Back to tasks list button found');
-    backBtn.click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
     assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/);
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/);
+    assert.equal(doc.querySelector('[data-record-kind="task"]'), null, 'the production Task page does not substitute fixture cards');
 
     // 2. In AgentsView: click agent card to view details
     await router.push('/manage/agents');

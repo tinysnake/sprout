@@ -180,6 +180,11 @@ export class TaskControlService {
     return this.#lifecycle.recoverForHuman(taskId, input.action, actor, commandReason(input.reason));
   }
 
+  async stopSubordinateForHumanLead(taskId: string, input: { readonly runId: string; readonly reason: string }): Promise<Task> {
+    const actor = await this.#humanForTask(taskId);
+    return this.stopSubordinateForLead(taskId, actor, input);
+  }
+
   async stopSubordinateForLead(taskId: string, actorInput: TaskActor, input: { readonly runId: string; readonly reason: string }): Promise<Task> {
     const task = await this.#task(taskId);
     const actor = await this.#authorizeLead(task, actorInput);

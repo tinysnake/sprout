@@ -190,7 +190,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
   };
 }
 
-test('M77-NAV-002: an unknown task detail deep link renders not-found and never substitutes a record', async () => {
+test('M77-NAV-002: a Task detail deep link requires production authority and never substitutes a record', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
@@ -206,15 +206,10 @@ test('M77-NAV-002: an unknown task detail deep link renders not-found and never 
     const doc = dom.window.document;
 
     assert.equal(router.currentRoute.value.params['taskId'], 'does-not-exist', 'the requested URL is preserved');
-    assert.ok(doc.querySelector('.tasks-not-found-state'), 'an explicit not-found state is rendered');
-    assert.match(doc.body.textContent ?? '', /Task Not Found/);
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/);
     assert.doesNotMatch(doc.body.textContent ?? '', /#101/, 'the first task is not substituted');
-    assert.equal(doc.querySelector('.operating-stage-card'), null, 'no other task detail is shown');
-
-    (doc.querySelector('.tasks-not-found-return') as HTMLButtonElement).click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(router.currentRoute.value.path, '/project/tasks', 'the return control recovers to the task list');
-    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/, 'the task list is restored');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Task Operating Stage & Specification/,
+      'the page does not render prototype Task facts without production authority');
 
     app.unmount();
   } finally {

@@ -20,7 +20,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
       if (context.method !== 'POST' || context.segments.length !== 4
         || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
       const action = context.segments[3] ?? '';
-      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
+      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
       if (!supported.has(action)) return false;
       if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
       try {
@@ -35,6 +35,12 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
               return json(context, 400, { code: 'invalid-command', error: 'expectedContentVersion, content, and reason are required' });
             }
             task = await controls.reviseForHuman(taskId, { expectedContentVersion: body.expectedContentVersion, content: body.content, reason: body.reason });
+            break;
+          case 'subordinate-stop':
+            if (!onlyKeys(body, ['runId', 'reason']) || typeof body.runId !== 'string' || typeof body.reason !== 'string') {
+              return json(context, 400, { code: 'invalid-command', error: 'runId and reason are required; actor fields are not accepted' });
+            }
+            task = await controls.stopSubordinateForHumanLead(taskId, { runId: body.runId, reason: body.reason });
             break;
           case 'pause':
           case 'interrupt':
