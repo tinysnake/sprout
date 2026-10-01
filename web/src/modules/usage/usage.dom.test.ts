@@ -581,6 +581,8 @@ test('Usage F6: backing tables expose every constituent and its measurement and 
         const row = region.querySelector(`[data-usage-backing-activity="${a.id}"]`)!;
         const text = row.textContent ?? '';
         assert.match(text, new RegExp(a.outcome, 'i'));
+        const project = (await fixture.listProjects()).find((p: any) => p.id === a.projectId);
+        if (project) assert.ok(text.includes(project.displayName), 'project display attribution present');
         assert.ok(text.includes(a.tokenDimensions.status));
         assert.ok(text.includes(a.observationState));
         assert.ok(text.includes(a.costValuation.billingBasis.replaceAll('_', ' ')));

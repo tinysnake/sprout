@@ -4,10 +4,13 @@ import { sanitizeOperatorText } from '../../../../src/environment/privacy.ts';
 
 defineProps<{
   activities: readonly UsageActivityItem[];
+  projectNames: Readonly<Record<string, string>>;
+  agentNames: Readonly<Record<string, string>>;
   aggregates: readonly { label: string; duration: string; tokens: string; estimate: string; coverage: string; provenance: string }[];
 }>();
 const dimensions = ['totalInput', 'uncachedInput', 'cachedReads', 'cacheWrite', 'output', 'reasoningOutput', 'total'] as const;
 const text = (value: string | undefined) => sanitizeOperatorText(value, { fallback: 'Unavailable', maxLength: 4000 });
+const identity = (value: string | undefined) => value && /^(?:act|task|run|att)-[a-z0-9-]+$/i.test(value) ? value : text(value);
 const number = (value: number | undefined) => value === undefined ? 'Unavailable' : value.toLocaleString();
 const usd = (value: number | undefined) => value === undefined ? 'Unavailable' : `$${(value / 1_000_000).toFixed(4)}`;
 </script>
@@ -32,7 +35,7 @@ const usd = (value: number | undefined) => value === undefined ? 'Unavailable' :
       <tbody>
         <tr v-for="a in activities" :key="a.id" :data-usage-backing-activity="a.id">
           <th scope="row">{{ a.id }}</th><td>{{ a.kind === 'agent_run' ? 'Agent run' : 'Routing attempt' }}</td>
-          <td>{{ text(a.projectId) }}</td><td>{{ text(a.taskId) }}</td><td>{{ text(a.agentId) }}</td>
+          <td>{{ projectNames[a.projectId] ?? identity(a.projectId) }}</td><td>{{ identity(a.taskId) }}</td><td>{{ (a.agentId && agentNames[a.agentId]) || identity(a.agentId) }}</td>
           <td>{{ text(a.engine) }} / {{ text(a.model) }} / {{ text(a.modelIdentity.source) }} / {{ text(a.modelIdentity.provider) }} / {{ text(a.modelIdentity.version) }}</td>
           <td>{{ a.settlementRange }} / {{ text(a.activityTime) }}</td>
           <td>{{ a.outcome }} / {{ a.sessionMode }} / {{ text(a.outcomeReason) }}</td>

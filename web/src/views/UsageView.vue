@@ -427,6 +427,8 @@ const timeGroups = computed(() => {
   return [...groups.entries()].sort(([a], [b]) => (rangeRank[a] ?? 99) - (rangeRank[b] ?? 99));
 });
 
+const backingProjectNames = computed(() => Object.fromEntries(projects.value.map(p => [p.id, displayText(p.displayName)])));
+const backingAgentNames = computed(() => Object.fromEntries(agents.value.map(a => [a.id, displayText(a.displayName)])));
 const backingActivities = computed(() => scopedActivities.value);
 const backingAggregates = computed(() => {
   const entries: { label: string; acts: readonly UsageActivityItem[] }[] = [
@@ -1495,7 +1497,7 @@ const timeRangeLabels: Record<string, string> = {
       </div>
 
       <!-- All visual aggregates and constituent evidence have semantic table equivalents. -->
-      <UsageBackingTable v-if="!isLoading && !queryError" :activities="backingActivities" :aggregates="backingAggregates" />
+      <UsageBackingTable v-if="!isLoading && !queryError" :activities="backingActivities" :aggregates="backingAggregates" :project-names="backingProjectNames" :agent-names="backingAgentNames" />
       </template>
     </div>
   </div>
