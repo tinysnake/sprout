@@ -2,6 +2,7 @@
 import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import Icon from '../primitives/Icon.vue';
+import UsageBackingTable from '../modules/usage/UsageBackingTable.vue';
 import Badge from '../primitives/Badge.vue';
 import EmptyState from '../primitives/EmptyState.vue';
 import {
@@ -402,6 +403,36 @@ const timeGroups = computed(() => {
     groups.set(activity.settlementRange, [...(groups.get(activity.settlementRange) ?? []), activity]);
   }
   return [...groups.entries()].sort(([a], [b]) => (rangeRank[a] ?? 99) - (rangeRank[b] ?? 99));
+});
+
+const backingActivities = computed(() => ['run', 'task', 'agent'].includes(activeTab.value) ? workActivities.value : filteredActivities.value);
+const backingAggregates = computed(() => {
+  const entries: { label: string; acts: readonly UsageActivityItem[] }[] = [
+    { label: 'Work-model Agent runs', acts: workActivities.value },
+    { label: 'Project-owned Routing attempts', acts: routingActivities.value },
+  ];
+  const groups = activeTab.value === 'task' ? taskGroups.value
+    : activeTab.value === 'project' ? projectGroups.value
+    : activeTab.value === 'agent' ? agentGroups.value
+    : activeTab.value === 'model' ? modelGroups.value
+    : activeTab.value === 'time' ? new Map(timeGroups.value) : new Map<string, UsageActivityItem[]>();
+  for (const [key, acts] of groups) {
+    for (const kind of ['agent_run', 'routing_attempt'] as const) {
+      const subset = acts.filter(a => a.kind === kind);
+      if (subset.length) entries.push({ label: `${activeTab.value} ${displayText(key)} / ${activityKindLabel(kind)}`, acts: subset });
+    }
+  }
+  return entries.flatMap(({ label, acts }) => [false, true].map(provisional => {
+    const subset = provisional ? splitOngoing(acts).provisional : splitOngoing(acts).finalized;
+    const metrics = aggregateMetrics(subset);
+    return {
+      label: `${label} — ${provisional ? 'Provisional observed so far' : 'Finalized'}`,
+      duration: formatDuration(metrics.duration, metrics.durationStatus), tokens: formatNumber(metrics.tokens),
+      estimate: `${formatUsd(metrics.estimate)} API-equivalent`,
+      coverage: `Token coverage: ${coverageText(subset)}; ${costCoverageText(subset)}; Attributable billed cost: Unavailable`,
+      provenance: aggregateCoverageDetails(subset).provenanceSummary,
+    };
+  }));
 });
 
 const timeRangeLabels: Record<string, string> = {
@@ -1436,37 +1467,8 @@ const timeRangeLabels: Record<string, string> = {
         </details>
       </div>
 
-      <!-- 8. Accessible Backing Table for Assistive Technologies -->
-      <div class="sr-only" role="region" aria-label="Tabular summary for assistive technology">
-        <table>
-          <caption>Observability telemetry summary backing table</caption>
-          <thead>
-            <tr>
-              <th scope="col">Activity Category</th>
-              <th scope="col">Duration</th>
-              <th scope="col">Known Tokens</th>
-              <th scope="col">API-Equivalent Estimate</th>
-              <th scope="col">Billed Cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th scope="row">Work-model Agent runs</th>
-              <td>{{ formatDuration(aggregateMetrics(splitOngoing(workActivities).finalized).duration, aggregateMetrics(splitOngoing(workActivities).finalized).durationStatus) }}</td>
-              <td>{{ formatNumber(aggregateMetrics(splitOngoing(workActivities).finalized).tokens) }}</td>
-              <td>{{ formatUsd(aggregateMetrics(splitOngoing(workActivities).finalized).estimate) }}</td>
-              <td>Unavailable</td>
-            </tr>
-            <tr>
-              <th scope="row">Project-owned Routing attempts</th>
-              <td>{{ formatDuration(aggregateMetrics(splitOngoing(routingActivities).finalized).duration, aggregateMetrics(splitOngoing(routingActivities).finalized).durationStatus) }}</td>
-              <td>{{ formatNumber(aggregateMetrics(splitOngoing(routingActivities).finalized).tokens) }}</td>
-              <td>{{ formatUsd(aggregateMetrics(splitOngoing(routingActivities).finalized).estimate) }}</td>
-              <td>Unavailable</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <!-- All visual aggregates and constituent evidence have semantic table equivalents. -->
+      <UsageBackingTable :activities="backingActivities" :aggregates="backingAggregates" />
       </template>
     </div>
   </div>

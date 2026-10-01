@@ -560,3 +560,36 @@ test('Usage F5: hostile display and telemetry strings are redacted across all ta
     app.unmount();
   } finally { await cleanup(); }
 });
+
+test('Usage F6: backing tables expose every constituent and its measurement and history evidence', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { app, fixture } = await mountedPage(vite, mount);
+    for (const tab of ['run', 'task', 'project', 'agent', 'model', 'time']) {
+      (doc.querySelector(`[data-usage-tab="${tab}"]`) as HTMLButtonElement).click();
+      await settle(80);
+      const region = doc.querySelector('[aria-label="Tabular summary for assistive technology"]')!;
+      const rows = region.querySelectorAll('[data-usage-backing-activity]');
+      const expected = fixture.rawActivities.filter((a: any) => !['run','task','agent'].includes(tab) || a.kind === 'agent_run');
+      assert.equal(rows.length, expected.length, `${tab}: all constituents represented`);
+      for (const a of expected) {
+        const row = region.querySelector(`[data-usage-backing-activity="${a.id}"]`)!;
+        const text = row.textContent ?? '';
+        assert.match(text, new RegExp(a.outcome, 'i'));
+        assert.ok(text.includes(a.tokenDimensions.status));
+        assert.ok(text.includes(a.observationState));
+        assert.ok(text.includes(a.costValuation.billingBasis.replaceAll('_', ' ')));
+        for (const dimension of ['totalInput','uncachedInput','cachedReads','cacheWrite','output','reasoningOutput','total']) {
+          const cell = row.querySelector(`[data-token-dimension="${dimension}"]`)!;
+          assert.equal(cell.textContent, a.tokenDimensions[dimension] === undefined ? 'Unavailable' : a.tokenDimensions[dimension].toLocaleString());
+        }
+        const { sanitizeOperatorText } = await import('../../../../src/environment/privacy.ts');
+        for (const h of a.observationHistory ?? []) assert.ok(text.includes(sanitizeOperatorText(h.note, { fallback: 'Unavailable', maxLength: 4000 })), 'append-only sanitized history note present');
+      }
+      assert.match(region.textContent ?? '', /Provisional observed so far/);
+      assert.match(region.textContent ?? '', /Token coverage/);
+      assert.match(region.textContent ?? '', /API-equivalent estimate provenance/);
+    }
+    app.unmount();
+  } finally { await cleanup(); }
+});
