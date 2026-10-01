@@ -310,6 +310,21 @@ test('a failed initial-run outcome survives SQLite restart and a begin retry wit
   }
 });
 
+test('a retried begin returns the already-bound Task without another lease or initial run', async () => {
+  const context = fixture();
+  const proposal = await propose(context);
+  const actor = { memberId: 'operator', memberKind: 'human' as const };
+  const input = beginInput({ memberId: 'scout', memberKind: 'agent' });
+  const first = await context.admissions.beginProposal(proposal.id, actor, input);
+  const retry = await context.admissions.beginProposal(proposal.id, actor, input);
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.task.id, first.task.id);
+  assert.equal(retry.initialRunId, first.initialRunId);
+  assert.equal(retry.initialRunFailed, undefined);
+  assert.equal(context.submissions.length, 1);
+  assert.equal(context.pool.leases().filter(lease => lease.state === 'active').length, 1);
+});
+
 test('SQLite restart preserves the consumed proposal snapshot and rolls back a partial cross-domain begin', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'task-admission-'));
   const filename = join(directory, 'sprout.db');
