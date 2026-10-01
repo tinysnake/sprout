@@ -198,6 +198,7 @@ export function buildHandOffContext(
 /** One bounded fact line for a run, or `undefined` when it has no fact to state. */
 function factFor(run: AgentRun): string | undefined {
   const where = run.environmentInstanceId;
+  if (run.status === 'stopped') return `- Stopped in ${where}`;
   switch (run.result?.status) {
     case 'completed': {
       const detail = bounded(run.result.text);
