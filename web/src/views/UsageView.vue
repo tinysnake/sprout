@@ -14,6 +14,9 @@ import {
   type UsageAgentOption,
 } from '../modules/usage/types.ts';
 import '../modules/usage/usage.css';
+import { emptyUsageAggregate, type UsageAggregate } from '../../../src/usage/model.ts';
+import type { UsageAggregateFilter } from '../../../src/usage/store.ts';
+import { mapObservationToItem } from '../modules/usage/adapters/production-adapter.ts';
 
 const props = defineProps<{
   service?: UsageManagementService;
@@ -36,6 +39,10 @@ const projects = ref<readonly UsageProjectOption[]>([]);
 const agents = ref<readonly UsageAgentOption[]>([]);
 const models = ref<readonly string[]>([]);
 const isLoading = ref(true);
+const queryError = ref(false);
+const listIncomplete = ref(false);
+const authoritativeActivities = ref(new Map<string, UsageAggregate>());
+let loadGeneration = 0;
 
 const tabLabels: Record<UsageTab, string> = {
   run: 'Agent run',
@@ -60,20 +67,57 @@ async function loadData() {
     return;
   }
 
+  const generation = ++loadGeneration;
   isLoading.value = true;
+  queryError.value = false;
+  activities.value = [];
+  authoritativeActivities.value = new Map();
+  const to = Date.now() + 1;
+  const days = { today: 1, '7d': 7, '30d': 30 };
+  const filter: UsageAggregateFilter = {
+    projectId: projectFilter.value === 'all' ? undefined : projectFilter.value,
+    agentId: agentFilter.value === 'all' ? undefined : agentFilter.value,
+    model: modelFilter.value === 'all' ? undefined : modelFilter.value,
+    timeZone: 'UTC',
+    ...(timeRangeFilter.value === 'all' ? {} : { from: to - days[timeRangeFilter.value] * 86400000, to }),
+  };
   try {
-    const [fetchedActivities, fetchedProjects, fetchedAgents, fetchedModels] = await Promise.all([
-      service.listActivities(),
-      service.listProjects(),
-      service.listAgents(),
-      service.listModels(),
+    const [scope, fetchedActivities, fetchedProjects, fetchedAgents, fetchedModels] = await Promise.all([
+      service.getAggregate({ ...filter, groupBy: activeTab.value === 'time' ? undefined : activeTab.value }),
+      service.listActivities(filter),
+      service.listProjects(), service.listAgents(), service.listModels(),
     ]);
-    activities.value = fetchedActivities;
+    // The aggregate's identities, not a potentially paginated list, define the constituents.
+    const identities = [...scope.activityIdentities, ...(scope.provisionalTotals?.activityIdentities ?? [])];
+    const items = new Map(fetchedActivities.map(item => [item.id, item]));
+    const missing = identities.filter(identity => !items.has(identity.activityId));
+    const recovered = await Promise.all(missing.map(async identity => {
+      const detail = await service.getActivityDetail(identity.activityId);
+      return detail ? mapObservationToItem(detail.activity, detail.effectiveObservation, detail.supersessionHistory) : undefined;
+    }));
+    if (recovered.some(item => !item)) throw new Error('Aggregate constituent detail unavailable');
+    recovered.forEach(item => { if (item) items.set(item.id, item); });
+    const totals = await Promise.all(identities.map(async identity => {
+      // Per-constituent authority preserves full model identity when a model-name aggregate mixes sources.
+      const identityFilter = identity.kind === 'agent_run'
+        ? { runId: identity.runId } : { attemptId: identity.attemptId };
+      if (!identityFilter.runId && !('attemptId' in identityFilter && identityFilter.attemptId)) {
+        throw new Error('Aggregate constituent lacks a query identity');
+      }
+      const aggregate = await service.getAggregate({ ...filter, ...identityFilter, kind: identity.kind, provisional: identity.status === 'active' });
+      return [identity.activityId, aggregate] as const;
+    }));
+    if (generation !== loadGeneration) return;
+    listIncomplete.value = missing.length > 0 || recovered.some(item => !item);
+    activities.value = identities.flatMap(identity => items.has(identity.activityId) ? [items.get(identity.activityId)!] : []);
+    authoritativeActivities.value = new Map(totals);
     projects.value = fetchedProjects;
     agents.value = fetchedAgents;
     models.value = fetchedModels;
+  } catch {
+    if (generation === loadGeneration) queryError.value = true;
   } finally {
-    isLoading.value = false;
+    if (generation === loadGeneration) isLoading.value = false;
   }
 }
 
@@ -81,7 +125,7 @@ onMounted(() => {
   loadData();
 });
 
-watch(activeService, () => {
+watch([activeService, activeTab, timeRangeFilter, projectFilter, agentFilter, modelFilter], () => {
   loadData();
 });
 
@@ -174,22 +218,36 @@ function tokenSummary(activity: UsageActivityItem): string {
   return `${formatNumber(activity.tokenDimensions.totalInput)} input observed`;
 }
 
-function sumKnown(acts: readonly UsageActivityItem[], value: (activity: UsageActivityItem) => number | undefined): number | undefined {
-  const known = acts.map(value).filter((item): item is number => item !== undefined);
-  return known.length > 0 ? known.reduce((total, item) => total + item, 0) : undefined;
+function aggregateFor(acts: readonly UsageActivityItem[]): UsageAggregate {
+  const totals = acts.map(item => authoritativeActivities.value.get(item.id)).filter((a): a is UsageAggregate => !!a);
+  const sum = (values: (number | undefined)[]) => values.every(v => v === undefined) ? undefined : values.reduce<number>((n, v) => n + (v ?? 0), 0);
+  const result = emptyUsageAggregate();
+  const tokenCoverage = { complete: 0, partial: 0, unavailable: 0 };
+  const costCoverage = { available: 0, pending: 0, unavailable: 0 };
+  const byProvenance: UsageAggregate['cost']['byProvenance'] = {};
+  for (const a of totals) {
+    for (const key of ['complete', 'partial', 'unavailable'] as const) tokenCoverage[key] += a.tokenCoverage[key];
+    for (const key of ['available', 'pending', 'unavailable'] as const) costCoverage[key] += a.costCoverage[key];
+    for (const key of ['provider_estimated', 'harness_calculated', 'locally_estimated'] as const) {
+      const value = a.cost.byProvenance[key];
+      if (value !== undefined) byProvenance[key] = (byProvenance[key] ?? 0) + value;
+    }
+  }
+  return {
+    ...result, totalActivities: totals.reduce((n, a) => n + a.totalActivities, 0), tokenCoverage, costCoverage,
+    totalSproutWallDurationMs: sum(totals.map(a => a.totalSproutWallDurationMs)),
+    tokens: { totalTokens: sum(totals.map(a => a.tokens.totalTokens)), status: tokenCoverage.partial || tokenCoverage.unavailable ? 'observed_incomplete' : totals.length ? 'complete' : 'unavailable' },
+    cost: { apiEquivalentUsdMicros: sum(totals.map(a => a.cost.apiEquivalentUsdMicros)), byProvenance, status: Object.keys(byProvenance).length > 1 ? 'mixed_provenance' : costCoverage.available ? 'single_provenance' : 'unavailable' },
+  };
 }
 
 function coverageText(acts: readonly UsageActivityItem[]): string {
-  const complete = acts.filter((activity) => activity.tokenDimensions.status === 'complete').length;
-  const partial = acts.filter((activity) => activity.tokenDimensions.status === 'partial').length;
-  const unavailable = acts.filter((activity) => activity.tokenDimensions.status === 'unavailable').length;
+  const { complete, partial, unavailable } = aggregateFor(acts).tokenCoverage;
   return `${complete} complete / ${partial} partial / ${unavailable} unavailable token observations`;
 }
 
 function costCoverageText(acts: readonly UsageActivityItem[]): string {
-  const available = acts.filter((activity) => activity.costValuation.apiEquivalentStatus === 'available').length;
-  const pending = acts.filter((activity) => activity.costValuation.apiEquivalentStatus === 'pending').length;
-  const unavailable = acts.filter((activity) => activity.costValuation.apiEquivalentStatus === 'unavailable').length;
+  const { available, pending, unavailable } = aggregateFor(acts).costCoverage;
   return `${available} available / ${pending} pending / ${unavailable} unavailable estimates`;
 }
 
@@ -223,7 +281,8 @@ function clearFilters() {
 }
 
 function aggregateMetrics(acts: readonly UsageActivityItem[]) {
-  const duration = sumKnown(acts, (activity) => activity.wallDurationMs);
+  const authority = aggregateFor(acts);
+  const duration = authority.totalSproutWallDurationMs;
   const durationStatus =
     acts.length === 0 || duration === undefined
       ? ('unavailable' as const)
@@ -235,10 +294,8 @@ function aggregateMetrics(acts: readonly UsageActivityItem[]) {
   return {
     duration,
     durationStatus,
-    tokens: sumKnown(acts, (activity) => activity.tokenDimensions.total),
-    estimate: sumKnown(acts, (activity) =>
-      activity.costValuation.apiEquivalentStatus === 'available' ? activity.costValuation.estimatedUsdMicros : undefined
-    ),
+    tokens: authority.tokens.totalTokens,
+    estimate: authority.cost.apiEquivalentUsdMicros,
   };
 }
 
@@ -250,38 +307,20 @@ function splitOngoing(acts: readonly UsageActivityItem[]) {
 }
 
 function aggregateCoverageDetails(acts: readonly UsageActivityItem[]) {
-  const tokenComplete = acts.filter((activity) => activity.tokenDimensions.status === 'complete').length;
-  const tokenPartial = acts.filter((activity) => activity.tokenDimensions.status === 'partial').length;
-  const tokenUnavailable = acts.filter((activity) => activity.tokenDimensions.status === 'unavailable').length;
+  const authority = aggregateFor(acts);
+  const { complete: tokenComplete, partial: tokenPartial, unavailable: tokenUnavailable } = authority.tokenCoverage;
   const durationKnown = acts.filter(
     (activity) => activity.durationStatus === 'complete' && activity.wallDurationMs !== undefined
   ).length;
   const durationPartial = acts.filter((activity) => activity.durationStatus === 'partial').length;
   const durationUnavailable = acts.filter((activity) => activity.durationStatus === 'unavailable').length;
-  const valuationAvailable = acts.filter(
-    (activity) => activity.costValuation.apiEquivalentStatus === 'available'
-  ).length;
-  const valuationPending = acts.filter(
-    (activity) => activity.costValuation.apiEquivalentStatus === 'pending'
-  ).length;
-  const valuationUnavailable = acts.filter(
-    (activity) => activity.costValuation.apiEquivalentStatus === 'unavailable'
-  ).length;
+  const { available: valuationAvailable, pending: valuationPending, unavailable: valuationUnavailable } = authority.costCoverage;
   const billedReported = acts.filter(
     (activity) => activity.costValuation.attributableBilledCostStatus !== 'unavailable'
   ).length;
   const billedUnavailable = acts.length - billedReported;
 
-  const provenanceCounts = new Map<string, number>();
-  acts
-    .filter(
-      (activity) =>
-        activity.costValuation.apiEquivalentStatus === 'available' && activity.costValuation.provenance !== undefined
-    )
-    .forEach((activity) => {
-      const provenance = activity.costValuation.provenance!;
-      provenanceCounts.set(provenance, (provenanceCounts.get(provenance) ?? 0) + 1);
-    });
+  const provenanceCounts = new Map(Object.entries(authority.cost.byProvenance));
 
   const provenanceLabels: Record<string, string> = {
     provider_estimated: 'provider-estimated',
@@ -289,7 +328,7 @@ function aggregateCoverageDetails(acts: readonly UsageActivityItem[]) {
     locally_estimated: 'locally-estimated',
   };
   const provenanceSummary = [...provenanceCounts.entries()]
-    .map(([provenance, count]) => `${provenanceLabels[provenance] ?? provenance} ${count}`)
+    .map(([provenance, value]) => `${provenanceLabels[provenance] ?? provenance} ${formatUsd(value)} API-equivalent`)
     .join(' / ');
   const mixedProvenance = provenanceCounts.size > 1;
 
@@ -396,6 +435,10 @@ const timeRangeLabels: Record<string, string> = {
       </div>
 
       <template v-else>
+      <p v-if="queryError" role="alert">Usage query unavailable. No local totals substituted.</p>
+      <p v-if="isLoading" role="status">Loading authoritative usage…</p>
+      <p v-if="listIncomplete" role="status">Activity list incomplete; totals use authoritative aggregate constituents, not the truncated list.</p>
+      <p class="usage-boundary-note">Settlement ranges use UTC and half-open instant bounds. Known subtotals are observed, incomplete when coverage has gaps.</p>
       <!-- 3. Summary Band (Work-model Agent runs & Project-owned Routing attempts separate) -->
       <section class="usage-summary-band" aria-label="Usage summary">
         <!-- Work-model Agent runs -->

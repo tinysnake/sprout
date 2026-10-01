@@ -495,6 +495,12 @@ export class FixtureUsageService implements UsageManagementService {
   async listActivities(filter: UsageActivityFilter = {}): Promise<readonly UsageActivityItem[]> {
     return this.#activities.filter((activity) => {
       if (filter.kind && activity.kind !== filter.kind) return false;
+      if (filter.runId && `run-${activity.id}` !== filter.runId) return false;
+      if (filter.attemptId && `att-${activity.id}` !== filter.attemptId) return false;
+      const ageDays = { today: 0, '7d': 3, '30d': 15, older: 60 }[activity.settlementRange];
+      const instant = Date.now() - ageDays * 86400000;
+      if (filter.from !== undefined && instant < filter.from) return false;
+      if (filter.to !== undefined && instant >= filter.to) return false;
       if (filter.projectId && filter.projectId !== 'all' && activity.projectId !== filter.projectId) return false;
       if (filter.taskId && filter.taskId !== 'all' && activity.taskId !== filter.taskId) return false;
       if (filter.agentId && filter.agentId !== 'all' && activity.agentId !== filter.agentId) return false;
@@ -508,6 +514,10 @@ export class FixtureUsageService implements UsageManagementService {
   async getAggregate(filter: UsageAggregateFilter = {}): Promise<UsageAggregate> {
     const activities = await this.listActivities({
       kind: filter.kind,
+      runId: filter.runId,
+      attemptId: filter.attemptId,
+      from: filter.from,
+      to: filter.to,
       projectId: filter.projectId,
       taskId: filter.taskId,
       agentId: filter.agentId,
@@ -586,6 +596,8 @@ export class FixtureUsageService implements UsageManagementService {
       totalSproutWallDurationMs: totalDuration > 0 ? totalDuration : undefined,
       activityIdentities: activities.map((a) => ({
         activityId: a.id,
+        runId: a.kind === 'agent_run' ? `run-${a.id}` : undefined,
+        attemptId: a.kind === 'routing_attempt' ? `att-${a.id}` : undefined,
         kind: a.kind,
         projectId: a.projectId,
         taskId: a.taskId,
@@ -630,6 +642,22 @@ export class FixtureUsageService implements UsageManagementService {
                 projectId: item.projectId,
               },
             }),
+      },
+      effectiveObservation: {
+        id: `obs-${item.id}-effective`, activityId: item.id, observedAt: 1,
+        source: item.modelIdentity.source, sourceVersion: item.modelIdentity.version,
+        completeness: item.tokenDimensions.status,
+        tokens: {
+          inputTokens: item.tokenDimensions.totalInput, uncachedInputTokens: item.tokenDimensions.uncachedInput,
+          cachedInputTokens: item.tokenDimensions.cachedReads, cacheWriteInputTokens: item.tokenDimensions.cacheWrite,
+          outputTokens: item.tokenDimensions.output, reasoningOutputTokens: item.tokenDimensions.reasoningOutput,
+          totalTokens: item.tokenDimensions.total,
+        },
+        durations: { sproutWallDurationMs: item.wallDurationMs ?? 0 },
+        billedCost: { status: item.costValuation.attributableBilledCostStatus, currency: 'USD' },
+        costEstimate: { status: item.costValuation.apiEquivalentStatus, currency: 'USD',
+          apiEquivalentUsdMicros: item.costValuation.estimatedUsdMicros, valuationProvenance: item.costValuation.provenance },
+        billingBasis: item.costValuation.billingBasis, isEffective: true,
       },
       observations: (item.observationHistory ?? []).map((h, i) => ({
         id: `obs-${item.id}-${i}`,

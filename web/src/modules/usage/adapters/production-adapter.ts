@@ -27,7 +27,7 @@ function mapSettlementRange(activity: BackendActivity): 'today' | '7d' | '30d' {
   return '30d';
 }
 
-function mapObservationToItem(
+export function mapObservationToItem(
   activity: BackendActivity,
   observation?: UsageObservation,
   history?: ActivityDetailView['supersessionHistory']

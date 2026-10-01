@@ -491,3 +491,34 @@ test('Usage: privacy boundary — no sensitive paths, credentials, or secrets in
     await cleanup();
   }
 });
+
+test('Usage F4: scopes query authoritative aggregates with filters; truncated lists are not full totals', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { FixtureUsageService } = await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts');
+    const fixture = new FixtureUsageService();
+    const calls: any[] = [];
+    const authority = new FixtureUsageService();
+    const aggregate = authority.getAggregate.bind(authority);
+    fixture.getAggregate = async (filter: any) => { calls.push(filter); return aggregate(filter); };
+    const list = fixture.listActivities.bind(fixture);
+    fixture.listActivities = async (filter: any) => (await list(filter)).slice(0, 1);
+    const { app } = await mountedPage(vite, mount, fixture);
+    for (const tab of ['run', 'task', 'project', 'agent', 'model', 'time']) {
+      (doc.querySelector(`[data-usage-tab="${tab}"]`) as HTMLButtonElement).click();
+      await settle(100);
+      assert.ok(calls.some(f => f.groupBy === (tab === 'time' ? undefined : tab) && f.timeZone === 'UTC'), `aggregate query for ${tab}`);
+    }
+    assert.match(doc.body.textContent ?? '', /Activity list incomplete/);
+    assert.match(doc.querySelector('[data-usage-summary-kind="agent_run"]')?.textContent ?? '', /181,500 tokens/);
+    const project = doc.querySelector('[data-usage-filter="projectId"]') as HTMLSelectElement;
+    project.value = 'proj-minesweeper';
+    project.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
+    const range = doc.querySelector('[data-usage-filter="timeRange"]') as HTMLSelectElement;
+    range.value = '30d';
+    range.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
+    await settle(100);
+    assert.ok(calls.some(f => f.projectId === 'proj-minesweeper' && typeof f.from === 'number' && typeof f.to === 'number' && f.to - f.from === 30 * 86400000));
+    app.unmount();
+  } finally { await cleanup(); }
+});
