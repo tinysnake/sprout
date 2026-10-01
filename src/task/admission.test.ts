@@ -8,7 +8,7 @@ import { InMemoryTaskProposalStore } from './proposal-store.ts';
 import { TaskProposalService } from './proposal-service.ts';
 import { TaskAdmissionError, TaskAdmissionService } from './admission-service.ts';
 import { TaskService } from './service.ts';
-import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
+import { TaskAdvanceConflictError, TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
 import type { TaskStore } from './store.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
@@ -27,6 +27,7 @@ const content = {
 
 function fixture(options: {
   readonly contextFailure?: boolean;
+  readonly submitFailure?: boolean;
   readonly compatible?: (agentId: string, environmentId: string) => boolean;
   readonly agents?: readonly string[];
   readonly taskStore?: TaskStore;
@@ -60,6 +61,7 @@ function fixture(options: {
   const runner = {
     async submit(request: { runId?: string; agentId: string; taskId?: string; environmentInstanceId?: string; prompt: string; projectId: string }) {
       submissions.push({ agentId: request.agentId, ...(request.runId !== undefined ? { runId: request.runId } : {}), ...(request.taskId !== undefined ? { taskId: request.taskId } : {}), ...(request.environmentInstanceId !== undefined ? { environmentInstanceId: request.environmentInstanceId } : {}) });
+      if (options.submitFailure) throw new Error('run submission failed');
       return { id: request.runId ?? `unlinked-${submissions.length}` };
     },
     async evaluateOptionAdmission(agentId: string, environmentInstanceId: string) {
@@ -228,21 +230,48 @@ test('simultaneous Task-lead advances admit one run and persist one audit record
     context.admissions.advance(task.task.id, actor, { targetAgentId: 'scribe', reason: 'Second concurrent advance.' }),
   ]);
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const rejected = results.find(result => result.status === 'rejected');
+  assert.equal(rejected?.status, 'rejected');
+  if (rejected?.status === 'rejected') {
+    assert.ok(rejected.reason instanceof TaskAdvanceConflictError);
+    assert.equal(rejected.reason.code, 'advance-conflict');
+  }
   assert.equal(context.submissions.length, 1);
   assert.equal((await context.tasks.getWithRuns(task.task.id))!.runs.length, 1);
 });
 
-test('a retried begin returns the already-bound Task without another lease or initial run', async () => {
-  const context = fixture();
-  const proposal = await propose(context);
-  const actor = { memberId: 'operator', memberKind: 'human' as const };
-  const input = beginInput({ memberId: 'scout', memberKind: 'agent' });
-  const first = await context.admissions.beginProposal(proposal.id, actor, input);
-  const retry = await context.admissions.beginProposal(proposal.id, actor, input);
-  assert.equal(retry.duplicate, true);
-  assert.equal(retry.task.id, first.task.id);
-  assert.equal(context.submissions.length, 1);
-  assert.equal(context.pool.leases().filter(lease => lease.state === 'active').length, 1);
+test('a failed initial-run outcome survives SQLite restart and a begin retry without resubmitting', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-admission-failure-'));
+  const filename = join(directory, 'sprout.db');
+  const store = new SqliteStore({ filename });
+  try {
+    const context = fixture({ taskStore: store.tasks, proposalStore: store.taskProposals, leaseStore: store.leases, submitFailure: true });
+    const proposal = await propose(context);
+    const actor = { memberId: 'operator', memberKind: 'human' as const };
+    const input = beginInput({ memberId: 'scout', memberKind: 'agent' });
+    const first = await context.admissions.beginProposal(proposal.id, actor, input);
+    assert.equal(first.initialRunFailed, true);
+    assert.equal(first.initialRunId, undefined);
+    assert.equal(context.submissions.length, 1);
+    store.close();
+
+    const reopened = new SqliteStore({ filename });
+    try {
+      const retryContext = fixture({ taskStore: reopened.tasks, proposalStore: reopened.taskProposals, leaseStore: reopened.leases });
+      const persisted = await reopened.tasks.get(first.task.id);
+      assert.equal(persisted?.admission?.initialRunFailed, true);
+      assert.equal(reopened.leases.get(persisted!.environmentLeaseId!)?.state, 'recovering');
+      const retry = await retryContext.admissions.beginProposal(proposal.id, actor, input);
+      assert.equal(retry.duplicate, true);
+      assert.equal(retry.task.id, first.task.id);
+      assert.equal(retry.initialRunFailed, true);
+      assert.equal(retry.initialRunId, undefined);
+      assert.equal(retryContext.submissions.length, 0);
+    } finally { reopened.close(); }
+  } finally {
+    try { store.close(); } catch { /* closed before reopening */ }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('SQLite restart preserves the consumed proposal snapshot and rolls back a partial cross-domain begin', async () => {

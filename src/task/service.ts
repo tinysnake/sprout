@@ -143,6 +143,22 @@ export class TaskService {
     return this.#store.getWithRuns(taskId);
   }
 
+  /** Persist the failed outcome of the separately submitted Agent-lead begin run. */
+  async recordInitialRunFailure(taskId: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (!task.admission || task.admission.lead.memberKind !== 'agent') {
+      throw new Error(`task ${taskId} has no Agent-lead admission run`);
+    }
+    if (task.admission.initialRunFailed) return task;
+    const failed: Task = {
+      ...task,
+      admission: { ...task.admission, initialRunFailed: true },
+      updatedAt: this.#clock.now(),
+    };
+    await this.#store.save(failed);
+    return failed;
+  }
+
   /**
    * Apply a partial update to a Task.
    *

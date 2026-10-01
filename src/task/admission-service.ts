@@ -95,7 +95,13 @@ export class TaskAdmissionService {
         || task.admission.lead.memberId !== repeatedLead.memberId || task.admission.lead.memberKind !== repeatedLead.memberKind
         || task.admission.approvalReason !== reason) throw new TaskProposalError('stale-proposal');
       const runLinks = (await this.#tasks.getWithRuns(task.id))?.runs ?? [];
-      return { task, duplicate: true, ...(task.admission?.lead.memberKind === 'agent' && runLinks[0] ? { initialRunId: runLinks[0].runId } : {}) };
+      const initialRunFailed = task.admission?.initialRunFailed === true;
+      return {
+        task,
+        duplicate: true,
+        ...(task.admission?.lead.memberKind === 'agent' && !initialRunFailed && runLinks[0] ? { initialRunId: runLinks[0].runId } : {}),
+        ...(initialRunFailed ? { initialRunFailed: true } : {}),
+      };
     }
 
     const proposal = await this.#proposals.beginSnapshot(proposalId, actor, input.expectedRevision);
@@ -160,7 +166,8 @@ export class TaskAdmissionService {
     } catch {
       const begunTask = await this.#tasks.get(taskId);
       if (!begunTask) throw new TaskAdmissionError('task-not-admitted', 'Task begin committed but its Task record is unavailable');
-      return { task: begunTask, duplicate: false, initialRunFailed: true };
+      const failedTask = await this.#tasks.recordInitialRunFailure(taskId);
+      return { task: failedTask, duplicate: false, initialRunFailed: true };
     }
   }
 
