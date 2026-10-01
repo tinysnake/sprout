@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import type { ProjectEvent } from './events.ts';
+import { validateAttentionResolution, type CollaborationAttentionResolution, type ResolveCollaborationAttention, type FailedWakeInput } from './attention.ts';
 import type {
   Message,
   MessageChannel,
@@ -83,6 +84,15 @@ export class SqliteCollaborationStore implements CollaborationStore {
 
   #init(): void {
     this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS collaboration_attention_resolutions (
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        human_id TEXT NOT NULL,
+        resolved_at INTEGER NOT NULL,
+        source_version INTEGER NOT NULL,
+        PRIMARY KEY (source_kind, source_id)
+      );
       CREATE TABLE IF NOT EXISTS collaboration_messages (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -461,6 +471,37 @@ export class SqliteCollaborationStore implements CollaborationStore {
       .prepare('SELECT * FROM collaboration_messages ORDER BY created_at ASC')
       .all() as unknown as MessageRow[];
     return rows.map(toMessage);
+  }
+
+  async resolveAttention(input: ResolveCollaborationAttention): Promise<void> {
+    const resolution = await validateAttentionResolution(this, input);
+    this.#db.prepare(
+      `INSERT INTO collaboration_attention_resolutions
+       (source_kind, source_id, project_id, human_id, resolved_at, source_version) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_kind, source_id) DO UPDATE SET human_id = excluded.human_id,
+         resolved_at = excluded.resolved_at, source_version = excluded.source_version
+       WHERE excluded.source_kind = 'wake-input'
+         AND excluded.source_version > collaboration_attention_resolutions.source_version`
+    ).run(resolution.kind, resolution.sourceId, resolution.projectId, resolution.humanId, resolution.resolvedAt, resolution.sourceVersion);
+  }
+
+  async listAttentionResolutions(): Promise<readonly CollaborationAttentionResolution[]> {
+    return this.#db.prepare(
+      'SELECT project_id AS projectId, source_kind AS kind, source_id AS sourceId, human_id AS humanId, resolved_at AS resolvedAt, source_version AS sourceVersion FROM collaboration_attention_resolutions ORDER BY source_kind, source_id'
+    ).all() as unknown as CollaborationAttentionResolution[];
+  }
+
+  async listWakeFailures(): Promise<readonly FailedWakeInput[]> {
+    return this.#db.prepare(
+      `SELECT o.input_id AS inputId, CASE WHEN m.id IS NOT NULL THEN 'message' ELSE 'event' END AS inputKind,
+        COALESCE(m.project_id, e.project_id) AS projectId,
+        COUNT(DISTINCT o.agent_id) AS failedTargetCount, COUNT(*) AS version, MAX(o.created_at) AS at
+       FROM collaboration_observations o
+       LEFT JOIN collaboration_messages m ON m.id = o.input_id
+       LEFT JOIN project_events e ON e.id = o.input_id
+       WHERE o.status = 'failed' AND COALESCE(m.project_id, e.project_id) IS NOT NULL
+       GROUP BY o.input_id, COALESCE(m.project_id, e.project_id) ORDER BY o.input_id`
+    ).all() as unknown as FailedWakeInput[];
   }
 
   async getEvent(eventId: string): Promise<ProjectEvent | undefined> {

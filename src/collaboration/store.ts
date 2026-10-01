@@ -21,6 +21,7 @@
  */
 
 import type { ProjectEvent } from './events.ts';
+import { validateAttentionResolution, type CollaborationAttentionResolution, type ResolveCollaborationAttention, type FailedWakeInput } from './attention.ts';
 import type {
   Message,
   WakeObservation,
@@ -75,6 +76,11 @@ export interface CollaborationStore {
   getMessage(messageId: string): Promise<Message | undefined>;
   getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined>;
   listMessages(): Promise<readonly Message[]>;
+
+  /** Human-only Feed resolution; never changes historical collaboration facts. */
+  resolveAttention(input: ResolveCollaborationAttention): Promise<void>;
+  listAttentionResolutions(): Promise<readonly CollaborationAttentionResolution[]>;
+  listWakeFailures(): Promise<readonly FailedWakeInput[]>;
 
   getEvent(eventId: string): Promise<ProjectEvent | undefined>;
   getEventByDeliveryKey(deliveryKey: string): Promise<ProjectEvent | undefined>;
@@ -265,6 +271,8 @@ export function wakeFromBatch(input: {
  * the contract rather than about one backend.
  */
 export class InMemoryCollaborationStore implements CollaborationStore {
+  readonly #resolutions = new Map<string, CollaborationAttentionResolution>();
+  readonly #observationTimes = new Map<string, number>();
   readonly #messages = new Map<string, Message>();
   readonly #byDeliveryKey = new Map<string, string>();
   readonly #events = new Map<string, ProjectEvent>();
@@ -383,6 +391,7 @@ export class InMemoryCollaborationStore implements CollaborationStore {
       });
       this.#wakes.set(wake.idempotencyKey, wake);
     }
+    if (plan.observations.some(o => o.status === 'failed')) this.#observationTimes.set(plan.inputId, now);
     for (const observation of plan.observations) {
       this.#observations.set(plan.inputId, [
         ...(this.#observations.get(plan.inputId) ?? []),
@@ -402,6 +411,30 @@ export class InMemoryCollaborationStore implements CollaborationStore {
 
   async listMessages(): Promise<readonly Message[]> {
     return [...this.#messages.values()].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  async resolveAttention(input: ResolveCollaborationAttention): Promise<void> {
+    const resolution = await validateAttentionResolution(this, input);
+    const key = JSON.stringify([input.kind, input.sourceId]);
+    const existing = this.#resolutions.get(key);
+    if (existing === undefined || (input.kind === 'wake-input' && resolution.sourceVersion > existing.sourceVersion)) {
+      this.#resolutions.set(key, resolution);
+    }
+  }
+
+  async listAttentionResolutions(): Promise<readonly CollaborationAttentionResolution[]> {
+    return [...this.#resolutions.values()];
+  }
+
+  async listWakeFailures(): Promise<readonly FailedWakeInput[]> {
+    return [...this.#observations.entries()].flatMap(([inputId, observations]) => {
+      const owner = this.#messages.get(inputId) ?? this.#events.get(inputId);
+      const failures = observations.filter(o => o.status === 'failed');
+      return owner === undefined || failures.length === 0 ? [] : [{
+        inputId, inputKind: this.#messages.has(inputId) ? 'message' as const : 'event' as const, projectId: owner.projectId, failedTargetCount: new Set(failures.map(o => o.agentId)).size, version: failures.length,
+        at: this.#observationTimes.get(inputId) ?? owner.createdAt,
+      }];
+    });
   }
 
   async getEvent(eventId: string): Promise<ProjectEvent | undefined> {
@@ -445,6 +478,7 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     readonly observation: WakeObservation;
     readonly now: number;
   }): Promise<void> {
+    if (input.observation.status === 'failed') this.#observationTimes.set(input.inputId, input.now);
     this.#observations.set(input.inputId, [
       ...(this.#observations.get(input.inputId) ?? []),
       input.observation,
