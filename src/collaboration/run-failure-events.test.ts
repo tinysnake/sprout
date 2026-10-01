@@ -276,6 +276,17 @@ test('reconciliation survives an unprojectable run and never fabricates an event
   assert.equal((await coordinator.listEvents('project-does-not-exist')).length, 0);
 });
 
+test('existing identifier-only failure events acquire safe outcome evidence on read without duplication', async () => {
+  const run = failedRun({ result: { status: 'failed', message: 'the engine refused the saved session' } });
+  const coordinator = harness(streamlessAdmitter([run]));
+  const input = runFailureEventInput(run)!;
+  await coordinator.publishEvent({ ...input, detail: 'run run-42 · agent architect' });
+  assert.equal(await coordinator.publishRunFailure(run), 'duplicate');
+  const events = await coordinator.listEvents(project.id);
+  assert.equal(events.length, 1);
+  assert.match(events[0]?.detail ?? '', /the engine refused the saved session/);
+});
+
 test('publishRunFailure reports published, duplicate, and skipped distinctly', async () => {
   const run = failedRun();
   const coordinator = harness(streamlessAdmitter([run]));

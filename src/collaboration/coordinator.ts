@@ -910,7 +910,13 @@ export class CollaborationCoordinator {
       // Placement is reconstructed from durable causality on every read. This
       // also covers a fast settlement published before admitWake committed,
       // and historical events, without duplicating facts or waking anyone.
-      return { ...event, originScopeIds: [...origins] };
+      // Historical identifier-only events retain their durable identity while
+      // their read projection explains the persisted outcome. No replay or
+      // mutation of the Project record is needed after deploying this repair.
+      const outcome = run?.projectId === event.projectId ? runFailureEventInput(run) : undefined;
+      const detail = sanitizeProjectEventDetail(outcome?.detail ??
+        `${event.detail ?? ''} · No error outcome was recorded.`);
+      return { ...event, ...(detail !== undefined ? { detail } : {}), originScopeIds: [...origins] };
     }));
   }
 
