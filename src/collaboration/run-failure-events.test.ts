@@ -6,9 +6,9 @@
  * 1. **Projection shape** — one Project-scoped terminal failure projects one
  *    `informational` `agent-run-failure` input attributed to the system
  *    producer, keyed by the run id.
- * 2. **Privacy** — the projection carries only the failure class and run
- *    identifiers: never failure text, prompt, raw events, tool output, or host
- *    facts.
+ * 2. **Privacy** — only identifiers, failure class, and exact product-owned
+ *    outcome reasons cross the projection: never arbitrary failure text,
+ *    prompt, raw events, tool output, or host facts.
  * 3. **Exactly-once** — the coordinator publishes it live (covered end-to-end
  *    in `integration.test.ts`) and again from restart reconciliation over the
  *    same delivery key, so a missed publication is repaired without a duplicate.
@@ -86,7 +86,7 @@ test('a Project-scoped terminal failure projects an informational system event w
   assert.equal(input.responsibleAgentIds, undefined, 'only addressed events name responsible Agents');
   assert.match(input.summary, /Agent run failed \(environment\) for architect/);
   assert.doesNotMatch(input.summary, /no available environment for capability: agent-run/);
-  assert.equal(input.detail, 'run run-42 · agent architect');
+  assert.equal(input.detail, 'run run-42 · agent architect · No error outcome was recorded.');
 
   // Privacy: prompt, raw events, and tool output are structurally absent.
   const serialized = JSON.stringify(input);
@@ -107,7 +107,7 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
   }));
   assert.ok(input);
   assert.equal(input.summary, 'Agent run failed (execution) for architect');
-  assert.equal(input.detail, 'run run-42 · agent architect');
+  assert.equal(input.detail, 'run run-42 · agent architect · No error outcome was recorded.');
   assert.equal(input.deliveryKey, 'run-failure:run-42');
   const projected = JSON.stringify(input);
   for (const unsafe of [marker, numberedHost, bareHost, 'engine error']) {
@@ -121,6 +121,22 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
   assert.equal(known.summary, 'Agent run failed (environment) for architect');
   assert.equal(JSON.stringify(known).includes(marker), false);
   assert.equal(JSON.stringify(known).includes(numberedHost), false);
+});
+
+test('failure notices explain persisted error messages, message-less errors, and missing outcomes safely', () => {
+  const cases: readonly [Partial<AgentRun>, RegExp][] = [
+    [{ result: { status: 'failed', message: 'the engine refused the saved session' } }, /the engine refused the saved session/],
+    [{ result: { status: 'failed', message: '' } }, /code: failed/],
+    [{ result: { status: 'failed', message: '', stopReason: 'error' } }, /stopReason: error/],
+    [{}, /No error outcome was recorded/],
+    [{ result: { status: 'failed', message: '<script>HOSTILE_DIAGNOSTIC</script>'.repeat(1000) } }, /diagnostic withheld/],
+  ];
+  for (const [outcome, reason] of cases) {
+    const input = runFailureEventInput(failedRun(outcome));
+    assert.match(input?.detail ?? '', reason);
+    assert.doesNotMatch(JSON.stringify(input), /HOSTILE_DIAGNOSTIC|<script>/);
+    assert.ok((input?.detail?.length ?? 0) < 500, 'notice reason is bounded by product-owned vocabulary');
+  }
 });
 
 test('only Project-scoped terminal failures project an event', () => {
@@ -195,6 +211,92 @@ function streamlessAdmitter(runs: readonly AgentRun[]): RunAdmitter {
   };
 }
 
+test('failure notice follows the real Message → wake → run into its originating direct chat', async () => {
+  const scopes = buildCollaborationScopes({ projects: [project] });
+  const scopeId = await scopes.openDirect(project.id, ['operator', 'architect']);
+  const run = failedRun();
+  const coordinator = new CollaborationCoordinator({
+    scopes: scopes.scopes,
+    store: new InMemoryCollaborationStore(),
+    runs: { ...streamlessAdmitter([run]), async submit() { return run; } },
+  });
+  const delivered = await coordinator.deliver({
+    scopeId, author: { id: 'operator', kind: 'human' }, body: 'Please investigate',
+    recipients: ['architect'], deliveryKey: 'origin-failure',
+  });
+  assert.equal(delivered.wakes[0]?.runId, run.id);
+  await coordinator.reconcile();
+  const events = await coordinator.listEvents(project.id);
+  assert.deepEqual((events[0] as unknown as { originScopeIds: string[] }).originScopeIds, [scopeId]);
+  assert.equal(events.length, 1, 'the same durable Project event is exposed, not a fabricated reply');
+  assert.equal((await coordinator.listMessages()).length, 1);
+  assert.equal((await coordinator.listWakeRequests()).length, 1, 'failure notice never wakes an Agent');
+  await coordinator.reconcile();
+  assert.equal((await coordinator.listEvents(project.id)).length, 1);
+});
+
+test('fast failure settlement never places a notice in an unrelated pending direct chat', async () => {
+  const scopes = buildCollaborationScopes({ projects: [project] });
+  const scopeA = await scopes.openDirect(project.id, ['operator', 'architect']);
+  const scopeB = await scopes.openDirect(project.id, ['human-lead', 'architect']);
+  const store = new InMemoryCollaborationStore();
+  const run = failedRun();
+  const otherRun = failedRun({ id: 'run-unrelated', status: 'running' });
+  function gate() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  const gates = [0, 1].map(() => ({ reached: gate(), release: gate() }));
+  const admitWake = store.admitWake.bind(store);
+  let admissions = 0;
+  store.admitWake = async (input) => {
+    const gate = gates[admissions++]!;
+    gate.reached.resolve();
+    await gate.release.promise;
+    return admitWake(input);
+  };
+  let submissions = 0;
+  const coordinator = new CollaborationCoordinator({
+    scopes: scopes.scopes, store,
+    runs: {
+      ...streamlessAdmitter([run, otherRun]),
+      async submit() { return submissions++ === 0 ? run : otherRun; },
+    },
+  });
+  const first = coordinator.deliver({
+    scopeId: scopeA, author: { id: 'operator', kind: 'human' }, body: 'Investigate A',
+    recipients: ['architect'], deliveryKey: 'fast-failure-A',
+  });
+  await gates[0]!.reached.promise;
+  const second = coordinator.deliver({
+    scopeId: scopeB, author: { id: 'human-lead', kind: 'human' }, body: 'Investigate B',
+    recipients: ['architect'], deliveryKey: 'pending-B',
+  });
+  try {
+    await gates[1]!.reached.promise;
+    const pending = await coordinator.listWakeRequests();
+    assert.equal(pending.length, 2);
+    assert.ok(pending.every((wake) => wake.status === 'pending' && wake.runId === undefined));
+    assert.equal(run.retryOfRunId, undefined);
+    await coordinator.publishRunFailure(run);
+    const beforeAdmission = await coordinator.listEvents(project.id);
+
+    gates[0]!.release.resolve();
+    await first;
+    assert.deepEqual((await coordinator.listEvents(project.id))[0]?.originScopeIds, [scopeA],
+      'only the failed run\'s originating chat receives the notice while B is still pending');
+    assert.deepEqual(beforeAdmission[0]?.originScopeIds, [],
+      'before the CAS, absent run links are not evidence of an origin');
+    assert.equal((await coordinator.listWakeRequests())[1]?.runId, undefined);
+    assert.equal((await store.listEvents()).length, 1);
+    assert.equal((await coordinator.listMessages()).length, 2, 'no fabricated Agent reply');
+  } finally {
+    for (const gate of gates) gate.release.resolve();
+    await Promise.all([first, second]);
+  }
+});
+
 test('restart reconciliation publishes a missed failure event exactly once', async () => {
   const marker = 'ARBITRARY_RECONCILIATION_OUTPUT';
   const run = failedRun({ failure: `engine failed: ${marker} at ${['fixture', 'node', '12345'].join('')}`, failureClass: 'execution' });
@@ -234,6 +336,113 @@ test('reconciliation survives an unprojectable run and never fabricates an event
   assert.deepEqual(result.failureEventRunIds, ['run-42']);
   assert.equal((await coordinator.listEvents('project-sprout')).length, 1);
   assert.equal((await coordinator.listEvents('project-does-not-exist')).length, 0);
+});
+
+test('historical failure origins use only their own run or a defined reconnect link without mutating records', async () => {
+  for (const link of ['own-run', 'reconnect-retry', 'missing-run'] as const) {
+    const scopes = buildCollaborationScopes({ projects: [project] });
+    const scopeA = await scopes.openDirect(project.id, ['operator', 'architect']);
+    const scopeB = await scopes.openDirect(project.id, ['human-lead', 'architect']);
+    const store = new InMemoryCollaborationStore();
+    const original = failedRun();
+    const unrelated = failedRun({ id: 'run-unrelated' });
+    const runs: AgentRun[] = [original, unrelated];
+    let submissions = 0;
+    const coordinator = new CollaborationCoordinator({
+      scopes: scopes.scopes, store,
+      runs: {
+        ...streamlessAdmitter(runs),
+        async submit() { return submissions++ === 0 ? original : unrelated; },
+      },
+    });
+    await coordinator.deliver({
+      scopeId: scopeA, author: { id: 'operator', kind: 'human' }, body: 'Investigate A',
+      recipients: ['architect'], deliveryKey: 'historical-A',
+    });
+    await coordinator.deliver({
+      scopeId: scopeB, author: { id: 'human-lead', kind: 'human' }, body: 'Investigate B',
+      recipients: ['architect'], deliveryKey: 'unrelated-B',
+    });
+    const run = failedRun({
+      ...(link === 'reconnect-retry' ? { id: 'run-retry', retryOfRunId: original.id } : {}),
+      result: { status: 'failed', message: 'the engine refused the saved session' },
+    });
+    if (link === 'reconnect-retry') runs.push(run);
+    else runs.splice(0, 1, run);
+    if (link === 'missing-run') runs.splice(0, runs.length);
+    await coordinator.publishEvent({ ...runFailureEventInput(run)!, detail: `run ${run.id} · agent architect` });
+    assert.equal(await coordinator.publishRunFailure(run), 'duplicate');
+    const persisted = JSON.stringify(await store.listEvents());
+    const events = await coordinator.listEvents(project.id);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]?.originScopeIds, [scopeA], link);
+    assert.match(events[0]?.detail ?? '', link === 'missing-run'
+      ? /No error outcome was recorded/ : /the engine refused the saved session/);
+    assert.equal(JSON.stringify(await store.listEvents()), persisted, 'read projection never mutates history');
+    assert.equal((await coordinator.listWakeRequests()).length, 2, 'read projection never creates wakes');
+  }
+});
+
+test('batch failure origins include assigned Message scopes only, not unassigned scopes or Project events', async () => {
+  const scopes = buildCollaborationScopes({
+    projects: [project], wakePolicy: 'wake-model-assisted', routingIntervalMs: 60_000,
+  });
+  const channel = await scopes.channel(project.id);
+  const group = await scopes.scopes.createWorkingGroup({
+    projectId: project.id, creator: { memberId: 'operator', kind: 'human' },
+    displayName: 'Investigation', memberIds: ['architect'],
+  });
+  const unassigned = await scopes.scopes.createWorkingGroup({
+    projectId: project.id, creator: { memberId: 'operator', kind: 'human' },
+    displayName: 'Unrelated', memberIds: ['architect'],
+  });
+  const store = new InMemoryCollaborationStore();
+  const run = failedRun();
+  const assignedIds = new Set<string>();
+  let now = 0;
+  const coordinator = new CollaborationCoordinator({
+    scopes: scopes.scopes, store, clock: { now: () => now },
+    runs: { ...streamlessAdmitter([run]), async submit() { return run; } },
+    routingModel: {
+      id: 'fixture-routing-model',
+      async judge(request) {
+        const inputIds = [...request.context.matchAll(/\[input \d+ \| id=([^ |]+) \|/g)]
+          .map((match) => match[1]!);
+        return JSON.stringify({
+          selections: [{
+            agentId: 'architect', inputIds: inputIds.filter((id) => assignedIds.has(id)),
+            rationale: 'Investigate',
+          }],
+          suppressions: inputIds.filter((id) => !assignedIds.has(id)).map((inputId) => ({
+            inputId, rationale: 'Not assigned',
+          })),
+        });
+      },
+    },
+  });
+  for (const scopeId of [channel, group.id, unassigned.id]) {
+    const delivered = await coordinator.deliver({
+      scopeId, author: { id: 'operator', kind: 'human' }, body: 'Investigate',
+      deliveryKey: `batch-origin:${scopeId}`,
+    });
+    if (scopeId !== unassigned.id) assignedIds.add(delivered.message.id);
+  }
+  const published = await coordinator.publishEvent({
+    projectId: project.id, kind: 'fixture-fact', producer: { id: 'sprout', kind: 'system' },
+    disposition: 'wake-eligible', summary: 'Investigation requested', deliveryKey: 'batch-event',
+  });
+  assignedIds.add(published.event.id);
+  now = 60_001;
+  await coordinator.sweepRouting();
+  assert.equal((await coordinator.listRoutingBatches(project.id))[0]?.status, 'routed');
+  const wakes = await coordinator.listWakeRequests();
+  assert.equal(wakes.length, 1);
+  assert.equal(wakes[0]?.runId, run.id);
+  await coordinator.publishRunFailure(run);
+  const failure = (await coordinator.listEvents(project.id)).find((event) => event.kind === 'agent-run-failure');
+  assert.deepEqual(failure?.originScopeIds, [channel, group.id]);
+  assert.equal((await coordinator.listMessages()).length, 3);
+  assert.equal((await coordinator.listWakeRequests()).length, 1, 'the notice adds no routing input');
 });
 
 test('publishRunFailure reports published, duplicate, and skipped distinctly', async () => {

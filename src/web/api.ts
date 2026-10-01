@@ -6,6 +6,7 @@ import { WebSocketServer } from 'ws';
 import { createWebSocketStream } from 'ws';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
+import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
@@ -867,7 +868,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'runs' && segments[3] === 'status') {
       const run = orchestrator.get(segments[2] ?? '') ?? (await orchestrator.load(segments[2] ?? ''));
       if (!run) { sendJson(response, 404, { error: 'unknown run' }); return; }
-      sendJson(response, 200, { id: run.id, status: run.status });
+      sendJson(response, 200, { id: run.id, status: run.status,
+        ...(run.status === 'failed' ? { failureReason: runFailureReason(run) } : {}),
+      });
       return;
     }
 

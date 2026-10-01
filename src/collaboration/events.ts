@@ -87,6 +87,8 @@ export interface ProjectEvent {
   readonly detail?: string;
   /** Who produced the fact: the system, or the member whose action caused it. */
   readonly producer: ProjectEventProducer;
+  /** Read projection from durable run → wake → Message links; not routing targets. */
+  readonly originScopeIds?: readonly string[];
   /** The declared routing disposition; publication requires exactly one. */
   readonly disposition: RoutingDisposition;
   /** The responsible Agent ids; non-empty only when `disposition` is `addressed`. */

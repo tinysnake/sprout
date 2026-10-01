@@ -482,6 +482,26 @@ test('the reply renders with attribution and projected evidence in the Working g
   }
 });
 
+for (const scenario of [
+  { name: 'safe persisted message', result: { status: 'failed', message: 'the engine refused the saved session' } as const, reason: /the engine refused the saved session/ },
+  { name: 'message-less error stop', result: { status: 'failed', message: '', stopReason: 'error' } as const, reason: /stopReason: error/ },
+]) {
+  test(`origin-chat notice and detail explain ${scenario.name}`, async () => {
+    const page = await startPage([{ events: [], result: scenario.result }]);
+    try {
+      await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+      await waitForEnabledComposer(page);
+      await sendInComposer(page, 'Explain this failure.');
+      const input = await waitFor('the originating input', () => messageElement(page, 'Explain this failure.'));
+      const notice = await waitFor('the originating notice', () => page.doc.querySelector<HTMLElement>('[data-event-id]'));
+      assert.match(notice.textContent ?? '', scenario.reason);
+      const detail = await openEvidence(page, input);
+      await waitFor('failed run detail', () => detail.getAttribute('data-evidence-state') === 'run-failed' ? true : null);
+      assert.match(detail.textContent ?? '', scenario.reason);
+    } finally { await page.close(); }
+  });
+}
+
 test('a failed run and an empty #182-style completion never render a phantom reply in the timeline', async () => {
   const page = await startPage([
     {
@@ -509,9 +529,12 @@ test('a failed run and an empty #182-style completion never render a phantom rep
     await sendInComposer(page, 'This run fails instead of replying.');
     await waitFor('the failing input', () => messageElement(page, 'This run fails instead of replying'));
     await waitFor('the failed run to settle', () => settledRuns(1));
-    // Project events belong to the Project channel, not the direct timeline.
-    // Verify the Project entry there, then return to the originating direct
-    // message to inspect its independent server-backed wake → run evidence.
+    // The failure notice must be visible without leaving the originating chat.
+    const originNotice = await waitFor('failure notice in the originating direct chat', () =>
+      page.doc.querySelector<HTMLElement>('[data-event-id]'));
+    assert.match(originNotice.textContent ?? '', /Agent run failed/);
+    assert.match(originNotice.textContent ?? '', /code: failed.*diagnostic withheld/);
+    // The same event remains the durable Project record.
     await page.push(`/project/chat/${page.server.channelScopeId}?project=${PROJECT_ID}`);
     const failureEntry = await waitFor('the #180 failure entry in the Project timeline', () =>
       [...page.doc.querySelectorAll<HTMLElement>('[data-event-id]')]
@@ -542,6 +565,8 @@ test('a failed run and an empty #182-style completion never render a phantom rep
       failureEvidence.getAttribute('data-evidence-state') === 'run-failed' ? true : null);
     assert.match(failureEvidence.textContent ?? '', /Run:\s*\S+\s*·\s*failed/);
     assert.match(failureEvidence.textContent ?? '', /Run failed\. No reply was produced/);
+    assert.match(failureEvidence.textContent ?? '', /code: failed.*diagnostic withheld/);
+    assert.doesNotMatch(failureEvidence.textContent ?? '', /MUST NOT SURFACE|arbitrary engine diagnostic/);
     assert.doesNotMatch(failureEvidence.textContent ?? '', /Projected Reply/, 'the two outcomes are never conflated');
 
     // Outcome 2: the #182 shape — a completed run with empty text. It must

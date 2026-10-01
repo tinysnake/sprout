@@ -613,6 +613,7 @@ test('Project Chat renders the system run-failure entry and the reply-less faile
     assert.match(popup.textContent ?? '', /· failed/, 'the run outcome is the {id,status} projection');
     assert.match(popup.textContent ?? '', /msg-dm-failed/, 'the chain stays anchored to the originating message');
     assert.match(popup.textContent ?? '', /No reply was produced/, 'a failed run never implies a reply');
+    assert.match(popup.textContent ?? '', /No error outcome was recorded/, 'an outcome-less failure is explicit');
 
     // Privacy projection: neither the run prompt nor raw run events can surface
     // on either surface — the Chat port is `{id,status}` and the event carries

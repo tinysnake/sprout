@@ -267,6 +267,7 @@ export function toWakeView(wake: WakeRequest): WakeView {
  * appear here.
  */
 export interface ProjectEventView {
+  readonly originScopeIds?: readonly string[];
   readonly id: string;
   readonly projectId: string;
   readonly kind: string;
@@ -286,6 +287,7 @@ export function toProjectEventView(event: ProjectEvent): ProjectEventView {
     kind: event.kind,
     summary: event.summary,
     ...(event.detail !== undefined ? { detail: event.detail } : {}),
+    ...(event.originScopeIds !== undefined ? { originScopeIds: event.originScopeIds } : {}),
     producerId: event.producer.id,
     producerKind: event.producer.kind,
     disposition: event.disposition,

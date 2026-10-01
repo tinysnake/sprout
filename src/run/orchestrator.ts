@@ -197,6 +197,8 @@ type SessionAttempt =
       readonly ok: false;
       readonly run: AgentRun;
       readonly message: string;
+      /** Preserve structured turn outcome evidence through settlement. */
+      readonly result?: Extract<EngineTurnResult, { status: 'failed' }>;
       /** True only when the engine refused the supplied key and did no work. */
       readonly resumeRefused: boolean;
     };
@@ -911,7 +913,7 @@ export class RunOrchestrator {
       }
 
       if (!attempt.ok) {
-        return this.#finish(attempt.run, 'failed', {
+        return this.#finish(attempt.run, 'failed', attempt.result ?? {
           status: 'failed',
           message: attempt.message,
         });
@@ -1018,6 +1020,7 @@ export class RunOrchestrator {
           ok: false,
           run: current,
           message: result.message,
+          result,
           resumeRefused: result.resumeRefused === true,
         };
       }

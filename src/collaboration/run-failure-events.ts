@@ -22,13 +22,14 @@
  * and completion … do not initiate routing"). The disposition is declared, never
  * inferred: `requireRoutingDisposition` refuses anything else.
  *
- * Privacy and truthfulness: the event carries only the durable Sprout-set
- * `failureClass` and run identifiers — never the run `failure` text, `prompt`,
+ * Privacy and truthfulness: the event carries the durable Sprout-set
+ * `failureClass`, run identifiers, and an exact product-owned outcome reason
+ * (or an explicit missing/withheld diagnostic) — never arbitrary `failure` text, `prompt`,
  * raw `events`, tool output, or host facts. Legacy untyped runs are execution;
  * no wording in a diagnostic can grant a more specific class.
  * Engine-authored failures can contain arbitrary output; pattern redaction at
- * publication cannot make that text safe. The `{id,status}` privacy projection
- * precedent (#98's `/api/runs/:id/status`) and ADR-0007 apply.
+ * publication cannot make that text safe. The minimal status projection
+ * (#98's `/api/runs/:id/status`) adds only this same safe explanation; ADR-0007 applies.
  *
  * Attention linkage (#103): these events are durable, typed
  * (`agent-run-failure`), sanitized Project events with an `informational`
@@ -40,6 +41,7 @@
  */
 
 import type { AgentRun } from '../run/model.ts';
+import { runFailureReason } from '../run/failure-reason.ts';
 import type { PublishEventInput } from './coordinator.ts';
 
 /** The stable producer-declared kind of every run-lifecycle failure event. */
@@ -57,8 +59,8 @@ export function runFailureDeliveryKey(runId: string): string {
  * only `failed` counts (an intentional Human stop settles `interrupted` and is
  * not reported as a failure), and a run without a Project has no timeline that
  * would be authoritative for the event. Every other field is derived from the
- * durable run record — identifiers and class — and never from the run's
- * failure text, prompt, events, or tool output.
+ * durable run record — identifiers, class, and exact product-owned reason —
+ * never from arbitrary failure text, prompt, events, or tool output.
  */
 export function runFailureEventInput(run: AgentRun): PublishEventInput | undefined {
   if (run.status !== 'failed' || run.projectId === undefined) return undefined;
@@ -71,6 +73,7 @@ export function runFailureEventInput(run: AgentRun): PublishEventInput | undefin
     `run ${run.id}`,
     `agent ${run.agentId}`,
     ...(run.taskId !== undefined ? [`task ${run.taskId}`] : []),
+    runFailureReason(run),
   ].join(' · ');
   return {
     projectId: run.projectId,

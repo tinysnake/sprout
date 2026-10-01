@@ -1,4 +1,5 @@
 import { renderIcon } from '../icons.js';
+import { runFailureReason } from '../../../../src/run/failure-reason.ts';
 import { getWakeRequestDisplayStatus, stateManager, type PrototypeState } from '../state.js';
 import type { MessageItem, ProjectItem, RoutingBatch, WorkingGroup } from '../types.js';
 
@@ -505,6 +506,7 @@ export function renderProjectChat(
                                 (outcome) => `<div style="font-size: 10px; color: ${outcome.status === 'admitted' ? 'var(--green-ready)' : 'var(--red-action)'};">
                                   <strong>@${outcome.targetDisplayName ?? outcome.targetAgentId}</strong> · ${outcome.status === 'admitted' ? 'Admitted' : outcome.status === 'cancelled' ? 'Cancelled' : 'Failed closed'}<br />
                                   <span style="color: var(--text-muted);">${outcome.reason}</span>
+                                  ${outcome.runStatus === 'failed' ? `<p style="color: var(--red-action);">Run failed. No reply was produced for this message. Reason: ${runFailureReason(outcome.runOutcome ? { result: outcome.runOutcome } : {})}</p>` : ''}
                                   ${outcome.terminalResponsibility ? `<br /><span style="color: var(--text-muted);">Responsible ${outcome.terminalResponsibility.kind}: <code>${outcome.terminalResponsibility.id}</code></span>` : ''}
                                 </div>`
                               )
@@ -969,7 +971,7 @@ export function renderRoutingInspectorModal(
                           Target Agent: <strong>@${w.targetAgentId}</strong> · Linked Run: <code>${w.linkedRunId ?? 'none'}</code> · Projected Reply: <code>${w.projectedReplyId ?? 'none'}</code>
                         </div>
                         <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">
-                          ${w.failureReason ?? w.terminalReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
+                          ${w.runStatus === 'failed' ? `Run failed. No reply was produced for this message. Reason: ${runFailureReason(w.runOutcome ? { result: w.runOutcome } : {})}` : w.failureReason ?? w.terminalReason ?? 'Loop prevention guarantee: Projected replies are marked non-routing and never trigger new wake evaluations.'}
                         </div>
                         ${w.terminalResponsibility ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Responsible ${w.terminalResponsibility.kind}:</strong> <code>${w.terminalResponsibility.id}</code></div>` : ''}
                         ${w.terminalTimestamp ? `<div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;"><strong>Terminal at:</strong> <code>${w.terminalTimestamp}</code></div>` : ''}
