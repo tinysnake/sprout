@@ -81,7 +81,7 @@ export function sanitizeUsagePayload<T>(value: T, keyName?: string): T {
         ));
         continue;
       }
-      if (/tokens?$/i.test(key) && !/secret|auth|access|session|bearer|cookie/i.test(key)) {
+      if ((/tokens?$/i.test(key) && !/secret|auth|access|session|bearer|cookie/i.test(key)) || key === 'tokenCoverage') {
         sanitized[key] = sanitizeUsagePayload(val, key);
         continue;
       }

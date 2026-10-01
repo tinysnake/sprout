@@ -319,6 +319,53 @@ test('GET /api/usage/aggregate and drill-down routes', async () => {
 });
 
 
+test('Usage aggregate HTTP serialization preserves the complete DTO for sparse, grouped, provisional, and empty results', async () => {
+  const h = await openUsageHarness();
+  try {
+    await h.store.recordActivity({
+      id: 'sparse-run', kind: 'agent_run',
+      correlation: { runId: 'sparse-run-id', projectId: 'sparse-project', taskId: 'sparse-task', agentId: 'sparse-agent' },
+      engine: 'engine', model: 'model', status: 'completed', createdAt: 1, settledAt: 2,
+    });
+    await h.store.recordActivity({
+      id: 'sparse-routing', kind: 'routing_attempt',
+      correlation: { attemptId: 'sparse-attempt-id', batchId: 'sparse-batch', projectId: 'sparse-project' },
+      engine: 'routing', model: 'wake-model', status: 'active', createdAt: 3,
+    });
+
+    const assertAggregateDto = (value: unknown, path: string): void => {
+      assert.ok(value && typeof value === 'object', `${path} is an aggregate object`);
+      const aggregate = value as Record<string, unknown>;
+      for (const field of ['totalActivities', 'tokenCoverage', 'costCoverage', 'tokens', 'cost', 'billedCost', 'activityIdentities']) {
+        assert.ok(Object.hasOwn(aggregate, field), `${path}.${field} is present`);
+      }
+      if (aggregate.workModelSubtotal !== undefined) assertAggregateDto(aggregate.workModelSubtotal, `${path}.workModelSubtotal`);
+      if (aggregate.routingModelSubtotal !== undefined) assertAggregateDto(aggregate.routingModelSubtotal, `${path}.routingModelSubtotal`);
+      if (aggregate.provisionalTotals !== undefined) assertAggregateDto(aggregate.provisionalTotals, `${path}.provisionalTotals`);
+      if (aggregate.groups && typeof aggregate.groups === 'object') {
+        for (const [key, group] of Object.entries(aggregate.groups)) assertAggregateDto(group, `${path}.groups.${key}`);
+      }
+    };
+    const readAggregate = async (query: string, expectedCount: number) => {
+      const response = await fetch(`${h.base}/api/usage/aggregate${query}`);
+      assert.equal(response.status, 200, query);
+      const aggregate = await response.json() as Record<string, unknown>;
+      assertAggregateDto(aggregate, query || 'empty query');
+      assert.equal(aggregate.totalActivities, expectedCount, query);
+    };
+
+    await readAggregate('?projectId=absent&groupBy=model', 0);
+    await readAggregate('?kind=agent_run&groupBy=run', 1);
+    await readAggregate('?kind=routing_attempt&provisional=true&groupBy=project', 1);
+    await readAggregate('', 1);
+
+    const invalid = await fetch(`${h.base}/api/usage/aggregate?kind=unknown`);
+    assert.equal(invalid.status, 400, 'invalid filters are HTTP errors, not successful error-envelope data');
+    const errorBody = await invalid.json() as Record<string, unknown>;
+    assert.ok(Object.hasOwn(errorBody, 'error'));
+  } finally { await h.api.close(); }
+});
+
 test('HTTP serialization omits smuggled Routing ownership in aggregate identities and activity correlations', async () => {
   const h = await openUsageHarness();
   try {

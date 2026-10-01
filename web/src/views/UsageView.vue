@@ -53,10 +53,61 @@ const modelSelection = computed({
 });
 const isLoading = ref(true);
 const queryError = ref(false);
+const queryIncomplete = ref(false);
 const listIncomplete = ref(false);
 const authoritativeActivities = ref(new Map<string, UsageAggregate>());
 const scopedActivityIds = ref(new Set<string>());
 let loadGeneration = 0;
+
+class IncompleteUsageAggregateError extends Error {}
+
+const usageAggregateCountFields = {
+  tokenCoverage: ['complete', 'partial', 'unavailable'],
+  costCoverage: ['available', 'pending', 'unavailable'],
+} as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function hasUsageCounts(value: unknown, fields: readonly string[]): boolean {
+  return isRecord(value) && fields.every(field => isNonNegativeSafeInteger(value[field]));
+}
+
+function isRenderableUsageAggregate(value: unknown): value is UsageAggregate {
+  if (!isRecord(value)
+    || !isNonNegativeSafeInteger(value.totalActivities)
+    || !hasUsageCounts(value.tokenCoverage, usageAggregateCountFields.tokenCoverage)
+    || !hasUsageCounts(value.costCoverage, usageAggregateCountFields.costCoverage)
+    || !Array.isArray(value.activityIdentities)) return false;
+
+  const tokens = value.tokens;
+  const cost = value.cost;
+  if (!isRecord(tokens) || !isRecord(cost) || !isRecord(cost.byProvenance) || !isRecord(value.billedCost)) return false;
+  if (value.activityIdentities.some(identity => !isRecord(identity)
+    || typeof identity.activityId !== 'string'
+    || (identity.kind !== 'agent_run' && identity.kind !== 'routing_attempt')
+    || typeof identity.status !== 'string')) return false;
+  if (tokens.totalTokens !== undefined && !isNonNegativeSafeInteger(tokens.totalTokens)) return false;
+  if (cost.apiEquivalentUsdMicros !== undefined && !isNonNegativeSafeInteger(cost.apiEquivalentUsdMicros)) return false;
+  if (Object.values(cost.byProvenance).some(amount => !isNonNegativeSafeInteger(amount))) return false;
+
+  for (const nested of [value.workModelSubtotal, value.routingModelSubtotal, value.provisionalTotals]) {
+    if (nested !== undefined && !isRenderableUsageAggregate(nested)) return false;
+  }
+  if (value.groups !== undefined) {
+    if (!isRecord(value.groups) || Object.values(value.groups).some(group => !isRenderableUsageAggregate(group))) return false;
+  }
+  return true;
+}
+
+function requireRenderableUsageAggregate(value: unknown): asserts value is UsageAggregate {
+  if (!isRenderableUsageAggregate(value)) throw new IncompleteUsageAggregateError('Usage aggregate response is incomplete');
+}
 
 const tabLabels: Record<UsageTab, string> = {
   run: 'Agent run',
@@ -84,6 +135,7 @@ async function loadData() {
   const generation = ++loadGeneration;
   isLoading.value = true;
   queryError.value = false;
+  queryIncomplete.value = false;
   listIncomplete.value = false;
   activities.value = [];
   authoritativeActivities.value = new Map();
@@ -106,6 +158,8 @@ async function loadData() {
       service.listActivities(filter),
       service.listProjects(), service.listAgents(), service.listModels(),
     ]);
+    requireRenderableUsageAggregate(overview);
+    requireRenderableUsageAggregate(scope);
     // The aggregate's identities, not a potentially paginated list, define the constituents.
     const identities = [...overview.activityIdentities, ...(overview.provisionalTotals?.activityIdentities ?? [])];
     const items = new Map(fetchedActivities.map(item => [item.id, item]));
@@ -124,6 +178,7 @@ async function loadData() {
         throw new Error('Aggregate constituent lacks a query identity');
       }
       const aggregate = await service.getAggregate({ ...filter, ...identityFilter, kind: identity.kind, provisional: identity.status === 'active' });
+      requireRenderableUsageAggregate(aggregate);
       return [identity.activityId, aggregate] as const;
     }));
     if (generation !== loadGeneration) return;
@@ -134,8 +189,11 @@ async function loadData() {
     projects.value = fetchedProjects;
     agents.value = fetchedAgents;
     models.value = fetchedModels;
-  } catch {
-    if (generation === loadGeneration) queryError.value = true;
+  } catch (error) {
+    if (generation === loadGeneration) {
+      queryError.value = true;
+      queryIncomplete.value = error instanceof IncompleteUsageAggregateError;
+    }
   } finally {
     if (generation === loadGeneration) isLoading.value = false;
   }
@@ -497,7 +555,8 @@ const timeRangeLabels: Record<string, string> = {
       </div>
 
       <template v-else>
-      <p v-if="queryError" role="alert">Usage query unavailable. No local totals substituted.</p>
+      <p v-if="queryIncomplete" class="usage-incomplete-state" role="alert">Usage authority returned incomplete aggregate data. No local totals substituted.</p>
+      <p v-else-if="queryError" role="alert">Usage query unavailable. No local totals substituted.</p>
       <p v-if="isLoading" role="status">Loading authoritative usage…</p>
       <p v-if="listIncomplete" role="status">Activity list incomplete; totals use authoritative aggregate constituents, not the truncated list.</p>
       <p class="usage-boundary-note">Settlement ranges use UTC and half-open instant bounds. Known subtotals are observed, incomplete when coverage has gaps.</p>

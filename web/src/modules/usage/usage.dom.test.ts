@@ -100,7 +100,18 @@ function settle(ms = 60): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function mountedPage(vite: ViteDevServer, mount: HTMLElement, fixtureOverride?: any) {
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await settle(50);
+  return predicate();
+}
+
+async function mountedPage(
+  vite: ViteDevServer,
+  mount: HTMLElement,
+  fixtureOverride?: any,
+  configureApp?: (app: any) => void,
+) {
   const [{ createSproutApp }, usageModule] = await Promise.all([
     vite.ssrLoadModule('/src/app/main.ts') as Promise<typeof import('../../app/main.ts')>,
     vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts') as Promise<
@@ -112,6 +123,7 @@ async function mountedPage(vite: ViteDevServer, mount: HTMLElement, fixtureOverr
     routerBase: '/app/',
     usageService: fixture,
   });
+  configureApp?.(app);
   await router.push('/manage/usage');
   await router.isReady();
   app.mount(mount);
@@ -492,6 +504,63 @@ test('Usage: privacy boundary — no sensitive paths, credentials, or secrets in
   }
 });
 
+test('Usage regression: incomplete aggregate responses show an explicit error instead of crashing during render', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { FixtureUsageService } = await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts');
+    const scenarios: {
+      label: string;
+      malformed?: (aggregate: any) => unknown;
+      fromCall?: number;
+      reject?: boolean;
+      message?: RegExp;
+    }[] = [
+      { label: 'per-identity token coverage', fromCall: 3, malformed: aggregate => { delete aggregate.tokenCoverage; return aggregate; } },
+      { label: 'cost coverage', fromCall: 3, malformed: aggregate => { delete aggregate.costCoverage; return aggregate; } },
+      { label: 'provenance totals', fromCall: 3, malformed: aggregate => {
+        aggregate.cost = { ...aggregate.cost };
+        delete aggregate.cost.byProvenance;
+        return aggregate;
+      } },
+      { label: 'nested group coverage', malformed: aggregate => {
+        const nested = { ...aggregate, groups: undefined };
+        delete nested.tokenCoverage;
+        aggregate.groups = { sparseGroup: nested };
+        return aggregate;
+      } },
+      { label: '200 error envelope', malformed: () => ({ error: 'invalid aggregate response' }) },
+      { label: 'rejected query', reject: true, message: /Usage query unavailable/ },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = new FixtureUsageService();
+      const getAggregate = fixture.getAggregate.bind(fixture);
+      let calls = 0;
+      fixture.getAggregate = async (filter: any) => {
+        if (scenario.reject) throw new Error('request failed');
+        const aggregate = await getAggregate(filter);
+        calls += 1;
+        if (calls < (scenario.fromCall ?? 1)) return aggregate;
+        return scenario.malformed?.({ ...aggregate, cost: { ...aggregate.cost } }) as any;
+      };
+      const renderErrors: string[] = [];
+      const { app } = await mountedPage(vite, mount, fixture, (configuredApp) => {
+        configuredApp.config.errorHandler = (error: unknown, _instance: unknown, info: string) => {
+          renderErrors.push(`${info}: ${String(error)}`);
+        };
+      });
+      const state = doc.querySelector(scenario.reject ? '[role="alert"]' : '.usage-incomplete-state');
+      assert.deepEqual(renderErrors, [], `${scenario.label}: no render error`);
+      assert.ok(state, `${scenario.label}: failure is visible`);
+      assert.match(state.textContent ?? '', scenario.message ?? /incomplete aggregate data/i, scenario.label);
+      assert.doesNotMatch(doc.body.textContent ?? '', /Loading authoritative usage/, scenario.label);
+      assert.equal(doc.querySelector('.usage-summary-band'), null, `${scenario.label}: no partial aggregate is presented as complete`);
+      app.unmount();
+      mount.innerHTML = '';
+    }
+  } finally { await cleanup(); }
+});
+
 test('Usage F4: scopes query authoritative aggregates with filters; truncated lists are not full totals', async () => {
   const { doc, mount, vite, cleanup } = await setupHarness();
   try {
@@ -520,9 +589,12 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
     const range = doc.querySelector('[data-usage-filter="timeRange"]') as HTMLSelectElement;
     range.value = '30d';
     range.dispatchEvent(new doc.defaultView!.Event('change', { bubbles: true }));
-    await settle(100);
-    assert.ok(calls.some(f => f.projectId === 'proj-minesweeper' && typeof f.from === 'number' && typeof f.to === 'number' && f.to - f.from === 30 * 86400000));
-    assert.ok(doc.querySelector('.usage-tab-surface [data-usage-activity="act-204"]'), 'query constituent survives stale display bucket; bounds belong to the authority');
+    const filteredQuery = (filter: any) => filter.projectId === 'proj-minesweeper'
+      && typeof filter.from === 'number' && typeof filter.to === 'number'
+      && filter.to - filter.from === 30 * 86400000;
+    assert.ok(await waitFor(() => calls.some(filteredQuery)), 'filtered aggregate query starts');
+    assert.ok(await waitFor(() => !(doc.body.textContent ?? '').includes('Loading authoritative usage…')), 'filtered aggregate request settles');
+    assert.ok(doc.querySelector('.usage-tab-surface [data-usage-activity="act-204"]'), `query constituent survives stale display bucket; bounds belong to the authority; results: ${JSON.stringify(calls.filter(filteredQuery))}`);
     app.unmount();
   } finally { await cleanup(); }
 });
