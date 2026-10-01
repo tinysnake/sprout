@@ -82,8 +82,8 @@ class FakeCodexServer {
     this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
   }
 
-  reject(id: number, message: string): void {
-    this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32_601, message } })}\n`);
+  reject(id: number, message: string, data?: unknown): void {
+    this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32_601, message, ...(data !== undefined ? { data } : {}) } })}\n`);
   }
 
   notify(method: string, params: unknown): void {
@@ -399,6 +399,26 @@ test('interrupting a turn is reported as interrupted, not as a failure', async (
   assert.ok(server.requests.some((request) => request.method === 'turn/interrupt'));
 });
 
+
+test('turn-start failures classify JSON-RPC data and typed connection loss without engine prose', async () => {
+  for (const disconnected of [false, true]) {
+    const server = new FakeCodexServer((request, self) => {
+      if (request.method === 'initialize') self.respond(request.id, {});
+      if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+      if (request.method === 'turn/start') {
+        if (disconnected) self.crash();
+        else self.reject(request.id, 'PRIVATE_PROVIDER_BODY', { error: { code: 'model_not_found', message: 'PRIVATE_PROVIDER_BODY' } });
+      }
+    });
+    const session = await startAdapter(server).startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+    const turn = session.run('PRIVATE_PROMPT');
+    await collect(turn);
+    const result = await turn.completion;
+    assert.deepEqual(result, { status: 'failed', message: sanitizedTurnFailure('codex', disconnected ? 'connection-lost' : 'model-rejected') });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROVIDER_BODY|PRIVATE_PROMPT|model_not_found/);
+    await session.close();
+  }
+});
 
 test('a turn error from the engine becomes a failed terminal state', async () => {
   const raw = 'sandbox denied raw-upstream-body';

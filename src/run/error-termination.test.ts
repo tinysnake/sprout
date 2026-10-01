@@ -77,6 +77,25 @@ test('bad-model zero-usage Pi failure reaches the run-failure projection', async
   assert.ok(!JSON.stringify(event).includes(UPSTREAM_BODY));
 });
 
+test('a configured bogus model reaches a persisted actionable failure through the local Pi harness', async () => {
+  const adapter = piAdapter((process) => {
+    process.line({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error',
+      model: 'ENGINE-MODEL-MUST-NOT-SURFACE',
+      errorMessage: '400 {"error":{"code":"model_not_found","message":"UPSTREAM-BODY-DO-NOT-PERSIST"}}',
+    } });
+    process.kill();
+  });
+  const { orchestrator, store } = buildFor('pi', adapter, 'agent-configured-model', 'provider/bogus-model');
+  const admitted = await orchestrator.submit({ agentId: 'agent-configured-model', prompt: PROMPT_MARKER });
+  const run = await orchestrator.waitFor(admitted.id);
+  const stored = await store.get(run.id);
+  assertSanitizedFailure(run, sanitizedTurnFailure('pi', 'model-rejected'));
+  assert.equal(stored?.result?.status, 'failed');
+  assert.equal(stored?.workOption?.workModel, 'provider/bogus-model');
+  assert.match(runFailureEventInput(stored!)?.detail ?? '', /pi turn failed for model provider\/bogus-model: the engine rejected the model/);
+  assert.doesNotMatch(JSON.stringify({ result: stored?.result, failure: stored?.failure }), /ENGINE-MODEL|UPSTREAM-BODY/);
+});
+
 const PROMPT_MARKER = 'PROMPT-DO-NOT-PERSIST-8f2a';
 const CONTRACT_MARKER = 'CONTRACT-DO-NOT-PERSIST-3b7c';
 const UPSTREAM_BODY = '400 Model is unavailable UPSTREAM-BODY-DO-NOT-PERSIST';
@@ -109,7 +128,7 @@ function project(agentId: string): Project {
   };
 }
 
-function buildFor(engine: string, adapter: EngineAdapter, agentId: string) {
+function buildFor(engine: string, adapter: EngineAdapter, agentId: string, model?: string) {
   const pool = new EnvironmentPool({
     definitions: [definition],
     instances: [instance],
@@ -120,6 +139,7 @@ function buildFor(engine: string, adapter: EngineAdapter, agentId: string) {
       id: agentId,
       name: 'Scout',
       engine,
+      ...(model !== undefined ? { workOptions: [{ id: 'configured', engine, workModel: model, effort: 'standard' }] } : {}),
       capability: 'agent-run',
       workingDirectory: '/tmp',
       instructions: `You are Scout. ${CONTRACT_MARKER}`,

@@ -385,7 +385,7 @@ export class EnvironmentWorker {
         }
         live.events.settled(
           turnId,
-          sanitizeEngineTurnResult(await turn.completion),
+          sanitizeEngineTurnResult(await turn.completion, live.engine),
           live.session.engineSessionKey,
         );
       } catch {

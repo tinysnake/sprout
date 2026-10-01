@@ -1,6 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from './port.ts';
 import { extractPiCostEstimate } from '../usage/valuation.ts';
-import { sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
+import { classifyEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Pi's `--mode json` stream into engine-neutral run events.
@@ -19,8 +19,8 @@ import { sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failur
  * - `agent_settled` is the terminal event for a turn.
  * - an assistant message (or the turn) ending with `stopReason: "error"` is an
  *   error termination: it settles the turn as **failed** with a sanitized
- *   reason, never as a completed empty turn (#182). The `errorMessage` that
- *   rides alongside it is the raw upstream body and is never read.
+ *   reason, never as a completed empty turn (#182). Structured error codes
+ *   are classified locally; no upstream prose enters state or the result.
  */
 
 export interface PiTurnState {
@@ -118,9 +118,9 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       const msg = message['message'] as PiMessage | undefined;
       if (msg?.role !== 'assistant') return { events: [] };
       // An errored assistant message is a failure, not an empty answer. The
-      // engine's `errorMessage` is the raw upstream body: it is deliberately
-      // never read into state or the turn result (#182).
-      if (msg.stopReason === 'error') return failTurn(state, 'error-stop-reason');
+      // structured error fields are classified before their payload is dropped.
+      // No engine prose enters state or the turn result (#182).
+      if (msg.stopReason === 'error') return failTurn(state, classifyEngineTurnFailure(msg) ?? 'error-stop-reason');
       const text = extractText(msg.content);
       if (text !== '') state.finalText = text;
       addPiDetailedUsage(state, readPiDetailedUsage(msg.usage) ?? state.pendingDetailedUsage);
@@ -133,7 +133,7 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       // too means an error termination is caught even when `message_end` was
       // omitted from a malformed stream.
       const msg = message['message'] as PiMessage | undefined;
-      if (msg?.stopReason === 'error') return failTurn(state, 'error-stop-reason');
+      if (msg?.stopReason === 'error') return failTurn(state, classifyEngineTurnFailure(msg) ?? 'error-stop-reason');
       // Turn framing otherwise carries no run progress.
       return { events: [], ignored: true };
     }
@@ -157,7 +157,7 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
       if (state.failure !== undefined) {
         return { events: [], finish: createPiTurnResult(state, 'failed', state.failure) };
       }
-      if (message['stopReason'] === 'error') return failTurn(state, 'error-stop-reason');
+      if (message['stopReason'] === 'error') return failTurn(state, classifyEngineTurnFailure(message) ?? 'error-stop-reason');
       // A malformed or interrupted stream may omit message_end. Keep a valid
       // final update observable rather than failing the otherwise healthy run.
       addPiDetailedUsage(state, state.pendingDetailedUsage);
@@ -169,9 +169,9 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
     }
 
     case 'error': {
-      // The event may carry the engine's raw detail (an upstream body); it is
-      // never read. Only the stable failure class reaches durable state (#182).
-      return failTurn(state, 'engine-error');
+      // Only a class derived from structured fields reaches durable state.
+      // Any upstream body remains inside this mapping boundary (#182).
+      return failTurn(state, classifyEngineTurnFailure(message) ?? 'engine-error');
     }
 
     default:

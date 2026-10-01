@@ -343,6 +343,7 @@ export async function buildReplyProjectionApi(
       id: REPLY_PROJECTION_AGENT_ID,
       name: REPLY_PROJECTION_AGENT_NAME,
       engine: 'scripted',
+      workOptions: [{ id: 'reply-option', engine: 'scripted', workModel: 'scripted-model', effort: 'standard' }],
       capability: 'agent-run',
       workingDirectory: '/tmp',
     },

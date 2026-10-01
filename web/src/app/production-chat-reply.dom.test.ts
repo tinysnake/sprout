@@ -502,6 +502,24 @@ for (const scenario of [
   });
 }
 
+test('an actionable model failure identifies the configured model in the origin notice and evidence', async () => {
+  const page = await startPage([{ events: [], result: { status: 'failed',
+    message: 'pi turn failed: the engine rejected the model' } }]);
+  try {
+    await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+    await waitForEnabledComposer(page);
+    await sendInComposer(page, 'Identify this rejected model.');
+    const input = await waitFor('the model-failure input', () => messageElement(page, 'Identify this rejected model'));
+    const notice = await waitFor('the actionable origin notice', () =>
+      [...page.doc.querySelectorAll<HTMLElement>('[data-event-id]')]
+        .find((entry) => (entry.textContent ?? '').includes('the engine rejected the model')));
+    assert.match(notice.textContent ?? '', /pi turn failed for model scripted-model: the engine rejected the model/);
+    const detail = await openEvidence(page, input);
+    await waitFor('the model-failure evidence', () => detail.getAttribute('data-evidence-state') === 'run-failed' ? true : null);
+    assert.match(detail.textContent ?? '', /pi turn failed for model scripted-model: the engine rejected the model/);
+  } finally { await page.close(); }
+});
+
 test('a failed run and an empty #182-style completion never render a phantom reply in the timeline', async () => {
   const page = await startPage([
     {
