@@ -14,6 +14,8 @@ const cases = [
   [{ errorCode: 'invalid_model' }, 'the engine rejected the model'],
   [{ statusCode: 401 }, 'authentication was rejected'],
   [{ error: { status: 403 } }, 'authentication was rejected'],
+  [{ statusCode: 502 }, 'the upstream service was unavailable'],
+  [{ error: { httpStatusCode: 503 } }, 'the upstream service was unavailable'],
   [{ error: { code: 'rate_limit_exceeded' } }, 'the engine rate limit was reached'],
   [{ status: 429 }, 'the engine rate limit was reached'],
   [{ cause: { code: 'ETIMEDOUT' } }, 'the engine request timed out'],
@@ -32,12 +34,19 @@ test('Pi and Codex classify structured error signals before dropping private dia
         : { type, stopReason: 'error', ...signal };
       const result = mapPiEvent(raw, newPiTurnState()).finish;
       assert.equal(result?.status, 'failed');
-      if (result?.status === 'failed') assert.equal(result.message, `pi turn failed: ${reason}`, JSON.stringify(raw));
+      if (result?.status === 'failed') {
+        assert.equal(result.message, `pi turn failed: ${reason}`, JSON.stringify(raw));
+        assert.equal(result.retryable === true, reason === 'the engine request timed out' ||
+          reason === 'the engine connection was lost' || reason === 'the upstream service was unavailable');
+      }
       assert.doesNotMatch(JSON.stringify(result), /PRIVATE_BODY|model_not_found|codexErrorInfo/);
     }
     const result = mapCodexNotification({ method: 'turn/completed', params: { turn: { status: 'failed', error: signal } } }, { text: '', finalText: '', failure: undefined }).finish;
-    if (result?.status === 'failed') assert.equal(result.message, `codex turn failed: ${reason}`);
-    else assert.fail('Codex must fail');
+    if (result?.status === 'failed') {
+      assert.equal(result.message, `codex turn failed: ${reason}`);
+      assert.equal(result.retryable === true, reason === 'the engine request timed out' ||
+        reason === 'the engine connection was lost' || reason === 'the upstream service was unavailable');
+    } else assert.fail('Codex must fail');
   }
 });
 
@@ -45,7 +54,11 @@ test('Worker classifies signals and never forwards their raw fields or prefix-sp
   for (const [signal, reason] of cases) {
     const incoming = { status: 'failed' as const, message: 'PRIVATE_BODY', error: signal };
     const result = sanitizeEngineTurnResult(incoming, 'pi');
-    if (result.status === 'failed') assert.equal(result.message, `pi turn failed: ${reason}`);
+    if (result.status === 'failed') {
+      assert.equal(result.message, `pi turn failed: ${reason}`);
+      assert.equal(result.retryable === true, reason === 'the engine request timed out' ||
+        reason === 'the engine connection was lost' || reason === 'the upstream service was unavailable');
+    }
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_BODY|model_not_found|errorMessage|codexErrorInfo/);
   }
   const result = sanitizeEngineTurnResult({ status: 'failed', message: 'pi turn failed: the engine rejected the model PRIVATE_BODY' }, 'pi');

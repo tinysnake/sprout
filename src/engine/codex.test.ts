@@ -414,7 +414,11 @@ test('turn-start failures classify JSON-RPC data and typed connection loss witho
     const turn = session.run('PRIVATE_PROMPT');
     await collect(turn);
     const result = await turn.completion;
-    assert.deepEqual(result, { status: 'failed', message: sanitizedTurnFailure('codex', disconnected ? 'connection-lost' : 'model-rejected') });
+    assert.deepEqual(result, {
+      status: 'failed',
+      message: sanitizedTurnFailure('codex', disconnected ? 'connection-lost' : 'model-rejected'),
+      ...(disconnected ? { retryable: true } : {}),
+    });
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROVIDER_BODY|PRIVATE_PROMPT|model_not_found/);
     await session.close();
   }

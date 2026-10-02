@@ -1,6 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from './port.ts';
 import { extractPiCostEstimate } from '../usage/valuation.ts';
-import { classifyEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Pi's `--mode json` stream into engine-neutral run events.
@@ -189,7 +189,10 @@ function failTurn(state: PiTurnState, cause: EngineTurnFailureCause): PiOutcome 
   // stable reason for the same turn.
   const failure = state.failure ?? sanitizedTurnFailure('pi', cause);
   state.failure = failure;
-  return { events: [], finish: createPiTurnResult(state, 'failed', failure) };
+  return {
+    events: [],
+    finish: createPiTurnResult(state, 'failed', failure, isRetryableEngineTurnFailure(cause)),
+  };
 }
 
 function mapAssistantUpdate(message: Record<string, unknown>, state: PiTurnState): PiOutcome {
@@ -257,6 +260,7 @@ function createPiTurnResult(
   state: PiTurnState,
   status: 'completed' | 'failed',
   errorMessage?: string,
+  retryable = false,
 ): EngineTurnResult {
   const hasUsage = state.tokenUsage !== undefined || state.detailedTokens !== undefined;
   const costEstimate = state.cost?.total !== undefined ? extractPiCostEstimate({ cost: state.cost, valuedAt: Date.now() }) : undefined;
@@ -264,6 +268,7 @@ function createPiTurnResult(
     return {
       status: 'failed',
       message: errorMessage ?? 'failed',
+      ...(retryable ? { retryable: true as const } : {}),
       ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
       ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
       ...(costEstimate !== undefined ? { costEstimate } : {}),

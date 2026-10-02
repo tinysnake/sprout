@@ -249,6 +249,8 @@ export type EngineTurnResult = { readonly pricingContext?: import('../usage/valu
   | {
       readonly status: 'failed';
       readonly message: string;
+      /** Set only when the engine boundary classified an infra-class failure. */
+      readonly retryable?: true;
       /** Structured error stop evidence, when exposed by the engine. */
       readonly stopReason?: 'error';
       readonly tokenUsage?: TokenUsage;

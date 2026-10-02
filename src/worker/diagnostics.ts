@@ -1,5 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
-import { classifyEngineTurnFailure, sanitizedTurnFailure, trustedTurnFailureMessage } from '../engine/turn-failure.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, trustedTurnFailureCause, trustedTurnFailureMessage } from '../engine/turn-failure.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
 
@@ -79,7 +79,7 @@ export function staticRefusalReason(reason: string): string | undefined {
 /** Replace an engine-owned failure message before it crosses Worker JSON-RPC. */
 export function sanitizeEngineTurnResult(result: EngineTurnResult, engine?: string): EngineTurnResult {
   if (result.status !== 'failed') return result;
-  const cause = classifyEngineTurnFailure(result);
+  const cause = classifyEngineTurnFailure(result) ?? trustedTurnFailureCause(result.message);
   const message = result.resumeRefused === true
     ? WORKER_DIAGNOSTICS.resumeRefused
     : cause !== undefined && engine !== undefined
@@ -89,6 +89,7 @@ export function sanitizeEngineTurnResult(result: EngineTurnResult, engine?: stri
   // error, response body, code or diagnostic into Worker JSON-RPC/journal data.
   return {
     status: 'failed', message,
+    ...(cause !== undefined && isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
     ...(result.stopReason === 'error' ? { stopReason: result.stopReason } : {}),
     ...(result.resumeRefused === true ? { resumeRefused: true } : {}),
     ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),

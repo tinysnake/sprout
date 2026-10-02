@@ -21,6 +21,15 @@ import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 
+/** Three total attempts; two retries use 200/400 ms exponential delays plus up to 100 ms jitter (800 ms total maximum). */
+const ENGINE_RETRY_MAX_ATTEMPTS = 3;
+
+async function defaultEngineRetryBackoff(failedAttempt: number): Promise<void> {
+  const exponential = Math.min(200 * 2 ** Math.max(0, failedAttempt - 1), 400);
+  const jitter = Math.floor(Math.random() * 101);
+  await new Promise<void>((resolve) => setTimeout(resolve, exponential + jitter));
+}
+
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
  * engine sessions meet.
@@ -95,6 +104,8 @@ export interface RunOrchestratorOptions {
    */
   readonly onTaskRunSettled?: TaskRunObserver;
   readonly leaseTtlMs?: number;
+  /** Wait before a bounded engine retry; injectable for deterministic tests. */
+  readonly retryBackoff?: (failedAttempt: number) => Promise<void>;
   /** Injected so tests get deterministic ids; production uses unique ids. */
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
@@ -199,6 +210,8 @@ type SessionAttempt =
       readonly message: string;
       /** Preserve structured turn outcome evidence through settlement. */
       readonly result?: Extract<EngineTurnResult, { status: 'failed' }>;
+      /** Number of events this failed attempt emitted before its error. */
+      readonly progressEventCount: number;
       /** True only when the engine refused the supplied key and did no work. */
       readonly resumeRefused: boolean;
     };
@@ -218,6 +231,7 @@ export class RunOrchestrator {
   /** Told when a Task-linked run settles, so the Task can advance its state. */
   readonly #onTaskRunSettled: TaskRunObserver | undefined;
   readonly #leaseTtlMs: number;
+  readonly #retryBackoff: (failedAttempt: number) => Promise<void>;
   readonly #clock: { now(): number };
   readonly #engineFacts:
     | ((environmentInstanceId: string) => Promise<readonly AgentWorkOptionEngineFact[]>)
@@ -252,6 +266,7 @@ export class RunOrchestrator {
     this.#tasks = options.tasks;
     this.#onTaskRunSettled = options.onTaskRunSettled;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
+    this.#retryBackoff = options.retryBackoff ?? defaultEngineRetryBackoff;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#engineFacts = options.engineFacts;
@@ -929,8 +944,52 @@ export class RunOrchestrator {
         );
       }
 
+      // Retry only a classified upstream failure that produced no run events.
+      // Repeating after visible tool or assistant progress could duplicate work.
+      let retryableFailure: Extract<EngineTurnResult, { status: 'failed' }> | undefined;
+      let attemptNumber = 1;
+      while (!attempt.ok && attempt.result?.retryable === true && attempt.progressEventCount === 0 &&
+          attemptNumber < ENGINE_RETRY_MAX_ATTEMPTS && !this.#stopRequests.has(running.id)) {
+        retryableFailure ??= attempt.result;
+        const nextAttempt = attemptNumber + 1;
+        const notice: AgentRunEvent = {
+          type: 'notice',
+          text: `Engine request failed temporarily; retrying (attempt ${nextAttempt} of ${ENGINE_RETRY_MAX_ATTEMPTS}).`,
+        };
+        prepared = await this.#advance(attempt.run, { events: [...attempt.run.events, notice] });
+        await this.#retryBackoff(attemptNumber);
+        if (this.#stopRequests.has(running.id)) {
+          return this.#finish(prepared, 'stopped', { status: 'interrupted' });
+        }
+        attempt = await this.#runSession(
+          adapter,
+          agent,
+          option,
+          assembled.prompt,
+          prepared,
+          stored?.key,
+          appendBootstrap(assembled.instructions, workspace.taskBootstrapInstructions),
+          workingDirectory,
+          workspace.projectWorkspaceId,
+          workspace.projectWorkspaceKind,
+          workspace.projectWorkspacePath,
+        );
+        attemptNumber = nextAttempt;
+      }
+
       if (!attempt.ok) {
-        return this.#finish(attempt.run, 'failed', attempt.result ?? {
+        const exhausted = retryableFailure !== undefined && attempt.result?.retryable === true &&
+          attempt.progressEventCount === 0 && attemptNumber === ENGINE_RETRY_MAX_ATTEMPTS;
+        let result: Extract<EngineTurnResult, { status: 'failed' }> | undefined;
+        if (attempt.result !== undefined) {
+          const { retryable: retryMarker, ...boundedResult } = attempt.result;
+          void retryMarker;
+          // The retry marker is internal attempt metadata, not durable run output.
+          result = exhausted
+            ? { ...boundedResult, message: retryableFailure!.message }
+            : boundedResult;
+        }
+        return this.#finish(attempt.run, 'failed', result ?? {
           status: 'failed',
           message: attempt.message,
         });
@@ -1003,6 +1062,7 @@ export class RunOrchestrator {
         ok: false,
         run: running,
         message: error instanceof Error ? error.message : String(error),
+        progressEventCount: 0,
         // Only the engine's explicit refusal of the supplied key is retryable.
         // Any other start failure is a real failure and must not discard a key.
         resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
@@ -1039,6 +1099,7 @@ export class RunOrchestrator {
           run: current,
           message: result.message,
           result,
+          progressEventCount: current.events.length - running.events.length,
           resumeRefused: result.resumeRefused === true,
         };
       }
@@ -1049,6 +1110,7 @@ export class RunOrchestrator {
           ok: false,
           run: current,
           message: streamError instanceof Error ? streamError.message : String(streamError),
+          progressEventCount: current.events.length - running.events.length,
           resumeRefused: false,
         };
       }
@@ -1058,6 +1120,7 @@ export class RunOrchestrator {
         ok: false,
         run: current,
         message: error instanceof Error ? error.message : String(error),
+        progressEventCount: current.events.length - running.events.length,
         // A thrown error is never a resume refusal: the engine had a working
         // session and failed while doing the work (or reading its result).
         resumeRefused: false,

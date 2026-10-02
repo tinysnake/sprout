@@ -1,6 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult } from './port.ts';
 import type { JsonRpcNotification } from './jsonrpc.ts';
-import { classifyEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Codex `app-server` notifications into the engine-neutral run
@@ -152,7 +152,14 @@ export function mapCodexNotification(
 
 /** Classify an error termination with stable, content-free failure text (#182). */
 function failTurn(cause: EngineTurnFailureCause): CodexNotificationOutcome {
-  return { events: [], finish: { status: 'failed', message: sanitizedTurnFailure('codex', cause) } };
+  return {
+    events: [],
+    finish: {
+      status: 'failed',
+      message: sanitizedTurnFailure('codex', cause),
+      ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
+    },
+  };
 }
 
 function firstCommandAction(item: CodexItem): string | undefined {

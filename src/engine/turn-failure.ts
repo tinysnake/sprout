@@ -23,6 +23,7 @@ export type EngineTurnFailureCause =
   | 'auth-rejected'
   | 'rate-limited'
   | 'timeout'
+  | 'upstream-unavailable'
   | 'connection-lost'
   | 'context-overflow'
   /** The engine ended the turn with an error stop reason (Pi `stopReason: "error"`). */
@@ -41,6 +42,7 @@ const REASONS: Readonly<Record<EngineTurnFailureCause, string>> = {
   'auth-rejected': 'authentication was rejected',
   'rate-limited': 'the engine rate limit was reached',
   'timeout': 'the engine request timed out',
+  'upstream-unavailable': 'the upstream service was unavailable',
   'connection-lost': 'the engine connection was lost',
   'context-overflow': 'the context exceeded the model limit',
   'error-stop-reason': 'the engine ended the turn with an error stop reason',
@@ -104,6 +106,7 @@ export function classifyEngineTurnFailure(raw: unknown, depth = 0): EngineTurnFa
       case 401: case 403: return 'auth-rejected';
       case 429: return 'rate-limited';
       case 408: case 504: return 'timeout';
+      case 502: case 503: return 'upstream-unavailable';
     }
   }
   const info = signal['codexErrorInfo'];
@@ -128,15 +131,28 @@ export function classifyEngineTurnFailure(raw: unknown, depth = 0): EngineTurnFa
   return undefined;
 }
 
+/** Whether an already-classified engine failure is safe to retry automatically. */
+export function isRetryableEngineTurnFailure(cause: EngineTurnFailureCause | undefined): boolean {
+  return cause === 'timeout' || cause === 'connection-lost' || cause === 'upstream-unavailable';
+}
+
+/** Exact product-owned messages only; prefixes never authorize engine prose. */
+export function trustedTurnFailureCause(message: unknown): EngineTurnFailureCause | undefined {
+  if (typeof message !== 'string' || message.length > 200) return undefined;
+  for (const engine of ['pi', 'codex', 'agy', 'claude']) {
+    for (const cause of Object.keys(REASONS) as EngineTurnFailureCause[]) {
+      if (message === sanitizedTurnFailure(engine, cause)) return cause;
+    }
+  }
+  return undefined;
+}
+
 /** Exact product-owned messages only; prefixes never authorize engine prose. */
 export function trustedTurnFailureMessage(message: unknown): string | undefined {
+  const trusted = trustedTurnFailureCause(message);
+  if (trusted !== undefined) return message as string;
   if (typeof message !== 'string' || message.length > 200) return undefined;
   if (message === 'the engine turn failed' || message === 'the engine refused the saved session' ||
       message === 'the engine session could not be started') return message;
-  for (const engine of ['pi', 'codex', 'agy', 'claude']) {
-    for (const cause of Object.keys(REASONS) as EngineTurnFailureCause[]) {
-      if (message === sanitizedTurnFailure(engine, cause)) return message;
-    }
-  }
   return undefined;
 }

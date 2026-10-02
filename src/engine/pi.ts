@@ -10,7 +10,7 @@ import type {
   StartSessionRequest,
 } from './port.ts';
 import { EventQueue } from './event-queue.ts';
-import { classifyEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
 import { mapPiEvent, newPiTurnState } from './pi-protocol.ts';
 
 /**
@@ -177,7 +177,12 @@ export class PiSession implements EngineSession {
       // Spawn failures fire 'error' without 'exit'; without this the turn
       // would hang forever after a bad working directory or missing binary.
       if (!settled) {
-        finish({ status: 'failed', message: sanitizedTurnFailure('pi', classifyEngineTurnFailure(error) ?? 'turn-start-rejected') });
+        const cause = classifyEngineTurnFailure(error) ?? 'turn-start-rejected';
+        finish({
+          status: 'failed',
+          message: sanitizedTurnFailure('pi', cause),
+          ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
+        });
       }
     });
 
