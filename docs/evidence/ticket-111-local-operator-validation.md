@@ -125,3 +125,35 @@ These exports contained no credential, model/account identity, host path, raw co
 - The direct `npm test` summary discrepancy needs a reproducible explanation even though the combined `npm run test` and separated source/Web baselines pass.
 
 **Disposition:** Partial. Mac enrollment, service, diagnostics, Project workspace, restart persistence, and production code checks are evidenced. AC3 recovery/Force Release and Windows live exercise remain pending; owner acceptance is pending.
+
+## Windows live exercise — rework round 2 (F5)
+
+### Base, triage, and isolation
+
+The rework checkout was verified with `git log --oneline -1`: `23bf7ef7 record ticket 111 operator validation`. The attempt-1 Work record and both reviewer reports were read before this exercise. F5 identifies missing live Windows bootstrap and signed-in-user Scheduled Task evidence: the prior attempt supplied a procedure because no Windows host was available, so it did not satisfy AC1. This rework was assigned the owner-provided Windows host to obtain that evidence.
+
+The intended Windows exercise required a dedicated temporary database, Worker state, Project workspace, and an occupancy-checked allocated port block. No Windows session was established, so no tree transfer, port occupancy check, bootstrap, service installation, or runtime operation occurred. Existing preview state and services were not touched.
+
+### Sanitized prerequisite transcript
+
+```text
+$ ssh -o BatchMode=yes -o ConnectTimeout=15 <windows-host> <prerequisite-command>
+<user>@<windows-host>: Permission denied (publickey,password,keyboard-interactive).
+result: passwordless SSH authentication rejected
+local command timeout: 45 seconds
+connection timeout: 15 seconds
+```
+
+The SSH client reached authentication, but the owner-provided passwordless access did not authenticate. No credential workaround, password prompt, key provisioning, or authentication configuration change was attempted. No remote command outcome was obtained. Local shell version output from the attempted command is excluded because it does not establish Windows prerequisites.
+
+### Acceptance status and next action
+
+- **AC1 Windows / F5:** blocked before bootstrap. Neither host-local bootstrap nor the signed-in-user Scheduled Task lifecycle was exercised.
+- **AC2 Windows:** enrollment, authenticated reconnect, protocol compatibility, capability permission, engine readiness, and Project workspace behavior were not exercised. Windows OpenSSH configuration, Node.js/npm availability, repository access at the required base, and installed engine versions remain unverified.
+- **AC3 Windows:** ordinary Core restart, Worker disconnect/reconnect, active-run recovery, retained evidence, reconciliation, normal recovery, and Force Release were not exercised. The engine-pin decision remains pending; authentication prevented checking whether an installed engine could complete a turn.
+- **AC4 Windows:** no Web or host-local diagnostic export was obtained. The SSH authentication rejection is an access prerequisite failure, not product diagnostic evidence.
+- **AC5:** this change is documentation only. No production code or script changed; no production suite was rerun. Privacy review and `git diff --check` were performed for the evidence addition. Owner acceptance remains pending.
+
+**Follow-up:** Restore the promised passwordless SSH access to the owner-provided Windows host, then redispatch F5 at the verified base. Repeat the allocated-port occupancy check before creating isolated runtime state. Resolve the engine-pin decision and obtain a successful turn before claiming the conditional active-run recovery chain.
+
+**Disposition:** Blocked. F5 remains open; this rework records an actual SSH prerequisite failure and claims no Windows product acceptance result.
