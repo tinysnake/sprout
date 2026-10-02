@@ -1798,7 +1798,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // one implementation; the routes sit behind the operator browser
         // boundary, so their actor is the authenticated Human by construction.
         createConversationRouter({ scopes: conversationScopes }),
-        createChatReadRouter({ scopes: conversationScopes, store: openedStoresForCatalog.collaboration }),
+        createChatReadRouter({ scopes: conversationScopes, store: openedStoresForCatalog.collaboration, agents: agentService }),
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),

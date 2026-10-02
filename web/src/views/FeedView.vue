@@ -27,7 +27,6 @@ import UnreadBadge from '../modules/chat/UnreadBadge.vue';
 
 const unread = useUnreadState();
 const unreadConversations = computed(() => unread?.scopes.value.filter((s) => s.count > 0 && (activeScope.value === FEED_ALL_SCOPE || activeScope.value === s.projectId)) ?? []);
-function activityUnread(target: FeedTarget | undefined) { return target?.surface === 'project-chat' && target.scopeId ? unread?.count(target.scopeId) ?? 0 : 0; }
 const props = defineProps<{ api?: FeedBrowserAdapter }>();
 const route = useRoute();
 const router = useRouter();
@@ -602,7 +601,6 @@ onMounted(() => {
             <ol v-if="activityItems.length" class="flex flex-col gap-2" aria-label="Recent operational activity">
               <li v-for="item in activityItems" :key="item.id" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
                 <button v-if="targetLocation(item.target)" type="button" class="flex min-h-[64px] w-full items-start gap-3 p-3 text-left transition-colors hover:bg-[var(--bg-surface-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :data-activity-id="item.id" @click="navigateTo(item.target, activityGroupLabel(activityGroup(item)))">
-                  <UnreadBadge :count="activityUnread(item.target)" />
                   <StatusDot status="blue" size="sm" class="mt-1 shrink-0" />
                   <span class="min-w-0 flex-1">
                     <span class="flex flex-wrap items-center gap-2"><Badge variant="secondary">{{ activityGroupLabel(activityGroup(item)) }}</Badge><span v-if="projectName(item.projectId)" class="text-[10px] text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></span>

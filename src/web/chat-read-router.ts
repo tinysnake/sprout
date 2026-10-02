@@ -9,6 +9,10 @@ export interface UnreadScopeCount {
   readonly count: number;
 }
 
+type AgentStatusLookup = {
+  get(agentId: string): Promise<{ readonly status: 'active' | 'archived' } | undefined>;
+};
+
 function json(context: ApiRequestContext, status: number, body: unknown) {
   context.response.writeHead(status, { 'content-type': 'application/json' });
   context.response.end(JSON.stringify(body));
@@ -16,17 +20,22 @@ function json(context: ApiRequestContext, status: number, body: unknown) {
 }
 
 /** Operator-only read receipts and count-only projection. Message content never enters a badge payload. */
-export function createChatReadRouter(options: { readonly store: CollaborationStore; readonly scopes: ConversationScopeService }): ApiRouter {
-  const { store, scopes } = options;
+export function createChatReadRouter(options: { readonly store: CollaborationStore; readonly scopes: ConversationScopeService; readonly agents: AgentStatusLookup }): ApiRouter {
+  const { store, scopes, agents } = options;
   async function visibleScope(scopeId: string) {
     const scope = await scopes.getScope(scopeId);
     if (!scope) return undefined;
     const human = await scopes.humanAuthority(scope.projectId);
-    // A Project's Human cannot inspect a private conversation between Agents.
-    if (scope.kind === 'direct' && !scope.participants.includes(human.memberId)) return undefined;
+    let unreadVisible = true;
+    if (scope.kind === 'direct') {
+      // A Project's Human cannot inspect a private conversation between Agents.
+      if (!scope.participants.includes(human.memberId)) return undefined;
+      const agentId = scope.participants.find((participant) => participant !== human.memberId);
+      unreadVisible = agentId === undefined || (await agents.get(agentId))?.status !== 'archived';
+    }
     const counted = scope.kind !== 'working-group' || workingGroupStatus(scope) !== 'disbanded';
     const state = await scopes.scopeState(scopeId, human.memberId);
-    return { scope, human, counted: counted && state.reason !== 'membership-ended' };
+    return { scope, human, unreadVisible, counted: counted && state.reason !== 'membership-ended' };
   }
   return {
     name: 'chat-read-state',
@@ -43,7 +52,7 @@ export function createChatReadRouter(options: { readonly store: CollaborationSto
           for (const id of ids) {
             let visible;
             try { visible = await visibleScope(id); } catch (error) { if (error instanceof ConversationScopeError) continue; throw error; }
-            if (!visible) continue;
+            if (!visible || !visible.unreadVisible) continue;
             counts.push({ scopeId: id, projectId: visible.scope.projectId, count: visible.counted ? await store.unreadCount(id, visible.human.memberId) : 0 });
           }
           return json(context, 200, { scopes: counts });
@@ -59,7 +68,7 @@ export function createChatReadRouter(options: { readonly store: CollaborationSto
         const messages = await store.listMessages();
         if (ids.some((id) => !messages.some((m) => m.id === id && m.scopeId === scopeId))) return json(context, 400, { error: 'Message does not belong to this scope' });
         for (const id of ids) await store.markReadThrough(scopeId, visible.human.memberId, id);
-        return json(context, 200, { scopeId, projectId: visible.scope.projectId, count: visible.counted ? await store.unreadCount(scopeId, visible.human.memberId) : 0 });
+        return json(context, 200, { scopeId, projectId: visible.scope.projectId, count: visible.unreadVisible && visible.counted ? await store.unreadCount(scopeId, visible.human.memberId) : 0 });
       } catch (error) {
         if (error instanceof ConversationScopeError) return json(context, 404, { error: 'Conversation not found' });
         return json(context, 500, { error: 'Read state is unavailable' });

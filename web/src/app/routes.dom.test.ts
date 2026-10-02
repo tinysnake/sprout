@@ -116,37 +116,35 @@ async function deterministicAppOptions(vite: ViteDevServer) {
   };
 }
 
-for (const surface of ['sidebar', 'feed-card', 'feed-activity', 'scope-card'] as const) {
+for (const surface of ['sidebar', 'feed-card', 'phone-nav', 'scope-card'] as const) {
   test(`durable unread ${surface}: visible before opening, retained on remount, and cleared only by reading its scope`, async () => {
-    const { vite, doc, mount, cleanup } = await setupHarness();
+    const { vite, doc, dom, mount, cleanup } = await setupHarness();
     let activeApp: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
     try {
+      if (surface === 'phone-nav') Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 390 });
       const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
       const options = await deterministicAppOptions(vite);
+      if (surface === 'phone-nav') await options.chatService.markRead('#general', ['reply-msg-addressed:programmer']);
       options.chatService.pushIdleMessage('wg-frontend', 'PRIVATE_UNREAD_BODY');
-      options.chatService.pushIdleMessage('dm-architect', 'Other scope arrival');
-      const path = surface === 'scope-card' ? '/project/chat' : '/feed';
+      if (surface !== 'phone-nav') options.chatService.pushIdleMessage('dm-architect', 'Other scope arrival');
+      const path = surface === 'scope-card' || surface === 'phone-nav' ? '/project/chat' : '/feed';
       const selector = surface === 'sidebar' ? '[data-nav="chat"] [data-unread-count]'
         : surface === 'scope-card' ? '[data-scope-id="wg-frontend"] [data-unread-count]'
-        : surface === 'feed-card' ? '[data-unread-scope="wg-frontend"] [data-unread-count]'
-        : '[data-activity-id="message-wg"] [data-unread-count]';
-      // Feed targets use the durable scope identity rather than message prose.
-      if (surface === 'feed-activity') {
-        const snapshot = await options.feedService.load();
-        options.feedService.load = async () => ({ ...snapshot, activity: [{ id: 'message-wg', kind: 'message', projectId: 'project-sprout', summary: 'Message recorded', scopes: ['feed:all', 'project-sprout'], at: 1, target: { surface: 'project-chat', path: '/project/chat/wg-frontend', projectId: 'project-sprout', scopeId: 'wg-frontend' } }] });
-      }
+        : surface === 'phone-nav' ? '.mobile-bottom-nav [data-nav="chat"] [data-unread-count]'
+        : '[data-unread-scope="wg-frontend"] [data-unread-count]';
       let mounted = createSproutApp(options); activeApp = mounted;
       await mounted.router.push(path); mounted.app.mount(mount); await settle(180);
       const badge = doc.querySelector(selector);
       assert.ok(badge, `${surface} shows unread before opening`);
       assert.ok(!badge.textContent?.includes('PRIVATE'), 'badges contain counts only');
+      if (surface === 'phone-nav') assert.equal(badge.getAttribute('data-unread-count'), '1', 'phone Chat navigation reports its unread count');
       mounted.app.unmount();
       mounted = createSproutApp(options); activeApp = mounted;
       await mounted.router.push(path); mounted.app.mount(mount); await settle(180);
       assert.ok(doc.querySelector(selector), 'unread survives a fresh app mount');
       await mounted.router.push('/project/chat/wg-frontend?project=project-sprout'); await settle(180);
       await mounted.router.push('/project/chat/dm-empty?project=project-sprout'); await settle(130);
-      assert.ok(doc.querySelector('[data-scope-id="dm-architect"] [data-unread-count]'), 'scope switches preserve other unread conversations');
+      if (surface !== 'phone-nav') assert.ok(doc.querySelector('[data-scope-id="dm-architect"] [data-unread-count]'), 'scope switches preserve other unread conversations');
       await mounted.router.push('/project/chat/%23general?project=project-sprout'); await settle(130);
       await mounted.router.push('/project/chat/dm-architect?project=project-sprout'); await settle(130);
       await mounted.router.push(path); await settle(130);
@@ -158,6 +156,91 @@ for (const surface of ['sidebar', 'feed-card', 'feed-activity', 'scope-card'] as
       mounted.app.unmount();
       activeApp = undefined;
     } finally { activeApp?.app.unmount(); await cleanup(); }
+  });
+}
+
+test('Feed activity deep-links unread conversations without duplicating the unread badge', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+  try {
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    options.chatService.pushIdleMessage('wg-frontend', 'PRIVATE_UNREAD_BODY');
+    const snapshot = await options.feedService.load();
+    options.feedService.load = async () => ({ ...snapshot, activity: [{ id: 'message-wg', kind: 'message', projectId: 'project-sprout', summary: 'Message recorded', scopes: ['feed:all', 'project-sprout'], at: 1, target: { surface: 'project-chat', path: '/project/chat/wg-frontend', projectId: 'project-sprout', scopeId: 'wg-frontend' } }] });
+    mounted = createSproutApp(options);
+    await mounted.router.push('/feed');
+    mounted.app.mount(mount);
+    await settle(180);
+
+    const activity = doc.querySelector('[data-activity-id="message-wg"]');
+    assert.ok(activity, 'the unread conversation remains linked from Recent Operational Activity');
+    assert.equal(activity.querySelector('[data-unread-count]'), null, 'the activity row has no unread badge');
+    assert.ok(doc.querySelector('[data-unread-scope="wg-frontend"] [data-unread-count]'), 'the Feed conversation link keeps its unread badge');
+    (activity as HTMLButtonElement).click();
+    await settle(140);
+    assert.equal(mounted.router.currentRoute.value.params['scopeId'], 'wg-frontend', 'the activity row still deep-links to its conversation');
+  } finally { mounted?.app.unmount(); await cleanup(); }
+});
+
+test('archived Agent direct scopes suppress unread presentation on Chat cards', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+  try {
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const archivedScope = { id: 'dm-legacy-coder', kind: 'direct' as const, projectId: 'project-sprout', participants: ['operator', 'legacy-coder'], createdAt: 1_800_000_000_000, updatedAt: 1_800_000_000_000 };
+    const listScopes = options.chatService.listScopes.bind(options.chatService);
+    options.chatService.listScopes = async (projectId) => [...await listScopes(projectId), archivedScope];
+    const listUnread = options.chatService.listUnread.bind(options.chatService);
+    options.chatService.listUnread = async () => [...await listUnread(), { scopeId: archivedScope.id, projectId: archivedScope.projectId, count: 1 }];
+    const projects = await options.projectService.listProjects();
+    options.projectService.listProjects = async () => projects.map((project) => project.id !== 'project-sprout' ? project : ({
+      ...project,
+      content: { ...project.content, versions: project.content.versions.map((version) => ({
+        ...version,
+        memberships: [...version.memberships, { memberId: 'legacy-coder', memberKind: 'agent' as const, responsibilities: [], collaborationInstructions: '', startedAt: project.createdAt }],
+      })) },
+    }));
+    options.chatService.pushIdleMessage(archivedScope.id, 'Archived Agent unread message');
+    mounted = createSproutApp(options);
+    await mounted.router.push('/project/chat');
+    mounted.app.mount(mount);
+    await settle(180);
+
+    const card = doc.querySelector(`[data-scope-id="${archivedScope.id}"]`);
+    assert.ok(card, 'the archived direct scope remains available for read-only history');
+    assert.match(card.textContent ?? '', /Archived/);
+    assert.equal((await options.chatService.listUnread()).find((scope) => scope.scopeId === archivedScope.id)?.count, 1, 'the fixture reports an unread archived-scope count');
+    assert.equal(card.querySelector('[data-unread-count]'), null, 'the Chat card suppresses the archived-scope badge');
+  } finally { mounted?.app.unmount(); await cleanup(); }
+});
+
+for (const [surface, width] of [['desktop', 1024], ['phone', 390]] as const) {
+  test(`chat-card unread badge is a centered right-side flex item on ${surface}`, async () => {
+    const { vite, doc, dom, mount, cleanup } = await setupHarness();
+    let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+    try {
+      Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: width });
+      const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+      const options = await deterministicAppOptions(vite);
+      options.chatService.pushIdleMessage('wg-frontend', 'A long unread preview that must not collide with its count.');
+      mounted = createSproutApp(options);
+      await mounted.router.push('/project/chat');
+      mounted.app.mount(mount);
+      await settle(180);
+
+      const card = doc.querySelector('[data-scope-id="wg-frontend"]') as HTMLButtonElement | null;
+      const badge = card?.querySelector('[data-unread-count]') ?? null;
+      assert.ok(card, 'the unread conversation card is present');
+      assert.ok(badge, 'the unread count remains visible on the card');
+      const slot = badge;
+      assert.equal(slot?.parentElement, card, 'the badge occupies a separate card-level flex item');
+      assert.equal(card.lastElementChild, slot, 'the count occupies the right edge after the flexible conversation text');
+      assert.ok(slot?.classList.contains('self-center'), 'the right-side badge is vertically centered');
+      assert.ok(slot?.classList.contains('shrink-0'), 'the count keeps its own width beside long text');
+      assert.ok(card.classList.contains('min-h-[64px]'), 'the card itself keeps a touch target above 44px');
+    } finally { mounted?.app.unmount(); await cleanup(); }
   });
 }
 
