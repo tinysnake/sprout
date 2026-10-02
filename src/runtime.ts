@@ -1096,10 +1096,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
       // ownership of the Task state it just made durable.
-      onRecovery: async ({ leaseId, hadActiveRun, runId }) => {
+      onRecovery: async ({ leaseId, hadActiveRun, runId, cause }) => {
         await recovery.open({
           leaseId,
-          cause: 'worker-channel-lost',
+          cause: cause ?? 'worker-channel-lost',
           hadActiveRun,
           ...(runId !== undefined ? { runId } : {}),
         });

@@ -66,14 +66,16 @@ export function runFailureEventInput(run: AgentRun): PublishEventInput | undefin
   if (run.status !== 'failed' || run.projectId === undefined) return undefined;
   // Legacy untyped failures are execution, regardless of their free text.
   const failureClass = run.failureClass ?? 'execution';
-  // No failure text crosses this boundary: even a known prefix can be followed
-  // by engine output or machine identity that a redactor cannot recognize.
+  // Arbitrary failure prose stays out. The reason boundary admits only exact
+  // product-owned grammar, with Environment reasons gated by their saved class.
   const summary = `Agent run failed (${failureClass}) for ${run.agentId}`;
   const detail = [
     `run ${run.id}`,
     `agent ${run.agentId}`,
     ...(run.taskId !== undefined ? [`task ${run.taskId}`] : []),
     runFailureReason(run),
+    ...(failureClass === 'environment' && run.result?.status === 'failed'
+      ? ['Open Environments for recovery controls, or open Tasks, select the holding Task, enter a reason, and Discard Task. Discard ends unfinished work.'] : []),
   ].join(' · ');
   return {
     projectId: run.projectId,

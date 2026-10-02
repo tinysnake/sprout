@@ -125,7 +125,7 @@ test('engine-error text and host-shaped facts are excluded, not pattern-redacted
 
 test('failure notices explain persisted error messages, message-less errors, and missing outcomes safely', () => {
   const cases: readonly [Partial<AgentRun>, RegExp][] = [
-    [{ result: { status: 'failed', message: 'the engine refused the saved session' } }, /the engine refused the saved session/],
+    [{ failureClass: 'execution', result: { status: 'failed', message: 'the engine refused the saved session' } }, /the engine refused the saved session/],
     [{ result: { status: 'failed', message: '' } }, /code: failed/],
     [{ result: { status: 'failed', message: '', stopReason: 'error' } }, /stopReason: error/],
     [{}, /No error outcome was recorded/],
@@ -137,6 +137,14 @@ test('failure notices explain persisted error messages, message-less errors, and
     assert.doesNotMatch(JSON.stringify(input), /HOSTILE_DIAGNOSTIC|<script>/);
     assert.ok((input?.detail?.length ?? 0) < 500, 'notice reason is bounded by product-owned vocabulary');
   }
+});
+
+test('environment failure summary and detail identify the retained lease consistently', () => {
+  const input = runFailureEventInput(failedRun({ result: { status: 'failed', message: 'environment busy: env-local is leased by task-example' } }));
+  assert.match(input?.summary ?? '', /failed \(environment\)/);
+  assert.match(input?.detail ?? '', /Environment busy: env-local is leased by task-example/);
+  assert.doesNotMatch(input?.detail ?? '', /Engine failure|diagnostic withheld/);
+  assert.match(input?.detail ?? '', /Open Environments for recovery controls, or open Tasks, select the holding Task, enter a reason, and Discard Task/);
 });
 
 test('only Project-scoped terminal failures project an event', () => {
@@ -365,6 +373,7 @@ test('historical failure origins use only their own run or a defined reconnect l
     });
     const run = failedRun({
       ...(link === 'reconnect-retry' ? { id: 'run-retry', retryOfRunId: original.id } : {}),
+      failureClass: 'execution',
       result: { status: 'failed', message: 'the engine refused the saved session' },
     });
     if (link === 'reconnect-retry') runs.push(run);

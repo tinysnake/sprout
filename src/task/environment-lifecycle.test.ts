@@ -163,6 +163,28 @@ function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void 
   assert.equal(child.status, exitCode, String(child.stderr));
 }
 
+test('overdue blocked Task lease enters retained recovery before competing acquisition', async () => {
+  let now = 1;
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], clock: { now: () => now }, idFactory: () => 'lease-1' });
+  const scenario = build({ pool });
+  await scenario.store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  await scenario.store.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
+  now = pool.getLease(begun.environmentLeaseId!)!.expiresAt;
+  const acquired = await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 });
+  assert.equal(acquired.ok, false);
+  if (!acquired.ok) assert.equal(acquired.state, 'recovering');
+  const recovering = await scenario.store.get('task-1');
+  assert.equal(recovering?.environmentLifecycleState, 'recovery');
+  assert.equal(recovering?.recoveryState, 'blocked');
+  assert.equal(recovering?.status, 'blocked');
+  assert.equal(pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+  await scenario.lifecycle.recover('task-1', 'resume');
+  assert.equal((await scenario.store.get('task-1'))?.environmentLifecycleState, 'blocked');
+  assert.ok(pool.getLease(begun.environmentLeaseId!)!.expiresAt > now);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, false);
+});
+
 test('begin binds a Task-owned non-expiring lease; nested settlement retains it and end releases after recycle', async () => {
   const calls: string[] = [];
   const context: TaskContextWorker = { prepare: async () => { calls.push('prepare'); return { bootstrapInstructions: '' }; }, recycle: async () => { calls.push('recycle'); } };

@@ -109,8 +109,8 @@ function build(options: {
       run: () => 'run-1',
     },
     runs: { submit: async (request) => ({ id: request.runId }) },
-    onRecovery: async ({ leaseId, hadActiveRun }) => {
-      await recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun });
+    onRecovery: async ({ leaseId, hadActiveRun, cause }) => {
+      await recovery.open({ leaseId, cause: cause ?? 'worker-channel-lost', hadActiveRun });
     },
     forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     ...(options.now !== undefined ? { clock: { now: () => options.now! } } : {}),
@@ -154,6 +154,32 @@ async function interruptedTask(built: Built): Promise<{ readonly leaseId: string
   return { leaseId: begun.environmentLeaseId! };
 }
 
+
+test('overdue blocked lease exposes durable recovery and Human Force Release without freeing work automatically', async () => {
+  let now = 1;
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], clock: { now: () => now }, idFactory: () => 'lease-1' });
+  const built = build({ pool });
+  await built.store.create(task());
+  const begun = await built.lifecycle.begin('task-1');
+  const leaseId = begun.environmentLeaseId!;
+  await built.store.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
+  assert.equal(await built.recovery.forLease(leaseId), undefined);
+  now = pool.getLease(leaseId)!.expiresAt;
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, false);
+  const record = await built.recovery.forLease(leaseId);
+  assert.equal(record?.phase, 'recovery');
+  assert.equal(record?.cause, 'lease-overdue');
+  assert.equal(workSafetyFromRecovery([record!], pool.leases(), 'mac-1'), 'recovery');
+  assert.ok(record!.unresolvedFacts.length > 0);
+  assert.equal(pool.getLease(leaseId)?.state, 'recovering');
+  await built.recovery.forceRelease(leaseId, {
+    acknowledgedRisks: true, typedConfirmation: FORCE_RELEASE_CONFIRMATION, reason: 'Human releases overdue blocked work',
+  });
+  assert.equal(pool.getLease(leaseId)?.state, 'released');
+  assert.equal((await built.store.get('task-1'))?.status, 'cancelled');
+  assert.equal((await built.recovery.forceReleaseHistory('mac-1')).length, 1);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, true);
+});
 
 test('an interrupted nested run opens one durable recovery record and retains the Task lease', async () => {
   const built = build();
