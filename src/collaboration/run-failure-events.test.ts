@@ -144,7 +144,18 @@ test('environment failure summary and detail identify the retained lease consist
   assert.match(input?.summary ?? '', /failed \(environment\)/);
   assert.match(input?.detail ?? '', /Environment busy: env-local is leased by task-example/);
   assert.doesNotMatch(input?.detail ?? '', /Engine failure|diagnostic withheld/);
-  assert.match(input?.detail ?? '', /Open Environments for recovery controls, or open Tasks, select the holding Task, enter a reason, and Discard Task/);
+  assert.match(input?.detail ?? '', /Inspect the lease and recovery state in Environments\. If a Task holds the lease, open Tasks, select that Task, enter a reason, and choose Discard Task\. Discard ends unfinished work\./);
+});
+
+test('environment run conflicts keep Task discard guidance conditional on the holder', () => {
+  const input = runFailureEventInput(failedRun({
+    failureClass: 'environment',
+    result: { status: 'failed', message: 'environment busy: env-local is leased by agent-example' },
+  }));
+  assert.match(input?.detail ?? '', /Inspect the lease and recovery state in Environments/);
+  assert.match(input?.detail ?? '', /If a Task holds the lease, open Tasks/);
+  assert.doesNotMatch(input?.detail ?? '', /select the holding Task/);
+  assert.match(input?.detail ?? '', /enter a reason, and choose Discard Task\. Discard ends unfinished work\./);
 });
 
 test('only Project-scoped terminal failures project an event', () => {

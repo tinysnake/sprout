@@ -75,7 +75,7 @@ export function runFailureEventInput(run: AgentRun): PublishEventInput | undefin
     ...(run.taskId !== undefined ? [`task ${run.taskId}`] : []),
     runFailureReason(run),
     ...(failureClass === 'environment' && run.result?.status === 'failed'
-      ? ['Open Environments for recovery controls, or open Tasks, select the holding Task, enter a reason, and Discard Task. Discard ends unfinished work.'] : []),
+      ? ['Inspect the lease and recovery state in Environments. If a Task holds the lease, open Tasks, select that Task, enter a reason, and choose Discard Task. Discard ends unfinished work.'] : []),
   ].join(' · ');
   return {
     projectId: run.projectId,
