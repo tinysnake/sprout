@@ -10,6 +10,7 @@ import { createWorkerCli } from './worker/cli/worker-cli.ts';
 import { ensureStateDirectory, workerHostPaths, writePrivateFile } from './worker/cli/host-state.ts';
 import { connectWorkerEnrollment, loadOrCreateWorkerIdentity, workerPublicKey,
   type WorkerEnrollmentConnection } from './worker/enrollment-connector.ts';
+import { lookup } from 'node:dns/promises';
 import { createConnection } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
 import { WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS } from './web/api.ts';
@@ -20,23 +21,14 @@ import { WORKER_PROTOCOL_VERSION } from './worker/protocol.ts';
 
 const SHUTDOWN_GUARD_MS = 6_500;
 
-async function listenWithoutHost(server: HttpServer, port: number): Promise<number> {
-  await new Promise<void>((resolve, reject) => {
-    const onListening = () => {
-      server.off('error', onError);
-      resolve();
-    };
-    const onError = (error: Error) => {
-      server.off('listening', onListening);
-      reject(error);
-    };
-    server.once('error', onError);
-    server.once('listening', onListening);
-    server.listen(port);
-  });
+async function assertLoopbackOnlyListener(server: HttpServer): Promise<void> {
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
-  return address.port;
+  // Resolve localhost at runtime so the assertion contains no address literal;
+  // wildcard binds do not match any of its loopback destinations.
+  const localhostAddresses = await lookup('localhost', { all: true });
+  assert.ok(localhostAddresses.some((candidate) => candidate.address === address.address),
+    'Core API listener must bind to a localhost address');
 }
 
 test('Core shutdown releases an accepted foreground Worker without an operator stop', async (t) => {
@@ -50,7 +42,13 @@ test('Core shutdown releases an accepted foreground Worker without an operator s
       databasePath: join(root, 'core.db'), engineId: 'scripted' }),
     projectRoot: root,
   });
-  const port = await listenWithoutHost(runtime.api.server, Number(process.env['PORT'] ?? 0));
+  const { port } = await runtime.api.listen(0);
+  try {
+    await assertLoopbackOnlyListener(runtime.api.server);
+  } catch (error) {
+    await runtime.close();
+    throw error;
+  }
   const requested = await runtime.enrollments.requestEnrollment({
     environmentInstanceId: 'shutdown-host', displayName: 'Shutdown test host', platform: 'macos',
     publicKey: workerPublicKey(identity.privateKey), capabilityRequests: ['agent-run'], engineFacts: [],
@@ -138,8 +136,13 @@ test('Core shutdown bounds a Worker socket that never acknowledges the going-awa
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const runtime = await createRuntime({ configuration: hostConfiguration({ environmentSource: 'enrollment',
     databasePath: join(root, 'core.db'), engineId: 'scripted' }), projectRoot: root });
-  const port = await listenWithoutHost(runtime.api.server,
-    process.env['PORT'] === undefined ? 0 : Number(process.env['PORT']) + 1);
+  const { port } = await runtime.api.listen(0);
+  try {
+    await assertLoopbackOnlyListener(runtime.api.server);
+  } catch (error) {
+    await runtime.close();
+    throw error;
+  }
   // A real upgraded TCP peer, deliberately without a WebSocket client that
   // automatically acknowledges close. This also covers stalled enrollment.
   const peer = createConnection({ host: 'localhost', port });
