@@ -1764,7 +1764,19 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
-        createTaskControlRouter({ controls: taskControls }),
+        createTaskControlRouter({
+          controls: taskControls,
+          recover: async (taskId, input) => {
+            const task = await tasks.get(taskId);
+            if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
+                task.environmentLifecycleState !== 'recovery') {
+              return taskControls.recoverForHuman(taskId, input);
+            }
+            if (input.action === 'resume') await recovery.resume(task.environmentLeaseId, { reason: input.reason });
+            else await recovery.discard(task.environmentLeaseId, { reason: input.reason });
+            return (await tasks.get(taskId))!;
+          },
+        }),
         // The read-only Feed/Attention projection (#103) through the same
         // additive seam: one GET snapshot, no dismiss or snooze command.
         createFeedRouter({ feed }),
