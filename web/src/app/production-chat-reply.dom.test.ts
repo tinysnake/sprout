@@ -125,6 +125,12 @@ interface Page {
   server: ReplyProjectionApi;
   sse: SseObservation;
   push(path: string): Promise<void>;
+  setVisibilityState(state: 'hidden' | 'visible'): void;
+  holdPath(path: string): {
+    requestCount(): number;
+    waitForRequests(count: number): Promise<void>;
+    release(): void;
+  };
   close(): Promise<void>;
 }
 
@@ -139,10 +145,20 @@ async function startPage(turns: readonly ScriptedTurn[]): Promise<Page> {
   const server = await buildReplyProjectionApi({ turns });
   const harness = await setupHarness();
   const sse: SseObservation = { runEvents: 0 };
+  const requestGates = new Map<string, {
+    readonly wait: Promise<void>;
+    started(): void;
+  }>();
   let cookie = '';
 
   const sessionFetch: typeof fetch = async (input, init) => {
     const target = typeof input === 'string' && input.startsWith('http') ? input : `${server.base}${String(input)}`;
+    const targetUrl = new URL(target);
+    const gate = requestGates.get(targetUrl.pathname);
+    if ((init?.method ?? 'GET') === 'GET' && gate !== undefined) {
+      gate.started();
+      await gate.wait;
+    }
     const headers = new Headers(init?.headers);
     if (cookie !== '') headers.set('cookie', cookie);
     const response = await globalThis.fetch(target, { ...init, headers });
@@ -278,6 +294,39 @@ async function startPage(turns: readonly ScriptedTurn[]): Promise<Page> {
       async push(path) {
         await router.push(path);
         await settle(200);
+      },
+      setVisibilityState(state) {
+        Object.defineProperty(harness.doc, 'visibilityState', { configurable: true, value: state });
+        harness.doc.dispatchEvent(new harness.dom.window.Event('visibilitychange'));
+      },
+      holdPath(path) {
+        let releaseGate!: () => void;
+        const wait = new Promise<void>((resolve) => { releaseGate = resolve; });
+        let started = 0;
+        const waiters = new Set<{ readonly count: number; readonly resolve: () => void }>();
+        requestGates.set(path, {
+          wait,
+          started() {
+            started += 1;
+            for (const waiter of waiters) {
+              if (started >= waiter.count) {
+                waiters.delete(waiter);
+                waiter.resolve();
+              }
+            }
+          },
+        });
+        return {
+          requestCount: () => started,
+          waitForRequests(count) {
+            if (started >= count) return Promise.resolve();
+            return new Promise<void>((resolve) => waiters.add({ count, resolve }));
+          },
+          release() {
+            requestGates.delete(path);
+            releaseGate();
+          },
+        };
       },
       async close() {
         app.unmount();
@@ -420,7 +469,7 @@ test('a live engine reply renders in the Project channel through the run follow-
   }
 });
 
-test('Chat shows the active Agent identity, offers Human Stop, and accepts the next message after interruption', async () => {
+test('Chat shows the active Agent identity, offers Human Stop, accepts the next message, and refreshes on refocus', async () => {
   const page = await startPage([
     {
       events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
@@ -431,7 +480,19 @@ test('Chat shows the active Agent identity, offers Human Stop, and accepts the n
       events: [{ type: 'message', text: 'The next message was admitted.', final: true }],
       result: { status: 'completed', text: 'The next message was admitted.' },
     },
+    {
+      events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
+      result: { status: 'completed', text: 'third turn' },
+      settleAfterMs: 5_000,
+    },
+    {
+      events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
+      result: { status: 'failed', message: 'private engine failure' },
+      settleAfterMs: 1_200,
+    },
   ]);
+  let messagesGate: ReturnType<Page['holdPath']> | undefined;
+  let activeRunsGate: ReturnType<Page['holdPath']> | undefined;
   try {
     await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
     await waitForEnabledComposer(page);
@@ -443,6 +504,10 @@ test('Chat shows the active Agent identity, offers Human Stop, and accepts the n
     });
     assert.match(status.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
     assert.doesNotMatch(status.textContent ?? '', /PRIVATE_ENGINE_PROGRESS|prompt|model|engine/);
+    assert.equal((page.doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, false,
+      'the Human can continue drafting while an active run blocks submission');
+    assert.equal((page.doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
+      'Send is blocked while the conversation has an active Chat run');
     await page.push('/project/feed');
     await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
     const rehydrated = await waitFor('the active Agent indicator after a fresh Chat mount', () => {
@@ -462,7 +527,40 @@ test('Chat shows the active Agent identity, offers Human Stop, and accepts the n
     await sendInComposer(page, 'Send the next message immediately.');
     const reply = await waitFor('the reply to the next message', () => messageElement(page, 'The next message was admitted.'));
     assert.equal(authorOf(reply), `@${AGENT_NAME}`);
+
+    await sendInComposer(page, 'Start work before hiding the Chat tab.');
+    await waitFor('the second active Agent indicator', () => page.doc.querySelector('.chat-working-state'));
+    await settle(200);
+    messagesGate = page.holdPath('/api/messages');
+    const activeRunsPath = `/api/chat/scopes/${encodeURIComponent(page.server.directScopeId)}/active-runs`;
+    activeRunsGate = page.holdPath(activeRunsPath);
+    const run = (await page.server.collaboration.activeChatRunsForScope(page.server.directScopeId))[0];
+    assert.ok(run, 'the authoritative active Chat run is linked to this conversation');
+    page.setVisibilityState('hidden');
+    await page.server.orchestrator.interrupt(run.id);
+    await messagesGate.waitForRequests(1);
+    await activeRunsGate.waitForRequests(1);
+    assert.ok(page.doc.querySelector('.chat-working-state'), 'the in-flight reads keep the previous indicator visible');
+
+    const readsBeforeRefocus = activeRunsGate.requestCount();
+    page.setVisibilityState('visible');
+    await activeRunsGate.waitForRequests(readsBeforeRefocus + 1);
+    activeRunsGate.release();
+    await waitFor('the stale working indicator to clear on refocus', () =>
+      page.doc.querySelector('.chat-working-state') === null ? true : null);
+    messagesGate.release();
+    messagesGate = undefined;
+
+    await sendInComposer(page, 'Check that run failure clears the indicator.');
+    await waitFor('the working indicator before run failure', () => page.doc.querySelector('.chat-working-state'));
+    await waitFor('the working indicator to clear after run failure', () =>
+      page.doc.querySelector('.chat-working-state') === null ? true : null);
+    await waitFor('the safe run failure event', () =>
+      [...page.doc.querySelectorAll('[data-event-id]')].find((row) => (row.textContent ?? '').includes('Agent run failed')));
+    assert.doesNotMatch(page.doc.body.textContent ?? '', /private engine failure|PRIVATE_ENGINE_PROGRESS/);
   } finally {
+    messagesGate?.release();
+    activeRunsGate?.release();
     await page.close();
   }
 });
