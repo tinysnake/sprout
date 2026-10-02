@@ -71,6 +71,9 @@ const CHAT_POLL_MS = 15000;
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let refreshInFlight = false;
 const requestedScopeId = computed(() => typeof route.params['scopeId'] === 'string' ? route.params['scopeId'] as string : '');
+const requestedMessageId = computed(() => typeof route.query['message'] === 'string' ? route.query['message'] : '');
+const requestedEventId = computed(() => typeof route.query['event'] === 'string' ? route.query['event'] : '');
+const targetAnnouncement = ref('');
 const projectId = computed(() => typeof route.query['project'] === 'string' ? route.query['project'] as string : projects.value.find((p) => p.status === 'active')?.id ?? projects.value[0]?.id ?? '');
 const project = computed(() => projects.value.find((p) => p.id === projectId.value));
 const channelScopes = computed(() => scopes.value.filter((s) => s.kind === 'project'));
@@ -120,6 +123,11 @@ function time(at: number) { return new Date(at).toLocaleTimeString([], { hour: '
 function unread(scope: ConversationScopeView) { void unreadVersion.value; return messages.value.filter((m) => m.scopeId === scope.id && !seen.has(m.id) && scope.id !== activeScope.value?.id).length; }
 function markVisible() { for (const m of activeMessages.value) seen.add(m.id); unreadVersion.value++; }
 function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : 'working-group'; }
+function isTargetEntry(entry: ChatTimelineItem) {
+  return entry.kind === 'message'
+    ? requestedMessageId.value !== '' && entry.message.id === requestedMessageId.value
+    : requestedEventId.value !== '' && entry.event.id === requestedEventId.value;
+}
 function scopePill(scope: ConversationScopeView) {
   if (scope.kind === 'working-group') return scope.status === 'disbanded' ? 'Disbanded' : '';
   if (scope.kind !== 'direct' || !project.value) return '';
@@ -214,6 +222,41 @@ async function loadScope() {
   } catch { if (token === detailGeneration) actionError.value = 'Conversation admission could not be verified. Sending is disabled.'; }
   finally { if (token === detailGeneration) detailLoading.value = false; }
 }
+let lastTargetAnnouncement = '';
+watch([timeline, loading, detailLoading, missingScope, activeScopeId, requestedMessageId, requestedEventId], async () => {
+  const messageId = requestedMessageId.value;
+  const eventId = requestedEventId.value;
+  if (!messageId && !eventId) { targetAnnouncement.value = ''; lastTargetAnnouncement = ''; return; }
+  if (loading.value || detailLoading.value) return;
+  const requested = `${activeScopeId.value}|${messageId}|${eventId}`;
+  await nextTick();
+  if (requested !== `${activeScopeId.value}|${requestedMessageId.value}|${requestedEventId.value}`) return;
+  let result: string;
+  if (missingScope.value || !activeScope.value) {
+    result = 'The requested conversation is unavailable.';
+  } else {
+    const selector = messageId ? '[data-message-id]' : '[data-event-id]';
+    const targetId = messageId || eventId;
+    const target = [...document.querySelectorAll<HTMLElement>(selector)].find((row) =>
+      (messageId ? row.dataset['messageId'] : row.dataset['eventId']) === targetId,
+    );
+    if (target) {
+      target.scrollIntoView?.({ block: 'center' });
+      target.focus({ preventScroll: true });
+      result = messageId ? 'Target message highlighted.' : 'Target Project event highlighted.';
+    } else {
+      result = messageId
+        ? 'Target message is unavailable; the conversation is open without message focus.'
+        : 'Target Project event is unavailable; the conversation is open without event focus.';
+    }
+  }
+  targetAnnouncement.value = result;
+  const announcementKey = `${requested}|${result}`;
+  if (lastTargetAnnouncement !== announcementKey) {
+    lastTargetAnnouncement = announcementKey;
+    announcer.announce(result);
+  }
+}, { flush: 'post', immediate: true });
 async function selectScope(scope: ConversationScopeView) {
   await router.push({ name: 'project-chat-scope', params: { scopeId: scope.id }, query: route.query });
   announcer.announce(`Opened ${title(scope)} conversation.`);
@@ -409,6 +452,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
 
 <template>
   <div class="chat-view relative flex h-full min-h-0 flex-col bg-[var(--bg-app)] p-3 sm:p-5">
+    <div class="chat-target-announcement sr-only" role="status" aria-live="polite" aria-atomic="true">{{ targetAnnouncement }}</div>
     <div class="chat-admission-announcement sr-only" role="status" aria-live="polite" aria-atomic="true">{{ detailLoading ? 'Checking conversation admission…' : '' }}</div>
     <div v-if="projects.length" class="mb-2 flex items-center gap-2 text-xs"><label for="chat-project-selector" class="font-bold">Project</label><select id="chat-project-selector" :value="projectId" class="min-h-11 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.displayName }}</option></select></div>
     <div v-if="loading" class="chat-loading-state flex flex-col gap-3 p-6" role="status" aria-busy="true" aria-label="Loading conversations">
@@ -472,8 +516,8 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
           <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
           <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading">
           <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
-          <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined"
-            class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start'">
+          <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"
+            class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="[entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start', isTargetEntry(entry) ? 'ring-2 ring-[var(--accent-primary)]' : '']">
             <div class="flex items-center justify-between gap-3">
               <strong class="text-[var(--text-primary)]">{{ entry.kind === 'event' ? 'Project event' : entry.message.authorKind === 'human' ? 'Human Operator' : `@${agentName(entry.message.authorId)}` }}</strong>
               <div class="chat-evidence-wrap relative flex items-center gap-1">

@@ -577,6 +577,60 @@ test('in-flight cards expose configured engine and work model identifiers withou
   assert.ok(!wire.includes('ENGINE_PROSE_SECRET'));
 });
 
+test('chat-related activity retains exact Message, Project event, Agent, Project and run identities', async () => {
+  const source = sources({
+    projects: [{ id: 'proj-chat', displayName: 'Chat Project' }],
+    events: [
+      makeEvent({ id: 'event-chat-complete', projectId: 'proj-chat', kind: 'chat-complete', disposition: 'informational', producer: { id: 'agent-scout', kind: 'agent' } }),
+      makeEvent({ id: 'event-chat-started', projectId: 'proj-chat', kind: 'chat-started', disposition: 'informational' }),
+      makeEvent({ id: 'event-chat-error', projectId: 'proj-chat', kind: 'agent-run-failure', disposition: 'informational', deliveryKey: 'run-failure:run-chat-error' }),
+      makeEvent({ id: 'event-chat-error-generic', projectId: 'proj-chat', kind: 'chat-error', disposition: 'informational' }),
+    ],
+    runs: [
+      makeRun({ id: 'run-chat-complete', agentId: 'agent-scout', projectId: 'proj-chat', status: 'completed', completedAt: 710 }),
+      makeRun({ id: 'run-chat-error', agentId: 'agent-scout', projectId: 'proj-chat', status: 'failed', completedAt: 711 }),
+      makeRun({ id: 'run-without-origin', agentId: 'agent-scout', projectId: 'proj-chat', status: 'completed', completedAt: 712 }),
+    ],
+  });
+  const snapshot = await projectFeed({
+    ...source,
+    chatActivityOrigins: async () => [
+      { runId: 'run-chat-complete', projectId: 'proj-chat', agentId: 'agent-scout', scopeId: 'dm-proj-chat-agent-scout', messageId: 'message-trigger' },
+      { runId: 'run-chat-error', projectId: 'proj-chat', agentId: 'agent-scout', scopeId: 'wg-proj-chat-review', messageId: 'message-error-trigger' },
+      { runId: 'run-without-origin', projectId: 'proj-chat', agentId: 'agent-scout', scopeId: '../settings', messageId: 'message-hostile' },
+    ],
+  });
+  const completed = snapshot.activity.find((item) => item.id === 'run:run-chat-complete');
+  assert.deepEqual(
+    { projectId: completed?.target?.projectId, scopeId: completed?.target?.scopeId, messageId: completed?.target?.messageId, runId: completed?.target?.runId, agentId: completed?.target?.agentId },
+    { projectId: 'proj-chat', scopeId: 'dm-proj-chat-agent-scout', messageId: 'message-trigger', runId: 'run-chat-complete', agentId: 'agent-scout' },
+  );
+  assert.equal(snapshot.activity.find((item) => item.id === 'event:event-chat-complete')?.target?.eventId, 'event-chat-complete');
+  assert.equal(snapshot.activity.find((item) => item.id === 'event:event-chat-started')?.target?.eventId, 'event-chat-started');
+  assert.equal(snapshot.activity.find((item) => item.id === 'event:event-chat-error-generic')?.target?.eventId, 'event-chat-error-generic');
+  const failed = snapshot.activity.find((item) => item.id === 'event:event-chat-error');
+  assert.deepEqual(
+    {
+      projectId: failed?.target?.projectId,
+      scopeId: failed?.target?.scopeId,
+      messageId: failed?.target?.messageId,
+      eventId: failed?.target?.eventId,
+      runId: failed?.target?.runId,
+      agentId: failed?.target?.agentId,
+    },
+    {
+      projectId: 'proj-chat',
+      scopeId: 'wg-proj-chat-review',
+      messageId: undefined,
+      eventId: 'event-chat-error',
+      runId: 'run-chat-error',
+      agentId: 'agent-scout',
+    },
+    'event activity focuses its own Project event while retaining safe causal run context',
+  );
+  assert.equal(snapshot.activity.find((item) => item.id === 'run:run-without-origin')?.target, undefined, 'missing or hostile causal identities do not guess a Chat destination');
+});
+
 test('operational activity is bounded, sanitized, and newest first', async () => {
   const base = await projectFeed(sources(mixedWorld()));
   const runActivity = base.activity.find((item) => item.id === 'run:run-done');
@@ -624,6 +678,12 @@ test('isFeedDeepLink accepts canonical targets and rejects malformed identities'
   assert.ok(isFeedDeepLink({ surface: 'project-task-detail', taskId: 'task-1', path: '/project/tasks/task-1' }));
   assert.ok(isFeedDeepLink({ surface: 'project-tasks', proposalId: 'p 1', path: '/project/tasks?proposal=p%201' }));
   assert.ok(isFeedDeepLink({ surface: 'agent-detail', agentId: 'agent-1', path: '/manage/agents/agent-1' }));
+  const chatTarget = feedTarget({ surface: 'project-chat', projectId: 'project-1', scopeId: 'dm-project-1-agent-1', messageId: 'message-1', runId: 'run-1', agentId: 'agent-1' });
+  assert.equal(chatTarget.path, '/project/chat/dm-project-1-agent-1?message=message-1');
+  assert.ok(isFeedDeepLink(chatTarget));
+  assert.ok(!isFeedDeepLink({ surface: 'project-chat', projectId: 'project-1', scopeId: '../settings', messageId: 'message-1', path: '/project/chat/%2E%2E%2Fsettings?message=message-1' }), 'hostile conversation ids are rejected');
+  assert.ok(!isFeedDeepLink({ surface: 'project-chat', projectId: 'project-1', messageId: 'message-1', path: '/project/chat?message=message-1' }), 'message focus requires its exact conversation');
+  assert.ok(!isFeedDeepLink({ surface: 'project-chat', projectId: 'project-1', scopeId: 'dm-project-1-agent-1', eventId: '<script>', path: '/project/chat/dm-project-1-agent-1?event=%3Cscript%3E' }), 'hostile event ids are rejected');
   assert.ok(!isFeedDeepLink({ surface: 'project-task-detail', path: '/project/tasks/task-1' }), 'a detail link without its Task id is invalid');
   assert.ok(!isFeedDeepLink({ surface: 'project-task-detail', taskId: 'task-1', path: '/project/tasks/other' }), 'a path that disagrees with its identity is invalid');
   assert.ok(!isFeedDeepLink({ surface: 'made-up', path: '/made-up' }), 'unknown surface');

@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 
 import { build, INSTANCE_ID, PROJECT_ID, scriptedEnvironment } from '../runtime-test-harness.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
+import { projectChannelScopeId } from '../conversation/model.ts';
 import type { TaskView } from './views.ts';
 
 const content = {
@@ -25,7 +26,7 @@ const content = {
 interface FeedBody {
   attention: { id: string; severity: string; category: string; reason: string; lifecycle: string; target: { path: string; taskId?: string } }[];
   inFlight: { id: string; kind: 'task' | 'run'; taskId?: string; lifecycle: string }[];
-  activity: { id: string; summary: string }[];
+  activity: { id: string; summary: string; target?: { surface?: string; projectId?: string; scopeId?: string; messageId?: string; eventId?: string; runId?: string; agentId?: string } }[];
   scopes: { id: string; kind: string; attentionCount: number }[];
 }
 
@@ -154,6 +155,91 @@ test('the composed runtime serves GET /api/feed and its Attention follows real d
     assert.equal(dismiss.status, 404);
     feed = await readFeed(cookie);
     assert.deepEqual(feed.attention.map((item) => item.category), ['task-validation'], 'the failed dismiss changed nothing');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('the composed Feed API carries a direct Agent wake back to its originating Message', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential },
+    listen: false,
+    environment: scriptedEnvironment({
+      adapters: new Map([['scripted', new ScriptedEngineAdapter({
+        turns: [{
+          events: [{ type: 'message', text: 'chat reply', final: true }],
+          result: { status: 'completed', text: 'reply complete' },
+        }],
+      })]]),
+      contexts: { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} },
+    }),
+  });
+  try {
+    const { port } = await runtime.api.listen(Number(process.env.PORT ?? 0));
+    const base = new URL('http://localhost');
+    base.port = String(port);
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+
+    const direct = await runtime.conversationScopes.openDirect({ projectId: PROJECT_ID, participants: ['operator', 'scout'] });
+    const delivered = await runtime.collaboration.deliver({
+      scopeId: direct.id,
+      author: { id: 'operator', kind: 'human' },
+      recipients: ['scout'],
+      body: 'Origin message for Feed navigation.',
+      deliveryKey: 'feed-origin-message',
+    });
+    const runId = delivered.admittedRunIds[0];
+    assert.ok(runId, 'the direct conversation admitted its Agent run');
+
+    const response = await fetch(new URL('/api/feed', base), { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const feed = await response.json() as FeedBody;
+    const chatActivity = feed.activity.find((item) => item.id === `run:${runId}`);
+    assert.deepEqual(
+      {
+        surface: chatActivity?.target?.surface,
+        projectId: chatActivity?.target?.projectId,
+        scopeId: chatActivity?.target?.scopeId,
+        messageId: chatActivity?.target?.messageId,
+        runId: chatActivity?.target?.runId,
+        agentId: chatActivity?.target?.agentId,
+      },
+      { surface: 'project-chat', projectId: PROJECT_ID, scopeId: direct.id, messageId: delivered.message.id, runId, agentId: 'scout' },
+      'the production Feed projection carries the exact originating Message and Agent conversation',
+    );
+
+    const published = await runtime.collaboration.publishEvent({
+      projectId: PROJECT_ID,
+      kind: 'chat-completed',
+      summary: 'A routed Project Chat event.',
+      producer: { id: 'operator', kind: 'human' },
+      disposition: 'addressed',
+      responsibleAgentIds: ['scout'],
+      deliveryKey: 'feed-origin-event',
+    });
+    const eventRunId = published.admittedRunIds[0];
+    assert.ok(eventRunId, 'the addressed Project event admitted its Agent run');
+    const eventResponse = await fetch(new URL('/api/feed', base), { headers: { cookie } });
+    assert.equal(eventResponse.status, 200);
+    const eventFeed = await eventResponse.json() as FeedBody;
+    const eventActivity = eventFeed.activity.find((item) => item.id === `run:${eventRunId}`);
+    assert.deepEqual(
+      {
+        surface: eventActivity?.target?.surface,
+        projectId: eventActivity?.target?.projectId,
+        scopeId: eventActivity?.target?.scopeId,
+        eventId: eventActivity?.target?.eventId,
+        runId: eventActivity?.target?.runId,
+        agentId: eventActivity?.target?.agentId,
+      },
+      { surface: 'project-chat', projectId: PROJECT_ID, scopeId: projectChannelScopeId(PROJECT_ID), eventId: published.event.id, runId: eventRunId, agentId: 'scout' },
+      'the production Feed projection carries the exact originating Project event',
+    );
   } finally {
     await runtime.close();
   }

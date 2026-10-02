@@ -63,6 +63,7 @@ import {
   ConversationScopeService,
   type ConversationProjectPort,
 } from './conversation/service.ts';
+import { projectChannelScopeId } from './conversation/model.ts';
 import type { ConversationScopeStore } from './conversation/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
@@ -90,7 +91,7 @@ import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
 import { createTaskControlRouter } from './web/task-control-router.ts';
 import { createFeedRouter } from './web/feed-router.ts';
 import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
-import { createFeedProjection } from './web/feed.ts';
+import { createFeedProjection, type FeedChatActivityOrigin } from './web/feed.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
@@ -1714,6 +1715,36 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       routingBatches: () => collaboration.listRoutingBatches(),
       wakeFailures: () => openedStoresForCatalog.collaboration.listWakeFailures(),
       attentionResolutions: () => openedStoresForCatalog.collaboration.listAttentionResolutions(),
+      chatActivityOrigins: async ({ events: eventRows, routingBatches }) => {
+        const [messages, wakes] = await Promise.all([
+          collaboration.listMessages(),
+          collaboration.listWakeRequests(),
+        ]);
+        const messagesById = new Map(messages.map((message) => [message.id, message]));
+        const eventsById = new Map(eventRows.map((event) => [event.id, event]));
+        const batchesById = new Map(routingBatches.map((batch) => [batch.id, batch]));
+        return wakes.flatMap((wake): FeedChatActivityOrigin[] => {
+          if (!wake.runId) return [];
+          const message = messagesById.get(wake.inputId);
+          if (message?.projectId === wake.projectId) {
+            return [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: message.scopeId, messageId: message.id }];
+          }
+          const event = eventsById.get(wake.inputId);
+          if (event?.projectId === wake.projectId) {
+            return [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: projectChannelScopeId(event.projectId), eventId: event.id }];
+          }
+          const batch = batchesById.get(wake.inputId) ?? (wake.batchId ? batchesById.get(wake.batchId) : undefined);
+          const input = batch?.projectId === wake.projectId && batch.manifest.inputs.length === 1
+            ? batch.manifest.inputs[0]
+            : undefined;
+          if (!input) return [];
+          return input.kind === 'message' && input.scopeId !== ''
+            ? [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: input.scopeId, messageId: input.inputId }]
+            : input.kind === 'event'
+              ? [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: projectChannelScopeId(wake.projectId), eventId: input.inputId }]
+              : [];
+        });
+      },
     });
 
     const api = createRunApi({

@@ -101,9 +101,16 @@ export interface FeedTargetIdentity {
   readonly taskId?: string;
   readonly proposalId?: string;
   readonly batchId?: string;
+  /** Conversation scope for a project-chat destination. */
+  readonly scopeId?: string;
+  /** Exact Chat timeline item to reveal. */
+  readonly messageId?: string;
+  readonly eventId?: string;
+  /** Causal Agent run identity carried as safe routing evidence. */
+  readonly runId?: string;
+  readonly agentId?: string;
   /** The Manage Environments route key (enrollment key), not the instance id. */
   readonly environmentId?: string;
-  readonly agentId?: string;
 }
 
 /** One deep-link identity: the owning surface plus a concrete route path. */
@@ -114,6 +121,10 @@ export interface FeedTarget extends FeedTargetIdentity {
 
 function usable(value: string | undefined): value is string {
   return typeof value === 'string' && value.trim() !== '';
+}
+
+function safeChatIdentity(value: string | undefined): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,159}$/.test(value) && value !== '.' && value !== '..';
 }
 
 /**
@@ -134,6 +145,21 @@ export function feedTarget(identity: FeedTargetIdentity): FeedTarget {
     return encodeURIComponent(value!);
   });
   let path = segments.join('/');
+  if (identity.surface === 'project-chat') {
+    const { scopeId, messageId, eventId, runId, agentId } = identity;
+    if (scopeId !== undefined && !safeChatIdentity(scopeId)) throw new Error('project-chat requires a safe scopeId');
+    if (messageId !== undefined && !safeChatIdentity(messageId)) throw new Error('project-chat requires a safe messageId');
+    if (eventId !== undefined && !safeChatIdentity(eventId)) throw new Error('project-chat requires a safe eventId');
+    if (runId !== undefined && !safeChatIdentity(runId)) throw new Error('project-chat requires a safe runId');
+    if (agentId !== undefined && !safeChatIdentity(agentId)) throw new Error('project-chat requires a safe agentId');
+    if (messageId !== undefined && scopeId === undefined) throw new Error('a message deep link requires a conversation scope');
+    if (messageId !== undefined && eventId !== undefined) throw new Error('a Chat deep link may focus one timeline item');
+    if (scopeId !== undefined) path += `/${encodeURIComponent(scopeId)}`;
+    if (messageId !== undefined) path += `?message=${encodeURIComponent(messageId)}`;
+    else if (eventId !== undefined) path += `?event=${encodeURIComponent(eventId)}`;
+  } else if (identity.scopeId !== undefined || identity.messageId !== undefined || identity.eventId !== undefined || identity.runId !== undefined) {
+    throw new Error('conversation identity belongs to the project-chat surface');
+  }
   if (usable(identity.proposalId)) {
     if (identity.surface !== 'project-tasks') throw new Error('a proposal deep link owns the project-tasks surface');
     path += `?proposal=${encodeURIComponent(identity.proposalId!)}`;
@@ -162,6 +188,15 @@ export interface FeedProjectRef {
   readonly displayName: string;
 }
 
+export interface FeedChatActivityOrigin {
+  readonly runId: string;
+  readonly projectId: string;
+  readonly agentId: string;
+  readonly scopeId: string;
+  readonly messageId?: string;
+  readonly eventId?: string;
+}
+
 /**
  * The authoritative reads one snapshot derives from. Ports, not state: the
  * projection never writes through them, holds no cache, and cannot clear,
@@ -179,6 +214,11 @@ export interface FeedSources {
   routingBatches(): Promise<readonly RoutingBatch[]>;
   wakeFailures(): Promise<readonly FailedWakeInput[]>;
   attentionResolutions(): Promise<readonly CollaborationAttentionResolution[]>;
+  /** Durable run-to-Message/Event identity links for exact Chat activity destinations. */
+  chatActivityOrigins?(context: {
+    readonly events: readonly ProjectEvent[];
+    readonly routingBatches: readonly RoutingBatch[];
+  }): Promise<readonly FeedChatActivityOrigin[]>;
 }
 
 /** One unresolved Human Attention item. Cleared only by its source clearing. */
@@ -368,6 +408,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     sources.wakeFailures(),
     sources.attentionResolutions(),
   ]);
+  const chatOrigins = await sources.chatActivityOrigins?.({ events, routingBatches: batches }) ?? [];
 
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
   const runsById = new Map(runs.map((run) => [run.id, run]));
@@ -387,6 +428,25 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   }
   const knownProject = (projectId: string | undefined): projectId is string =>
     usable(projectId) && projectRefs.has(projectId!);
+  const chatOriginsByRun = new Map(chatOrigins.map((origin) => [origin.runId, origin]));
+  const chatTarget = (projectId: string, origin: FeedChatActivityOrigin | undefined, expectedAgentId?: string, focusEventId?: string): FeedTarget | undefined => {
+    if (!origin || origin.projectId !== projectId || (expectedAgentId !== undefined && origin.agentId !== expectedAgentId) || !safeChatIdentity(origin.scopeId) ||
+        (origin.messageId !== undefined && !safeChatIdentity(origin.messageId)) ||
+        (origin.eventId !== undefined && !safeChatIdentity(origin.eventId)) ||
+        (origin.messageId === undefined && origin.eventId === undefined) ||
+        (origin.messageId !== undefined && origin.eventId !== undefined) ||
+        (focusEventId !== undefined && !safeChatIdentity(focusEventId)) ||
+        !safeChatIdentity(origin.runId) || !safeChatIdentity(origin.agentId)) return undefined;
+    return feedTarget({
+      surface: 'project-chat', projectId, scopeId: origin.scopeId,
+      ...(focusEventId !== undefined
+        ? { eventId: focusEventId }
+        : origin.messageId !== undefined
+          ? { messageId: origin.messageId }
+          : origin.eventId !== undefined ? { eventId: origin.eventId } : {}),
+      runId: origin.runId, agentId: origin.agentId,
+    });
+  };
 
   const instanceToEnvironmentId = new Map<string, string>();
   for (const enrollment of enrollments) {
@@ -641,14 +701,37 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     const summary = boundText(event.summary, 300);
     if (summary === '') continue;
     const projectKnown = knownProject(event.projectId);
+    const eventRunId = event.deliveryKey.startsWith('run-failure:')
+      ? event.deliveryKey.slice('run-failure:'.length)
+      : undefined;
+    const linkedFailureRun = eventRunId !== undefined ? runsById.get(eventRunId) : undefined;
+    // This is a Project event row, so its own event takes focus over the linked run's causal Message; run activity below still focuses that Message.
+    const linkedFailureEventTarget = projectKnown && linkedFailureRun?.projectId === event.projectId
+      ? chatTarget(event.projectId, chatOriginsByRun.get(eventRunId!), linkedFailureRun.agentId, event.id)
+      : undefined;
+    const isChatEvent = /chat|message|routing|wake|run/i.test(event.kind);
+    const eventScopeId = event.originScopeIds?.length === 1 ? event.originScopeIds[0] : undefined;
+    const chatEventTarget = projectKnown && isChatEvent && safeChatIdentity(event.id)
+      ? feedTarget({
+          surface: 'project-chat', projectId: event.projectId,
+          ...(eventScopeId !== undefined && safeChatIdentity(eventScopeId) ? { scopeId: eventScopeId } : {}),
+          eventId: event.id,
+          ...(eventRunId !== undefined && safeChatIdentity(eventRunId) ? { runId: eventRunId } : {}),
+          ...(event.producer.kind === 'agent' && safeChatIdentity(event.producer.id) ? { agentId: event.producer.id } : {}),
+        })
+      : undefined;
+    const eventTarget = projectKnown
+      ? linkedFailureEventTarget ?? (isChatEvent
+          ? chatEventTarget
+          : feedTarget({ surface: 'project-overview', projectId: event.projectId }))
+      : undefined;
     activityDrafts.push({
       id: `event:${event.id}`,
       kind: event.kind,
       summary,
       scopes: projectKnown ? [event.projectId] : [],
-      ...(projectKnown
-        ? { target: feedTarget({ surface: 'project-overview', projectId: event.projectId }), projectId: event.projectId }
-        : {}),
+      ...(eventTarget !== undefined ? { target: eventTarget } : {}),
+      ...(projectKnown ? { projectId: event.projectId } : {}),
       at: event.createdAt,
     });
   }
@@ -661,7 +744,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
       task !== undefined && knownProject(task.projectId)
         ? feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id })
         : knownProject(run.projectId)
-          ? feedTarget({ surface: 'project-chat', projectId: run.projectId })
+          ? chatTarget(run.projectId, chatOriginsByRun.get(run.id), run.agentId)
           : feedTarget({ surface: 'agent-detail', agentId: run.agentId });
     activityDrafts.push({
       id: `run:${run.id}`,
