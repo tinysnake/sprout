@@ -321,7 +321,7 @@ export class TaskEnvironmentLifecycle {
 
   async advanceRun(taskId: string, agentId: string, input: string, audit?: {
     readonly actor: TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     return this.#withAdmissionPauseLock(taskId, () => this.#advanceRun(taskId, agentId, input, audit), true);
@@ -329,7 +329,7 @@ export class TaskEnvironmentLifecycle {
 
   async #advanceRun(taskId: string, agentId: string, input: string, audit?: {
     readonly actor: TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     const task = await this.#require(taskId);
@@ -345,7 +345,7 @@ export class TaskEnvironmentLifecycle {
     if (!lease || lease.state !== 'active' || lease.holderKind !== 'task' || lease.taskId !== task.id || lease.instanceId !== task.environmentInstanceId) {
       throw new Error(`task ${taskId} lease is not active`);
     }
-    if (task.admission !== undefined && audit === undefined) throw new Error(`task ${taskId} advance requires actor, reason, and content version`);
+    if (task.admission !== undefined && audit === undefined) throw new Error(`task ${taskId} advance requires actor and content version`);
     if (audit !== undefined) {
       this.#assertLeadOrHuman(task, audit.actor);
       if (task.admission === undefined || audit.contentVersion !== task.admission.contentVersion) throw new Error(`task ${taskId} advance content version is not current`);
@@ -358,7 +358,11 @@ export class TaskEnvironmentLifecycle {
       updatedAt: task.updatedAt, controlDocument: serializeTaskControlDocument(task) };
     const admitted = audit === undefined
       ? await this.#store.saveIfUnchanged(running, expected)
-      : await this.#store.admitRun(running, { runId, agentId, actor: audit.actor, reason: audit.reason, contentVersion: audit.contentVersion, now: this.#clock.now() }, expected);
+      : await this.#store.admitRun(running, {
+        runId, agentId, actor: audit.actor,
+        ...(audit.reason !== undefined ? { reason: audit.reason } : {}),
+        contentVersion: audit.contentVersion, now: this.#clock.now(),
+      }, expected);
     if (!admitted) throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     let prepared: { readonly bootstrapInstructions: string };
     try {

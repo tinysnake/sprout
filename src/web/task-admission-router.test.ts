@@ -45,7 +45,6 @@ test('begin against a recovering Task-held lease returns HTTP 409 with its admis
         expectedRevision: 1,
         environmentInstanceId: INSTANCE_ID,
         lead: { memberId: 'operator', memberKind: 'human' },
-        reason: 'Approve after recovery is resolved.',
       }),
     });
     assert.equal(response.status, 409);

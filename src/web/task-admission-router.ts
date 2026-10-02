@@ -30,14 +30,15 @@ export function createTaskAdmissionRouter(options: { readonly admissions: TaskAd
         }
         if (begin) {
           if (!isActor(body.lead) || !Number.isSafeInteger(body.expectedRevision)
-            || typeof body.environmentInstanceId !== 'string' || typeof body.reason !== 'string') {
-            return json(context, 400, { code: 'invalid-command', error: 'expectedRevision, environmentInstanceId, lead, and reason are required' });
+            || typeof body.environmentInstanceId !== 'string'
+            || (body.reason !== undefined && typeof body.reason !== 'string')) {
+            return json(context, 400, { code: 'invalid-command', error: 'expectedRevision, environmentInstanceId, and lead are required; reason is optional' });
           }
           const result = await admissions.beginForHuman(context.segments[2] ?? '', {
             expectedRevision: body.expectedRevision as number,
             environmentInstanceId: body.environmentInstanceId,
             lead: body.lead,
-            reason: body.reason,
+            ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
           });
           return json(context, result.duplicate ? 200 : 201, {
             task: toTaskView(result.task),

@@ -8,6 +8,7 @@ import { useAnnouncer } from '../../../primitives/announcer.ts';
 import { useShellConnection } from '../../../shell/use-shell-connection.ts';
 import Badge from '../../../primitives/Badge.vue';
 import Button from '../../../primitives/Button.vue';
+import ChatDialog from '../../chat/views/ChatDialog.vue';
 import EmptyState from '../../../primitives/EmptyState.vue';
 import Icon from '../../../primitives/Icon.vue';
 import type { ProjectManagementService, ProjectOverviewData } from '../../projects/types.ts';
@@ -45,8 +46,8 @@ const actionError = ref<{ readonly code?: string; readonly message: string }>();
 const filter = ref<'all' | 'proposed' | 'active' | 'validation' | 'blocked' | 'recovery' | 'completed'>('all');
 const lifecycleExpanded = ref(true);
 const detailHeading = ref<HTMLElement>();
-const proposalFormHeading = ref<HTMLElement>();
 const proposalFormOpen = ref(false);
+const proposalTrigger = ref<HTMLButtonElement>();
 const proposalEditOpen = ref(false);
 const beginOpen = ref(false);
 const taskEditOpen = ref(false);
@@ -58,7 +59,6 @@ const proposalCriteria = ref('');
 const proposalReason = ref('');
 const beginEnvironmentId = ref('');
 const beginLeadKey = ref('');
-const beginReason = ref('');
 const controlReason = ref('');
 const advanceTargetId = ref('');
 const stopRunId = ref('');
@@ -533,12 +533,17 @@ function proposalTarget(proposal: TaskProposal): void {
 function returnToList(): void {
   void router.push({ name: 'project-tasks', query: { ...route.query, project: selectedProjectId.value } });
 }
-function beginProposalForm(): void {
+function beginProposalForm(event: MouseEvent): void {
+  proposalTrigger.value = event.currentTarget as HTMLButtonElement;
   fillProposalForm();
   proposalFormOpen.value = true;
   proposalEditOpen.value = false;
-  void nextTick(() => proposalFormHeading.value?.focus());
+  void nextTick(() => document.querySelector<HTMLInputElement>('.chat-dialog-backdrop input')?.focus());
   announcer.announce('Task proposal form opened.');
+}
+function setProposalFormOpen(open: boolean): void {
+  proposalFormOpen.value = open;
+  if (!open) void nextTick(() => void nextTick(() => proposalTrigger.value?.focus()));
 }
 function openProposalEditor(): void {
   fillProposalForm(proposalCurrent.value);
@@ -549,7 +554,6 @@ function openBeginPanel(): void {
   const first = environmentOptions.value.find((entry) => entry.enabled);
   beginEnvironmentId.value = first?.id ?? '';
   beginLeadKey.value = beginLeadOptions.value[0]?.key ?? '';
-  beginReason.value = '';
   beginOpen.value = true;
   proposalEditOpen.value = false;
 }
@@ -607,7 +611,6 @@ async function approveAndBegin(): Promise<void> {
       expectedRevision: proposal.revision,
       environmentInstanceId: beginEnvironmentId.value,
       lead,
-      reason: beginReason.value.trim(),
     });
   });
   if (saved) beginOpen.value = false;
@@ -734,7 +737,6 @@ async function perform(success: string, action: () => Promise<unknown>): Promise
     await action();
     controlReason.value = '';
     proposalReason.value = '';
-    beginReason.value = '';
     taskRevisionReason.value = '';
     await refresh();
     announcer.announce(success);
@@ -800,19 +802,15 @@ onMounted(() => { void loadIndex(); });
         </div>
       </header>
 
-      <section v-if="proposalFormOpen" class="shrink-0 max-h-[60%] overflow-y-auto rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3" aria-labelledby="task-proposal-form-heading" aria-describedby="task-proposal-form-description">
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div><h2 id="task-proposal-form-heading" ref="proposalFormHeading" tabindex="-1" class="text-base font-bold">Propose a Task</h2><p id="task-proposal-form-description" class="mt-1 text-xs text-[var(--text-secondary)]">A proposal creates no Agent run and holds no Environment lease. Human approval is required before begin.</p></div>
-          <Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="proposalFormOpen = false">Close proposal form</Button>
-        </div>
-        <form class="grid grid-cols-1 gap-3" @submit.prevent="submitProposal">
-          <label class="flex flex-col gap-1 text-xs">Title<input v-model="proposalTitle" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label>
-          <label class="flex flex-col gap-1 text-xs">Goal<textarea v-model="proposalGoal" class="min-h-24 rounded border bg-[var(--bg-surface)] p-3 text-sm" required /></label>
-          <label class="flex flex-col gap-1 text-xs">Constraints, one per line<textarea v-model="proposalConstraints" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" /></label>
-          <label class="flex flex-col gap-1 text-xs">Validation criteria, one per line<textarea v-model="proposalCriteria" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" /></label>
-          <div class="flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !proposalTitle.trim() || !proposalGoal.trim()">Save proposal</Button></div>
-        </form>
-      </section>
+        <ChatDialog :open="proposalFormOpen" @update:open="setProposalFormOpen" title="Propose a Task" description="A proposal creates no Agent run and holds no Environment lease. Human approval is required before begin.">
+          <form class="grid grid-cols-1 gap-3" @submit.prevent="submitProposal">
+            <label class="flex flex-col gap-1 text-xs">Title<input v-model="proposalTitle" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label>
+            <label class="flex flex-col gap-1 text-xs">Goal<textarea v-model="proposalGoal" class="min-h-24 rounded border bg-[var(--bg-surface)] p-3 text-sm" required /></label>
+            <label class="flex flex-col gap-1 text-xs">Constraints, one per line<textarea v-model="proposalConstraints" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" /></label>
+            <label class="flex flex-col gap-1 text-xs">Validation criteria, one per line<textarea v-model="proposalCriteria" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" /></label>
+            <div class="flex flex-wrap justify-end gap-2"><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="setProposalFormOpen(false)">Cancel</Button><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !proposalTitle.trim() || !proposalGoal.trim()">Save proposal</Button></div>
+          </form>
+        </ChatDialog>
 
       <div v-if="actionError" class="rounded border border-[var(--red-action-border)] bg-[var(--red-action-bg)] p-3 text-sm text-[var(--text-primary)]" role="alert" :data-conflict-code="actionError.code">
         <strong class="block">Task action needs attention</strong>
@@ -880,10 +878,9 @@ onMounted(() => { void loadIndex(); });
               <form v-if="beginOpen" class="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-[var(--border-subtle)] pt-3" @submit.prevent="approveAndBegin">
                 <label class="flex flex-col gap-1 text-xs">Environment instance<select id="begin-environment" v-model="beginEnvironmentId" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option value="" disabled>Select Environment</option><option v-for="environment in environmentOptions" :key="environment.id" :value="environment.id" :disabled="!environment.enabled">{{ environment.name }}{{ environment.enabled ? '' : ` · ${environment.unavailableReason}` }}</option></select></label>
                 <label class="flex flex-col gap-1 text-xs">Task lead<select id="begin-lead" v-model="beginLeadKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option v-for="lead in beginLeadOptions" :key="lead.key" :value="lead.key">{{ lead.label }}</option></select></label>
-                <label class="sm:col-span-2 flex flex-col gap-1 text-xs">Approval reason<input v-model="beginReason" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm" required /></label>
                 <p data-lead-guidance class="sm:col-span-2 text-xs text-[var(--text-secondary)]">{{ beginEnvironmentId ? 'Choose yourself or a compatible Project Agent as Task lead. An Agent lead receives an initial run after begin; a Human lead does not.' : 'Select an available Environment to see eligible Agent leads. A Task lead may be you or a compatible Project Agent.' }}</p>
                 <p v-if="!environmentOptions.some((environment) => environment.enabled)" data-begin-guidance class="sm:col-span-2 text-xs text-[var(--text-muted)]">No available Environment with a compatible Agent is confirmed. {{ environmentOptions.map((environment) => `${environment.name}: ${environment.unavailableReason}`).join('; ') || 'Assign an Environment and workspace in Project resources.' }} Review Project resources before beginning this proposal.</p>
-                <div class="sm:col-span-2 flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !beginSelectionReady || !beginReason.trim()">Confirm approve and begin</Button><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="beginOpen = false">Cancel</Button></div>
+                <div class="sm:col-span-2 flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !beginSelectionReady">Confirm approve and begin</Button><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="beginOpen = false">Cancel</Button></div>
               </form>
               <form v-if="proposalEditOpen" class="grid grid-cols-1 gap-3 border-t border-[var(--border-subtle)] pt-3" @submit.prevent="submitProposalRevision">
                 <h4 class="font-bold">Revise proposed content</h4>

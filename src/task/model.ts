@@ -136,7 +136,7 @@ export interface TaskAdmission {
   readonly contextAgentId: string;
   readonly approvedBy: TaskActor;
   readonly approvedAt: number;
-  readonly approvalReason: string;
+  readonly approvalReason?: string;
   /** Set durably when the separately admitted initial Agent run could not be submitted. */
   readonly initialRunFailed?: boolean;
 }

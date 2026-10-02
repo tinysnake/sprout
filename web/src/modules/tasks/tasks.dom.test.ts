@@ -291,11 +291,54 @@ test('Project Tasks creates proposals through validation and the production adap
     else clickButton(doc, 'active');
     await settle();
     assert.equal(doc.querySelector('[data-record-kind="proposal"]'), null);
+    const proposeButton = clickButton(doc, 'Propose Task');
+    await settle();
+    const backdrop = doc.querySelector<HTMLElement>('.chat-dialog-backdrop');
+    const dialog = backdrop?.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"]');
+    assert.ok(backdrop && dialog, 'proposal form opens in an accessible modal dialog');
+    assert.ok(backdrop.classList.contains('fixed') && backdrop.classList.contains('inset-0'), 'the overlay covers the viewport without taking page layout space');
+    assert.equal(doc.querySelector('.project-tasks-view #task-proposal-form-heading'), null, 'the proposal form is not rendered in the page layout');
+    assert.ok(dialog.getAttribute('aria-labelledby'));
+    assert.ok(dialog.getAttribute('aria-describedby'));
+    assert.ok(dialog.className.includes('w-full') && dialog.className.includes('overflow-y-auto'), 'the dialog uses a full-width, scrollable mobile layout');
+    assert.match(dialog.className, /max-h-/);
+    const closeButton = dialog.querySelector<HTMLButtonElement>('[aria-label="Close dialog"]');
+    assert.ok(closeButton);
+    assert.ok(closeButton.className.includes('h-11') && closeButton.className.includes('w-11'));
+    for (const button of dialog.querySelectorAll<HTMLButtonElement>('button')) {
+      if (button !== closeButton) assert.ok(button.className.includes('min-h-[44px]'), 'form actions meet the 44px touch target');
+    }
+    assert.match(doc.querySelector('[data-testid="shell-announcer"]')?.textContent ?? '', /Task proposal form opened/);
+    assert.equal(dialog.contains(doc.activeElement), true, 'opening the form moves focus inside the dialog');
+    const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')];
+    closeButton.focus();
+    closeButton.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+    assert.equal(doc.activeElement, focusable.at(-1), 'Shift+Tab wraps focus to the last dialog control');
+    assert.match(doc.body.textContent ?? '', /Human approval is required before begin/);
+    doc.activeElement?.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(doc.querySelector('[role="dialog"]'), null, 'Escape closes the proposal dialog');
+    assert.equal(doc.activeElement, proposeButton, 'closing restores focus to the propose trigger');
+    assert.equal(router.currentRoute.value.name, 'project-tasks', 'Escape leaves the page route unchanged');
     clickButton(doc, 'Propose Task');
     await settle();
-    assert.match(doc.querySelector('[data-testid="shell-announcer"]')?.textContent ?? '', /Task proposal form opened/);
-    assert.equal(doc.activeElement?.textContent, 'Propose a Task', 'opening the form moves focus to its heading');
-    assert.match(doc.body.textContent ?? '', /Human approval is required before begin/);
+    const reopenedBackdrop = doc.querySelector<HTMLElement>('.chat-dialog-backdrop');
+    const reopenedDialog = reopenedBackdrop?.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"]');
+    assert.ok(reopenedDialog);
+    reopenedBackdrop!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    await settle();
+    assert.equal(doc.querySelector('[role="dialog"]'), null, 'backdrop click closes the proposal dialog');
+    assert.equal(doc.activeElement?.textContent, 'Propose Task', 'backdrop close restores focus to the trigger');
+    clickButton(doc, 'Propose Task');
+    await settle();
+    clickButton(doc, 'Cancel');
+    await settle();
+    assert.equal(doc.querySelector('[role="dialog"]'), null, 'Cancel closes the proposal dialog');
+    assert.equal(doc.activeElement, proposeButton, 'Cancel restores focus to the propose trigger');
+    assert.equal(router.currentRoute.value.name, 'project-tasks', 'Cancel leaves the page route unchanged');
+    clickButton(doc, 'Propose Task');
+    await settle();
+    assert.ok(doc.querySelector('.chat-dialog-backdrop [role="dialog"][aria-modal="true"]'));
     await enterField(doc, dom, 'Title', 'New proposed work');
     await enterField(doc, dom, 'Goal', 'Record a bounded proposal.');
     clickButton(doc, 'Save proposal');
@@ -330,10 +373,17 @@ test('Project Tasks allows an eligible Agent lead despite an unrelated yellow re
     const lead = selectOption(doc, dom, 'begin-lead', JSON.stringify({ memberId: 'agent-b', memberKind: 'agent' }));
     await settle();
     assert.match(lead.selectedOptions[0]?.textContent ?? '', /Other Project Agent/);
-    await enterField(doc, dom, 'Approval reason', 'Entrust bounded work to another Project Agent.');
+    const beginForm = [...doc.querySelectorAll('form')].find(form => form.textContent?.includes('Confirm approve and begin'));
+    assert.ok(beginForm);
+    assert.equal([...beginForm.querySelectorAll('label')].some(label => label.textContent?.includes('Approval reason')), false,
+      'approve and begin has no approval reason field');
+    const confirm = [...beginForm.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('Confirm approve and begin'));
+    assert.ok(confirm);
+    assert.equal(confirm.disabled, false, 'eligible approval no longer depends on an approval reason');
     clickButton(doc, 'Confirm approve and begin');
     await settle(180);
     assert.deepEqual((beginInputs[0] as { lead: unknown }).lead, { memberId: 'agent-b', memberKind: 'agent' });
+    assert.equal('reason' in (beginInputs[0] as object), false, 'the client omits approval reason instead of fabricating one');
     app.unmount();
   } finally { await cleanup(); }
 });
@@ -533,7 +583,7 @@ test('Project Tasks creates and renders each blocker responsibility kind', async
 test('Project Tasks exposes authorized proposal, intervention, validation, discard, and recovery actions', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
-    const { app, router, calls } = await mountTasks(vite, doc);
+    const { app, router, calls, beginInputs } = await mountTasks(vite, doc);
     await router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
     await settle();
     clickButton(doc, 'Approve & Begin');
@@ -541,10 +591,13 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     const environment = [...doc.querySelectorAll<HTMLSelectElement>('select')].find((select) => select.closest('label')?.textContent?.includes('Environment instance'));
     assert.ok(environment);
     assert.equal(environment.value, 'instance-a');
-    await enterField(doc, dom, 'Approval reason', 'Authorize this bounded Task.');
+    const beginForm = [...doc.querySelectorAll('form')].find(form => form.textContent?.includes('Confirm approve and begin'));
+    assert.ok(beginForm);
+    assert.equal([...beginForm.querySelectorAll('label')].some(label => label.textContent?.includes('Approval reason')), false);
     clickButton(doc, 'Confirm approve and begin');
     await settle(180);
     assert.ok(calls.includes('begin'), 'approve-and-begin uses the proposal admission port');
+    assert.equal('reason' in (beginInputs[0] as object), false, 'approval submits no fabricated reason');
 
     await openTaskRecord(router, 'run-running');
     assert.match(doc.body.textContent ?? '', /Pause Task/);

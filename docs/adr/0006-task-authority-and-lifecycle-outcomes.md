@@ -46,6 +46,9 @@ Human-created and Agent-proposed work use the same authority boundary:
    Agent, Sprout then submits a separately observable first Task-lead run. A
    Human Task lead does not cause an automatic Agent run.
 
+An optional explanatory reason may accompany approve-and-begin; if omitted, no
+approval or initial-run reason is written.
+
 The approved boundary contains the Task goal, constraints, validation criteria,
 Task lead, current Project permissions, and selected Environment instance. The
 lead may choose any Project Agent that remains permitted and compatible with
@@ -78,9 +81,11 @@ instance, an Agent Task lead may:
 - state a routable blocker and its required next action; and
 - submit a Task completion claim for Human validation.
 
-Every advance records its initiator, target Agent, reason, and Task content
-version. There is no automatic infinite retry: failure, denied authority, or an
-uncertain next step produces a blocker or a validation request. M2 does not add
+Every deliberate advance records its initiator, target Agent, reason, and Task
+content version. The automatic initial run following approve-and-begin records
+its actor, target, and content version, and carries a reason only when the Human
+supplied the optional begin reason. There is no automatic infinite retry:
+failure, denied authority, or an uncertain next step produces a blocker or a validation request. M2 does not add
 a general workflow, scheduling, or budget engine merely to bound this autonomy.
 One active run, explicit authority, complete audit, and Human pause and stop
 controls are the bounds.

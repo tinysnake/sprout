@@ -13,7 +13,7 @@ export interface TaskProposalStore {
   consumeForBegin(id: string, expectedRevision: number, input: {
     readonly actor: import('./proposal-model.ts').ProposalActor;
     readonly at: number;
-    readonly reason: string;
+    readonly reason?: string;
     readonly taskId: string;
   }): TaskProposal;
 }
@@ -43,7 +43,7 @@ export class InMemoryTaskProposalStore implements TaskProposalStore {
   consumeForBegin(id: string, expectedRevision: number, input: {
     readonly actor: import('./proposal-model.ts').ProposalActor;
     readonly at: number;
-    readonly reason: string;
+    readonly reason?: string;
     readonly taskId: string;
   }): TaskProposal {
     const prior = this.#records.get(id);
@@ -56,7 +56,8 @@ export class InMemoryTaskProposalStore implements TaskProposalStore {
       revision: prior.revision + 1,
       updatedAt: input.at,
       lifecycle: [...prior.lifecycle, {
-        action: 'begun', actor: structuredClone(input.actor), at: input.at, reason: input.reason,
+        action: 'begun', actor: structuredClone(input.actor), at: input.at,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
         contentVersion: prior.currentContentVersion, taskId: input.taskId,
       }],
     };
