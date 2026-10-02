@@ -82,8 +82,33 @@ export class SqliteCollaborationStore implements CollaborationStore {
     this.#init();
   }
 
+  async unreadCount(scopeId: string, humanId: string): Promise<number> {
+    const row = this.#db.prepare(`SELECT COUNT(*) AS count FROM collaboration_messages
+      WHERE scope_id = ? AND author_id != ? AND rowid > COALESCE(
+        (SELECT m.rowid FROM collaboration_read_markers r JOIN collaboration_messages m ON m.id = r.message_id WHERE r.scope_id = ? AND r.human_id = ?), 0)`)
+      .get(scopeId, humanId, scopeId, humanId) as { count: number };
+    return row.count;
+  }
+
+  async markReadThrough(scopeId: string, humanId: string, messageId: string): Promise<void> {
+    const message = this.#db.prepare('SELECT rowid AS cursor, scope_id FROM collaboration_messages WHERE id = ?')
+      .get(messageId) as { cursor: number; scope_id: string } | undefined;
+    if (!message || message.scope_id !== scopeId) throw new Error('Message does not belong to this scope');
+    this.#db.prepare(`INSERT INTO collaboration_read_markers (scope_id, human_id, message_id) VALUES (?, ?, ?)
+      ON CONFLICT(scope_id, human_id) DO UPDATE SET message_id = excluded.message_id
+      WHERE (SELECT rowid FROM collaboration_messages WHERE id = excluded.message_id) > COALESCE(
+        (SELECT rowid FROM collaboration_messages WHERE id = collaboration_read_markers.message_id), 0)`)
+      .run(scopeId, humanId, messageId);
+  }
+
   #init(): void {
     this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS collaboration_read_markers (
+        scope_id TEXT NOT NULL,
+        human_id TEXT NOT NULL,
+        message_id TEXT NOT NULL CHECK (length(message_id) > 0),
+        PRIMARY KEY (scope_id, human_id)
+      );
       CREATE TABLE IF NOT EXISTS collaboration_attention_resolutions (
         source_kind TEXT NOT NULL,
         source_id TEXT NOT NULL,

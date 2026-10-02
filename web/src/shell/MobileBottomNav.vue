@@ -10,6 +10,7 @@
  */
 import { computed } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
+import UnreadBadge from '../modules/chat/UnreadBadge.vue';
 import { buildNavigation, NAVIGATION_ROOT, type NavigationIndicators } from './navigation.js';
 import Icon from '../primitives/Icon.vue';
 import StatusDot from '../primitives/StatusDot.vue';
@@ -62,8 +63,9 @@ function goToRootDestinations() {
     >
       <Icon :name="item.icon" :size="20" />
       <span class="text-[10px] mt-0.5">{{ item.shortLabel }}</span>
+      <UnreadBadge v-if="item.key === 'chat'" :count="item.count" />
       <span
-        v-if="item.count > 0"
+        v-else-if="item.count > 0"
         class="bottom-nav-badge absolute top-1 right-1/4 px-1 py-0.1 text-[9px] font-bold rounded-full border"
         :class="
           item.indicatorStatus === 'yellow'

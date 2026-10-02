@@ -16,6 +16,8 @@ import Icon from '../../../primitives/Icon.vue';
 import Button from '../../../primitives/Button.vue';
 import ChatDialog from './ChatDialog.vue';
 import EmptyState from '../../../primitives/EmptyState.vue';
+import { useUnreadState } from '../unread-state.ts';
+import UnreadBadge from '../UnreadBadge.vue';
 import { newDeliveryKey } from '../../../utils/delivery-key.ts';
 
 const route = useRoute();
@@ -58,9 +60,10 @@ const evidence = ref<RoutingEvidenceView | null>(null);
 const evidenceLoading = ref(false);
 const provenance = ref<{ runId?: string; runStatus?: string; failureReason?: string; inputIds: readonly string[]; batchId?: string } | null>(null);
 const evidenceTrigger = ref<HTMLElement | null>(null);
-const seen = new Set<string>();
+const unreadState = useUnreadState();
+const viewportWidth = ref(typeof window === 'undefined' ? 0 : window.innerWidth);
+function onResize() { viewportWidth.value = window.innerWidth; void markVisible(); }
 const knownEvents = new Set<string>();
-const unreadVersion = ref(0);
 let generation = 0;
 let detailGeneration = 0;
 let unsubRuns: (() => void) | undefined;
@@ -120,8 +123,16 @@ function preview(scope: ConversationScopeView) {
 }
 function latestTime(scope: ConversationScopeView) { const last = [...messages.value].reverse().find((m) => m.scopeId === scope.id); return last ? time(last.createdAt) : ''; }
 function time(at: number) { return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-function unread(scope: ConversationScopeView) { void unreadVersion.value; return messages.value.filter((m) => m.scopeId === scope.id && !seen.has(m.id) && scope.id !== activeScope.value?.id).length; }
-function markVisible() { for (const m of activeMessages.value) seen.add(m.id); unreadVersion.value++; }
+function unread(scope: ConversationScopeView) { return scopePill(scope) ? 0 : unreadState?.count(scope.id) ?? 0; }
+async function markVisible() {
+  const id = activeScopeId.value;
+  const token = generation;
+  await nextTick();
+  if (token !== generation || id !== activeScopeId.value || loading.value || error.value || detailLoading.value
+    || document.visibilityState === 'hidden' || (!requestedScopeId.value && viewportWidth.value < 768)
+    || inspection.value?.scope.id !== id) return;
+  await unreadState?.markRead(id, activeMessages.value.map((m) => m.id));
+}
 function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : 'working-group'; }
 function isTargetEntry(entry: ChatTimelineItem) {
   return entry.kind === 'message'
@@ -166,8 +177,7 @@ async function loadProject() {
     events.value = projectEvents;
     for (const event of projectEvents) knownEvents.add(event.id);
     batches.value = routing.batches;
-    for (const m of messages.value) seen.add(m.id); // No server read-marker port: baseline existing history as seen this session.
-    unreadVersion.value++;
+    await unreadState?.refresh();
   } catch { if (token === generation) error.value = safeError(); }
   finally { if (token === generation) loading.value = false; }
 }
@@ -186,7 +196,8 @@ async function refreshMessages() {
     messages.value = all.filter((m) => m.projectId === id);
     events.value = projectEvents;
     for (const event of newEvents) knownEvents.add(event.id);
-    markVisible();
+    await unreadState?.refresh();
+    void markVisible();
     let sentence: string | undefined;
     if (incoming.length || newEvents.length) {
       const inCurrent = incoming.filter((m) => m.scopeId === activeScope.value?.id);
@@ -215,12 +226,11 @@ async function loadScope() {
   evidenceOpen.value = null;
   if (!service || !activeScope.value || missingScope.value) { detailLoading.value = false; return; }
   detailLoading.value = true;
-  markVisible();
   try {
     const inspected = await service.inspectScope(activeScope.value.id);
     if (token === detailGeneration) inspection.value = inspected;
   } catch { if (token === detailGeneration) actionError.value = 'Conversation admission could not be verified. Sending is disabled.'; }
-  finally { if (token === detailGeneration) detailLoading.value = false; }
+  finally { if (token === detailGeneration) { detailLoading.value = false; void markVisible(); } }
 }
 let lastTargetAnnouncement = '';
 watch([timeline, loading, detailLoading, missingScope, activeScopeId, requestedMessageId, requestedEventId], async () => {
@@ -437,6 +447,7 @@ watch(projectId, () => { if (projectId.value) void loadProject(); });
 watch([activeScopeId, loading], () => { if (!loading.value) void loadScope(); });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
+  window.addEventListener('resize', onResize);
   document.addEventListener('visibilitychange', onVisibilityChange);
   onVisibilityChange();
   unsubRuns = service?.subscribeRunStatuses(() => {
@@ -447,7 +458,7 @@ onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); 
       refreshTimers.add(timer);
     }
   }); });
-onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTimer !== undefined) clearInterval(pollTimer); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('visibilitychange', onVisibilityChange); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
+onUnmounted(() => { window.removeEventListener('resize', onResize); generation++; detailGeneration++; unsubRuns?.(); if (pollTimer !== undefined) clearInterval(pollTimer); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('visibilitychange', onVisibilityChange); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
 </script>
 
 <template>
@@ -487,7 +498,7 @@ onUnmounted(() => { generation++; detailGeneration++; unsubRuns?.(); if (pollTim
                 <span class="flex items-center gap-1.5"><strong class="truncate text-xs text-[var(--text-primary)]">{{ title(scope) }}</strong><span v-if="scopePill(scope)" class="text-[10px] text-[var(--text-muted)]">{{ scopePill(scope) }}</span><span class="ml-auto shrink-0 text-[10px] text-[var(--text-muted)]">{{ latestTime(scope) }}</span></span>
                 <span class="block text-[10px] text-[var(--text-muted)]">{{ kindLabel(scope) }}</span>
                 <span class="block truncate text-[11px] text-[var(--text-secondary)]">{{ preview(scope) }}</span>
-                <span v-if="unread(scope)" class="chat-unread-badge mt-1 inline-block rounded-full bg-[var(--accent-primary)] px-2 text-[10px] font-bold text-[var(--text-inverse)]">{{ unread(scope) }} new</span>
+                <UnreadBadge :count="unread(scope)" />
               </span>
             </button>
             <template v-if="section.label.startsWith('Direct Messages')">

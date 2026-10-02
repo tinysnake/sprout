@@ -16,6 +16,8 @@ export class ProductionChatService implements ChatService {
 
   state = () => this.ports.messages.state();
   subscribeState: ChatService['subscribeState'] = (listener) => this.ports.messages.subscribeState(listener);
+  listUnread: ChatService['listUnread'] = () => this.ports.conversations.listUnread();
+  markRead: ChatService['markRead'] = (id, messages) => this.ports.conversations.markRead(id, messages);
   listScopes: ChatService['listScopes'] = (id) => this.ports.conversations.listScopes(id);
   inspectScope: ChatService['inspectScope'] = (id) => this.ports.conversations.inspectScope(id);
   openDirectConversation: ChatService['openDirectConversation'] = (id, participants) => this.ports.conversations.openDirectConversation(id, { participants });

@@ -23,6 +23,7 @@ import { createRunApi } from './api.ts';
 import type { RunApi } from './api.ts';
 import { createProjectRouter } from './project-router.ts';
 import { createConversationRouter } from './conversation-router.ts';
+import { createChatReadRouter } from './chat-read-router.ts';
 import { createAgentRouter } from './agent-router.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
@@ -416,9 +417,10 @@ export async function buildReplyProjectionApi(
     },
     bridge: { prepare: (project) => scopes.prepareProjectChannel(project) },
   });
+  const collaborationStore = new InMemoryCollaborationStore();
   const collaboration = new CollaborationCoordinator({
     scopes,
-    store: new InMemoryCollaborationStore(),
+    store: collaborationStore,
     runs: orchestrator,
   });
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
@@ -434,6 +436,7 @@ export async function buildReplyProjectionApi(
     routers: [
       createProjectRouter({ projects }),
       createConversationRouter({ scopes }),
+      createChatReadRouter({ scopes, store: collaborationStore }),
       createAgentRouter({ agents: durableAgents }),
     ],
   });

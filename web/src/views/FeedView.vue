@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watch } from 'vue';
 import type { RouteLocationRaw } from 'vue-router';
-import { useRoute, useRouter } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { FEED_ALL_SCOPE, isFeedDeepLink } from '../../../src/web/feed.ts';
 import type {
   FeedActivityItem,
@@ -22,7 +22,12 @@ import Button from '../primitives/Button.vue';
 import EmptyState from '../primitives/EmptyState.vue';
 import Icon from '../primitives/Icon.vue';
 import StatusDot from '../primitives/StatusDot.vue';
+import { useUnreadState } from '../modules/chat/unread-state.ts';
+import UnreadBadge from '../modules/chat/UnreadBadge.vue';
 
+const unread = useUnreadState();
+const unreadConversations = computed(() => unread?.scopes.value.filter((s) => s.count > 0 && (activeScope.value === FEED_ALL_SCOPE || activeScope.value === s.projectId)) ?? []);
+function activityUnread(target: FeedTarget | undefined) { return target?.surface === 'project-chat' && target.scopeId ? unread?.count(target.scopeId) ?? 0 : 0; }
 const props = defineProps<{ api?: FeedBrowserAdapter }>();
 const route = useRoute();
 const router = useRouter();
@@ -498,6 +503,15 @@ onMounted(() => {
         <Button variant="secondary" size="sm" class="ml-2 min-h-[44px]" @click="retry">Retry</Button>
       </div>
 
+      <section v-if="unreadConversations.length" class="mb-4 flex flex-col gap-2" aria-label="Unread conversations">
+        <h2 class="text-sm font-bold">Unread conversations</h2>
+        <div class="flex flex-wrap gap-2">
+          <RouterLink v-for="scope in unreadConversations" :key="scope.scopeId" :data-unread-scope="scope.scopeId" :to="{ name: 'project-chat-scope', params: { scopeId: scope.scopeId }, query: { project: scope.projectId } }" class="flex min-h-11 items-center gap-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]">
+            <Icon name="chat" :size="14" /> {{ projectName(scope.projectId) }} · Conversation <UnreadBadge :count="scope.count" />
+          </RouterLink>
+        </div>
+      </section>
+      <p v-else-if="unread && !unread.available.value" class="mb-2 text-xs text-[var(--text-muted)]" role="status">Unread counts unavailable.</p>
       <template v-if="snapshot">
         <div v-if="pageState === 'empty'" class="rounded border border-[var(--green-ready-border)] bg-[var(--green-ready-bg)] p-4 text-sm text-[var(--text-primary)]" data-empty-state>
           No Attention, in-flight work, or activity is currently recorded for {{ scopeLabel }}.
@@ -588,6 +602,7 @@ onMounted(() => {
             <ol v-if="activityItems.length" class="flex flex-col gap-2" aria-label="Recent operational activity">
               <li v-for="item in activityItems" :key="item.id" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
                 <button v-if="targetLocation(item.target)" type="button" class="flex min-h-[64px] w-full items-start gap-3 p-3 text-left transition-colors hover:bg-[var(--bg-surface-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :data-activity-id="item.id" @click="navigateTo(item.target, activityGroupLabel(activityGroup(item)))">
+                  <UnreadBadge :count="activityUnread(item.target)" />
                   <StatusDot status="blue" size="sm" class="mt-1 shrink-0" />
                   <span class="min-w-0 flex-1">
                     <span class="flex flex-wrap items-center gap-2"><Badge variant="secondary">{{ activityGroupLabel(activityGroup(item)) }}</Badge><span v-if="projectName(item.projectId)" class="text-[10px] text-[var(--text-muted)]">{{ projectName(item.projectId) }}</span></span>

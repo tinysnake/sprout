@@ -48,6 +48,9 @@ export function journeyWire() {
     { id: 'event:agent-run-failure', kind: 'agent-run-failure', summary: 'Exact Agent run failure event A', scopes: [project.id], target: chatFailureTarget, projectId: project.id, at: at + 3 },
   ] };
   let sessions = [{ id: 'session-current', current: true, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }, { id: 'session-other', current: false, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }];
+  const readMessages = new Set<string>();
+  const unreadCounts = () => [scope, directScope].map((s) => ({ scopeId: s.id, projectId: s.projectId,
+    count: messages.filter((m) => m.scopeId === s.id && m.authorId !== 'operator' && !readMessages.has(m.id)).length }));
   const unknown: string[] = [];
   let authorized = true;
   return {
@@ -83,6 +86,13 @@ export function journeyWire() {
       else if (path === '/api/projects/project-a/scopes') body = { scopes: [scope, directScope] };
       else if (path === '/api/scopes/channel-a') body = { scope, state: { scopeId: scope.id, writable: true }, context: { scopeId: scope.id, projectId: project.id, kind: 'project', project: { contentVersion: 1, goal: 'Exact Chat context A', rules: [] } } };
       else if (path === '/api/scopes/dm-a') body = { scope: directScope, state: { scopeId: directScope.id, writable: true }, context: { scopeId: directScope.id, projectId: project.id, kind: 'direct', project: { contentVersion: 1, goal: 'Exact Chat context A', rules: [] } } };
+      else if (path === '/api/chat/unread') body = { scopes: unreadCounts() };
+      else if (/^\/api\/scopes\/[^/]+\/read$/.test(path) && method === 'POST') {
+        const scopeId = decodeURIComponent(path.split('/')[3]!);
+        const receipt = JSON.parse(String(init?.body ?? '{}')) as { messageIds: string[] };
+        for (const id of receipt.messageIds) readMessages.add(id);
+        body = unreadCounts().find((s) => s.scopeId === scopeId);
+      }
       else if (path === '/api/messages') {
         const scopeId = url.searchParams.get('scopeId');
         body = { messages: scopeId ? messages.filter((message) => message.scopeId === scopeId) : messages };

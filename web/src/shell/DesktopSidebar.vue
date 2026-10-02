@@ -9,6 +9,7 @@
  * `buildNavigation` result so this and the phone navigation cannot drift.
  */
 import { computed } from 'vue';
+import UnreadBadge from '../modules/chat/UnreadBadge.vue';
 import { RouterLink, useRoute } from 'vue-router';
 import { buildNavigation, type NavigationIndicators } from './navigation.js';
 import { useShellConnection } from './use-shell-connection.js';
@@ -70,8 +71,9 @@ const presentation = computed(() => connection.presentation.value);
           >
             <Icon :name="item.icon" :size="16" />
             <span class="flex-1 truncate">{{ item.label }}</span>
+            <UnreadBadge v-if="item.key === 'chat'" :count="item.count" />
             <span
-              v-if="item.count > 0"
+              v-else-if="item.count > 0"
               class="px-1.5 py-0.2 rounded-full text-[10px] font-bold border"
               :class="
                 item.indicatorStatus === 'blue'

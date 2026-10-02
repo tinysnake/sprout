@@ -8,7 +8,8 @@
  * admission check has its own raw-state status so its brief checks cannot be
  * overwritten by an unrelated shell announcement.
  */
-import { computed, nextTick, onMounted, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
+import { useUnreadState } from '../modules/chat/unread-state.ts';
 import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
@@ -29,6 +30,13 @@ const props = withDefaults(
   { indicators: undefined }
 );
 
+const unread = useUnreadState();
+const liveIndicators = computed(() => ({ attention: 0, activeWork: 0, degradedEnvironments: 0, ...props.indicators,
+  chatUnread: unread ? (typeof route.query['project'] === 'string' ? unread.projectCount(route.query['project']) : unread.total.value) : props.indicators?.chatUnread ?? 0 }));
+let unreadTimer: ReturnType<typeof setInterval> | undefined;
+function refreshUnread() { if (document.visibilityState !== 'hidden') void unread?.refresh(); }
+onMounted(() => { refreshUnread(); if (unread) unreadTimer = setInterval(refreshUnread, 15000); document.addEventListener('visibilitychange', refreshUnread); });
+onUnmounted(() => { if (unreadTimer) clearInterval(unreadTimer); document.removeEventListener('visibilitychange', refreshUnread); });
 const appStore = useAppStore();
 const route = useRoute();
 const connection = useShellConnection();
@@ -36,7 +44,7 @@ const connection = useShellConnection();
 const { announcer, message } = { announcer: useAnnouncer(), message: useAnnouncerMessage() };
 
 const presentation = computed(() => connection.presentation.value);
-const navigation = computed(() => buildNavigation(route, props.indicators));
+const navigation = computed(() => buildNavigation(route, liveIndicators.value));
 
 const showConnectionWarning = useConnectionNotice(computed(() => presentation.value.controlAvailable));
 
@@ -76,7 +84,7 @@ onMounted(() => {
 
     <SkipToContent />
 
-    <DesktopSidebar :indicators="indicators" />
+    <DesktopSidebar :indicators="liveIndicators" />
 
     <div class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
       <ReturnContextBanner />
@@ -123,6 +131,6 @@ onMounted(() => {
       </div>
     </div>
 
-    <MobileBottomNav :indicators="indicators" />
+    <MobileBottomNav :indicators="liveIndicators" />
   </div>
 </template>
