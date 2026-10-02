@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult } from './port.ts';
+import type { AgentRunEvent, DetailedTokenDimensions, EngineTurnResult, TokenUsage } from './port.ts';
 
 /**
  * Translation from `agy`'s `--output-format stream-json` stream into
@@ -99,14 +99,63 @@ function mapResult(result: unknown, state: AgyTurnState): AgyOutcome {
   const response = typeof settled['response'] === 'string' ? settled['response'] : '';
 
   if (status !== 'SUCCESS' && status !== '') {
+    const usage = readAgyUsage(settled['usage']);
     return {
       events: [],
-      finish: { status: 'failed', message: state.failure ?? `agy run did not succeed: ${status}` },
+      finish: {
+        status: 'failed',
+        message: state.failure ?? `agy run did not succeed: ${status}`,
+        ...(usage !== undefined ? { tokenUsage: usage.tokenUsage, detailedTokens: usage.detailedTokens } : {}),
+      },
     };
   }
   // The turn's answer is the result frame's `response`, which is authoritative:
   // `text_delta` fragments are its prefix, not a separate answer.
-  return { events: [], finish: { status: 'completed', text: response || state.text } };
+  const usage = readAgyUsage(settled['usage']);
+  return {
+    events: [],
+    finish: {
+      status: 'completed',
+      text: response || state.text,
+      ...(usage !== undefined ? { tokenUsage: usage.tokenUsage, detailedTokens: usage.detailedTokens } : {}),
+    },
+  };
+}
+
+interface AgyUsage {
+  readonly tokenUsage: TokenUsage;
+  readonly detailedTokens: DetailedTokenDimensions;
+}
+
+function readAgyUsage(raw: unknown): AgyUsage | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const usage = raw as Record<string, unknown>;
+  const input = usage['input_tokens'];
+  const output = usage['output_tokens'];
+  const reasoning = usage['thinking_tokens'];
+  const cacheRead = usage['cache_read_tokens'];
+  const total = usage['total_tokens'];
+  if (!isTokenCount(input) || !isTokenCount(output) ||
+      (reasoning !== undefined && !isTokenCount(reasoning)) ||
+      (cacheRead !== undefined && !isTokenCount(cacheRead)) ||
+      (total !== undefined && !isTokenCount(total)) ||
+      (cacheRead !== undefined && cacheRead > input)) return undefined;
+
+  const tokenTotal = total ?? input + output;
+  return {
+    tokenUsage: { promptTokens: input, completionTokens: output, totalTokens: tokenTotal },
+    detailedTokens: {
+      inputTokens: input,
+      ...(cacheRead !== undefined ? { uncachedInputTokens: input - cacheRead, cachedInputTokens: cacheRead } : {}),
+      outputTokens: output,
+      ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
+      totalTokens: tokenTotal,
+    },
+  };
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Render an agy `tool_info` compactly for display. */

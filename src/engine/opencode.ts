@@ -244,9 +244,14 @@ export class OpenCodeSession implements EngineSession {
       if (settled) return;
       settled = true;
       this.#settle = undefined;
-      if (result.status === 'failed') queue.fail(new Error(result.message));
+      const settledResult: EngineTurnResult = {
+        ...result,
+        ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+        ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
+      };
+      if (settledResult.status === 'failed') queue.fail(new Error(settledResult.message));
       else queue.end();
-      resolveCompletion(result);
+      resolveCompletion(settledResult);
     };
     this.#settle = finish;
 

@@ -12,6 +12,13 @@ const dimensions = ['totalInput', 'uncachedInput', 'cachedReads', 'cacheWrite', 
 const text = (value: string | undefined) => sanitizeOperatorText(value, { fallback: 'Unavailable', maxLength: 4000 });
 const identity = (value: string | undefined) => value && /^(?:act|task|run|att)-[a-z0-9-]+$/i.test(value) ? value : text(value);
 const number = (value: number | undefined) => value === undefined ? 'Unavailable' : value.toLocaleString();
+const tokenDimension = (activity: UsageActivityItem, value: number | undefined) => {
+  if (value !== undefined) return value.toLocaleString();
+  const dimensions = activity.tokenDimensions;
+  const hasReportedTokens = [dimensions.totalInput, dimensions.uncachedInput, dimensions.cachedReads, dimensions.cacheWrite,
+    dimensions.output, dimensions.reasoningOutput, dimensions.total].some((dimension) => dimension !== undefined);
+  return dimensions.status !== 'unavailable' && hasReportedTokens ? 'Not reported by engine' : 'Unavailable';
+};
 const usd = (value: number | undefined) => value === undefined ? 'Unavailable' : `$${(value / 1_000_000).toFixed(4)}`;
 </script>
 
@@ -42,7 +49,7 @@ const usd = (value: number | undefined) => value === undefined ? 'Unavailable' :
           <td>{{ a.outcome === 'ongoing' ? 'Provisional observed so far; excluded from finalized totals' : 'Finalized' }}</td>
           <td>{{ number(a.wallDurationMs) }} ms / {{ a.durationStatus }} / {{ text(a.durationSource) }}; Engine duration {{ number(a.engineDurationMs) }} ms; Task calendar elapsed {{ number(a.taskCalendarElapsedMs) }} ms</td>
           <td>{{ a.tokenDimensions.status }} measurement / {{ text(a.tokenDimensions.source) }}</td>
-          <td v-for="dimension in dimensions" :key="dimension" :data-token-dimension="dimension">{{ number(a.tokenDimensions[dimension]) }}</td>
+          <td v-for="dimension in dimensions" :key="dimension" :data-token-dimension="dimension">{{ tokenDimension(a, a.tokenDimensions[dimension]) }}</td>
           <td>{{ a.costValuation.apiEquivalentStatus }} / {{ usd(a.costValuation.estimatedUsdMicros) }} API-equivalent</td>
           <td>{{ text(a.costValuation.provenance?.replaceAll('_', ' ')) }} / {{ text(a.costValuation.source) }} / {{ text(a.costValuation.sourceVersion) }}</td>
           <td>{{ a.costValuation.attributableBilledCostStatus === 'unavailable' ? 'Unavailable' : 'Available; inspect provider ledger' }}</td>

@@ -13,7 +13,11 @@ import type { AgentRunEvent } from './port.ts';
  * Frames recorded from `agy 1.2.2` on this host, trimmed to what the mapping
  * needs, so the adapter is checked against the engine's real stream.
  */
-function replaySuccessfulTurn(process: { line(value: unknown): void }, answer: string): void {
+function replaySuccessfulTurn(
+  process: { line(value: unknown): void },
+  answer: string,
+  usage?: Record<string, number>,
+): void {
   process.line({
     event: 'init',
     conversation_id: '1354d8d5-7266-479c-88cc-83abd1282acc',
@@ -81,6 +85,7 @@ function replaySuccessfulTurn(process: { line(value: unknown): void }, answer: s
       response: answer,
       duration_seconds: 1.2,
       num_turns: 1,
+      ...(usage !== undefined ? { usage } : {}),
     },
   });
 }
@@ -178,6 +183,33 @@ test('an agy turn streams tool progress and text, then completes', async () => {
   // stream-json is what makes the output a protocol at all.
   assert.ok(args.includes('--output-format') && args.includes('stream-json'));
   assert.equal(args.at(-1), '--print=run echo');
+});
+
+test('an agy result normalizes final input, output, reasoning, and cache usage', async () => {
+  const { adapter } = adapterFor((process) => replaySuccessfulTurn(process, 'done', {
+    input_tokens: 100,
+    output_tokens: 24,
+    thinking_tokens: 4,
+    cache_read_tokens: 30,
+    total_tokens: 124,
+  }));
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('count usage');
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') throw new Error('expected completed agy turn');
+  assert.deepEqual(result.tokenUsage, { promptTokens: 100, completionTokens: 24, totalTokens: 124 });
+  assert.deepEqual(result.detailedTokens, {
+    inputTokens: 100,
+    uncachedInputTokens: 70,
+    cachedInputTokens: 30,
+    outputTokens: 24,
+    reasoningOutputTokens: 4,
+    totalTokens: 124,
+  });
 });
 
 test('the prompt is attached to --print, because a bare --print swallows the next flag', async () => {

@@ -212,6 +212,18 @@ function formatNumber(value: number | undefined): string {
   return value === undefined ? 'Unavailable' : value.toLocaleString();
 }
 
+function formatTokenDimension(activity: UsageActivityItem, value: number | undefined): string {
+  if (value !== undefined) return formatNumber(value);
+  const dimensions = activity.tokenDimensions;
+  const hasReportedTokens = [
+    dimensions.totalInput, dimensions.uncachedInput, dimensions.cachedReads, dimensions.cacheWrite,
+    dimensions.output, dimensions.reasoningOutput, dimensions.total,
+  ].some((dimension) => dimension !== undefined);
+  return activity.tokenDimensions.status !== 'unavailable' && hasReportedTokens
+    ? 'Not reported by engine'
+    : 'Unavailable';
+}
+
 function formatUsd(value: number | undefined): string {
   return value === undefined ? 'Unavailable' : `$${(value / 1_000_000).toFixed(4)}`;
 }
@@ -559,7 +571,7 @@ const timeRangeLabels: Record<string, string> = {
       <p v-else-if="queryError" role="alert">Usage query unavailable. No local totals substituted.</p>
       <p v-if="isLoading" role="status">Loading authoritative usage…</p>
       <p v-if="listIncomplete" role="status">Activity list incomplete; totals use authoritative aggregate constituents, not the truncated list.</p>
-      <p class="usage-boundary-note">Settlement ranges use UTC and half-open instant bounds. Known subtotals are observed, incomplete when coverage has gaps.</p>
+      <p class="usage-boundary-note">Settlement ranges use UTC and half-open instant bounds. Token totals sum each activity's reported total; missing dimensions say “Not reported by engine” and do not enter those totals. Known subtotals are observed, incomplete when coverage has gaps.</p>
       <!-- 3. Summary Band (Work-model Agent runs & Project-owned Routing attempts separate) -->
       <section v-if="!isLoading && !queryError" class="usage-summary-band" aria-label="Usage summary">
         <!-- Work-model Agent runs -->
@@ -869,13 +881,13 @@ const timeRangeLabels: Record<string, string> = {
                     <h4>Token dimensions</h4>
                     <p class="usage-source-note">{{ displayText(activity.tokenDimensions.source) }} / {{ displayText(activity.tokenDimensions.status) }} measurement; provider or engine fact, not a local estimate</p>
                     <dl class="usage-fact-list token-facts">
-                      <div><dt>Total input</dt><dd>{{ formatNumber(activity.tokenDimensions.totalInput) }}</dd></div>
-                      <div><dt>Uncached input</dt><dd>{{ formatNumber(activity.tokenDimensions.uncachedInput) }}</dd></div>
-                      <div><dt>Cached reads</dt><dd>{{ formatNumber(activity.tokenDimensions.cachedReads) }}</dd></div>
-                      <div><dt>Cache write</dt><dd>{{ formatNumber(activity.tokenDimensions.cacheWrite) }}</dd></div>
-                      <div><dt>Output</dt><dd>{{ formatNumber(activity.tokenDimensions.output) }}</dd></div>
-                      <div><dt>Reasoning output</dt><dd>{{ formatNumber(activity.tokenDimensions.reasoningOutput) }} <small>subset of output</small></dd></div>
-                      <div><dt>Provider or engine total</dt><dd>{{ formatNumber(activity.tokenDimensions.total) }}</dd></div>
+                      <div><dt>Total input</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.totalInput) }}</dd></div>
+                      <div><dt>Uncached input</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.uncachedInput) }}</dd></div>
+                      <div><dt>Cached reads</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.cachedReads) }}</dd></div>
+                      <div><dt>Cache write</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.cacheWrite) }}</dd></div>
+                      <div><dt>Output</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.output) }}</dd></div>
+                      <div><dt>Reasoning output</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.reasoningOutput) }} <small>subset of output</small></dd></div>
+                      <div><dt>Provider or engine total</dt><dd>{{ formatTokenDimension(activity, activity.tokenDimensions.total) }}</dd></div>
                     </dl>
                   </div>
 
@@ -1511,13 +1523,13 @@ const timeRangeLabels: Record<string, string> = {
             <h4>Token dimensions</h4>
             <p class="usage-source-note">{{ displayText(activeDetail.tokenDimensions.source) }} / {{ displayText(activeDetail.tokenDimensions.status) }} measurement; provider or engine fact, not a local estimate</p>
             <dl class="usage-fact-list token-facts">
-              <div><dt>Total input</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.totalInput) }}</dd></div>
-              <div><dt>Uncached input</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.uncachedInput) }}</dd></div>
-              <div><dt>Cached reads</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.cachedReads) }}</dd></div>
-              <div><dt>Cache write</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.cacheWrite) }}</dd></div>
-              <div><dt>Output</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.output) }}</dd></div>
-              <div><dt>Reasoning output</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.reasoningOutput) }} <small>subset of output</small></dd></div>
-              <div><dt>Provider or engine total</dt><dd>{{ formatNumber(activeDetail.tokenDimensions.total) }}</dd></div>
+              <div><dt>Total input</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.totalInput) }}</dd></div>
+              <div><dt>Uncached input</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.uncachedInput) }}</dd></div>
+              <div><dt>Cached reads</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.cachedReads) }}</dd></div>
+              <div><dt>Cache write</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.cacheWrite) }}</dd></div>
+              <div><dt>Output</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.output) }}</dd></div>
+              <div><dt>Reasoning output</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.reasoningOutput) }} <small>subset of output</small></dd></div>
+              <div><dt>Provider or engine total</dt><dd>{{ formatTokenDimension(activeDetail, activeDetail.tokenDimensions.total) }}</dd></div>
             </dl>
           </div>
 

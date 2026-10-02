@@ -63,14 +63,23 @@ engine and version, and observation time. The normalized dimensions are:
 Reasoning output is detail within output unless a versioned provider contract
 states otherwise; it is not blindly added to output a second time. A simple
 prompt/completion/total summary is derived through an engine-versioned mapping.
-It is not the sole durable pricing input.
+It is not the sole durable pricing input. When an engine reports only that
+coarse summary, Sprout maps those values to input, output, and total and leaves
+cache and reasoning dimensions absent. Usage labels each absent detail “Not
+reported by engine.” Cross-engine totals use the provider-reported run total
+when present, or the engine adapter's versioned input/output mapping when
+absent; optional dimensions do not become zero or enter a total as though every
+engine reported them.
 
 Each token observation is `complete`, `partial`, or `unavailable`. A failed,
 stopped, or interrupted run retains trustworthy usage observed before
-settlement. Absence is unavailable rather than a zero-filled object. Pi usage
-counts each final usage-bearing provider call once, never cumulative streaming
-updates. Codex uses the per-turn `last` usage correlated by turn identity,
-never the resumed thread's cumulative total.
+settlement. If a settled update contains no token report, trustworthy usage
+already recorded for that same run may remain visible as `partial` with a
+last-observed-before-settlement source note. It cannot be promoted to complete
+by the missing final update. Absence is unavailable rather than a zero-filled
+object. Pi usage counts each final usage-bearing provider call once, never
+cumulative streaming updates. Codex uses the per-turn `last` usage correlated
+by turn identity, never the resumed thread's cumulative total.
 
 Sprout's run wall duration is the authoritative cross-engine duration. It is
 measured from the run lifecycle's own start and terminal settlement. An

@@ -156,7 +156,8 @@ export class UsageService {
     await this.#store.recordActivity(activity);
 
     const hasObservedUsage = run.detailedTokens !== undefined || run.tokenUsage !== undefined ||
-      run.result?.detailedTokens !== undefined || run.result?.costEstimate !== undefined;
+      run.result?.detailedTokens !== undefined || run.result?.tokenUsage !== undefined ||
+      run.result?.costEstimate !== undefined;
     if (run.completedAt === undefined ? hasObservedUsage : true) {
       const existing = await this.#store.getEffectiveObservation(activityId);
       const mayFinalizeProvisional = priorActivity?.settledAt === undefined;
@@ -179,22 +180,30 @@ export class UsageService {
     const model = run.workOption?.workModel ?? 'unknown';
     const result = run.result;
 
-    const reportedTokens = run.detailedTokens ?? result?.detailedTokens ?? (
-      run.tokenUsage !== undefined
-        ? {
-            inputTokens: run.tokenUsage.promptTokens,
-            outputTokens: run.tokenUsage.completionTokens,
-            totalTokens: run.tokenUsage.totalTokens,
-          }
-        : undefined
-    );
-    const detailedTokens = reportedTokens ?? prior?.tokens;
+    const fromCoarseUsage = (
+      tokenUsage: { readonly promptTokens: number; readonly completionTokens: number; readonly totalTokens: number } | undefined,
+    ): DetailedTokenDimensions | undefined => tokenUsage === undefined ? undefined : {
+      inputTokens: tokenUsage.promptTokens,
+      outputTokens: tokenUsage.completionTokens,
+      totalTokens: tokenUsage.totalTokens,
+    };
+    const resultTokens = result?.detailedTokens ?? fromCoarseUsage(result?.tokenUsage);
+    const runTokens = run.detailedTokens ?? fromCoarseUsage(run.tokenUsage);
+    const settledResultOmittedTokens = run.completedAt !== undefined && result !== undefined && resultTokens === undefined;
+    const reportedTokens = resultTokens ?? (settledResultOmittedTokens ? undefined : runTokens);
+    const carriedTokens = reportedTokens === undefined
+      ? settledResultOmittedTokens ? runTokens ?? prior?.tokens : prior?.tokens
+      : undefined;
+    const detailedTokens = reportedTokens ?? carriedTokens;
+    const carriedTokenObservation = reportedTokens === undefined && detailedTokens !== undefined;
 
     let completeness: MeasurementCompleteness;
     if (reportedTokens !== undefined) {
       completeness = run.status === 'completed' ? 'complete' : 'partial';
+    } else if (carriedTokenObservation) {
+      completeness = 'partial';
     } else {
-      completeness = prior?.completeness ?? 'unavailable';
+      completeness = 'unavailable';
     }
 
     let costEstimate: ApiEquivalentCostEstimate;
@@ -219,7 +228,9 @@ export class UsageService {
       id: prior === undefined ? `uobs_run_${run.id}_initial` : `uobs_run_${run.id}_${randomUUID()}`,
       activityId: activity.id,
       observedAt: now,
-      source: result?.source ?? prior?.source ?? `${engine}:turn`,
+      source: carriedTokenObservation && run.completedAt !== undefined
+        ? `${prior?.source ?? result?.source ?? `${engine}:turn`} (last observed before settlement; final update reported no token dimensions)`
+        : result?.source ?? prior?.source ?? `${engine}:turn`,
       sourceVersion: result?.sourceVersion ?? prior?.sourceVersion ?? '1.0',
       completeness,
       ...(detailedTokens !== undefined ? { tokens: detailedTokens } : {}),
