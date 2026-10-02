@@ -9,6 +9,8 @@ import type { MessageBrowserAdapter } from '../../adapters/message-api.ts';
 export interface ChatService {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
+  listUnread(): Promise<readonly import('../../../../src/web/chat-read-router.ts').UnreadScopeCount[]>;
+  markRead(scopeId: string, messageIds: readonly string[]): Promise<import('../../../../src/web/chat-read-router.ts').UnreadScopeCount>;
   listScopes(projectId: string): Promise<readonly ConversationScopeView[]>;
   inspectScope(scopeId: string): Promise<ScopeInspectionView>;
   openDirectConversation(projectId: string, participants: readonly string[]): Promise<ConversationScopeView>;

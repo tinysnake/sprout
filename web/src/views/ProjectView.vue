@@ -20,7 +20,10 @@ import Card from '../primitives/Card.vue';
 import ClampedText from '../primitives/ClampedText.vue';
 import EmptyState from '../primitives/EmptyState.vue';
 import Dialog from '../primitives/Dialog.vue';
+import { useUnreadState } from '../modules/chat/unread-state.ts';
+import UnreadBadge from '../modules/chat/UnreadBadge.vue';
 
+const unread = useUnreadState();
 const route = useRoute();
 const router = useRouter();
 const announcer = useAnnouncer();
@@ -331,7 +334,6 @@ interface ChatScope {
   kindLabel: string;
   lastSnippet: string;
   lastTime: string;
-  unread: number;
   readOnlyReason: string;
 }
 
@@ -343,7 +345,6 @@ const chatScopes: ChatScope[] = [
     kindLabel: 'Project channel',
     lastSnippet: 'All accessible dialog checks pass on both viewports.',
     lastTime: '10:11 AM',
-    unread: 0,
     readOnlyReason: '',
   },
   {
@@ -353,7 +354,6 @@ const chatScopes: ChatScope[] = [
     kindLabel: 'Working group',
     lastSnippet: 'Focus ring contrast measured at 5.1:1.',
     lastTime: '09:48 AM',
-    unread: 2,
     readOnlyReason: '',
   },
   {
@@ -363,7 +363,6 @@ const chatScopes: ChatScope[] = [
     kindLabel: 'Direct message',
     lastSnippet: 'Lease recovery evidence attached.',
     lastTime: '09:20 AM',
-    unread: 0,
     readOnlyReason: '',
   },
 ];
@@ -878,11 +877,7 @@ function sendMessage() {
                 {{ scope.lastSnippet }}
               </p>
 
-              <div v-if="scope.unread > 0" class="flex justify-end pt-0.5">
-                <span class="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-[var(--accent-primary)] text-[var(--text-inverse)]">
-                  {{ scope.unread }} new
-                </span>
-              </div>
+              <UnreadBadge :count="unread?.count(scope.id) ?? 0" />
             </button>
           </div>
         </div>

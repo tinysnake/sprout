@@ -182,6 +182,11 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
     { name: 'batch_id', type: 'TEXT', notnull: 0, pk: 0 },
   ],
+  collaboration_read_markers: [
+    { name: 'scope_id', type: 'TEXT', notnull: 1, pk: 1 },
+    { name: 'human_id', type: 'TEXT', notnull: 1, pk: 2 },
+    { name: 'message_id', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   collaboration_attention_resolutions: [
     { name: 'source_kind', type: 'TEXT', notnull: 1, pk: 1 },
     { name: 'source_id', type: 'TEXT', notnull: 1, pk: 2 },

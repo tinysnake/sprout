@@ -66,6 +66,7 @@ function evidence(input: RoutingEvidenceView['input'], id: string): RoutingEvide
 /** Test-only authority. Production bootstrap never imports it. */
 export class FixtureChatService implements ChatService {
   readonly #scopes = [...scopes];
+  readonly #read = new Set<string>();
   readonly #messages = [...fixtureMessages];
   readonly #events = [event, runFailureEvent];
   #idleEvents = 0;
@@ -88,6 +89,16 @@ export class FixtureChatService implements ChatService {
   constructor(options: { readonly archived?: boolean; readonly loading?: boolean } = {}) { this.options = options; }
   state(): BrowserTransportState { return { status: 'online', connection: 'online', loading: false }; }
   subscribeState(listener: (state: BrowserTransportState) => void) { listener(this.state()); return () => {}; }
+  async listUnread() {
+    return this.#scopes.map((scope) => ({ scopeId: scope.id, projectId: scope.projectId,
+      count: scope.kind === 'working-group' && scope.status === 'disbanded' || scope.id === 'dm-ended' ? 0
+        : this.#messages.filter((m) => m.scopeId === scope.id && m.authorId !== 'operator' && !this.#read.has(m.id)).length }));
+  }
+  async markRead(scopeId: string, ids: readonly string[]) {
+    if (ids.some((id) => !this.#messages.some((m) => m.id === id && m.scopeId === scopeId))) throw new Error('Wrong scope');
+    for (const id of ids) this.#read.add(id);
+    return (await this.listUnread()).find((scope) => scope.scopeId === scopeId)!;
+  }
   async listScopes(id: string): Promise<readonly ConversationScopeView[]> {
     if (this.options.loading) return new Promise(() => {});
     return id === 'project-archived' ? [{ id: 'channel-project-archived', kind: 'project', projectId: id, createdAt: at, updatedAt: at }] : [...this.#scopes];

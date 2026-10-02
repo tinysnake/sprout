@@ -127,6 +127,8 @@ export interface CreateWorkingGroupInput {
 export interface ConversationBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
+  listUnread(): Promise<readonly import('../../../src/web/chat-read-router.ts').UnreadScopeCount[]>;
+  markRead(scopeId: string, messageIds: readonly string[]): Promise<import('../../../src/web/chat-read-router.ts').UnreadScopeCount>;
   /** Every scope of one Project: the Project channel, direct conversations, Working groups. */
   listScopes(projectId: string): Promise<readonly ConversationScopeView[]>;
   /** Open (idempotently) one Project-scoped direct conversation. */
@@ -185,6 +187,13 @@ export function createConversationBrowserAdapter(
   return {
     state: () => transport.state(),
     subscribeState: (listener) => transport.subscribeState(listener),
+    async listUnread() {
+      const response = await transport.request<{ readonly scopes: readonly import('../../../src/web/chat-read-router.ts').UnreadScopeCount[] }>('/api/chat/unread');
+      return response.scopes;
+    },
+    async markRead(scopeId, messageIds) {
+      return transport.request<import('../../../src/web/chat-read-router.ts').UnreadScopeCount>(`/api/scopes/` + encodeURIComponent(scopeId) + '/read', jsonCommand({ messageIds }));
+    },
     async listScopes(projectId) {
       const response = await transport.request<{ readonly scopes: readonly ConversationScopeView[] }>(
         `/api/projects/${encodeURIComponent(projectId)}/scopes`,

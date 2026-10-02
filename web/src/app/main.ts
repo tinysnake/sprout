@@ -10,6 +10,7 @@ import { createAgentBrowserAdapter } from '../adapters/agent-api.js';
 import { ProductionAgentService } from '../modules/agents/adapters/production-adapter.js';
 import { PROJECT_SERVICE, type ProjectManagementService } from '../modules/projects/types.js';
 import { ProductionProjectService } from '../modules/projects/adapters/production-adapter.js';
+import { UNREAD_STATE, createUnreadState } from '../modules/chat/unread-state.js';
 import { CHAT_SERVICE, type ChatService } from '../modules/chat/types.js';
 import { ProductionChatService } from '../modules/chat/adapters/production-adapter.js';
 import { createConversationBrowserAdapter } from '../adapters/conversation-api.js';
@@ -111,6 +112,7 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.chatService) {
     app.provide(CHAT_SERVICE, options.chatService);
+    app.provide(UNREAD_STATE, createUnreadState(options.chatService));
   }
   if (options.usageService) {
     app.provide(USAGE_SERVICE, options.usageService);

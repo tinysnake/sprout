@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 27;
+export const CURRENT_SCHEMA_VERSION = 28;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 27;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 28;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1272,6 +1272,19 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         resolved_at INTEGER NOT NULL,
         source_version INTEGER NOT NULL,
         PRIMARY KEY (source_kind, source_id)
+      );`);
+    },
+  },
+  {
+    fromVersion: 27,
+    toVersion: 28,
+    name: 'collaboration_read_markers',
+    migrate(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS collaboration_read_markers (
+        scope_id TEXT NOT NULL,
+        human_id TEXT NOT NULL,
+        message_id TEXT NOT NULL CHECK (length(message_id) > 0),
+        PRIMARY KEY (scope_id, human_id)
       );`);
     },
   },

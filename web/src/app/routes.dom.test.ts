@@ -116,6 +116,87 @@ async function deterministicAppOptions(vite: ViteDevServer) {
   };
 }
 
+for (const surface of ['sidebar', 'feed-card', 'feed-activity', 'scope-card'] as const) {
+  test(`durable unread ${surface}: visible before opening, retained on remount, and cleared only by reading its scope`, async () => {
+    const { vite, doc, mount, cleanup } = await setupHarness();
+    let activeApp: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+    try {
+      const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+      const options = await deterministicAppOptions(vite);
+      options.chatService.pushIdleMessage('wg-frontend', 'PRIVATE_UNREAD_BODY');
+      options.chatService.pushIdleMessage('dm-architect', 'Other scope arrival');
+      const path = surface === 'scope-card' ? '/project/chat' : '/feed';
+      const selector = surface === 'sidebar' ? '[data-nav="chat"] [data-unread-count]'
+        : surface === 'scope-card' ? '[data-scope-id="wg-frontend"] [data-unread-count]'
+        : surface === 'feed-card' ? '[data-unread-scope="wg-frontend"] [data-unread-count]'
+        : '[data-activity-id="message-wg"] [data-unread-count]';
+      // Feed targets use the durable scope identity rather than message prose.
+      if (surface === 'feed-activity') {
+        const snapshot = await options.feedService.load();
+        options.feedService.load = async () => ({ ...snapshot, activity: [{ id: 'message-wg', kind: 'message', projectId: 'project-sprout', summary: 'Message recorded', scopes: ['feed:all', 'project-sprout'], at: 1, target: { surface: 'project-chat', path: '/project/chat/wg-frontend', projectId: 'project-sprout', scopeId: 'wg-frontend' } }] });
+      }
+      let mounted = createSproutApp(options); activeApp = mounted;
+      await mounted.router.push(path); mounted.app.mount(mount); await settle(180);
+      const badge = doc.querySelector(selector);
+      assert.ok(badge, `${surface} shows unread before opening`);
+      assert.ok(!badge.textContent?.includes('PRIVATE'), 'badges contain counts only');
+      mounted.app.unmount();
+      mounted = createSproutApp(options); activeApp = mounted;
+      await mounted.router.push(path); mounted.app.mount(mount); await settle(180);
+      assert.ok(doc.querySelector(selector), 'unread survives a fresh app mount');
+      await mounted.router.push('/project/chat/wg-frontend?project=project-sprout'); await settle(180);
+      await mounted.router.push('/project/chat/dm-empty?project=project-sprout'); await settle(130);
+      assert.ok(doc.querySelector('[data-scope-id="dm-architect"] [data-unread-count]'), 'scope switches preserve other unread conversations');
+      await mounted.router.push('/project/chat/%23general?project=project-sprout'); await settle(130);
+      await mounted.router.push('/project/chat/dm-architect?project=project-sprout'); await settle(130);
+      await mounted.router.push(path); await settle(130);
+      assert.equal(doc.querySelector(selector), null, 'badge clears after the relevant conversation is read');
+      mounted.app.unmount();
+      mounted = createSproutApp(options); activeApp = mounted;
+      await mounted.router.push(path); mounted.app.mount(mount); await settle(160);
+      assert.equal(doc.querySelector(selector), null, 'read state survives a fresh app mount');
+      mounted.app.unmount();
+      activeApp = undefined;
+    } finally { activeApp?.app.unmount(); await cleanup(); }
+  });
+}
+
+test('phone scope list and hidden conversation never acknowledge unseen messages', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+  try {
+    Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 390 });
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    options.chatService.pushIdleMessage('wg-frontend', 'PRIVATE_PHONE_ARRIVAL');
+    mounted = createSproutApp(options);
+    await mounted.router.push('/project/chat'); mounted.app.mount(mount); await settle(180);
+    assert.ok(doc.querySelector('[data-scope-id="#general"] [data-unread-count]'), 'phone list preserves default-channel unread');
+    Object.defineProperty(doc, 'visibilityState', { configurable: true, value: 'hidden' });
+    await mounted.router.push('/project/chat/wg-frontend?project=project-sprout'); await settle(160);
+    assert.equal((await options.chatService.listUnread()).find((s) => s.scopeId === 'wg-frontend')?.count, 1, 'hidden detail is not read');
+    Object.defineProperty(doc, 'visibilityState', { configurable: true, value: 'visible' });
+    doc.dispatchEvent(new dom.window.Event('visibilitychange')); await settle(180);
+    assert.equal((await options.chatService.listUnread()).find((s) => s.scopeId === 'wg-frontend')?.count, 0, 'visible detail clears only its scope');
+    assert.equal((await options.chatService.listUnread()).find((s) => s.scopeId === '#general')?.count, 1);
+  } finally { mounted?.app.unmount(); await cleanup(); }
+});
+
+test('Chat retains the open evidence popup while unread refreshes the same scope', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+  try {
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    mounted = createSproutApp(options);
+    await mounted.router.push('/project/chat'); mounted.app.mount(mount); await settle(180);
+    (doc.querySelector('[data-message-id="msg-addressed"] .chat-evidence-trigger') as HTMLButtonElement).click(); await settle(80);
+    assert.ok(doc.querySelector('.chat-evidence-popup'));
+    await options.chatService.pushIncoming('#general', 'Incoming while inspecting'); await settle(100);
+    assert.ok(doc.querySelector('.chat-evidence-popup'), 'a background unread refresh must not dismiss operator evidence');
+  } finally { mounted?.app.unmount(); await cleanup(); }
+});
+
 /** Routes the operator can actually reach, with the content each must compose. */
 const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: string; expect: RegExp }[] = [
   { path: '/feed', destination: 'feed', expect: /Operations Feed & Human Attention/ },
@@ -644,7 +725,7 @@ test('Project Chat marks offline facts stale and disables controls; loading and 
     await fixture.pushIncoming('wg-frontend', 'New agent update');
     await settle(80);
     assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /1 new message in /i);
-    assert.match(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.textContent ?? '', /1 new/);
+    assert.equal(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.getAttribute('data-unread-count'), '1');
     (doc.querySelector('[data-scope-id="wg-frontend"]') as HTMLButtonElement).click();
     await settle(90);
     assert.equal(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge'), null);
@@ -848,7 +929,7 @@ test('idle Message and Project-event arrivals announce without run status; hidde
     fixture.pushIdleMessage('wg-frontend', 'Unrouted conversation update');
     await settle(15100); // The bounded idle poll, not an injected run-status notification.
     assert.match(doc.querySelector('.shell-announcer')?.textContent ?? '', /1 new message in /i);
-    assert.match(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.textContent ?? '', /1 new/);
+    assert.equal(doc.querySelector('[data-scope-id="wg-frontend"] .chat-unread-badge')?.getAttribute('data-unread-count'), '1');
 
     Object.defineProperty(doc, 'visibilityState', { configurable: true, value: 'hidden' });
     doc.dispatchEvent(new dom.window.Event('visibilitychange'));

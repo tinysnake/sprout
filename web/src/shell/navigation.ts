@@ -18,12 +18,13 @@ export type DestinationKey = 'feed' | 'project' | 'manage';
 export type ProjectTabKey = 'overview' | 'tasks' | 'chat';
 export type ManageTabKey = 'environments' | 'agents' | 'usage' | 'settings';
 export type DestinationTabKey = ProjectTabKey | ManageTabKey;
-export type IndicatorKind = 'attention' | 'active-work' | 'degraded';
+export type IndicatorKind = 'attention' | 'active-work' | 'degraded' | 'unread';
 export type IndicatorStatus = 'yellow' | 'blue' | 'red';
 
 /** Bounded shell facts. Absent backend support reports zero, never a guessed value. */
 export interface NavigationIndicators {
   readonly attention: number;
+  readonly chatUnread?: number;
   readonly activeWork: number;
   readonly degradedEnvironments: number;
 }
@@ -71,6 +72,7 @@ const INDICATOR_STATUS: Readonly<Record<IndicatorKind, IndicatorStatus>> = {
   attention: 'yellow',
   'active-work': 'blue',
   degraded: 'red',
+  unread: 'red',
 };
 
 export const FEED_ITEM: NavigationItem = {
@@ -103,7 +105,7 @@ export const MANAGE_ITEM: NavigationItem = {
 export const PROJECT_ITEMS: readonly NavigationItem[] = [
   { key: 'overview', label: 'Overview & Contract', shortLabel: 'Overview', icon: 'overview', to: { name: 'project-overview' } },
   { key: 'tasks', label: 'Tasks & Leases', shortLabel: 'Tasks', icon: 'tasks', to: { name: 'project-tasks' }, indicator: 'active-work' },
-  { key: 'chat', label: 'Project Chat', shortLabel: 'Chat', icon: 'chat', to: { name: 'project-chat' } },
+  { key: 'chat', label: 'Project Chat', shortLabel: 'Chat', icon: 'chat', to: { name: 'project-chat' }, indicator: 'unread' },
 ];
 
 export const MANAGE_ITEMS: readonly NavigationItem[] = [
@@ -140,6 +142,7 @@ export function isDrillDown(route: RouteLocationNormalizedLoaded): boolean {
 }
 
 export function indicatorCount(indicators: NavigationIndicators, kind: IndicatorKind | undefined): number {
+  if (kind === 'unread') return indicators.chatUnread ?? 0;
   if (kind === 'attention') return indicators.attention;
   if (kind === 'active-work') return indicators.activeWork;
   if (kind === 'degraded') return indicators.degradedEnvironments;

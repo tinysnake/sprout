@@ -76,6 +76,10 @@ export interface CollaborationStore {
   getMessage(messageId: string): Promise<Message | undefined>;
   getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined>;
   listMessages(): Promise<readonly Message[]>;
+  /** Counts only messages after the Human's durable per-scope cursor, excluding their own input. */
+  unreadCount(scopeId: string, humanId: string): Promise<number>;
+  /** Acknowledge through an observed message; never advance over an unseen arrival. */
+  markReadThrough(scopeId: string, humanId: string, messageId: string): Promise<void>;
 
   /** Human-only Feed resolution; never changes historical collaboration facts. */
   resolveAttention(input: ResolveCollaborationAttention): Promise<void>;
@@ -271,6 +275,7 @@ export function wakeFromBatch(input: {
  * the contract rather than about one backend.
  */
 export class InMemoryCollaborationStore implements CollaborationStore {
+  readonly #readMarkers = new Map<string, number>();
   readonly #resolutions = new Map<string, CollaborationAttentionResolution>();
   readonly #observationTimes = new Map<string, number>();
   readonly #messages = new Map<string, Message>();
@@ -288,6 +293,19 @@ export class InMemoryCollaborationStore implements CollaborationStore {
   readonly #batchInputs = new Map<string, RoutingBatchInput[]>();
   readonly #attempts = new Map<string, RoutingAttempt[]>();
   readonly #outcomes = new Map<string, RoutingInputOutcome[]>();
+
+  async unreadCount(scopeId: string, humanId: string): Promise<number> {
+    const cursor = this.#readMarkers.get(JSON.stringify([scopeId, humanId])) ?? 0;
+    return [...this.#messages.values()].filter((m, index) => index + 1 > cursor && m.scopeId === scopeId && m.author.id !== humanId).length;
+  }
+
+  async markReadThrough(scopeId: string, humanId: string, messageId: string): Promise<void> {
+    const messages = [...this.#messages.values()];
+    const index = messages.findIndex((m) => m.id === messageId);
+    if (index < 0 || messages[index]!.scopeId !== scopeId) throw new Error('Message does not belong to this scope');
+    const key = JSON.stringify([scopeId, humanId]);
+    this.#readMarkers.set(key, Math.max(this.#readMarkers.get(key) ?? 0, index + 1));
+  }
 
   async postMessage(input: {
     readonly message: Message;
