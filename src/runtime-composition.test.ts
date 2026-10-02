@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteUsageStore } from './usage/sqlite-store.ts';
+import { InMemoryUsageStore, type UsageStore } from './usage/store.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { SchemaTooNewError, CURRENT_SCHEMA_VERSION } from './store/schema.ts';
 import {
@@ -39,6 +40,86 @@ import {
   scriptedEnvironment,
   scriptedTurn,
 } from './runtime-test-harness.ts';
+
+test('run settles and core writes stay loud when usage telemetry fails', async () => {
+  const stores = inMemoryStores();
+  const usage = new Proxy(new InMemoryUsageStore(), {
+    get(target, property) {
+      if (property === 'recordActivity') {
+        return async () => {
+          throw Object.assign(new Error('injected database contention'), { code: 'SQLITE_BUSY' });
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as UsageStore;
+  const coreTasks = new Proxy(stores.tasks, {
+    get(target, property) {
+      if (property === 'create') return async () => { throw new Error('core task write failed'); };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const environment = scriptedEnvironment({
+    adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [scriptedTurn('settled despite telemetry')] })]]),
+  });
+  const runtime = await createRuntime({
+    configuration: hostConfiguration(),
+    projectRoot: '/synthetic/project-root',
+    environment,
+    stores: { ...stores, tasks: coreTasks, usage },
+  });
+  const originalWrite = process.stderr.write;
+  let logged = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    logged += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const { id } = await runtime.orchestrator.submit({ agentId: 'scout', prompt: 'complete the run' });
+    const settled = await runtime.orchestrator.waitFor(id);
+    assert.equal(settled.status, 'completed');
+    assert.equal((await runtime.orchestrator.load(id))?.status, 'completed');
+    await new Promise((resolve) => setImmediate(resolve));
+    const logLines = logged.trim().split('\n');
+    assert.ok(logLines.length >= 1);
+    assert.ok(logLines.every((line) => line === 'Usage telemetry write failed; record dropped.'));
+    assert.doesNotMatch(logged, /injected|SQLITE_BUSY|run-|host|synthetic/);
+
+    await assert.rejects(
+      runtime.stores.tasks.create({} as never),
+      /core task write failed/,
+      'core task persistence errors must remain observable',
+    );
+  } finally {
+    process.stderr.write = originalWrite;
+    await runtime.close();
+  }
+});
+
+test('runtime composition opens its configured database through the WAL-enabled SqliteStore path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-wal-'));
+  const filename = join(directory, 'runtime.sqlite');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({ databasePath: filename }),
+    projectRoot: '/synthetic/project-root',
+    environment: scriptedEnvironment({
+      adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+    }),
+  });
+  try {
+    const probe = new DatabaseSync(filename);
+    try {
+      assert.equal((probe.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
+    } finally {
+      probe.close();
+    }
+  } finally {
+    await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('the complete runtime graph is constructible over in-memory collaborators and scripted engines', async () => {
   const { runtime, stores, environment } = await build({ listen: false });
