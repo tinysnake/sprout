@@ -19,7 +19,7 @@ Schema v28 adds `collaboration_read_markers(scope_id, human_id, message_id)` thr
 
 The authenticated operator-only routes are `GET /api/chat/unread` and `POST /api/scopes/:id/read`. Receipts require the existing CSRF boundary and resolve the actor from Project Human authority; client actor fields have no authority. All observed message identities are validated against the scope before any mutation. Agent-to-Agent private Direct Messages are excluded. Responses carry only scope identity, Project identity, and integer counts, never Message content, transcripts, prompts, or run details.
 
-The app shares one count snapshot across surfaces, refreshes while visible at a bounded fifteen-second cadence, and invalidates summaries started before a receipt. Chat's existing scoped arrival reads and announcements remain intact. Server computation makes persistence and own-author exclusion consistent across reloads and browser instances; clients only render the resulting counts.
+The app shares one count snapshot across surfaces, refreshes while visible at a bounded fifteen-second cadence, and invalidates summaries started before a receipt. Concurrent observers wait for the same receipt to settle, and Chat announces arrivals after receipt/connection reads settle, so a late connection update cannot replace the arrival announcement. Refreshing the same scope retains an open evidence popup; changing scopes still closes it. Chat's existing scoped arrival reads and announcements remain intact. Server computation makes persistence and own-author exclusion consistent across reloads and browser instances; clients only render the resulting counts.
 
 ## Regression risks and evidence shape
 

@@ -66,6 +66,7 @@ function onResize() { viewportWidth.value = window.innerWidth; void markVisible(
 const knownEvents = new Set<string>();
 let generation = 0;
 let detailGeneration = 0;
+let inspectedScopeKey = '';
 let unsubRuns: (() => void) | undefined;
 const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
 // The Message port has no arrival signal. Observe the selected Project at a
@@ -222,15 +223,16 @@ function onVisibilityChange() {
 }
 async function loadScope() {
   const token = ++detailGeneration;
+  const key = `${projectId.value}|${activeScopeId.value}`;
+  if (key !== inspectedScopeKey) { evidenceOpen.value = null; inspectedScopeKey = key; }
   inspection.value = null;
-  evidenceOpen.value = null;
   if (!service || !activeScope.value || missingScope.value) { detailLoading.value = false; return; }
   detailLoading.value = true;
   try {
     const inspected = await service.inspectScope(activeScope.value.id);
     if (token === detailGeneration) inspection.value = inspected;
   } catch { if (token === detailGeneration) actionError.value = 'Conversation admission could not be verified. Sending is disabled.'; }
-  finally { if (token === detailGeneration) { detailLoading.value = false; void markVisible(); } }
+  finally { if (token === detailGeneration) { detailLoading.value = false; await markVisible(); } }
 }
 let lastTargetAnnouncement = '';
 watch([timeline, loading, detailLoading, missingScope, activeScopeId, requestedMessageId, requestedEventId], async () => {

@@ -182,6 +182,21 @@ test('phone scope list and hidden conversation never acknowledge unseen messages
   } finally { mounted?.app.unmount(); await cleanup(); }
 });
 
+test('Chat retains the open evidence popup while unread refreshes the same scope', async () => {
+  const { vite, doc, mount, cleanup } = await setupHarness();
+  let mounted: ReturnType<typeof import('./main.ts')['createSproutApp']> | undefined;
+  try {
+    const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    mounted = createSproutApp(options);
+    await mounted.router.push('/project/chat'); mounted.app.mount(mount); await settle(180);
+    (doc.querySelector('[data-message-id="msg-addressed"] .chat-evidence-trigger') as HTMLButtonElement).click(); await settle(80);
+    assert.ok(doc.querySelector('.chat-evidence-popup'));
+    await options.chatService.pushIncoming('#general', 'Incoming while inspecting'); await settle(100);
+    assert.ok(doc.querySelector('.chat-evidence-popup'), 'a background unread refresh must not dismiss operator evidence');
+  } finally { mounted?.app.unmount(); await cleanup(); }
+});
+
 /** Routes the operator can actually reach, with the content each must compose. */
 const REACHABLE_ROUTES: readonly { path: string; destination: string; tab?: string; expect: RegExp }[] = [
   { path: '/feed', destination: 'feed', expect: /Operations Feed & Human Attention/ },

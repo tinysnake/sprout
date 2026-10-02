@@ -2,6 +2,18 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createUnreadState } from './unread-state.ts';
 
+test('concurrent observers wait for the durable receipt before treating the conversation as settled', async () => {
+  let release!: (value: typeof row) => void;
+  let receiptDone = false;
+  const state = createUnreadState({ listUnread: async () => [{ ...row, count: receiptDone ? 0 : 2 }], markRead: () => new Promise((resolve) => { release = (value) => { receiptDone = true; resolve(value); }; }) });
+  const first = state.markRead('scope', ['seen']);
+  let settled = false;
+  const second = state.markRead('scope', ['seen']).then(() => { settled = true; });
+  try { await Promise.resolve(); await Promise.resolve(); assert.equal(settled, false, 'arrival observers cannot announce before the receipt settles'); }
+  finally { release({ ...row, count: 0 }); await first; await second; }
+  assert.equal(state.count('scope'), 0);
+});
+
 const row = { scopeId: 'scope', projectId: 'project', count: 2 };
 test('unread projection rejects hostile counts and reports unavailable instead of inventing zero read state', async () => {
   for (const count of [-1, NaN, Infinity, 0.5]) {
