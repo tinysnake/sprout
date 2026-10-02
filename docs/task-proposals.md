@@ -177,6 +177,35 @@ Project sentinel without touching Project work. Failed/interrupted runs expose
 a system-attributed routable blocker requiring Human inspection. Idle recovery
 restores the prior pause, blocker, or validation gap without replaying work.
 
+## Project Tasks browser behavior
+
+Saving a proposal opens that proposal's detail and selects the proposed filter.
+The Human can inspect the saved content immediately, including on a phone where
+only one pane is visible. The status filter is a labeled dropdown without a
+surrounding tab-strip panel.
+
+The page uses Chat's full-height, bounded split-container pattern: list and
+detail scroll internally, so switching between short and long Tasks does not
+resize the outer content container. Its minimum content height matches Chat.
+
+Approve & Begin offers the Human and compatible active Project Agents as leads,
+as required by ADR-0006. Agent choices depend on the selected Environment.
+Selection uses approved enrollment, clear work safety, online Worker, confirmed
+protocol, granted Agent-run capability, and observed per-Agent compatibility.
+A red readiness summary remains blocked. A yellow summary alone does not block
+selection: it may concern an unrelated engine or probe while the selected Agent
+has a compatible work option. Unknown compatibility stays unknown and blocks
+selection with explicit guidance. These browser facts are observations; the
+server still rechecks Project access, membership, active Agent authority,
+work-option eligibility, and lease acquisition when begin is requested.
+
+Regression coverage in `web/src/modules/tasks/tasks.dom.test.ts` protects
+creation from a filter that hides proposals, dropdown filtering and the bounded
+pane contract, selection of another Agent lead with a yellow summary, and
+explicit unavailable/unknown resource guidance. The shared typed-conflict case
+also covers a server refusal to reserve an Environment. Visual geometry still
+requires browser review; DOM assertions cover the layout contract.
+
 ## Risk-to-test map
 
 - Pre-acquisition refusal and post-acquisition Worker failure: `src/task/admission.test.ts`.
