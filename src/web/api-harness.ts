@@ -24,6 +24,7 @@ import type { RunApi } from './api.ts';
 import { createProjectRouter } from './project-router.ts';
 import { createConversationRouter } from './conversation-router.ts';
 import { createChatReadRouter } from './chat-read-router.ts';
+import { createChatRunRouter } from './chat-run-router.ts';
 import { createAgentRouter } from './agent-router.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
@@ -437,6 +438,7 @@ export async function buildReplyProjectionApi(
       createProjectRouter({ projects }),
       createConversationRouter({ scopes }),
       createChatReadRouter({ scopes, store: collaborationStore }),
+      createChatRunRouter({ collaboration, scopes, runs: orchestrator }),
       createAgentRouter({ agents: durableAgents }),
     ],
   });

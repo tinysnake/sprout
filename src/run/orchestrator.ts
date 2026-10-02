@@ -249,6 +249,7 @@ export class RunOrchestrator {
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
   readonly #stopRequests = new Set<string>();
+  readonly #stopOutcomes = new Map<string, 'stopped' | 'interrupted'>();
   readonly #stopInterruptSent = new Set<string>();
   readonly #settled = new Map<string, Promise<AgentRun>>();
   readonly #observers = new Set<RunObserver>();
@@ -765,11 +766,25 @@ export class RunOrchestrator {
    * so the Web client never has to guess what "stop" meant for it.
    */
   async stop(runId: string): Promise<AgentRun> {
+    return this.#requestStop(runId, 'stopped');
+  }
+
+  /** Interrupt a one-round Chat run; its run lease is released before this resolves. */
+  async interrupt(runId: string): Promise<AgentRun> {
+    return this.#requestStop(runId, 'interrupted');
+  }
+
+  async #requestStop(runId: string, outcome: 'stopped' | 'interrupted'): Promise<AgentRun> {
     const run = this.#runs.get(runId);
     if (!run) throw new Error(`unknown run: ${runId}`);
+    if (outcome === 'interrupted' && (run.taskId !== undefined ||
+        (run.leaseId !== undefined && this.#pool.getLease(run.leaseId)?.holderKind === 'task'))) {
+      throw new Error('Task runs are controlled from Tasks');
+    }
     if (run.status !== 'running' && run.status !== 'queued') return run;
 
     this.#stopRequests.add(runId);
+    this.#stopOutcomes.set(runId, outcome);
     const session = this.#sessions.get(runId);
     if (session) {
       // Ask the engine to stop, then close the session. `close` is what
@@ -791,7 +806,7 @@ export class RunOrchestrator {
     workspace: { readonly projectWorkspaceId?: string; readonly projectWorkspaceKind?: 'default' | 'relative'; readonly projectWorkspacePath?: string; readonly taskBootstrapInstructions?: string } = {},
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
-      return this.#finish(initial, 'stopped', { status: 'interrupted' });
+      return this.#finish(initial, 'interrupted', { status: 'interrupted' });
     }
     // The run executes under the option it was admitted with (#90): the
     // engine, work model, and effort recorded before any engine accepted the
@@ -1192,7 +1207,7 @@ export class RunOrchestrator {
       case 'completed':
         return this.#finish(run, 'completed', result);
       case 'interrupted':
-        return this.#finish(run, this.#stopRequests.has(run.id) ? 'stopped' : 'interrupted', result);
+        return this.#finish(run, 'interrupted', result);
       case 'failed':
         return this.#finish(run, 'failed', result);
     }
@@ -1211,17 +1226,19 @@ export class RunOrchestrator {
     failureClass: RunFailureClass = 'execution',
   ): Promise<AgentRun> {
     const stopWins = this.#stopRequests.has(run.id) && status !== 'completed';
-    const finalStatus = stopWins ? 'stopped' : status;
+    const finalStatus = stopWins ? this.#stopOutcomes.get(run.id) ?? 'stopped' : status;
     const finalResult: EngineTurnResult = stopWins ? { status: 'interrupted' } : result;
     const settled = await this.#advance(run, {
       status: finalStatus,
       result: finalResult,
+      ...(stopWins && finalStatus === 'interrupted' ? { interruptionReason: 'human-stop' as const } : {}),
       ...(finalResult.tokenUsage !== undefined ? { tokenUsage: finalResult.tokenUsage } : {}),
       ...(finalResult.detailedTokens !== undefined ? { detailedTokens: finalResult.detailedTokens } : {}),
       completedAt: this.#clock.now(),
       ...(finalResult.status === 'failed' ? { failure: finalResult.message, failureClass } : {}),
     });
     this.#stopRequests.delete(run.id);
+    this.#stopOutcomes.delete(run.id);
     this.#stopInterruptSent.delete(run.id);
     return settled;
   }
