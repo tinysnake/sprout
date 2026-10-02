@@ -356,7 +356,7 @@ test('the user can stop a run through the worker', async (t) => {
 });
 
 
-test('a worker that dies mid-run fails the run instead of hanging it', async (t) => {
+test('a worker that dies mid-run interrupts the run instead of hanging it', async (t) => {
   const worker = await connectedWorker({
     turns: [
       {
@@ -376,8 +376,8 @@ test('a worker that dies mid-run fails the run instead of hanging it', async (t)
   worker.killChannel();
 
   const run = await orchestrator.waitFor(id);
-  assert.equal(run.status, 'failed');
-  assert.match(run.failure ?? '', /worker channel closed/i);
+  assert.equal(run.status, 'interrupted');
+  assert.deepEqual(run.result, { status: 'interrupted' });
 });
 
 
