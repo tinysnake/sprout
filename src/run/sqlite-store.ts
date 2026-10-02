@@ -6,8 +6,10 @@ import type { AgentWorkOption } from '../agent/model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import {
   sessionKeyId,
+  workingDirectoryId,
   type SessionKeyStore,
   type SessionKeyIdentity,
+  type SessionKeyWrite,
   type StoredSessionKey,
 } from './session-key-store.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
@@ -284,11 +286,64 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         agent_id TEXT NOT NULL,
         engine TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
-        working_directory TEXT NOT NULL,
+        working_directory_id TEXT NOT NULL,
         session_key TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
     `);
+    const columns = this.#db.prepare('PRAGMA table_info(agent_session_keys)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    const names = new Set(columns.map((column) => column.name));
+    if (names.has('working_directory') && !names.has('working_directory_id')) {
+      this.#migrateLegacySessionKeys();
+    }
+  }
+
+  #migrateLegacySessionKeys(): void {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = this.#db.prepare('SELECT * FROM agent_session_keys').all() as unknown as readonly LegacySessionKeyRow[];
+      this.#db.exec(`
+        ALTER TABLE agent_session_keys RENAME TO agent_session_keys_path_legacy;
+        CREATE TABLE agent_session_keys (
+          slot TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          engine TEXT NOT NULL,
+          environment_instance_id TEXT NOT NULL,
+          working_directory_id TEXT NOT NULL,
+          session_key TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+      `);
+      const insert = this.#db.prepare(`
+        INSERT INTO agent_session_keys
+          (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of rows) {
+        const identity: SessionKeyIdentity = {
+          agentId: row.agent_id,
+          engine: row.engine,
+          environmentInstanceId: row.environment_instance_id,
+          workingDirectory: row.working_directory,
+        };
+        const directoryId = workingDirectoryId(row.working_directory);
+        insert.run(
+          sessionKeyId(identity),
+          row.agent_id,
+          row.engine,
+          row.environment_instance_id,
+          directoryId,
+          row.session_key,
+          row.updated_at,
+        );
+      }
+      this.#db.exec('DROP TABLE agent_session_keys_path_legacy; COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   async get(identity: SessionKeyIdentity): Promise<StoredSessionKey | undefined> {
@@ -298,11 +353,12 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
     return row ? toStoredSessionKey(row as SessionKeyRow) : undefined;
   }
 
-  async save(record: StoredSessionKey): Promise<void> {
+  async save(record: SessionKeyWrite): Promise<void> {
+    const directoryId = workingDirectoryId(record.workingDirectory);
     this.#db
       .prepare(
         `INSERT INTO agent_session_keys
-           (slot, agent_id, engine, environment_instance_id, working_directory, session_key, updated_at)
+           (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(slot) DO UPDATE SET
            session_key = excluded.session_key,
@@ -313,7 +369,7 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         record.agentId,
         record.engine,
         record.environmentInstanceId,
-        record.workingDirectory,
+        directoryId,
         record.key,
         record.updatedAt,
       );
@@ -385,6 +441,15 @@ interface SessionKeyRow {
   readonly agent_id: string;
   readonly engine: string;
   readonly environment_instance_id: string;
+  readonly working_directory_id: string;
+  readonly session_key: string;
+  readonly updated_at: number;
+}
+
+interface LegacySessionKeyRow {
+  readonly agent_id: string;
+  readonly engine: string;
+  readonly environment_instance_id: string;
   readonly working_directory: string;
   readonly session_key: string;
   readonly updated_at: number;
@@ -395,7 +460,7 @@ function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
     agentId: row.agent_id,
     engine: row.engine,
     environmentInstanceId: row.environment_instance_id,
-    workingDirectory: row.working_directory,
+    workingDirectoryId: row.working_directory_id,
     key: row.session_key,
     updatedAt: row.updated_at,
   };

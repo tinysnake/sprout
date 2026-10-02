@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
@@ -7,8 +8,9 @@ import { join } from 'node:path';
 import {
   InMemorySessionKeyStore,
   sessionKeyId,
+  workingDirectoryId,
   type SessionKeyIdentity,
-  type StoredSessionKey,
+  type SessionKeyWrite,
 } from './session-key-store.ts';
 import { SqliteSessionKeyStore } from './sqlite-store.ts';
 
@@ -19,7 +21,7 @@ const identity: SessionKeyIdentity = {
   workingDirectory: '/srv/work',
 };
 
-function record(overrides: Partial<StoredSessionKey> = {}): StoredSessionKey {
+function record(overrides: Partial<SessionKeyWrite> = {}): SessionKeyWrite {
   return { ...identity, key: 'sess-1', updatedAt: 1_000, ...overrides };
 }
 
@@ -42,7 +44,14 @@ test('a stored key round-trips through SQLite across a restart', async () => {
   const restored = await reader.get(identity);
   reader.close();
 
-  assert.deepEqual(restored, record({ key: 'sess-persisted' }));
+  assert.deepEqual(restored, {
+    agentId: identity.agentId,
+    engine: identity.engine,
+    environmentInstanceId: identity.environmentInstanceId,
+    workingDirectoryId: workingDirectoryId(identity.workingDirectory),
+    key: 'sess-persisted',
+    updatedAt: 1_000,
+  });
 });
 
 test('re-saving a slot replaces its key instead of duplicating it', async () => {
@@ -81,4 +90,56 @@ test('a working directory containing the slot delimiter does not collide', () =>
   const a = sessionKeyId({ ...identity, workingDirectory: '/srv/a" , "agent-scout' });
   const b = sessionKeyId({ ...identity, workingDirectory: '/srv/a' });
   assert.notEqual(a, b);
+});
+
+test('SQLite session-key rows do not retain the working directory verbatim', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-session-key-privacy-'));
+  const dbPath = join(dir, 'sprout.db');
+  const rawWorkingDirectory = '/srv/synthetic-private-workspace';
+  const writer = new SqliteSessionKeyStore({ filename: dbPath });
+  await writer.save(record({ workingDirectory: rawWorkingDirectory }));
+  writer.close();
+
+  const db = new DatabaseSync(dbPath);
+  const rows = db.prepare('SELECT slot, working_directory_id, session_key FROM agent_session_keys').all();
+  db.close();
+
+  assert.equal(JSON.stringify(rows).includes(rawWorkingDirectory), false);
+});
+
+test('opening a legacy session-key table removes verbatim working directories', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-session-key-legacy-'));
+  const dbPath = join(dir, 'sprout.db');
+  const rawWorkingDirectory = '/srv/synthetic-legacy-workspace';
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE agent_session_keys (
+      slot TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL,
+      working_directory TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.prepare('INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    JSON.stringify(['agent-scout', 'pi', 'mac-mini-1', rawWorkingDirectory]),
+    'agent-scout',
+    'pi',
+    'mac-mini-1',
+    rawWorkingDirectory,
+    'sess-legacy',
+    1_000,
+  );
+
+  const store = new SqliteSessionKeyStore({ db });
+  const restored = await store.get({ ...identity, workingDirectory: rawWorkingDirectory });
+  const rows = db.prepare('SELECT * FROM agent_session_keys').all();
+  store.close();
+  db.close();
+
+  assert.equal(restored?.key, 'sess-legacy', 'the key remains available after migration');
+  assert.equal(restored?.workingDirectoryId, workingDirectoryId(rawWorkingDirectory));
+  assert.equal(JSON.stringify(rows).includes(rawWorkingDirectory), false);
 });

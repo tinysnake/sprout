@@ -123,7 +123,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'agent_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'engine', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
-    { name: 'working_directory', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'working_directory_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'session_key', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],

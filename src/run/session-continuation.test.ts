@@ -1,3 +1,7 @@
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import assert from 'node:assert/strict';
@@ -19,7 +23,8 @@ import type { Project } from '../project/model.ts';
 
 import { InMemoryRunStore } from './store.ts';
 
-import { InMemorySessionKeyStore } from './session-key-store.ts';
+import { InMemorySessionKeyStore, type SessionKeyStore } from './session-key-store.ts';
+import { SqliteSessionKeyStore } from './sqlite-store.ts';
 
 import { RunOrchestrator } from './orchestrator.ts';
 
@@ -80,7 +85,7 @@ function build(options: {
   knownSessionKeys?: readonly string[];
   staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
   failStart?: string;
-  sessionKeys?: InMemorySessionKeyStore;
+  sessionKeys?: SessionKeyStore;
   store?: InMemoryRunStore;
   projects?: readonly Project[];
   instances?: readonly EnvironmentInstance[];
@@ -316,6 +321,75 @@ test('a key stored by a previous process is used after a restart', async () => {
   await second.orchestrator.waitFor(next.id);
 
   assert.equal(second.adapter.requests[0]?.resumeSessionKey, keyBeforeRestart);
+});
+
+
+test('a migrated SQLite session key resumes after the database is reopened', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-session-key-migration-'));
+  const filename = join(directory, 'sprout.db');
+  const workingDirectory = '/srv/work';
+  const legacyKey = 'legacy-engine-session-key';
+  const identity = {
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory,
+  };
+
+  try {
+    const legacyDb = new DatabaseSync(filename);
+    legacyDb.exec(`
+      CREATE TABLE agent_session_keys (
+        slot TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        environment_instance_id TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    legacyDb.prepare('INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      JSON.stringify([identity.agentId, identity.engine, identity.environmentInstanceId, workingDirectory]),
+      identity.agentId,
+      identity.engine,
+      identity.environmentInstanceId,
+      workingDirectory,
+      legacyKey,
+      1_000,
+    );
+    legacyDb.close();
+
+    const migrationDb = new DatabaseSync(filename);
+    try {
+      const migrationStore = new SqliteSessionKeyStore({ db: migrationDb });
+      assert.equal((await migrationStore.get(identity))?.key, legacyKey);
+      migrationStore.close();
+    } finally {
+      migrationDb.close();
+    }
+
+    const reopenedDb = new DatabaseSync(filename);
+    try {
+      const sessionKeys = new SqliteSessionKeyStore({ db: reopenedDb });
+      const { orchestrator, adapter } = build({
+        sessionKeys,
+        knownSessionKeys: [legacyKey],
+      });
+      const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'continue' });
+      const run = await orchestrator.waitFor(id);
+
+      assert.equal(run.status, 'completed');
+      assert.equal(adapter.requests[0]?.resumeSessionKey, legacyKey);
+      assert.equal(adapter.sessions[0]?.engineSessionKey, legacyKey);
+      assert.equal((await sessionKeys.get(identity))?.key, legacyKey);
+      sessionKeys.close();
+    } finally {
+      reopenedDb.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 
