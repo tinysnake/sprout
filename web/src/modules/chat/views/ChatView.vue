@@ -257,7 +257,11 @@ function onVisibilityChange() {
   if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
   if (document.visibilityState === 'hidden') return;
   void refreshMessages(); // Catch up after a hidden interval without polling it.
-  pollTimer = setInterval(() => { void refreshMessages(); }, CHAT_POLL_MS);
+  void refreshActiveRuns(); // Refresh run authority even if a message read is already in flight.
+  pollTimer = setInterval(() => {
+    void refreshMessages();
+    void refreshActiveRuns();
+  }, CHAT_POLL_MS);
 }
 async function loadScope() {
   const token = ++detailGeneration;
@@ -514,6 +518,7 @@ onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); 
   onVisibilityChange();
   unsubRuns = service?.subscribeRunStatuses(() => {
     void refreshMessages();
+    void refreshActiveRuns();
     // Run settlement can reach the event stream just before its reply projection.
     for (const delay of [400, 1500]) {
       const timer = setTimeout(() => { refreshTimers.delete(timer); void refreshMessages(); }, delay);
