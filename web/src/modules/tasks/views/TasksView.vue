@@ -80,6 +80,7 @@ const completionLimitations = ref('');
 const completionDisposition = ref<'complete' | 'continue'>('complete');
 let loadGeneration = 0;
 let detailGeneration = 0;
+let focusSelectedRecord = false;
 
 const selectedProject = computed(() => projects.value.find((project) => project.id === selectedProjectId.value));
 const projectArchived = computed(() => selectedProject.value?.status === 'archived');
@@ -122,20 +123,30 @@ const environmentOptions = computed(() => {
     .filter((entry) => entry.status === 'active' && entry.current !== undefined)
     .map((entry) => {
       const environment = snapshot.environments.find((row) => row.environmentInstanceId === entry.environmentInstanceId || row.id === entry.environmentInstanceId);
-      const compatibleAgentIds = snapshot.compatibility
-        .filter((row) => row.environmentInstanceId === entry.environmentInstanceId && row.available === true && activeIds.has(row.agentId))
-        .map((row) => row.agentId);
+      const compatibility = snapshot.compatibility.filter((row) => row.environmentInstanceId === entry.environmentInstanceId && activeIds.has(row.agentId));
+      const compatibleAgentIds = compatibility.filter((row) => row.available === true).map((row) => row.agentId);
+      // The overall traffic light includes unrelated engines and stale probes.
+      // Use independent safety/connectivity facts and per-Agent compatibility;
+      // begin admission still owns the authoritative eligibility and lease gates.
       const unavailableReason = !environment
         ? 'Environment facts are unavailable'
         : environment.enrollmentStatus !== 'approved'
           ? 'Environment is not approved'
           : environment.workSafety !== 'clear'
             ? 'Environment is held for existing work or recovery'
-            : environment.trafficLight !== 'green'
-              ? 'Environment readiness needs attention'
-              : compatibleAgentIds.length === 0
-                ? 'No compatible Project Agent is currently available'
-                : '';
+            : environment.connectionState !== 'online'
+              ? 'Environment Worker is not online'
+              : environment.protocolCompatibility !== 'compatible'
+                ? 'Worker protocol compatibility is not confirmed'
+                : environment.capabilityPermissions['agent-run'] !== true
+                  ? 'Agent run capability is not granted'
+                  : environment.trafficLight === 'red'
+                    ? environment.trafficLightReason || 'Environment readiness is blocked'
+                    : compatibleAgentIds.length === 0
+                      ? compatibility.length === 0 || compatibility.some((row) => row.available === undefined)
+                        ? 'Agent compatibility has not been confirmed. Refresh Project resources.'
+                        : compatibility.find((row) => row.unavailableReason)?.unavailableReason || 'No compatible Project Agent is currently available'
+                      : '';
       return {
         id: entry.environmentInstanceId,
         name: environment?.displayName ?? 'Environment',
@@ -153,6 +164,8 @@ const beginLeadOptions = computed(() => {
     ...agents.map((member) => ({ key: actorKey({ memberId: member.memberId, memberKind: 'agent' }), label: agentName(member.memberId) })),
   ];
 });
+const beginSelectionReady = computed(() => environmentOptions.value.some((entry) => entry.id === beginEnvironmentId.value && entry.enabled)
+  && beginLeadOptions.value.some((entry) => entry.key === beginLeadKey.value));
 const filters = ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'completed'] as const;
 const taskLeadOptions = computed(() => [
   ...(currentHuman.value ? [{ key: actorKey({ memberId: currentHuman.value.memberId, memberKind: 'human' }), label: 'You · Human Task lead' }] : []),
@@ -373,6 +386,7 @@ function errorState(error: unknown): { readonly code?: string; readonly message:
       if (failure.code === 'agent-read-only') return { code: failure.code, message: 'This Agent no longer has writable Project access. Refresh the current membership before retrying this Task action.' };
       if (failure.code === 'proposal-closed') return { code: failure.code, message: 'This proposal is no longer open. Review its refreshed status before trying again.' };
       if (failure.code === 'lead-ineligible') return { code: failure.code, message: 'The selected Task lead is no longer eligible for this Environment. Refresh the Task and choose a current lead.' };
+      if (failure.code === 'environment-unavailable') return { code: failure.code, message: 'The Environment could not be reserved. The proposal remains unbegun; refresh Project resources and choose an available Environment.' };
       if (failure.code === 'environment-ineligible') return { code: failure.code, message: 'The selected Environment is no longer available to this Project. Refresh the available Environment facts before beginning.' };
       if (failure.code === 'no-compatible-agent') return { code: failure.code, message: 'No current Project Agent can work in the selected Environment. Review Project resources before beginning.' };
       if (failure.code === 'target-ineligible') return { code: failure.code, message: 'The selected Agent is no longer eligible for this Task Environment. Refresh and choose an eligible Project Agent.' };
@@ -440,7 +454,14 @@ async function loadSelectedRecord(projectId: string): Promise<void> {
   } catch (error) {
     if (generation === detailGeneration) detailError.value = errorState(error).message;
   } finally {
-    if (generation === detailGeneration) detailLoading.value = false;
+    if (generation === detailGeneration) {
+      detailLoading.value = false;
+      await nextTick();
+      if (focusSelectedRecord && detailHeading.value) {
+        detailHeading.value.focus({ preventScroll: true });
+        focusSelectedRecord = false;
+      }
+    }
   }
 }
 
@@ -540,13 +561,16 @@ async function submitProposal(): Promise<void> {
     title: proposalTitle.value.trim(), goal: proposalGoal.value.trim(),
     constraints: splitLines(proposalConstraints.value), validationCriteria: splitLines(proposalCriteria.value),
   };
+  let created: TaskProposal | undefined;
   const saved = await perform('Task proposal created.', async () => {
     const validated = await currentApi.validateProposal(selectedProjectId.value, content);
-    await currentApi.propose(selectedProjectId.value, validated);
+    created = await currentApi.propose(selectedProjectId.value, validated);
   });
-  if (saved) {
+  if (saved && created) {
     proposalFormOpen.value = false;
     fillProposalForm();
+    filter.value = 'proposed';
+    await router.push({ name: 'project-task-proposal', params: { proposalId: created.id }, query: { ...route.query, project: selectedProjectId.value } });
   }
 }
 async function submitProposalRevision(): Promise<void> {
@@ -577,7 +601,7 @@ async function approveAndBegin(): Promise<void> {
   const currentApi = api.value;
   const proposal = selectedProposal.value;
   const lead = actorFromKey(beginLeadKey.value);
-  if (!currentApi || !proposal || !lead) return;
+  if (!currentApi || !proposal || !lead || !beginSelectionReady.value) return;
   const saved = await perform('Task approved and begin requested.', async () => {
     await currentApi.beginProposal(proposal.id, {
       expectedRevision: proposal.revision,
@@ -745,8 +769,9 @@ watch(() => [openTaskId.value, openProposalId.value, selectedProjectId.value] as
 watch(() => [openTaskId.value, openProposalId.value] as const, async ([taskId, proposalId]) => {
   stopRunId.value = '';
   if (!taskId && !proposalId) return;
+  focusSelectedRecord = true;
   await nextTick();
-  detailHeading.value?.focus();
+  detailHeading.value?.focus({ preventScroll: true });
   announcer.announce(taskId ? 'Task details opened.' : 'Task proposal details opened.');
 });
 watch(beginEnvironmentId, () => {
@@ -756,9 +781,9 @@ onMounted(() => { void loadIndex(); });
 </script>
 
 <template>
-  <div class="project-tasks-view min-h-full bg-[var(--bg-app)]">
-    <div class="w-full max-w-[1920px] mx-auto p-4 sm:p-6 pb-28 md:pb-8 flex flex-col gap-4">
-      <header class="border-b border-[var(--border-subtle)] pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+  <div class="project-tasks-view relative flex h-full min-h-0 flex-col bg-[var(--bg-app)]">
+    <div class="w-full max-w-[1920px] mx-auto p-4 sm:p-6 flex h-full min-h-0 flex-col gap-4">
+      <header class="shrink-0 border-b border-[var(--border-subtle)] pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div class="min-w-0">
           <h1 class="text-lg sm:text-xl font-bold text-[var(--text-primary)] flex items-center gap-2">
             <Icon name="tasks" :size="20" /> Project Tasks & Operating Loop
@@ -775,7 +800,7 @@ onMounted(() => { void loadIndex(); });
         </div>
       </header>
 
-      <section v-if="proposalFormOpen" class="rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3" aria-labelledby="task-proposal-form-heading" aria-describedby="task-proposal-form-description">
+      <section v-if="proposalFormOpen" class="shrink-0 max-h-[60%] overflow-y-auto rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3" aria-labelledby="task-proposal-form-heading" aria-describedby="task-proposal-form-description">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div><h2 id="task-proposal-form-heading" ref="proposalFormHeading" tabindex="-1" class="text-base font-bold">Propose a Task</h2><p id="task-proposal-form-description" class="mt-1 text-xs text-[var(--text-secondary)]">A proposal creates no Agent run and holds no Environment lease. Human approval is required before begin.</p></div>
           <Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="proposalFormOpen = false">Close proposal form</Button>
@@ -799,18 +824,19 @@ onMounted(() => { void loadIndex(); });
       </div>
       <div v-else-if="loading" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6 text-sm text-[var(--text-secondary)]" role="status" aria-live="polite">Loading Project Tasks and current lifecycle facts…</div>
       <EmptyState v-else-if="projects.length === 0" icon="project" title="No Projects yet" description="Create or select a Project before proposing or beginning Task work." />
-      <div v-else class="grid grid-cols-1 lg:grid-cols-[minmax(17rem,0.85fr)_minmax(0,2fr)] gap-4 min-w-0">
-        <aside class="flex flex-col min-w-0 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden" :class="hasDetail ? 'hidden lg:flex' : 'flex'" aria-label="Project Task list">
-          <div class="p-3 border-b border-[var(--border-subtle)] flex flex-col gap-2">
+      <div v-else class="grid flex-1 min-h-[520px] grid-rows-[minmax(0,1fr)] grid-cols-1 lg:grid-cols-[minmax(17rem,0.85fr)_minmax(0,2fr)] gap-4 min-w-0 overflow-hidden" data-task-layout="split">
+        <aside class="flex flex-col min-h-0 min-w-0 overflow-hidden" :class="hasDetail ? 'hidden lg:flex' : 'flex'" aria-label="Project Task list">
+          <div class="shrink-0 pb-3 flex flex-col gap-2">
             <div class="flex items-center justify-between gap-2">
               <h2 class="text-sm font-bold">Tasks and proposals</h2>
               <span class="text-xs text-[var(--text-muted)]">{{ filteredEntries.length }} shown</span>
             </div>
-            <div class="flex gap-1 overflow-x-auto pb-1" role="group" aria-label="Filter Project Tasks">
-              <button v-for="choice in filters" :key="choice" type="button" class="min-h-[40px] shrink-0 rounded border px-2 text-xs capitalize focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="filter === choice ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)] text-[var(--text-primary)] font-bold' : 'border-[var(--border-subtle)] text-[var(--text-secondary)]'" :aria-pressed="filter === choice" @click="filter = choice">{{ choice === 'validation' ? 'Awaiting validation' : choice }}</button>
-            </div>
+            <label for="task-status-filter" class="sr-only">Filter Project Tasks</label>
+            <select id="task-status-filter" v-model="filter" class="min-h-[44px] w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm capitalize text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]">
+              <option v-for="choice in filters" :key="choice" :value="choice">{{ choice === 'validation' ? 'Awaiting validation' : choice }}</option>
+            </select>
           </div>
-          <div v-if="filteredEntries.length" class="flex flex-col gap-2 p-2 overflow-y-auto">
+          <div v-if="filteredEntries.length" class="flex flex-1 min-h-0 flex-col gap-2 overflow-y-auto">
             <button v-for="entry in filteredEntries" :key="entry.kind === 'task' ? `task:${entry.task.id}` : `proposal:${entry.proposal.id}`" type="button" :data-record-kind="entry.kind" :data-record-id="entry.kind === 'task' ? entry.task.id : entry.proposal.id" class="w-full min-h-[88px] rounded border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :class="((entry.kind === 'task' && openTaskId === entry.task.id) || (entry.kind === 'proposal' && openProposalId === entry.proposal.id)) ? 'border-[var(--accent-primary)] bg-[var(--accent-bg)]' : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-elevated)]'" @click="entry.kind === 'task' ? taskTarget(entry.task) : proposalTarget(entry.proposal)">
               <template v-if="entry.kind === 'task'">
                 <div class="flex items-center justify-between gap-2"><Badge :variant="badgeVariant(taskStage(entry.task))">{{ taskStage(entry.task) }}</Badge><span class="text-[10px] text-[var(--text-muted)]">v{{ entry.task.admission?.contentVersion ?? 1 }}</span></div>
@@ -827,7 +853,7 @@ onMounted(() => { void loadIndex(); });
           <EmptyState v-else icon="tasks" title="No Tasks in this view" description="Change the filter or propose a Task to start a Human reviewed work path." class="m-4" />
         </aside>
 
-        <section v-if="hasDetail" class="min-w-0 flex flex-col gap-4" aria-label="Selected Task details">
+        <section v-if="hasDetail" class="min-w-0 min-h-0 flex flex-col gap-4 overflow-y-auto [&>*]:shrink-0" aria-label="Selected Task details">
           <div v-if="detailLoading" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6 text-sm" role="status">Loading selected Task facts…</div>
           <div v-else-if="detailError" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-4" role="alert">
             <div class="flex flex-wrap items-center justify-between gap-3"><p>{{ detailError }}</p><Button variant="secondary" size="sm" class="min-h-[44px]" @click="loadSelectedRecord(selectedProjectId)">Retry</Button></div>
@@ -852,11 +878,12 @@ onMounted(() => { void loadIndex(); });
               <div class="flex flex-wrap gap-2"><Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl || projectArchived" @click="openProposalEditor">Revise proposal</Button><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || projectArchived" @click="openBeginPanel">Approve & Begin</Button><Button v-if="selectedProposalIsHumanProposed" variant="ghost" size="sm" class="min-h-[44px]" :disabled="!canControl || projectArchived || !proposalReason.trim()" @click="decideProposal('withdraw')">Withdraw</Button><Button variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || projectArchived || !proposalReason.trim()" @click="decideProposal('reject')">Reject</Button></div>
               <label class="flex flex-col gap-1 text-xs">Decision reason<input v-model="proposalReason" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm" required /></label>
               <form v-if="beginOpen" class="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-[var(--border-subtle)] pt-3" @submit.prevent="approveAndBegin">
-                <label class="flex flex-col gap-1 text-xs">Environment instance<select v-model="beginEnvironmentId" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option value="" disabled>Select Environment</option><option v-for="environment in environmentOptions" :key="environment.id" :value="environment.id" :disabled="!environment.enabled">{{ environment.name }}{{ environment.enabled ? '' : ` · ${environment.unavailableReason}` }}</option></select></label>
-                <label class="flex flex-col gap-1 text-xs">Task lead<select v-model="beginLeadKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option v-for="lead in beginLeadOptions" :key="lead.key" :value="lead.key">{{ lead.label }}</option></select></label>
+                <label class="flex flex-col gap-1 text-xs">Environment instance<select id="begin-environment" v-model="beginEnvironmentId" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option value="" disabled>Select Environment</option><option v-for="environment in environmentOptions" :key="environment.id" :value="environment.id" :disabled="!environment.enabled">{{ environment.name }}{{ environment.enabled ? '' : ` · ${environment.unavailableReason}` }}</option></select></label>
+                <label class="flex flex-col gap-1 text-xs">Task lead<select id="begin-lead" v-model="beginLeadKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option v-for="lead in beginLeadOptions" :key="lead.key" :value="lead.key">{{ lead.label }}</option></select></label>
                 <label class="sm:col-span-2 flex flex-col gap-1 text-xs">Approval reason<input v-model="beginReason" class="min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm" required /></label>
-                <p v-if="!environmentOptions.some((environment) => environment.enabled)" class="sm:col-span-2 text-xs text-[var(--text-muted)]">No ready, assigned Environment with a compatible Agent is available. Review Project resources before beginning this proposal.</p>
-                <div class="sm:col-span-2 flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !beginEnvironmentId || !beginLeadKey || !beginReason.trim() || !beginLeadOptions.length">Confirm approve and begin</Button><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="beginOpen = false">Cancel</Button></div>
+                <p data-lead-guidance class="sm:col-span-2 text-xs text-[var(--text-secondary)]">{{ beginEnvironmentId ? 'Choose yourself or a compatible Project Agent as Task lead. An Agent lead receives an initial run after begin; a Human lead does not.' : 'Select an available Environment to see eligible Agent leads. A Task lead may be you or a compatible Project Agent.' }}</p>
+                <p v-if="!environmentOptions.some((environment) => environment.enabled)" data-begin-guidance class="sm:col-span-2 text-xs text-[var(--text-muted)]">No available Environment with a compatible Agent is confirmed. {{ environmentOptions.map((environment) => `${environment.name}: ${environment.unavailableReason}`).join('; ') || 'Assign an Environment and workspace in Project resources.' }} Review Project resources before beginning this proposal.</p>
+                <div class="sm:col-span-2 flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !beginSelectionReady || !beginReason.trim()">Confirm approve and begin</Button><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="beginOpen = false">Cancel</Button></div>
               </form>
               <form v-if="proposalEditOpen" class="grid grid-cols-1 gap-3 border-t border-[var(--border-subtle)] pt-3" @submit.prevent="submitProposalRevision">
                 <h4 class="font-bold">Revise proposed content</h4>

@@ -68,15 +68,16 @@ const project = {
   status: 'active',
   content: { currentVersion: 1, versions: [{ version: 1, rules: [], memberships: [
     { memberId: 'operator', memberKind: 'human', startedAt: time, responsibilities: [], collaborationInstructions: '' },
+    { memberId: 'agent-b', memberKind: 'agent', startedAt: time, responsibilities: [], collaborationInstructions: '' },
     { memberId: 'agent-a', memberKind: 'agent', startedAt: time, responsibilities: [], collaborationInstructions: '' },
   ] }] },
 };
 const overview = {
   project,
-  agents: [{ id: 'agent-a', displayName: 'Project Agent', status: 'active' }],
-  environments: [{ id: 'env-a', environmentInstanceId: 'instance-a', displayName: 'Ready Environment', enrollmentStatus: 'approved', trafficLight: 'green', workSafety: 'clear' }],
+  agents: [{ id: 'agent-a', displayName: 'Project Agent', status: 'active' }, { id: 'agent-b', displayName: 'Other Project Agent', status: 'active' }],
+  environments: [{ id: 'env-a', environmentInstanceId: 'instance-a', displayName: 'Ready Environment', enrollmentStatus: 'approved', trafficLight: 'green', workSafety: 'clear', connectionState: 'online', protocolCompatibility: 'compatible', capabilityPermissions: { 'agent-run': true } }],
   access: [{ projectId, environmentInstanceId: 'instance-a', status: 'active', startedAt: time, updatedAt: time, current: { bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'default', boundAt: time }, history: [] }],
-  compatibility: [{ agentId: 'agent-a', environmentInstanceId: 'instance-a', available: true }],
+  compatibility: [{ agentId: 'agent-a', environmentInstanceId: 'instance-a', available: true }, { agentId: 'agent-b', environmentInstanceId: 'instance-a', available: true }],
 } as unknown as ProjectOverviewData;
 
 function task(id: string, state: string, changes: Partial<TaskView> = {}): TaskView {
@@ -101,7 +102,7 @@ const proposal: TaskProposal = {
   lifecycle: [], createdAt: time, updatedAt: time,
 };
 
-function appServices(conflictCodes: readonly string[] = []) {
+function appServices(conflictCodes: readonly string[] = [], snapshot = overview) {
   const idle = task('run-idle', 'idle');
   const humanLedIdle = { ...idle, admission: { ...idle.admission!, lead: { memberId: 'operator', memberKind: 'human' as const } } };
   const humanLedRunning = task('run-running', 'running', { activeRunId: 'run-private', status: 'in-progress' });
@@ -130,18 +131,25 @@ function appServices(conflictCodes: readonly string[] = []) {
   let nextConflict = 0;
   const calls: string[] = [];
   const blockerCalls: TaskBlockerInput[] = [];
+  const proposalRows = [proposal];
+  const beginInputs: unknown[] = [];
   const api = {
     state: () => ({ status: 'online', connection: 'online', loading: false }),
     subscribeState: () => () => undefined,
-    async listProposals() { return [proposal]; },
-    async getProposal() { return proposal; },
-    async getContentVersion(id: string, version: number) { calls.push(`content-version:${id}:${version}`); return proposal.versions[0]!; },
+    async listProposals() { return proposalRows; },
+    async getProposal(id: string) { return proposalRows.find(row => row.id === id)!; },
+    async getContentVersion(id: string, version: number) { calls.push(`content-version:${id}:${version}`); return proposalRows.find(row => row.id === id)!.versions[0]!; },
     async validateProposal(_id: string, content: unknown) { calls.push('validate-proposal'); return content; },
-    async propose() { calls.push('propose'); return proposal; },
+    async propose(_id: string, content: TaskProposal['versions'][number]) {
+      calls.push('propose');
+      const created = { ...proposal, id: 'proposal-new', versions: [{ ...proposal.versions[0]!, ...content }] };
+      proposalRows.push(created);
+      return created;
+    },
     async reviseProposal() { calls.push('revise-proposal'); return proposal; },
     async withdrawProposal() { calls.push('withdraw-proposal'); return proposal; },
     async rejectProposal() { calls.push('reject-proposal'); return proposal; },
-    async beginProposal() { calls.push('begin'); return { task: allTasks[0]!, duplicate: false }; },
+    async beginProposal(_id: string, input: unknown) { calls.push('begin'); beginInputs.push(input); return { task: allTasks[0]!, duplicate: false }; },
     async listTasks() { return allTasks; },
     async getTask(id: string) {
       const detail = details.get(id);
@@ -198,21 +206,21 @@ function appServices(conflictCodes: readonly string[] = []) {
   } as unknown as TaskBrowserAdapter;
   const projects = {
     async listProjects() { return [project]; },
-    async loadOverview() { return overview; },
+    async loadOverview() { return snapshot; },
   } as unknown as ProjectManagementService;
-  return { api, projects, allTasks, calls, blockerCalls };
+  return { api, projects, allTasks, calls, blockerCalls, beginInputs };
 }
 
-async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = []) {
+async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = [], snapshot = overview) {
   const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
-  const { api, projects, calls, blockerCalls } = appServices(codes);
+  const { api, projects, calls, blockerCalls, beginInputs } = appServices(codes, snapshot);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
   const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);
   await settle();
-  return { app, router, calls, blockerCalls };
+  return { app, router, calls, blockerCalls, beginInputs };
 }
 
 async function enterField(doc: Document, dom: JSDOM, labelText: string, value: string): Promise<void> {
@@ -277,7 +285,12 @@ test('Project Tasks renders distinct production lifecycle states and withholds r
 test('Project Tasks creates proposals through validation and the production adapter', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
-    const { app, calls } = await mountTasks(vite, doc);
+    const { app, calls, router } = await mountTasks(vite, doc);
+    const filterSelect = doc.querySelector<HTMLSelectElement>('#task-status-filter');
+    if (filterSelect) selectOption(doc, dom, 'task-status-filter', 'active');
+    else clickButton(doc, 'active');
+    await settle();
+    assert.equal(doc.querySelector('[data-record-kind="proposal"]'), null);
     clickButton(doc, 'Propose Task');
     await settle();
     assert.match(doc.querySelector('[data-testid="shell-announcer"]')?.textContent ?? '', /Task proposal form opened/);
@@ -288,17 +301,119 @@ test('Project Tasks creates proposals through validation and the production adap
     clickButton(doc, 'Save proposal');
     await settle(180);
     assert.ok(calls.includes('validate-proposal') && calls.includes('propose'), 'proposal creation validates before persistence');
+    assert.equal(router.currentRoute.value.name, 'project-task-proposal');
+    assert.equal(router.currentRoute.value.params['proposalId'], 'proposal-new');
+    assert.match(doc.querySelector('[aria-label="Selected Task details"]')?.textContent ?? '', /New proposed work/);
+    assert.equal(doc.activeElement?.textContent, 'New proposed work');
+    assert.equal(doc.querySelector('#task-proposal-form-heading'), null);
     app.unmount();
   } finally {
     await cleanup();
   }
 });
 
+test('Project Tasks allows an eligible Agent lead despite an unrelated yellow readiness summary', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  const snapshot = { ...overview, environments: overview.environments.map(environment => ({
+    ...environment, trafficLight: 'yellow' as const, trafficLightReason: 'An unrelated engine requires login.',
+  })) };
+  try {
+    const { app, router, beginInputs } = await mountTasks(vite, doc, [], snapshot);
+    await router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
+    await settle();
+    clickButton(doc, 'Approve & Begin');
+    await settle();
+    const environment = [...doc.querySelectorAll<HTMLSelectElement>('select')].find(select => select.closest('label')?.textContent?.includes('Environment instance'));
+    assert.ok(environment);
+    assert.equal(environment.querySelector<HTMLOptionElement>('[value="instance-a"]')?.disabled, false);
+    assert.equal(environment.value, 'instance-a');
+    const lead = selectOption(doc, dom, 'begin-lead', JSON.stringify({ memberId: 'agent-b', memberKind: 'agent' }));
+    await settle();
+    assert.match(lead.selectedOptions[0]?.textContent ?? '', /Other Project Agent/);
+    await enterField(doc, dom, 'Approval reason', 'Entrust bounded work to another Project Agent.');
+    clickButton(doc, 'Confirm approve and begin');
+    await settle(180);
+    assert.deepEqual((beginInputs[0] as { lead: unknown }).lead, { memberId: 'agent-b', memberKind: 'agent' });
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Tasks explains unavailable begin resources and never submits a refused selection', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  try {
+    for (const entry of [
+      { environment: { enrollmentStatus: 'pending' }, compatibility: overview.compatibility, reason: /not approved/ },
+      { environment: { trafficLight: 'red', trafficLightReason: 'A required readiness dimension is blocked.' }, compatibility: overview.compatibility, reason: /required readiness dimension is blocked/ },
+      { environment: { workSafety: 'recovery' }, compatibility: overview.compatibility, reason: /held for existing work or recovery/ },
+      { environment: { connectionState: 'offline' }, compatibility: overview.compatibility, reason: /Worker is not online/ },
+      { environment: { protocolCompatibility: 'unknown' }, compatibility: overview.compatibility, reason: /protocol compatibility is not confirmed/ },
+      { environment: { capabilityPermissions: { 'agent-run': false } }, compatibility: overview.compatibility, reason: /Agent run capability is not granted/ },
+      { environment: {}, compatibility: overview.compatibility.map(row => ({ ...row, available: undefined })), reason: /Agent compatibility has not been confirmed/ },
+      { environment: {}, compatibility: overview.compatibility.map(row => ({ ...row, available: false, unavailableReason: 'Selected work model is unavailable.' })), reason: /Selected work model is unavailable/ },
+    ]) {
+      const snapshot = { ...overview, environments: overview.environments.map(environment => ({ ...environment, ...entry.environment })), compatibility: entry.compatibility } as ProjectOverviewData;
+      const { app, router, beginInputs } = await mountTasks(vite, doc, [], snapshot);
+      await router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
+      await settle();
+      clickButton(doc, 'Approve & Begin');
+      await settle();
+      const environment = [...doc.querySelectorAll<HTMLSelectElement>('select')].find(select => select.closest('label')?.textContent?.includes('Environment instance'));
+      assert.ok(environment);
+      assert.equal(environment.querySelector<HTMLOptionElement>('[value="instance-a"]')?.disabled, true);
+      assert.match(doc.querySelector('[data-begin-guidance]')?.textContent ?? '', entry.reason);
+      assert.match(doc.querySelector('[data-lead-guidance]')?.textContent ?? '', /Select an available Environment to see eligible Agent leads/);
+      const confirm = [...doc.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('Confirm approve and begin'))!;
+      assert.equal(confirm.disabled, true);
+      confirm.click();
+      assert.deepEqual(beginInputs, []);
+      app.unmount();
+    }
+  } finally { await cleanup(); }
+});
+
+test('Project Tasks filters with a dropdown and keeps task switching inside Chat-style scroll panes', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router } = await mountTasks(vite, doc);
+    const filter = doc.querySelector<HTMLSelectElement>('#task-status-filter');
+    assert.ok(filter);
+    assert.equal(doc.querySelector('label[for="task-status-filter"]')?.textContent, 'Filter Project Tasks');
+    assert.equal(doc.querySelector('[role="group"][aria-label="Filter Project Tasks"]'), null);
+    assert.deepEqual([...filter.options].map(option => option.value), ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'completed']);
+    for (const [value, expected] of [['proposed', 'proposal-a'], ['active', 'run-idle'], ['validation', 'awaiting-validation'], ['blocked', 'blocked'], ['recovery', 'recovery'], ['completed', 'completed']]) {
+      selectOption(doc, dom, 'task-status-filter', value!);
+      await settle(30);
+      assert.ok(doc.querySelector(`[data-record-id="${expected}"]`));
+      if (value !== 'proposed') assert.equal(doc.querySelector('[data-record-kind="proposal"]'), null);
+    }
+    const root = doc.querySelector('.project-tasks-view')!;
+    const split = doc.querySelector('[data-task-layout="split"]')!;
+    const list = doc.querySelector('aside[aria-label="Project Task list"]')!;
+    assert.ok(root.classList.contains('h-full') && root.classList.contains('min-h-0'));
+    assert.ok(split.classList.contains('flex-1') && split.classList.contains('min-h-[520px]') && split.classList.contains('overflow-hidden'));
+    assert.ok(list.classList.contains('min-h-0'));
+    assert.equal(list.classList.contains('border'), false, 'filter and list have no parent container chrome');
+    assert.ok(list.querySelector('.overflow-y-auto'));
+    const splitClasses = split.className;
+    let detailClasses: string | undefined;
+    for (const id of ['run-idle', 'awaiting-validation', 'completed']) {
+      await openTaskRecord(router, id);
+      const detail = doc.querySelector('[aria-label="Selected Task details"]')!;
+      assert.ok(detail.classList.contains('min-h-0') && detail.classList.contains('overflow-y-auto'));
+      detailClasses ??= detail.className;
+      assert.equal(detail.className, detailClasses);
+      assert.equal(split.className, splitClasses, 'different detail lengths never change the bounded pane contract');
+      assert.equal(doc.querySelector('[data-task-layout="split"]'), split);
+    }
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
 test('Project Tasks presents typed 409 conflicts with actionable guidance', async () => {
   const codes = [
     'advance-conflict', 'environment-recovering', 'lifecycle-conflict', 'pause-retry-required',
     'stale-proposal', 'project-read-only', 'agent-read-only', 'proposal-closed', 'lead-ineligible', 'environment-ineligible',
-    'no-compatible-agent', 'target-ineligible', 'not-awaiting-recovery', 'lease-cannot-resume',
+    'no-compatible-agent', 'target-ineligible', 'not-awaiting-recovery', 'lease-cannot-resume', 'environment-unavailable',
   ];
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
@@ -334,6 +449,7 @@ test('Project Tasks presents typed 409 conflicts with actionable guidance', asyn
       /selected Agent is no longer eligible/,
       /no longer awaiting recovery/,
       /lease could not be resumed/,
+      /Environment could not be reserved.*proposal remains unbegun/,
     ];
     for (let index = 0; index < codes.length; index += 1) {
       const advance = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Advance Task lead work'));
