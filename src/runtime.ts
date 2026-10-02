@@ -68,6 +68,7 @@ import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import {
   RunReconnectRetry,
+  RunReconnectRetryShutdownError,
   type RunReconnectRetryReconcileResult,
 } from './run/reconnect-retry.ts';
 import type { RunReconnectRetryStore } from './run/reconnect-retry-store.ts';
@@ -1398,7 +1399,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       onRetrySettled: (input) => collaboration.projectRetryReply(input),
     });
     noteRunReconnectRetry = (acceptedInstanceId) =>
-      runReconnectRetry.noteEnvironmentState(acceptedInstanceId).then(() => undefined);
+      runReconnectRetry.noteEnvironmentState(acceptedInstanceId)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          if (!(error instanceof RunReconnectRetryShutdownError)) throw error;
+        });
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1955,6 +1960,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
 
       async close(): Promise<void> {
+        // Stop reconnect observations as shutdown starts. Drain concurrently
+        // with transport and Worker teardown so only the remaining store wait
+        // consumes the reconnect queue's bounded deadline.
+        const reconnectRetryDrain = runReconnectRetry.stopAcceptingAndDrain();
         // End every open event stream before anything else: `server.close` waits
         // for existing connections, and an SSE stream never ends by itself.
         await api.close();
@@ -1967,7 +1976,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.
         if (environment !== undefined) await environment.close();
-        await runReconnectRetry.drain();
+        await reconnectRetryDrain;
         activeStores.close();
       },
     };
