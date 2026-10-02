@@ -32,6 +32,10 @@ const agents = ref<readonly AgentInstance[]>([]);
 const scopes = ref<readonly ConversationScopeView[]>([]);
 const messages = ref<readonly MessageView[]>([]);
 const events = ref<readonly ProjectEventView[]>([]);
+const activeRuns = ref<readonly { readonly id: string; readonly agentId: string; readonly status: 'queued' | 'running' }[]>([]);
+const activeRunsLoading = ref(true);
+const activeRunsKnown = ref(false);
+const stoppingRunIds = ref<ReadonlySet<string>>(new Set());
 const batches = ref<readonly RoutingBatchSummaryView[]>([]);
 const inspection = ref<ScopeInspectionView | null>(null);
 const loading = ref(true);
@@ -66,6 +70,8 @@ function onResize() { viewportWidth.value = window.innerWidth; void markVisible(
 const knownEvents = new Set<string>();
 let generation = 0;
 let detailGeneration = 0;
+let activeRunGeneration = 0;
+let activeRunScopeId = '';
 let inspectedScopeKey = '';
 let unsubRuns: (() => void) | undefined;
 const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -102,7 +108,8 @@ const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
   ...events.value.filter((event) => activeScope.value?.kind === 'project' || event.originScopeIds?.includes(activeScopeId.value)).map((event) => ({ kind: 'event' as const, event })),
 ].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
-const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
+const activeChatRuns = computed(() => activeRuns.value.filter((run) => run.status === 'queued' || run.status === 'running'));
+const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && activeRunsKnown.value && !activeRunsLoading.value && activeChatRuns.value.length === 0 && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 // A background read may refuse Send, but must not interrupt draft entry.
 const canEnterText = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && inspection.value?.state.writable !== false && connectionState.value.connection !== 'offline');
 const currentEvidenceState = computed(() => evidence.value ? evidenceState(evidence.value, evidenceMessage.value ?? undefined, provenance.value?.runStatus) : 'informational');
@@ -149,6 +156,35 @@ function scopePill(scope: ConversationScopeView) {
   return '';
 }
 function safeError() { return 'Could not load current Chat facts. Retry when the connection is available.'; }
+async function refreshActiveRuns() {
+  const scopeId = activeScopeId.value;
+  const token = ++activeRunGeneration;
+  if (activeRunScopeId !== scopeId) {
+    activeRunScopeId = scopeId;
+    activeRuns.value = [];
+  }
+  if (!service || !scopeId) {
+    activeRuns.value = [];
+    activeRunsKnown.value = true;
+    activeRunsLoading.value = false;
+    return;
+  }
+  activeRunsLoading.value = true;
+  activeRunsKnown.value = false;
+  try {
+    const projected = await service.listActiveRuns(scopeId);
+    if (token === activeRunGeneration && scopeId === activeScopeId.value) {
+      activeRuns.value = projected;
+      activeRunsKnown.value = true;
+    }
+  } catch {
+    if (token === activeRunGeneration && scopeId === activeScopeId.value) {
+      actionError.value = 'Active Agent run state could not be verified. Sending is disabled.';
+    }
+  } finally {
+    if (token === activeRunGeneration && scopeId === activeScopeId.value) activeRunsLoading.value = false;
+  }
+}
 async function projectMessages(scopeList: readonly ConversationScopeView[]) {
   if (!service) return [];
   return (await Promise.all(scopeList.map((scope) => service.listMessages(scope.id)))).flat();
@@ -178,6 +214,7 @@ async function loadProject() {
     events.value = projectEvents;
     for (const event of projectEvents) knownEvents.add(event.id);
     batches.value = routing.batches;
+    await refreshActiveRuns();
     await unreadState?.refresh();
   } catch { if (token === generation) error.value = safeError(); }
   finally { if (token === generation) loading.value = false; }
@@ -211,6 +248,7 @@ async function refreshMessages() {
     // announces the start and the settle of every read, and inside the same
     // flush those would overwrite the arrival sentence before it renders.
     await loadScope();
+    await refreshActiveRuns();
     if (sentence !== undefined && token === generation && document.visibilityState !== 'hidden') announcer.announce(sentence);
   } catch { if (token === generation) actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
   finally { refreshInFlight = false; }
@@ -361,6 +399,28 @@ async function closeScope() {
   const card = [...document.querySelectorAll<HTMLElement>('[data-scope-id]')].find((el) => el.dataset['scopeId'] === id);
   card?.focus();
 }
+async function stopChatRun(run: { readonly id: string; readonly agentId: string }) {
+  const scopeId = activeScopeId.value;
+  if (!service || !scopeId || !presentation.value.controlAvailable || project.value?.status !== 'active' || stoppingRunIds.value.has(run.id)) return;
+  stoppingRunIds.value = new Set([...stoppingRunIds.value, run.id]);
+  actionError.value = '';
+  try {
+    const result = await service.stopChatRun(scopeId, run.id);
+    await refreshMessages();
+    await refreshActiveRuns();
+    announcer.announce(result.status === 'interrupted'
+      ? `@${agentName(run.agentId)} was stopped. The conversation is ready for another message.`
+      : `@${agentName(run.agentId)} is no longer working in this conversation.`);
+  } catch {
+    actionError.value = 'Agent run could not be stopped. Its current status will be refreshed.';
+    announcer.announce(actionError.value);
+    await refreshActiveRuns();
+  } finally {
+    const remaining = new Set(stoppingRunIds.value);
+    remaining.delete(run.id);
+    stoppingRunIds.value = remaining;
+  }
+}
 async function sendMessage() {
   if (!canSend.value || !newMessage.value.trim() || !service || !activeScope.value) return;
   const scopeId = activeScope.value.id;
@@ -446,7 +506,7 @@ async function inspectBatch(id: string, attempt?: number) {
   await router.push({ name: 'project-chat-routing', params: { batchId: id }, query: { ...route.query, ...(attempt ? { attempt: String(attempt) } : {}), ...(activeScope.value ? { from: activeScope.value.id } : {}) } });
 }
 watch(projectId, () => { if (projectId.value) void loadProject(); });
-watch([activeScopeId, loading], () => { if (!loading.value) void loadScope(); });
+watch([activeScopeId, loading], () => { if (!loading.value) { void loadScope(); void refreshActiveRuns(); } });
 watch(activeMessages, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
   window.addEventListener('resize', onResize);
@@ -460,7 +520,7 @@ onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); 
       refreshTimers.add(timer);
     }
   }); });
-onUnmounted(() => { window.removeEventListener('resize', onResize); generation++; detailGeneration++; unsubRuns?.(); if (pollTimer !== undefined) clearInterval(pollTimer); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('visibilitychange', onVisibilityChange); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
+onUnmounted(() => { window.removeEventListener('resize', onResize); generation++; detailGeneration++; activeRunGeneration++; unsubRuns?.(); if (pollTimer !== undefined) clearInterval(pollTimer); for (const timer of refreshTimers) clearTimeout(timer); refreshTimers.clear(); document.removeEventListener('visibilitychange', onVisibilityChange); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocumentClick); });
 </script>
 
 <template>
@@ -521,6 +581,12 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           </div>
           <Button v-if="activeScope" variant="secondary" size="icon" class="chat-info-btn h-10 w-10 shrink-0" title="Conversation Information" aria-label="Conversation Information" @click="infoOpen = true"><Icon name="info" :size="16" /></Button>
         </header>
+        <div v-if="activeChatRuns.length" class="chat-working-state flex flex-col gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status" aria-live="polite">
+          <div v-for="run in activeChatRuns" :key="run.id" class="flex items-center justify-between gap-3">
+            <span class="flex min-w-0 items-center gap-2 text-[var(--text-primary)]"><span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[var(--accent-primary)]" aria-hidden="true" /><span class="truncate">@{{ agentName(run.agentId) }} is working</span></span>
+            <Button variant="secondary" size="sm" class="chat-stop-run min-h-11 shrink-0" :disabled="!presentation.controlAvailable || project?.status !== 'active' || stoppingRunIds.has(run.id)" :aria-label="`Stop @${agentName(run.agentId)}`" @click="stopChatRun(run)">{{ stoppingRunIds.has(run.id) ? 'Stopping…' : 'Stop' }}</Button>
+          </div>
+        </div>
         <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><span><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</span><Button v-if="inspection.state.reason === 'working-group-disbanded' && project?.status === 'active'" variant="secondary" size="sm" class="min-h-11 shrink-0" :disabled="!presentation.controlAvailable || managingGroup" @click="restoreGroup">Restore WG</Button></div>
         <div v-else-if="archivedDirectAgent" class="chat-readonly-banner border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><Icon name="alert" :size="14" /> Agent @{{ archivedDirectAgent.displayName }} is archived. History is preserved for review; restore the Agent before sending new messages.</div>
         <div v-if="actionError" class="p-3 text-xs text-[var(--red-action)]" role="alert">{{ actionError }}</div>
@@ -562,7 +628,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
             </div>
             <p v-if="entry.kind === 'event'" class="text-[10px] text-[var(--text-muted)]">{{ entry.event.kind }} · {{ entry.event.disposition }}</p>
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
-            <p v-if="entry.kind === 'event' && entry.event.kind === 'agent-run-failure'" class="mt-1 whitespace-pre-wrap break-words text-[var(--red-action)]">{{ entry.event.detail ?? 'No error outcome was recorded.' }}</p>
+            <p v-if="entry.kind === 'event' && (entry.event.kind === 'agent-run-failure' || entry.event.kind === 'agent-run-interruption')" class="mt-1 whitespace-pre-wrap break-words" :class="entry.event.kind === 'agent-run-failure' ? 'text-[var(--red-action)]' : 'text-[var(--text-secondary)]'">{{ entry.event.detail ?? (entry.event.kind === 'agent-run-failure' ? 'No error outcome was recorded.' : 'The interruption outcome is unavailable.') }}</p>
           </div>
           </div>
         </div>

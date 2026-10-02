@@ -5,6 +5,12 @@ import type { ConversationScopeView, CreateWorkingGroupInput, ScopeInspectionVie
 import type { RoutingBatchDetailView, RoutingBatchSummaryView, RoutingEvidenceView, RoutingWindowView } from '../../adapters/routing-api.ts';
 import type { MessageBrowserAdapter } from '../../adapters/message-api.ts';
 
+export interface ActiveChatRun {
+  readonly id: string;
+  readonly agentId: string;
+  readonly status: 'queued' | 'running';
+}
+
 /** One page-owned seam; production composes accepted conversation, message, event, routing and run ports. */
 export interface ChatService {
   state(): BrowserTransportState;
@@ -28,6 +34,8 @@ export interface ChatService {
   listRoutingBatches(projectId: string): Promise<{ readonly windows: readonly RoutingWindowView[]; readonly batches: readonly RoutingBatchSummaryView[] }>;
   getRoutingBatch(id: string): Promise<RoutingBatchDetailView>;
   getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status']; readonly failureReason?: string }>;
+  listActiveRuns(scopeId: string): Promise<readonly ActiveChatRun[]>;
+  stopChatRun(scopeId: string, runId: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
   subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void): () => void;
 }
 

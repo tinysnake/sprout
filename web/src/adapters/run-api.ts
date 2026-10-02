@@ -11,6 +11,8 @@ export interface RunBrowserAdapter {
   getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status']; readonly failureReason?: string }>;
   submitRun(input: { readonly agentId: string; readonly prompt: string }): Promise<{ readonly id: string }>;
   stopRun(id: string): Promise<RunView>;
+  listActiveChatRuns(scopeId: string): Promise<{ readonly runs: readonly { readonly id: string; readonly agentId: string; readonly status: 'queued' | 'running' }[] }>;
+  stopChatRun(scopeId: string, id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
   subscribeRuns(listener: (run: RunView) => void): () => void;
 }
 
@@ -23,6 +25,8 @@ export function createRunBrowserAdapter(transport: BrowserTransport): RunBrowser
     getRunStatus: (id) => transport.request(`/api/runs/${encodeURIComponent(id)}/status`),
     submitRun: (input) => transport.request('/api/runs', jsonCommand(input)),
     stopRun: (id) => transport.request(`/api/runs/${encodeURIComponent(id)}/stop`, jsonCommand()),
+    listActiveChatRuns: (scopeId) => transport.request(`/api/chat/scopes/${encodeURIComponent(scopeId)}/active-runs`),
+    stopChatRun: (scopeId, id) => transport.request(`/api/chat/scopes/${encodeURIComponent(scopeId)}/runs/${encodeURIComponent(id)}/stop`, jsonCommand()),
     subscribeRuns(listener) {
       return transport.events((event) => {
         if (event.type === 'run') listener(event.data as RunView);

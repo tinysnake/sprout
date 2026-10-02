@@ -69,6 +69,7 @@ export class FixtureChatService implements ChatService {
   readonly #read = new Set<string>();
   readonly #messages = [...fixtureMessages];
   readonly #events = [event, runFailureEvent];
+  readonly #activeRuns: { readonly scopeId: string; readonly id: string; readonly agentId: string; readonly status: 'queued' | 'running' }[] = [];
   #idleEvents = 0;
   readonly #listeners = new Set<(run: { readonly id: string; readonly status: RunView['status'] }) => void>();
   private readonly options: { readonly archived?: boolean; readonly loading?: boolean };
@@ -164,6 +165,19 @@ export class FixtureChatService implements ChatService {
   async getRun(id: string): Promise<RunView> { return id === this.withheldRunRecord.id ? { ...this.withheldRunRecord } : { id, agentId: 'programmer', prompt: '', status: 'completed', events: [], handOffAttached: false, createdAt: at, completedAt: at + 30_300 }; }
   /** The Chat run surface is the `{id,status}` privacy projection — nothing else (#98, #180). */
   async getRunStatus(id: string) { return { id, status: (id === 'run-failed' ? 'failed' : 'completed') as 'failed' | 'completed' }; }
+  async listActiveRuns(scopeId: string) { return this.#activeRuns.filter((run) => run.scopeId === scopeId).map(({ id, agentId, status }) => ({ id, agentId, status })); }
+  async stopChatRun(scopeId: string, id: string) {
+    const index = this.#activeRuns.findIndex((run) => run.scopeId === scopeId && run.id === id);
+    if (index >= 0) this.#activeRuns.splice(index, 1);
+    for (const listener of this.#listeners) listener({ id, status: 'interrupted' });
+    return { id, status: 'interrupted' as const };
+  }
+  setActiveChatRun(scopeId: string, run: { readonly id: string; readonly agentId: string; readonly status?: 'queued' | 'running' }) {
+    const current = this.#activeRuns.find((candidate) => candidate.id === run.id);
+    if (current) this.#activeRuns.splice(this.#activeRuns.indexOf(current), 1);
+    this.#activeRuns.push({ scopeId, id: run.id, agentId: run.agentId, status: run.status ?? 'running' });
+    for (const listener of this.#listeners) listener({ id: run.id, status: run.status ?? 'running' });
+  }
   subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async pushIncoming(scopeId: string, body: string) {
     this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, at + 100 + this.#messages.length, 'programmer', 'agent'));

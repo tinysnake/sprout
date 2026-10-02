@@ -420,6 +420,53 @@ test('a live engine reply renders in the Project channel through the run follow-
   }
 });
 
+test('Chat shows the active Agent identity, offers Human Stop, and accepts the next message after interruption', async () => {
+  const page = await startPage([
+    {
+      events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
+      result: { status: 'completed', text: 'first turn' },
+      settleAfterMs: 5_000,
+    },
+    {
+      events: [{ type: 'message', text: 'The next message was admitted.', final: true }],
+      result: { status: 'completed', text: 'The next message was admitted.' },
+    },
+  ]);
+  try {
+    await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+    await waitForEnabledComposer(page);
+    await sendInComposer(page, 'Start a long direct chat run.');
+
+    const status = await waitFor('the Agent working indicator', () => {
+      const row = page.doc.querySelector('.chat-working-state');
+      return row && row.textContent?.includes(AGENT_NAME) ? row : null;
+    });
+    assert.match(status.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
+    assert.doesNotMatch(status.textContent ?? '', /PRIVATE_ENGINE_PROGRESS|prompt|model|engine/);
+    await page.push('/project/feed');
+    await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+    const rehydrated = await waitFor('the active Agent indicator after a fresh Chat mount', () => {
+      const row = page.doc.querySelector('.chat-working-state');
+      return row && row.textContent?.includes(AGENT_NAME) ? row : null;
+    });
+    assert.match(rehydrated.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
+    const stop = page.doc.querySelector('.chat-stop-run') as HTMLButtonElement | null;
+    assert.ok(stop, 'Human Stop is available on the active Chat run');
+    stop.click();
+
+    await waitFor('the working indicator to clear after settlement', () =>
+      page.doc.querySelector('.chat-working-state') === null ? true : null);
+    await waitFor('the interruption Project event', () =>
+      [...page.doc.querySelectorAll('[data-event-id]')].find((row) => (row.textContent ?? '').includes('Agent run interrupted for')));
+    assert.equal(page.doc.querySelector('.chat-working-state'), null, 'the indicator clears after settlement');
+    await sendInComposer(page, 'Send the next message immediately.');
+    const reply = await waitFor('the reply to the next message', () => messageElement(page, 'The next message was admitted.'));
+    assert.equal(authorOf(reply), `@${AGENT_NAME}`);
+  } finally {
+    await page.close();
+  }
+});
+
 test('the reply renders with attribution and projected evidence in the Working group and the direct scope', async () => {
   const page = await startPage([
     {

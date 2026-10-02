@@ -30,6 +30,11 @@ interface FeedBody {
   scopes: { id: string; kind: string; attentionCount: number }[];
 }
 
+function assignedPort(offset: number): number {
+  const base = Number(process.env.PORT ?? 0);
+  return base === 0 ? 0 : base + offset;
+}
+
 test('the composed runtime serves GET /api/feed and its Attention follows real domain commands', async () => {
   const credential = randomBytes(32).toString('base64url');
   const { runtime } = await build({
@@ -48,7 +53,7 @@ test('the composed runtime serves GET /api/feed and its Attention follows real d
       contexts: { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} },
     }),
   });
-  const { port } = await runtime.api.listen(Number(process.env.PORT ?? 0));
+  const { port } = await runtime.api.listen(assignedPort(3));
   const base = new URL('http://localhost');
   base.port = String(port);
   try {
@@ -176,7 +181,7 @@ test('the composed Feed API carries a direct Agent wake back to its originating 
     }),
   });
   try {
-    const { port } = await runtime.api.listen(Number(process.env.PORT ?? 0));
+    const { port } = await runtime.api.listen(assignedPort(4));
     const base = new URL('http://localhost');
     base.port = String(port);
     const signIn = await fetch(new URL('/api/auth/session', base), {

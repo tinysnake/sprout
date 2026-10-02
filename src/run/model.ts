@@ -26,6 +26,8 @@ export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'st
 
 /** Sprout's trusted classification at settlement, never inferred from failure text. */
 export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';
+/** A product-owned reason for an intentional Chat interruption. */
+export type RunInterruptionReason = 'human-stop';
 
 /**
  * One bounded activation of an agent, as the core and the Web client see it.
@@ -108,6 +110,8 @@ export interface AgentRun {
   readonly failure?: string;
   /** Absent on legacy rows; consumers treat absence as execution. */
   readonly failureClass?: RunFailureClass;
+  /** Product-owned reason when a Human stops a one-round run from Chat. */
+  readonly interruptionReason?: RunInterruptionReason;
   readonly result?: EngineTurnResult;
   /** Distinct machine-evidence history; never silently replaces a run's interrupted outcome. */
   readonly recoverySettlement?: { readonly status: 'completed' | 'failed' | 'interrupted' | 'stopped'; readonly eventCount: number };

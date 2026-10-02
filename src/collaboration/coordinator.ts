@@ -153,6 +153,7 @@ import {
 import type { CollaborationStore } from './store.ts';
 import { wakeFromBatch, wakeIdempotencyKey } from './store.ts';
 import { runFailureEventInput } from './run-failure-events.ts';
+import { runInterruptionEventInput } from './run-interruption-events.ts';
 
 /** The slice of the run orchestrator the coordinator uses. */
 export interface RunAdmitter {
@@ -380,6 +381,13 @@ type ResolvedRoutingSource =
       readonly assigned: readonly RoutingInput[];
     };
 
+function sourceTouchesScope(source: ResolvedRoutingSource, scopeId: string): boolean {
+  const inputs = source.kind === 'batch' ? source.assigned : [source.input];
+  return inputs.some((input) => isProjectEvent(input)
+    ? scopeId === projectChannelScopeId(input.projectId)
+    : input.scopeId === scopeId);
+}
+
 function sourceProjectId(source: ResolvedRoutingSource): string {
   return source.kind === 'batch' ? source.batch.projectId : source.input.projectId;
 }
@@ -432,15 +440,22 @@ export class CollaborationCoordinator {
     // reconciliation converge on one event instead of racing for a second.
     if (typeof options.runs.subscribe === 'function') {
       options.runs.subscribe((run) => {
-        if (run.status !== 'failed') return;
-        void this.publishRunFailure(run).catch(() => {
-          // Never let publication failure disturb the run path. The durable run
-          // remains the authority and the next restart reconciliation publishes
-          // the same delivery key; the log names no prompt, error text, or host.
-          process.stderr.write(
-            `[collaboration] run failure event for run ${run.id} is deferred to restart reconciliation\n`,
-          );
-        });
+        if (run.status === 'failed') {
+          void this.publishRunFailure(run).catch(() => {
+            // Never let publication failure disturb the run path. The durable run
+            // remains the authority and the next restart reconciliation publishes
+            // the same delivery key; the log names no prompt, error text, or host.
+            process.stderr.write(
+              `[collaboration] run failure event for run ${run.id} is deferred to restart reconciliation\n`,
+            );
+          });
+        } else if (run.status === 'interrupted' && run.interruptionReason === 'human-stop') {
+          void this.publishRunInterruption(run).catch(() => {
+            process.stderr.write(
+              `[collaboration] run interruption event for run ${run.id} is deferred to restart reconciliation\n`,
+            );
+          });
+        }
       });
     }
   }
@@ -615,6 +630,14 @@ export class CollaborationCoordinator {
    */
   async publishRunFailure(run: AgentRun): Promise<'skipped' | 'duplicate' | 'published'> {
     const input = runFailureEventInput(run);
+    if (input === undefined) return 'skipped';
+    const result = await this.publishEvent(input);
+    return result.duplicate ? 'duplicate' : 'published';
+  }
+
+  /** Publish one informational event for an intentional Human Chat interruption. */
+  async publishRunInterruption(run: AgentRun): Promise<'skipped' | 'duplicate' | 'published'> {
+    const input = runInterruptionEventInput(run);
     if (input === undefined) return 'skipped';
     const result = await this.publishEvent(input);
     return result.duplicate ? 'duplicate' : 'published';
@@ -867,6 +890,7 @@ export class CollaborationCoordinator {
     for (const run of this.#runs.list !== undefined ? await this.#runs.list() : []) {
       try {
         if ((await this.publishRunFailure(run)) === 'published') failureEventRunIds.push(run.id);
+        await this.publishRunInterruption(run);
       } catch {
         // One unreadable Project must not abort the pass: the durable run stays
         // visible and the next pass retries the same delivery key.
@@ -893,10 +917,14 @@ export class CollaborationCoordinator {
     const events = await this.#store.listEvents(projectId);
     const wakes = await this.#store.listWakeRequests();
     return Promise.all(events.map(async (event) => {
-      if (event.kind !== 'agent-run-failure' || event.producer.kind !== 'system' ||
-          !event.deliveryKey.startsWith('run-failure:')) return event;
-      const runId = event.deliveryKey.slice('run-failure:'.length);
-      const run = await this.#runs.load?.(runId);
+      const isFailure = event.kind === 'agent-run-failure' && event.producer.kind === 'system' &&
+        event.deliveryKey.startsWith('run-failure:');
+      const isInterruption = event.kind === 'agent-run-interruption' && event.producer.kind === 'system' &&
+        event.deliveryKey.startsWith('run-interruption:');
+      if (!isFailure && !isInterruption) return event;
+      const prefix = isFailure ? 'run-failure:' : 'run-interruption:';
+      const runId = event.deliveryKey.slice(prefix.length);
+      const run = await this.#loadRun(runId);
       const origins = new Set<string>();
       for (const wake of wakes) {
         // Missing run links are not causal evidence: two unset IDs must never
@@ -917,11 +945,59 @@ export class CollaborationCoordinator {
       // Historical identifier-only events retain their durable identity while
       // their read projection explains the persisted outcome. No replay or
       // mutation of the Project record is needed after deploying this repair.
-      const outcome = run?.projectId === event.projectId ? runFailureEventInput(run) : undefined;
+      const outcome = isFailure
+        ? run?.projectId === event.projectId ? runFailureEventInput(run) : undefined
+        : run?.projectId === event.projectId ? runInterruptionEventInput(run) : undefined;
       const detail = sanitizeProjectEventDetail(outcome?.detail ??
-        `${event.detail ?? ''} · No error outcome was recorded.`);
-      return { ...event, ...(detail !== undefined ? { detail } : {}), originScopeIds: [...origins] };
+        (isFailure ? `${event.detail ?? ''} · No error outcome was recorded.` : 'The interruption outcome is unavailable.'));
+      return {
+        ...event,
+        ...(isInterruption && outcome !== undefined ? { summary: outcome.summary } : {}),
+        ...(detail !== undefined ? { detail } : {}),
+        originScopeIds: [...origins],
+      };
     }));
+  }
+
+  /** Return one run only when a durable wake links it to the requested conversation. */
+  async chatRunForScope(scopeId: string, runId: string): Promise<AgentRun | undefined> {
+    const run = await this.#loadRun(runId);
+    if (run === undefined) return undefined;
+    const linkedRunId = run.retryOfRunId ?? run.id;
+    for (const wake of await this.#store.listWakeRequests()) {
+      if (wake.runId !== linkedRunId || wake.projectId !== run.projectId) continue;
+      const source = await this.#resolveWakeSource(wake);
+      if (source !== undefined && sourceTouchesScope(source, scopeId)) return run;
+    }
+    return undefined;
+  }
+
+  /** Project the authoritative active Chat runs for one conversation after reconnect or refresh. */
+  async activeChatRunsForScope(scopeId: string): Promise<readonly AgentRun[]> {
+    const active: AgentRun[] = [];
+    const seen = new Set<string>();
+    const allRuns = this.#runs.list === undefined ? [] : await this.#runs.list();
+    for (const wake of await this.#store.listWakeRequests()) {
+      if (wake.status !== 'admitted' || wake.runId === undefined) continue;
+      const original = await this.#loadRun(wake.runId);
+      if (original === undefined) continue;
+      const source = await this.#resolveWakeSource(wake);
+      if (source === undefined || !sourceTouchesScope(source, scopeId)) continue;
+      const candidates = [original, ...allRuns.filter((run) => run.retryOfRunId === original.id)];
+      for (const run of candidates) {
+        if ((run.status !== 'queued' && run.status !== 'running') || run.taskId !== undefined ||
+            run.projectId !== wake.projectId || seen.has(run.id)) continue;
+        seen.add(run.id);
+        active.push(run);
+      }
+    }
+    return active.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  }
+
+  async #loadRun(runId: string): Promise<AgentRun | undefined> {
+    const loaded = await this.#runs.load?.(runId);
+    if (loaded !== undefined) return loaded;
+    return (await this.#runs.list?.())?.find((run) => run.id === runId);
   }
 
   /** Durable state for observability: every wake request on record. */
@@ -929,8 +1005,7 @@ export class CollaborationCoordinator {
     return this.#store.listWakeRequests();
   }
 
-  /**
-   * Durable non-wake outcomes for one input (Message or Project event), for
+  /** Durable non-wake outcomes for one input (Message or Project event), for
    * observability.
    *
    * This is what lets a human answer "why did this input wake nobody?": a

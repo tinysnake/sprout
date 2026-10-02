@@ -82,6 +82,7 @@ export function journeyWire() {
       else if (path === '/api/tasks') body = { tasks: [task] };
       else if (path === '/api/tasks/task-a') body = { task, runs: [taskRun] };
       else if (path === projectPath + '/task-proposals') body = { proposals: [] };
+      else if (/^\/api\/chat\/scopes\/[^/]+\/active-runs$/.test(path)) body = { runs: [] };
       else if (path === '/api/runs') body = { runs: [run] };
       else if (path === '/api/projects/project-a/scopes') body = { scopes: [scope, directScope] };
       else if (path === '/api/scopes/channel-a') body = { scope, state: { scopeId: scope.id, writable: true }, context: { scopeId: scope.id, projectId: project.id, kind: 'project', project: { contentVersion: 1, goal: 'Exact Chat context A', rules: [] } } };

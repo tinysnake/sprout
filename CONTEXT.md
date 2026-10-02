@@ -105,8 +105,12 @@ One bounded activation of an agent in response to a message, task, or system eve
 _Avoid_: Agent, task
 
 **Agent run stop**:
-An intentional request by a Human, or by the Task lead for a run it initiated, to settle one active agent run without ending its Task or releasing the Task lease. The Human's operator action is named Interrupt, but its intentional run outcome is stopped, distinct from an unexpected run interruption.
-_Avoid_: Task pause, Task end, interruption
+An intentional request by a Human or Task lead to settle one active Task-linked run without ending its Task. Its outcome is stopped, and the Task lease remains held.
+_Avoid_: Chat run interruption, Task pause, Task end
+
+**Chat run interruption**:
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason, and its run-held Environment lease is released before the conversation is reused.
+_Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
 One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
@@ -141,7 +145,7 @@ The complete, partial, pending, or unavailable composition accompanying a usage 
 _Avoid_: Confidence score, success rate
 
 **Interrupt**:
-The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Agent run stop whose outcome is stopped, not interrupted.
+The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Task-linked Agent run stop whose outcome is stopped.
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:

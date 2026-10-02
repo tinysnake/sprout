@@ -103,6 +103,7 @@ import { createAgentRouter } from './web/agent-router.ts';
 import { createProjectRouter } from './web/project-router.ts';
 import { createConversationRouter } from './web/conversation-router.ts';
 import { createChatReadRouter } from './web/chat-read-router.ts';
+import { createChatRunRouter } from './web/chat-run-router.ts';
 import { createUsageRouter } from './web/usage-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
@@ -1799,6 +1800,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // boundary, so their actor is the authenticated Human by construction.
         createConversationRouter({ scopes: conversationScopes }),
         createChatReadRouter({ scopes: conversationScopes, store: openedStoresForCatalog.collaboration }),
+        createChatRunRouter({ collaboration, scopes: conversationScopes, runs: orchestrator }),
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
