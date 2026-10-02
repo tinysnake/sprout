@@ -210,14 +210,14 @@ export class TaskService {
   async advanceWithAttribution(taskId: string, input: {
     readonly agentId: string;
     readonly actor: import('./model.ts').TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
     readonly prompt?: string;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
     const task = await this.#require(taskId);
     return this.#lifecycle.advanceRun(taskId, input.agentId, input.prompt ?? defaultAdvancePrompt(task), {
-      actor: input.actor, reason: input.reason, contentVersion: input.contentVersion,
+      actor: input.actor, ...(input.reason !== undefined ? { reason: input.reason } : {}), contentVersion: input.contentVersion,
     });
   }
 

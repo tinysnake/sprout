@@ -21,6 +21,11 @@ test('proposal adapter encodes Project and proposal identities and retains optim
   await browser.revise('proposal/with space', { ...content, ...decision });
   await browser.withdraw('proposal/with space', decision);
   await browser.reject('proposal/with space', decision);
+  await browser.begin('proposal/with space', {
+    expectedRevision: 7,
+    environmentInstanceId: 'env-a',
+    lead: { memberId: 'operator', memberKind: 'human' },
+  });
   assert.deepEqual(calls.map(c => c.path), [
     '/api/projects/project%2Fwith%20space/task-proposals',
     '/api/task-proposals/proposal%2Fwith%20space',
@@ -31,12 +36,18 @@ test('proposal adapter encodes Project and proposal identities and retains optim
     '/api/task-proposals/proposal%2Fwith%20space/content',
     '/api/task-proposals/proposal%2Fwith%20space/withdraw',
     '/api/task-proposals/proposal%2Fwith%20space/reject',
+    '/api/task-proposals/proposal%2Fwith%20space/begin',
   ]);
   for (const call of calls.slice(3)) assert.equal(call.method, 'POST');
   assert.deepEqual(JSON.parse(calls[4]!.body!), { ...content, origin: null });
   assert.deepEqual(JSON.parse(calls[5]!.body!), { ...content, origin: { workingGroupId: 'group/1', sourceMessageId: 'message/2' } });
   assert.deepEqual(JSON.parse(calls[6]!.body!), { ...content, ...decision });
   assert.deepEqual(JSON.parse(calls[8]!.body!), decision);
+  assert.deepEqual(JSON.parse(calls[9]!.body!), {
+    expectedRevision: 7,
+    environmentInstanceId: 'env-a',
+    lead: { memberId: 'operator', memberKind: 'human' },
+  });
 });
 
 test('disconnected proposal command rejects once, exposes offline state and is never replayed', async () => {

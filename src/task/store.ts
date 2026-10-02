@@ -85,7 +85,7 @@ export interface TaskStore {
     readonly runId: string;
     readonly agentId: string;
     readonly actor: TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
     readonly now: number;
   }, expected: {
@@ -202,7 +202,7 @@ export class InMemoryTaskStore implements TaskStore {
     readonly runId: string;
     readonly agentId: string;
     readonly actor: TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
     readonly now: number;
   }, expected: {
@@ -219,7 +219,7 @@ export class InMemoryTaskStore implements TaskStore {
     if (links.some(link => link.runId === input.runId)) return false;
     const link: TaskRunLink = {
       taskId: task.id, runId: input.runId, agentId: input.agentId,
-      actor: structuredClone(input.actor), reason: input.reason, contentVersion: input.contentVersion,
+      actor: structuredClone(input.actor), ...(input.reason !== undefined ? { reason: input.reason } : {}), contentVersion: input.contentVersion,
       requestedAt: input.now, sequence: links.length + 1, linkedAt: input.now,
     };
     this.#tasks.set(task.id, structuredClone(task));

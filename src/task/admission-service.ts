@@ -79,7 +79,7 @@ export class TaskAdmissionService {
     const initial = await this.#proposals.get(proposalId);
     await this.#proposals.authorizeActor(initial.projectId, actor);
     if (actor.memberKind !== 'human') throw new TaskProposalError('authority-required');
-    const reason = safeReason(input.reason);
+    const reason = optionalReason(input.reason);
 
     // A lost HTTP response may retry the same command. The durable proposal event
     // identifies the single Task; it must never cause another lease or run.
@@ -142,7 +142,7 @@ export class TaskAdmissionService {
         contextAgentId,
         approvedBy: actor,
         approvedAt,
-        approvalReason: reason,
+        ...(reason !== undefined ? { approvalReason: reason } : {}),
       },
       createdAt: approvedAt,
       updatedAt: approvedAt,
@@ -152,7 +152,7 @@ export class TaskAdmissionService {
         environmentInstanceId: input.environmentInstanceId,
         contextAgentId,
         consumeProposal: () => { this.#proposalStore.consumeForBegin(proposal.id, proposal.revision, {
-          actor, at: approvedAt, reason, taskId,
+          actor, at: approvedAt, ...(reason !== undefined ? { reason } : {}), taskId,
         }); },
       });
     } catch (error) {
@@ -172,7 +172,9 @@ export class TaskAdmissionService {
     // This is deliberately a second durable command after Task begin: the begin
     // boundary first establishes the active Task, bound Environment and context.
     try {
-      const first = await this.advance(taskId, actor, { targetAgentId: lead.memberId, reason });
+      const first = await this.#advance(taskId, actor, {
+        targetAgentId: lead.memberId, ...(reason !== undefined ? { reason } : {}),
+      });
       return { task: first.task, duplicate: false, initialRunId: first.runId };
     } catch {
       const begunTask = await this.#tasks.get(taskId);
@@ -193,6 +195,15 @@ export class TaskAdmissionService {
     readonly reason: string;
     readonly prompt?: string;
   }): Promise<{ readonly task: Task; readonly runId: string; readonly audit: TaskRunLink }> {
+    const reason = safeReason(input.reason);
+    return this.#advance(taskId, actor, { ...input, reason });
+  }
+
+  async #advance(taskId: string, actor: TaskActor, input: {
+    readonly targetAgentId: string;
+    readonly reason?: string;
+    readonly prompt?: string;
+  }): Promise<{ readonly task: Task; readonly runId: string; readonly audit: TaskRunLink }> {
     actor = actorSnapshot(actor);
     const task = await this.#tasks.get(taskId);
     if (!task) throw new TaskAdmissionError('task-not-admitted', `unknown task: ${taskId}`);
@@ -201,14 +212,14 @@ export class TaskAdmissionService {
     if (actor.memberKind === 'agent' && (task.admission.lead.memberKind !== 'agent' || task.admission.lead.memberId !== actor.memberId)) {
       throw new TaskAdmissionError('advance-forbidden', 'only the Human or current Task lead may advance this Task');
     }
-    const reason = safeReason(input.reason);
+    const reason = optionalReason(input.reason);
     const prompt = input.prompt === undefined ? undefined : safePrompt(input.prompt);
     const eligible = await this.#eligibleAgents(task.projectId, task.environmentInstanceId!);
     if (!eligible.includes(input.targetAgentId)) throw new TaskAdmissionError('target-ineligible', 'the selected Agent is not eligible on the Task Environment');
     const advanced = await this.#tasks.advanceWithAttribution(taskId, {
       agentId: input.targetAgentId,
       actor,
-      reason,
+      ...(reason !== undefined ? { reason } : {}),
       contentVersion: task.admission.contentVersion,
       ...(prompt !== undefined ? { prompt } : {}),
     });
@@ -239,6 +250,10 @@ function safePrompt(value: unknown): string {
   const sanitized = sanitizeOperatorText(value, { maxLength: 16_000, fallback: '' });
   if (!sanitized.trim()) throw new TaskAdmissionError('invalid-command', 'prompt must contain usable text');
   return sanitized;
+}
+
+function optionalReason(value: unknown): string | undefined {
+  return value === undefined ? undefined : safeReason(value);
 }
 
 function safeReason(value: unknown): string {

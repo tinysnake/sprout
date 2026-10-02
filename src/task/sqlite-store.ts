@@ -243,7 +243,7 @@ export class SqliteTaskStore implements TaskStore {
     readonly runId: string;
     readonly agentId: string;
     readonly actor: import('./model.ts').TaskActor;
-    readonly reason: string;
+    readonly reason?: string;
     readonly contentVersion: number;
     readonly now: number;
   }, expected: {
@@ -265,7 +265,7 @@ export class SqliteTaskStore implements TaskStore {
       this.#db.prepare(`INSERT INTO task_run_links
         (task_id, run_id, agent_id, sequence, linked_at, advance_actor, advance_reason, content_version, requested_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(task.id, input.runId, input.agentId, next.sequence + 1, input.now, JSON.stringify(input.actor), input.reason, input.contentVersion, input.now);
+        .run(task.id, input.runId, input.agentId, next.sequence + 1, input.now, JSON.stringify(input.actor), input.reason ?? null, input.contentVersion, input.now);
       return true;
     });
   }

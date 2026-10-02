@@ -129,6 +129,31 @@ test('a Human lead begins one frozen proposal snapshot without waking an Agent',
   assert.equal(context.pool.activeLease('env-a')?.taskId, result.task.id);
 });
 
+test('approve-and-begin accepts an omitted reason and records no substitute', async () => {
+  for (const lead of [
+    { memberId: 'operator', memberKind: 'human' as const },
+    { memberId: 'scout', memberKind: 'agent' as const },
+  ]) {
+    const context = fixture();
+    const proposal = await propose(context);
+    const input = { expectedRevision: 1, environmentInstanceId: 'env-a', lead };
+    const first = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, input);
+    assert.equal(first.task.admission?.approvalReason, undefined);
+    const consumed = await context.proposals.get(proposal.id);
+    const begun = consumed.lifecycle.find(event => event.action === 'begun');
+    assert.ok(begun);
+    assert.equal('reason' in begun, false, 'proposal history does not invent an approval reason');
+    if (lead.memberKind === 'agent') {
+      const run = (await context.tasks.getWithRuns(first.task.id))?.runs[0];
+      assert.ok(run);
+      assert.equal('reason' in run, false, 'Agent-led initial run has no fabricated approval reason');
+    }
+    const retry = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, input);
+    assert.equal(retry.duplicate, true, 'reason-free retries identify the already begun Task');
+    assert.equal(retry.task.id, first.task.id);
+  }
+});
+
 test('failure before lease acquisition leaves the proposal open and creates no Task', async () => {
   const context = fixture({ compatible: (_agent, environment) => environment === 'env-a' });
   const proposal = await propose(context);
@@ -332,7 +357,9 @@ test('SQLite restart preserves the consumed proposal snapshot and rolls back a p
   try {
     const context = fixture({ taskStore: store.tasks, proposalStore: store.taskProposals, leaseStore: store.leases });
     const proposal = await propose(context);
-    const result = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'scout', memberKind: 'agent' }));
+    const result = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, {
+      expectedRevision: 1, environmentInstanceId: 'env-a', lead: { memberId: 'scout', memberKind: 'agent' },
+    });
     const rollbackProposal = await context.proposals.propose('project', { memberId: 'operator', memberKind: 'human' }, content);
     const rollbackTask = {
       id: 'rollback-task', projectId: 'project', title: content.title, goal: content.goal,
@@ -358,15 +385,20 @@ test('SQLite restart preserves the consumed proposal snapshot and rolls back a p
     const reopened = new SqliteStore({ filename });
     try {
       assert.equal((await reopened.taskProposals.get(proposal.id))?.status, 'begun');
+      const storedProposal = await reopened.taskProposals.get(proposal.id);
+      const begun = storedProposal?.lifecycle.find(event => event.action === 'begun');
+      assert.ok(begun);
+      assert.equal('reason' in begun, false, 'SQLite proposal history preserves the absent approval reason');
       const task = await reopened.tasks.get(result.task.id);
       assert.equal(task?.admission?.proposalRevision, 1);
       assert.equal(task?.admission?.contentVersion, 1);
+      assert.equal(task?.admission?.approvalReason, undefined);
       assert.deepEqual(task?.admission?.validationCriteria, content.validationCriteria);
       assert.equal(reopened.leases.get(task!.environmentLeaseId!)?.state, 'active');
       const links = (await reopened.tasks.getWithRuns(result.task.id))!.runs;
       assert.equal(links.length, 1);
       assert.equal(links[0]?.contentVersion, 1);
-      assert.equal(links[0]?.reason, 'Approved for the Project milestone.');
+      assert.equal('reason' in links[0]!, false, 'SQLite run history stores no substitute reason');
       assert.deepEqual(links[0]?.actor, { memberId: 'operator', memberKind: 'human' });
     } finally { reopened.close(); }
   } finally {

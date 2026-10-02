@@ -43,7 +43,7 @@ export interface TaskProposal {
         readonly action: 'begun';
         readonly actor: ProposalActor;
         readonly at: number;
-        readonly reason: string;
+        readonly reason?: string;
         readonly contentVersion: number;
         readonly taskId: string;
       }
@@ -55,7 +55,9 @@ export interface ProposalDecision {
   readonly expectedRevision: number;
   readonly reason: string;
 }
-export interface TaskProposalBeginInput extends ProposalDecision {
+export interface TaskProposalBeginInput {
+  readonly expectedRevision: number;
+  readonly reason?: string;
   readonly environmentInstanceId: string;
   readonly lead: ProposalActor;
 }

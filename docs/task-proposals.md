@@ -68,12 +68,15 @@ actor/proposer fields cannot impersonate an Agent or grant authority.
 | POST | `/api/task-proposals/:id/content` | `{ proposal }` |
 | POST | `/api/task-proposals/:id/withdraw` | `{ proposal }` |
 | POST | `/api/task-proposals/:id/reject` | `{ proposal }` |
-| POST | `/api/task-proposals/:id/begin` | `{ expectedRevision, environmentInstanceId, lead, reason }` → `{ task, duplicate, initialRunId? }` |
+| POST | `/api/task-proposals/:id/begin` | `{ expectedRevision, environmentInstanceId, lead, reason? }` → `{ task, duplicate, initialRunId? }` |
 | POST | `/api/tasks/:id/advances` | `{ targetAgentId, reason, prompt? }` → `{ task, runId, advance }` |
 
 Creation accepts content and optional `origin`; validation accepts content
 only. Revision accepts full replacement content, `reason`, and positive integer
-`expectedRevision`; decisions accept the latter two fields. Domain failures
+`expectedRevision`; decisions accept the latter two fields. Begin may omit its
+optional `reason`; when supplied, it is recorded, and when absent no approval or
+initial-run reason is fabricated. Revision, withdrawal, rejection, and explicit
+Task advances retain their required reasons. Domain failures
 carry stable `code`: unknown targets are 404,
 invalid content is 400, authority/membership refusal is 403, and stale/lifecycle
 conflicts are 409. Unexpected failures expose no raw diagnostics.
@@ -98,20 +101,22 @@ operator session, fences the expected proposal revision, validates the selected
 lead and Environment, and then consumes that revision in the same SQLite
 transaction that inserts the Task begin intent and Task-held lease. The Task
 stores the immutable approved content snapshot, content version, lead,
-Environment binding, and approval actor/reason. A pre-acquisition refusal leaves
-the proposal proposed; once the transaction commits, Worker-context failure
+Environment binding, and approval actor plus any supplied reason. A
+pre-acquisition refusal leaves the proposal proposed; once the transaction
+commits, Worker-context failure
 moves that same Task and lease into recovery on the selected Environment. There
 is no separately durable approved-but-unbegun state.
 
 The Task lead may use `POST /api/tasks/:id/advances` to select a currently
-eligible Project Agent. Each admitted run link records its actor, reason, target,
-and bound content version in the same compare-and-set that enforces one active
-run. Human leads receive no automatic run. Agent leads receive one initial,
-separately recorded run after context preparation succeeds. The Human approval
-command supplies the initial run's actor and reason. If that submission fails
-after begin commits, the response and every idempotent retry report
-`initialRunFailed: true`; the failed attempt's link is not presented as an
-admitted `initialRunId`.
+eligible Project Agent. Each subsequent admitted run link records its actor,
+reason, target, and bound content version in the same compare-and-set that
+enforces one active run. Human leads receive no automatic run. Agent leads
+receive one initial, separately recorded run after context preparation succeeds.
+The Human approval command supplies the initial run's actor and optional reason.
+If omitted, the begin event and initial run link record no reason rather than a
+placeholder. If that submission fails after begin commits, the response and
+every idempotent retry report `initialRunFailed: true`; the failed attempt's link
+is not presented as an admitted `initialRunId`.
 
 The authenticated runtime refuses direct legacy Task creation, begin, and
 advance routes; the old Task transport remains only for unauthenticated M1 test
@@ -182,7 +187,9 @@ restores the prior pause, blocker, or validation gap without replaying work.
 Saving a proposal opens that proposal's detail and selects the proposed filter.
 The Human can inspect the saved content immediately, including on a phone where
 only one pane is visible. The status filter is a labeled dropdown without a
-surrounding tab-strip panel.
+surrounding tab-strip panel. Propose Task uses the existing production ChatDialog
+overlay pattern: it contains focus, closes on Escape and backdrop interaction,
+restores focus to its trigger, and keeps controls touch-sized.
 
 The page uses Chat's full-height, bounded split-container pattern: list and
 detail scroll internally, so switching between short and long Tasks does not
@@ -208,7 +215,14 @@ requires browser review; DOM assertions cover the layout contract.
 
 ## Risk-to-test map
 
-- Pre-acquisition refusal and post-acquisition Worker failure: `src/task/admission.test.ts`.
+- Creation overlay, saved proposal direct-open, and approval-without-reason UI:
+  `web/src/modules/tasks/tasks.dom.test.ts` and
+  `web/src/adapters/task-proposal-api.test.ts`.
+- Omitted approval reason at the protected route, admission service, initial Agent
+  run, and SQLite restart: `src/web/task-admission-router.test.ts` and
+  `src/task/admission.test.ts`.
+- Pre-acquisition refusal and post-acquisition Worker failure:
+  `src/task/admission.test.ts`.
 - Atomic proposal revision consumption with Task+lease persistence, SQLite rollback, and restart: the SQLite admission contract in `src/task/admission.test.ts`.
 - Lead authority, Environment compatibility, one-active-run fence, initial-run policy, and attributed advance history: Task admission contract tests plus `web/src/adapters/task-admission-contract.test.ts`.
 

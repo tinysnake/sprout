@@ -37,7 +37,7 @@ export class SqliteTaskProposalStore implements TaskProposalStore {
   consumeForBegin(id: string, expectedRevision: number, input: {
     readonly actor: import('./proposal-model.ts').ProposalActor;
     readonly at: number;
-    readonly reason: string;
+    readonly reason?: string;
     readonly taskId: string;
   }): TaskProposal {
     const row = this.db.prepare(`SELECT document, revision, working_group_id, source_message_id
@@ -52,7 +52,8 @@ export class SqliteTaskProposalStore implements TaskProposalStore {
       revision: current.revision + 1,
       updatedAt: input.at,
       lifecycle: [...current.lifecycle, {
-        action: 'begun', actor: structuredClone(input.actor), at: input.at, reason: input.reason,
+        action: 'begun', actor: structuredClone(input.actor), at: input.at,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
         contentVersion: current.currentContentVersion, taskId: input.taskId,
       }],
     };
