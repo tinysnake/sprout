@@ -128,66 +128,68 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   return { app, pinia, router };
 }
 
+/** Build every production page service over the one browser transport. */
+export function createProductionAppOptions(transport = createBrowserTransport()): SproutAppOptions {
+  const operatorSession = createOperatorSessionBrowserAdapter(transport);
+  const environmentService = new ProductionEnvironmentService(
+    createEnvironmentEnrollmentBrowserAdapter(transport),
+  );
+  // The typed Agent authority (#91): the durable identities and the
+  // Environment-facts compatibility projection arrive through the #90 wire
+  // adapter over the same shared transport; the run history read supplies
+  // the attribution foldable. No fixture is involved.
+  const agentAdapter = createAgentBrowserAdapter(transport);
+  const agentService = new ProductionAgentService(
+    agentAdapter,
+    () =>
+      transport
+        .request<{ readonly runs: readonly RunView[] }>('/api/runs')
+        .then((body) => body.runs),
+  );
+  const projectService = new ProductionProjectService({
+    projects: createProjectBrowserAdapter(transport),
+    access: createProjectAccessBrowserAdapter(transport),
+    agents: agentService,
+    environments: environmentService,
+  });
+  const taskService = createTaskBrowserAdapter(transport);
+  const feedService = createFeedBrowserAdapter(transport);
+  const chatService = new ProductionChatService({
+    conversations: createConversationBrowserAdapter(transport),
+    messages: createMessageBrowserAdapter(transport),
+    routing: createRoutingBrowserAdapter(transport),
+    runs: createRunBrowserAdapter(transport),
+  });
+  const operatorApi = createOperatorBrowserAdapter(transport);
+  const settingsService = new ProductionSettingsService(
+    operatorApi,
+    operatorSession,
+    transport,
+  );
+  const usageAdapter = createUsageBrowserAdapter(transport);
+  const usageService = new ProductionUsageService(usageAdapter);
+
+  return {
+    environmentService,
+    agentService,
+    projectService,
+    taskService,
+    feedService,
+    chatService,
+    usageService,
+    connectionSource: transport,
+    operatorSession,
+    settingsService,
+  };
+}
+
 // Auto-mount in browser when #app is found (unless manual mount in test)
 if (typeof window !== 'undefined' && !(window as unknown as Record<string, unknown>).__SPROUT_TEST_MANUAL_MOUNT__) {
   const mountEl = document.getElementById('app');
   if (mountEl) {
-    // The production bootstrap wires the real typed Environment adapter over the
-    // shared #85 transport. Deterministic tests never run this branch (they set
-    // __SPROUT_TEST_MANUAL_MOUNT__ and inject a fixture explicitly), so a fixture
-    // can never become the production authority. The transport reports the
-    // connection fact the Shell and the control boundary read.
-    const transport = createBrowserTransport();
-    const operatorSession = createOperatorSessionBrowserAdapter(transport);
-    const environmentService = new ProductionEnvironmentService(
-      createEnvironmentEnrollmentBrowserAdapter(transport),
-    );
-    // The typed Agent authority (#91): the durable identities and the
-    // Environment-facts compatibility projection arrive through the #90 wire
-    // adapter over the same shared transport; the run history read supplies
-    // the attribution foldable. No fixture is involved.
-    const agentAdapter = createAgentBrowserAdapter(transport);
-    const agentService = new ProductionAgentService(
-      agentAdapter,
-      () =>
-        transport
-          .request<{ readonly runs: readonly RunView[] }>('/api/runs')
-          .then((body) => body.runs),
-    );
-    const projectService = new ProductionProjectService({
-      projects: createProjectBrowserAdapter(transport),
-      access: createProjectAccessBrowserAdapter(transport),
-      agents: agentService,
-      environments: environmentService,
-    });
-    const taskService = createTaskBrowserAdapter(transport);
-    const feedService = createFeedBrowserAdapter(transport);
-    const chatService = new ProductionChatService({
-      conversations: createConversationBrowserAdapter(transport),
-      messages: createMessageBrowserAdapter(transport),
-      routing: createRoutingBrowserAdapter(transport),
-      runs: createRunBrowserAdapter(transport),
-    });
-    const operatorApi = createOperatorBrowserAdapter(transport);
-    const settingsService = new ProductionSettingsService(
-      operatorApi,
-      operatorSession,
-      transport,
-    );
-    const usageAdapter = createUsageBrowserAdapter(transport);
-    const usageService = new ProductionUsageService(usageAdapter);
-    const { app, router } = createSproutApp({
-      environmentService,
-      agentService,
-      projectService,
-      taskService,
-      feedService,
-      chatService,
-      usageService,
-      connectionSource: transport,
-      operatorSession,
-      settingsService,
-    });
+    // One transport owns authenticated requests, CSRF proof, event updates, and
+    // the connection state shared by every production page service.
+    const { app, router } = createSproutApp(createProductionAppOptions());
     router.isReady().then(() => {
       app.mount(mountEl);
     });

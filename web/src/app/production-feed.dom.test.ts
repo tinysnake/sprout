@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
-import { feedTarget, type FeedFilter, type FeedSnapshot } from '../../../src/web/feed.ts';
+import { feedTarget, type FeedFilter, type FeedSnapshot, type FeedTarget } from '../../../src/web/feed.ts';
 import type { BrowserTransportState } from '../transport/browser-transport.js';
 import type { FeedBrowserAdapter } from '../adapters/feed-api.js';
 
@@ -121,6 +121,15 @@ const baseSnapshot: FeedSnapshot = {
       id: 'event:event-2', kind: 'environment-readiness', summary: 'Environment readiness was checked.', scopes: ['feed:infra'],
       target: feedTarget({ surface: 'environments' }), at: 1_700_000_000_005,
     },
+    {
+      id: 'message:chat-1', kind: 'message', summary: 'A Project Message is available.', scopes: ['all'],
+      target: feedTarget({ surface: 'project-chat', projectId: 'all' }), projectId: 'all', at: 1_700_000_000_007,
+    },
+    {
+      id: 'event:hostile-target', kind: 'task-event', summary: 'A malformed destination must be rejected.', scopes: ['all'],
+      target: { surface: 'agent-detail', agentId: '../settings', path: '/manage/settings' } as FeedTarget,
+      at: 1_700_000_000_008,
+    },
   ],
 };
 
@@ -219,15 +228,31 @@ test('production Feed wires its read adapter, restores namespaced scope context,
     assert.equal(router.currentRoute.value.query['urgency'], 'action_required');
     assert.equal(dom.window.document.activeElement?.textContent?.includes('Feed & Human Attention'), true, 'return focuses the Feed heading');
 
+    (dom.window.document.querySelector('[data-activity-id="event:hostile-target"]') as HTMLButtonElement).click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'feed', 'a malformed target cannot escape to another authority');
+    assert.equal(dom.window.document.querySelector('#btn-pop-return'), null, 'rejected route data creates no return context');
+
+    (dom.window.document.querySelector('[data-activity-id="message:chat-1"]') as HTMLButtonElement).click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'project-chat');
+    assert.equal(router.currentRoute.value.query['project'], 'all', 'Chat receives the exact Project identity');
+    assert.ok(dom.window.document.querySelector('#btn-pop-return'), 'Chat keeps return-to-Feed context');
+    (dom.window.document.querySelector('#btn-pop-return') as HTMLButtonElement).click();
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'feed');
+    assert.equal(router.currentRoute.value.query['scope'], 'all');
+    assert.equal(router.currentRoute.value.query['urgency'], 'action_required');
+
     scope = dom.window.document.querySelector('#feed-scope-select') as HTMLSelectElement;
     scope.value = 'feed:infra';
     scope.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
     await settle();
     assert.ok(feed.calls.some((filter) => filter.scope === 'feed:infra'), 'infrastructure uses its namespaced token');
-    const allUrgency = [...dom.window.document.querySelectorAll('[aria-label="Filter Attention by urgency"] button')]
-      .find((button) => button.textContent?.startsWith('All (')) as HTMLButtonElement | undefined;
-    assert.ok(allUrgency, 'the all urgency option remains available');
-    allUrgency.click();
+    const attentionUrgency = [...dom.window.document.querySelectorAll('[aria-label="Filter Attention by urgency"] button')]
+      .find((button) => button.textContent?.startsWith('Attention (')) as HTMLButtonElement | undefined;
+    assert.ok(attentionUrgency, 'the Attention urgency option remains available');
+    attentionUrgency.click();
     await settle();
     assert.ok(dom.window.document.querySelector('[data-attention-id="enrollment:env-1"]'));
     (dom.window.document.querySelector('[data-attention-id="enrollment:env-1"]') as HTMLButtonElement).click();
@@ -236,20 +261,29 @@ test('production Feed wires its read adapter, restores namespaced scope context,
     assert.equal(router.currentRoute.value.query['project'], undefined);
     (dom.window.document.querySelector('#btn-pop-return') as HTMLButtonElement).click();
     await settle();
+    assert.equal(router.currentRoute.value.query['scope'], 'feed:infra');
+    assert.equal(router.currentRoute.value.query['urgency'], 'attention');
 
     scope = dom.window.document.querySelector('#feed-scope-select') as HTMLSelectElement;
     scope.value = 'infra';
     scope.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
     await settle();
-    assert.ok(dom.window.document.querySelector('[data-attention-id="event:event-infra"]'));
     assert.equal(dom.window.document.querySelector('[data-attention-id="enrollment:env-1"]'), null,
       'Project id infra remains distinct from feed:infra');
+    const actionUrgency = [...dom.window.document.querySelectorAll('[aria-label="Filter Attention by urgency"] button')]
+      .find((button) => button.textContent?.toLowerCase().startsWith('action required (')) as HTMLButtonElement | undefined;
+    assert.ok(actionUrgency);
+    actionUrgency.click();
+    await settle();
+    assert.ok(dom.window.document.querySelector('[data-attention-id="event:event-infra"]'));
     (dom.window.document.querySelector('[data-attention-id="event:event-infra"]') as HTMLButtonElement).click();
     await settle();
     assert.equal(router.currentRoute.value.path, '/project/overview');
     assert.equal(router.currentRoute.value.query['project'], 'infra');
     (dom.window.document.querySelector('#btn-pop-return') as HTMLButtonElement).click();
     await settle();
+    assert.equal(router.currentRoute.value.query['scope'], 'infra');
+    assert.equal(router.currentRoute.value.query['urgency'], 'action_required');
 
     scope = dom.window.document.querySelector('#feed-scope-select') as HTMLSelectElement;
     scope.value = 'feed:all';
@@ -261,6 +295,10 @@ test('production Feed wires its read adapter, restores namespaced scope context,
     await settle();
     assert.equal(router.currentRoute.value.path, '/manage/agents/agent-2');
     assert.ok(dom.window.document.querySelector('#btn-pop-return'), 'Agent detail retains return-to-Feed context');
+    (dom.window.document.querySelector('#btn-pop-return') as HTMLButtonElement).click();
+    await settle();
+    assert.equal(router.currentRoute.value.query['scope'], 'feed:all');
+    assert.equal(router.currentRoute.value.query['urgency'], 'action_required');
     app.unmount();
 
     await routeToFeed();

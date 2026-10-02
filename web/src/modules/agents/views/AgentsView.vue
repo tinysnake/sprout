@@ -191,6 +191,9 @@ const deepLinkId = computed(() =>
 const deepLinkMissing = computed(
   () => deepLinkId.value !== '' && !isLoading.value && !agents.value.some((a) => a.id === deepLinkId.value)
 );
+const selectedRunId = computed(() =>
+  typeof route.query['run'] === 'string' ? route.query['run'] : undefined
+);
 
 const selectedAgent = computed<AgentInstance | undefined>(() => {
   if (deepLinkId.value !== '') {
@@ -612,6 +615,7 @@ function currentOptionInputs(agent: AgentInstance) {
               v-if="selectedAgent"
               :agent="selectedAgent"
               :attributions="attributions"
+              :selected-run-id="selectedRunId"
               :disabled="controlsDisabled"
               @edit="(agent) => (isEditOpen = true)"
               @edit-instructions="(agent) => (isEditInstructionsOpen = true)"
@@ -634,6 +638,7 @@ function currentOptionInputs(agent: AgentInstance) {
             <AgentDetail
               :agent="selectedAgent"
               :attributions="attributions"
+              :selected-run-id="selectedRunId"
               :disabled="controlsDisabled"
               @edit="(agent) => (isEditOpen = true)"
               @edit-instructions="(agent) => (isEditInstructionsOpen = true)"

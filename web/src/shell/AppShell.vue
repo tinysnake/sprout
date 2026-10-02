@@ -8,7 +8,7 @@
  * admission check has its own raw-state status so its brief checks cannot be
  * overwritten by an unrelated shell announcement.
  */
-import { computed, onMounted, watch } from 'vue';
+import { computed, nextTick, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
@@ -45,6 +45,15 @@ const showConnectionWarning = useConnectionNotice(computed(() => presentation.va
 // live region beside the status pill.
 watch(presentation, (next, previous) => {
   if (previous === undefined || next.label !== previous.label) announcer.announce(next.announce);
+});
+
+// A route change can remove the focused link before the destination's async
+// facts arrive. Keep keyboard focus in the main region; page-owned detail
+// focus may then move it to the loaded record heading.
+watch(() => route.fullPath, async () => {
+  await nextTick();
+  const main = document.getElementById('sprout-main-content');
+  if (document.activeElement === document.body) main?.focus();
 });
 
 onMounted(() => {

@@ -650,6 +650,12 @@ test('the edit persists through the production adapter with option identity pres
     app.mount(mount);
     await settle(160);
 
+    await router.push('/manage/agents/programmer?run=run-1');
+    await settle(120);
+    const selectedRun = doc.querySelector('[data-run-id="run-1"]');
+    assert.ok(selectedRun, 'the Agent authority exposes the referenced Task run');
+    assert.equal(selectedRun.getAttribute('aria-current'), 'true', 'the exact run deep link is highlighted');
+
     (doc.querySelector('[data-agent="programmer"]') as HTMLButtonElement).click();
     await settle(120);
     (doc.querySelector('.agent-option-row .edit-opt-btn') as HTMLButtonElement).click();

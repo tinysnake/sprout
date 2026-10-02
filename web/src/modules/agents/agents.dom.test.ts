@@ -410,14 +410,16 @@ test('an unknown Agent deep link renders not-found and never substitutes another
       routerBase: '/app/',
       agentService: new agentsModule.FixtureAgentService(),
     });
-    await router.push('/manage/agents/does-not-exist');
+    const hostileId = '<script>hostile</script>';
+    await router.push({ name: 'agent-detail', params: { agentId: hostileId } });
     await router.isReady();
     app.mount(mount);
     await settle(140);
 
-    assert.equal(router.currentRoute.value.params['agentId'], 'does-not-exist', 'the URL is preserved');
+    assert.equal(router.currentRoute.value.params['agentId'], hostileId, 'the hostile URL identity remains visible to the not-found state');
     assert.ok(doc.querySelector('.agents-not-found-state'), 'an explicit not-found state renders');
     assert.match(doc.body.textContent ?? '', /Agent Not Found/);
+    assert.doesNotMatch(doc.body.innerHTML, /<script>hostile<\/script>/, 'hostile route data is rendered as text, never executable markup');
     assert.doesNotMatch(doc.body.textContent ?? '', /Ready: Priority 1 option/, 'no other record is substituted');
     assert.equal(doc.querySelector('.archive-agent-btn'), null, 'no mutation control for a missing record');
 
