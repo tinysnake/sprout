@@ -61,11 +61,27 @@ permanent authority or recovery decision. Decision-source hashes deduplicate
 history replay; SQL atomically suppresses repeated current-state observations.
 Heartbeat times, latency and probe receipts never create journal events.
 
-Source subjects are opaque one-way hashes, not display names or raw domain
-identifiers. A connection subject groups transitions of one enrollment; decision
-subjects identify individual durable decisions. Sequence is journal insertion
-order; `at` is decision time for durable history and observation time for
-connection/compatibility. Old decisions recovered after restart may therefore
+Source subjects are opaque one-way hashes. A connection subject groups transitions
+of one enrollment; decision subjects identify individual durable decisions. The
+journal carries only `sequence`, `subject`, finite `kind`/`state`, and epoch-ms
+`at`; it stores no routing or content fields. Web export rejoins recovery decision
+subjects to the authoritative recovery record to add optional run/Task identities
+(including the typed lease holder when the optional identity is absent) and an
+established Feed target. Task owners link to Task detail with Project
+context; other known runs link to Project Chat or Agent detail. Missing owners
+have no target. Rejoining on each export preserves correlation after restart
+without changing the journal schema or interpreting a hash as a route.
+
+Settings' Data & Diagnostics tab shows the latest 50 journal entries in insertion
+order, their journal event identity, available run/Task identities, and an owner
+link only when the Feed grammar and actual browser route validate it. All event
+times use one local date/time format with seconds and an ISO `<time datetime>`
+attribute. Cached facts keep the existing stale notice. The JSON export continues
+to include the full journal; the presentation window does not truncate export.
+
+Sequence is journal insertion order; `at` is decision time for durable history
+and observation time for connection/compatibility. Old decisions recovered after
+restart may therefore
 have earlier times than recently inserted events. All transition facts remain,
 including unresolved recovery and permanent Force Release history; there is no
 raw-log retention facility. A historical observation without a current accepted
@@ -80,6 +96,12 @@ stderr, operator-authored reasons or engine-authored detail. Engine names are
 restricted to the product's supported `pi` and `codex`; model identities, auth
 mode/type, arbitrary engine versions and probe summaries do not cross this seam.
 Product versions come from the installed package, not an Environment payload.
+
+The only enrichment slots are bounded route-key identities and canonical Feed
+targets. Field selection excludes source reasons, goals, run prompts/results,
+Messages, host facts, and arbitrary extra routing fields. Rows without a valid
+owner remain plain. Counts and finite operational states remain the event window's
+only summaries.
 
 The event writer accepts only finite kind/state pairs and integer times. SQLite
 reads re-project rows and omit invalid subjects or unrecognized kind/state text,

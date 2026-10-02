@@ -6,7 +6,8 @@ import Badge from '../primitives/Badge.vue';
 import Dialog from '../primitives/Dialog.vue';
 import EmptyState from '../primitives/EmptyState.vue';
 import { SETTINGS_SERVICE, type SettingsService, type SettingsCategoryTab } from '../modules/settings/ports.js';
-import type { OperatorSettings, WebDiagnostic } from '../../../src/operations/contract.ts';
+import { RouterLink, useRouter } from 'vue-router';
+import { EVENT_STATES, isDiagnosticTarget, projectDiagnosticCorrelation, type OperatorSettings, type WebDiagnostic } from '../../../src/operations/contract.ts';
 import type { BrowserSessionView } from '../adapters/operator-session-api.js';
 import type { BrowserTransportState } from '../transport/browser-transport.js';
 
@@ -38,6 +39,25 @@ const isRevokingOthers = ref(false);
 const settingsData = ref<OperatorSettings | null>(null);
 const sessionsData = ref<readonly BrowserSessionView[]>([]);
 const diagnosticsData = ref<WebDiagnostic | null>(null);
+const router = useRouter();
+const diagnosticEvents = computed(() => (diagnosticsData.value?.events ?? []).filter(event =>
+  Number.isSafeInteger(event.sequence) && event.sequence > 0 &&
+  Object.hasOwn(EVENT_STATES, event.kind) && (EVENT_STATES[event.kind] as readonly string[]).includes(event.state),
+).slice(-50).map(event => {
+  const date = new Date(event.at);
+  const validTime = Number.isSafeInteger(event.at) && event.at >= 0 && !Number.isNaN(date.getTime());
+  const target = isDiagnosticTarget(event.target) ? event.target : undefined;
+  const resolved = target ? router.resolve(target.path) : undefined;
+  const destination = target && resolved?.matched.length
+    ? { path: resolved.path, query: { ...resolved.query, ...(target.projectId ? { project: target.projectId } : {}) } }
+    : undefined;
+  return {
+    sequence: event.sequence, kind: event.kind, state: event.state,
+    correlation: projectDiagnosticCorrelation(event.correlation ?? {}), destination,
+    datetime: validTime ? date.toISOString() : undefined,
+    time: validTime ? date.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Time unavailable',
+  };
+}));
 
 let unsubscribeTransport: (() => void) | null = null;
 
@@ -806,6 +826,27 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
                 <Icon name="clipboard" :size="14" />
                 <span>Export sanitized diagnostics</span>
               </Button>
+
+              <div class="mt-4 border-t border-[var(--border-subtle)] pt-3" aria-label="Operational events">
+                <h4 class="text-xs font-semibold text-[var(--text-primary)]">Operational events</h4>
+                <p class="mt-1 text-[11px] text-[var(--text-muted)]">{{ diagnosticEvents.length }} events shown · latest 50 journal entries · local time</p>
+                <ol v-if="diagnosticEvents.length" class="mt-2 divide-y divide-[var(--border-subtle)]">
+                  <li v-for="event in diagnosticEvents" :key="event.sequence" :data-diagnostic-event="event.sequence" class="py-3 text-xs flex flex-col gap-1.5">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <strong class="text-[var(--text-primary)]">{{ event.kind }} · {{ event.state }}</strong>
+                      <time v-if="event.datetime" :datetime="event.datetime" class="text-[11px] text-[var(--text-muted)]">{{ event.time }}</time>
+                      <span v-else class="text-[11px] text-[var(--text-muted)]">{{ event.time }}</span>
+                    </div>
+                    <div class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-[var(--text-secondary)]">
+                      <span>Event #{{ event.sequence }}</span>
+                      <span v-if="event.correlation?.runId" class="break-all">Run {{ event.correlation.runId }}</span>
+                      <span v-if="event.correlation?.taskId" class="break-all">Task {{ event.correlation.taskId }}</span>
+                    </div>
+                    <RouterLink v-if="event.destination" :to="event.destination" :aria-label="`Open owning surface for event #${event.sequence}`" class="min-h-[44px] inline-flex items-center text-[var(--accent-primary)] underline focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]">Open owning surface</RouterLink>
+                  </li>
+                </ol>
+                <p v-else class="mt-2 text-xs text-[var(--text-muted)]">No operational events recorded.</p>
+              </div>
             </div>
 
             <!-- Export boundary disclosure -->

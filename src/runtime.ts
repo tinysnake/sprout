@@ -1701,7 +1701,17 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     };
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
-    operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery, connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined });
+    operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
+      connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
+      run: async (id) => {
+        const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
+        return run ? { id: run.id, ...(run.projectId !== undefined ? { projectId: run.projectId } : {}), agentId: run.agentId } : undefined;
+      },
+      task: async (id) => {
+        const task = await tasks.get(id);
+        return task ? { id: task.id, projectId: task.projectId } : undefined;
+      },
+    });
     await operations.start();
     await operations.capture();
     // The read-only Feed projection (#103): one derived snapshot over the
