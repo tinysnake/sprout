@@ -69,7 +69,8 @@ async function runWorker(): Promise<void> {
         })),
         // Connector text is intentionally not forwarded. Identity state has
         // one product category regardless of filesystem detail.
-        log: () => log(WORKER_DIAGNOSTICS.identityReady),
+        log: (line) => log(line === WORKER_DIAGNOSTICS.coreGoingAway
+          ? WORKER_DIAGNOSTICS.coreGoingAway : WORKER_DIAGNOSTICS.identityReady),
       });
     } catch {
       log(WORKER_DIAGNOSTICS.outboundFailed);

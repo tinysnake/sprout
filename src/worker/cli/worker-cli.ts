@@ -951,7 +951,9 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
               claimSecret: undefined,
               identityKeyPath: identityPath,
               engineFacts: engineFacts(engineIds),
-              log: () => err('[sprout-worker] host-local Worker operation completed'),
+              log: (line) => err(line === WORKER_DIAGNOSTICS.coreGoingAway
+                ? `[sprout-worker] ${line}`
+                : '[sprout-worker] host-local Worker operation completed'),
             });
           } catch (error) {
             if (error instanceof WorkerEnrollmentPendingError) {

@@ -1964,8 +1964,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // with transport and Worker teardown so only the remaining store wait
         // consumes the reconnect queue's bounded deadline.
         const reconnectRetryDrain = runReconnectRetry.stopAcceptingAndDrain();
-        // End every open event stream before anything else: `server.close` waits
-        // for existing connections, and an SSE stream never ends by itself.
+        // The API ends SSE and releases upgraded Worker sockets with a bounded
+        // going-away handshake before awaiting HTTP close. Keep the gateway and
+        // stores alive here so channel-loss observers can preserve recovery.
         await api.close();
         // The enrollment-backed connections are owned by the gateway; the port
         // stops reaching them before they are torn down.
