@@ -625,7 +625,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       case 'reset':
         return reset(paths, rest);
       case 'install-service':
-        return installService(paths, rest);
+        return installService(paths, rest, environment);
       case 'uninstall-service':
         return uninstallService(paths, rest);
       case 'stop':
@@ -1348,7 +1348,11 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     return WORKER_EXIT.ok;
   }
 
-  async function installService(paths: WorkerHostPaths, args: readonly string[]): Promise<number> {
+  async function installService(
+    paths: WorkerHostPaths,
+    args: readonly string[],
+    environment: NodeJS.ProcessEnv,
+  ): Promise<number> {
     if (args.length !== 0) {
       err('sprout worker install-service: takes no arguments');
       return WORKER_EXIT.usage;
@@ -1400,7 +1404,7 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
       // keeps that supervised process alive across core restarts.
       arguments: ['worker', 'start', '--foreground'],
       logPath: paths.logPath,
-      environment: plistEnvironment(),
+      environment: plistEnvironment(environment),
     });
     try {
       installLaunchAgent({
@@ -1477,15 +1481,18 @@ export function createWorkerCli(dependencies: WorkerCliDependencies = {}): Worke
     }
   }
 
-  function plistEnvironment(): Readonly<Record<string, string>> {
-    const environment: Record<string, string> = {};
-    if (process.env['HOME'] !== undefined) environment['HOME'] = process.env['HOME'];
-    if (process.env['PATH'] !== undefined) environment['PATH'] = process.env['PATH'];
-    if (process.env['SPROUT_WORKER_HOME'] !== undefined) {
-      environment['SPROUT_WORKER_HOME'] = process.env['SPROUT_WORKER_HOME'];
+  function plistEnvironment(environment: NodeJS.ProcessEnv): Readonly<Record<string, string>> {
+    const variables: Record<string, string> = {};
+    if (environment['HOME'] !== undefined) variables['HOME'] = environment['HOME'];
+    if (environment['PATH'] !== undefined) variables['PATH'] = environment['PATH'];
+    if (environment['SPROUT_WORKER_HOME'] !== undefined) {
+      variables['SPROUT_WORKER_HOME'] = environment['SPROUT_WORKER_HOME'];
     }
-    environment['LC_ALL'] = 'C';
-    return environment;
+    if (environment['SPROUT_WORKSPACE_ROOT'] !== undefined) {
+      variables['SPROUT_WORKSPACE_ROOT'] = environment['SPROUT_WORKSPACE_ROOT'];
+    }
+    variables['LC_ALL'] = 'C';
+    return variables;
   }
 
   function recordState(paths: WorkerHostPaths, state: WorkerRuntimeState): void {

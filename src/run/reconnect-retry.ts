@@ -228,6 +228,11 @@ export class RunReconnectRetry {
     return this.#enqueue(() => this.#pass());
   }
 
+  /** Wait until every fire-and-forget observation currently queued has settled. */
+  async drain(): Promise<void> {
+    await this.#chain;
+  }
+
   #enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.#chain.then(fn, fn);
     this.#chain = result.then(

@@ -1952,6 +1952,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.
         if (environment !== undefined) await environment.close();
+        await runReconnectRetry.drain();
         activeStores.close();
       },
     };
