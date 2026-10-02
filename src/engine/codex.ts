@@ -18,7 +18,7 @@ import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
-import { classifyEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
 
 /**
  * Codex engine adapter (ADR-0001).
@@ -357,6 +357,7 @@ export class CodexSession implements EngineSession {
         finish({
           status: 'failed',
           message: sanitizedTurnFailure('codex', cause),
+          ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
         });
       });
 
@@ -406,7 +407,7 @@ export class CodexSession implements EngineSession {
     this.#settleTurn?.(
       this.#closed
         ? { status: 'interrupted' }
-        : { status: 'failed', message: sanitizedTurnFailure('codex', 'connection-lost') },
+        : { status: 'failed', message: sanitizedTurnFailure('codex', 'connection-lost'), retryable: true },
     );
   }
 
