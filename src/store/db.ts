@@ -22,6 +22,7 @@ import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
 import { SqliteProjectCreationStore } from '../project/creation-store.ts';
 import { SqliteUsageStore } from '../usage/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
+import { configureProductSqliteConnection } from './sqlite-connection.ts';
 import {
   getSchemaVersion,
   isDatabaseEmpty,
@@ -153,6 +154,12 @@ export class SqliteStore {
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    try {
+      configureProductSqliteConnection(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     const previousVersion = getSchemaVersion(this.db);
     const previouslyEmpty = isDatabaseEmpty(this.db);
     try {

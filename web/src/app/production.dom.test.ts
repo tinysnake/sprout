@@ -1093,3 +1093,56 @@ test('Project Environment notices use the same severity treatment as Environment
     await cleanup();
   }
 });
+
+test('sign-in distinguishes unreachable backend from rejected credentials', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  const doc = dom.window.document;
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { createBrowserTransport } = (await vite.ssrLoadModule('/src/transport/browser-transport.ts')) as typeof import('../transport/browser-transport.ts');
+    const { createOperatorSessionBrowserAdapter } = (await vite.ssrLoadModule('/src/adapters/operator-session-api.ts')) as typeof import('../adapters/operator-session-api.ts');
+
+    for (const outcome of ['unreachable', 'rejected'] as const) {
+      doc.body.innerHTML = '<div id="app"></div>';
+      dom.window.history.replaceState(null, '', '/app/');
+      const transport = createBrowserTransport({
+        fetch: async () => {
+          if (outcome === 'unreachable') throw new Error('connection refused');
+          return new Response(JSON.stringify({ error: 'authentication failed' }), {
+            status: 401, headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+      const operatorSession = createOperatorSessionBrowserAdapter(transport);
+      const { app, router } = createSproutApp({ routerBase: '/app/', operatorSession });
+      await router.isReady();
+      app.mount(doc.getElementById('app')!);
+      try {
+        await settle();
+        const input = doc.querySelector<HTMLInputElement>('#operator-credential');
+        assert.ok(input, 'sign-in form is rendered after session check fails');
+        input.value = 'test-credential';
+        input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+        const form = doc.querySelector<HTMLFormElement>('.auth-card form');
+        assert.ok(form);
+        form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+        await settle();
+        const copy = doc.querySelector('[role="alert"]')?.textContent ?? '';
+        if (outcome === 'unreachable') {
+          assert.match(copy, /Sprout could not be reached/i);
+          assert.match(doc.querySelector('button[type="submit"]')?.textContent ?? '', /Retry/);
+          assert.doesNotMatch(copy, /invalid credential|credential was rejected|authentication failed/i);
+        } else {
+          assert.match(copy, /credential was rejected/i);
+          assert.doesNotMatch(copy, /could not be reached/i);
+        }
+      } finally {
+        app.unmount();
+        router.options.history.destroy();
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});

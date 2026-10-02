@@ -2,6 +2,7 @@
 import { chmodSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { configureProductSqliteConnection } from '../store/sqlite-connection.ts';
 import type { AgentRunEvent, EngineTurnResult } from '../engine/port.ts';
 import { defaultPrivateFileSecurityDependencies, PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, privateFileRestriction, writePrivateFile, type PrivateFileSecurityDependencies } from './host-files.ts';
 
@@ -38,7 +39,7 @@ function withJournalLock<T>(path: string, work: () => T): T {
   const lock = new DatabaseSync(lockPath);
   try {
     chmodSync(lockPath, PRIVATE_FILE_MODE);
-    lock.exec('PRAGMA busy_timeout = 10000');
+    configureProductSqliteConnection(lock);
     lock.exec('CREATE TABLE IF NOT EXISTS journal_lock (id INTEGER PRIMARY KEY)');
     lock.exec('BEGIN IMMEDIATE');
     try {
