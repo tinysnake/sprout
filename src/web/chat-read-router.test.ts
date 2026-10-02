@@ -31,7 +31,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
     }
     const credential = privateInput();
     const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() }); await auth.initializeOrRecover(credential);
-    const agents = { get: async (id: string) => ({ status: id === 'agent-archived' ? 'archived' as const : 'active' as const }) };
+    let agentArchived = false;
+    const agents = { get: async (id: string) => ({ status: id === 'agent-archived' && agentArchived ? 'archived' as const : 'active' as const }) };
     const api = createRunApi({ orchestrator: build().orchestrator, agents: new AgentRegistry([]), auth, routers: [{ name: 'read-test', handle: (context) => createChatReadRouter({ store, scopes, agents }).handle(context) }] });
     const testPortBase = Number(process.env['DEV_PIPELINE_PORT_BASE'] ?? 0);
     const { port } = await api.listen(testPortBase ? testPortBase + (backend === 'memory' ? 1 : 2) : 0);
@@ -45,14 +46,20 @@ for (const backend of ['memory', 'sqlite'] as const) {
         [channel.id]: { projectId: 'project', count: 1 },
         [group.id]: { projectId: 'project', count: 0 },
         [activeDirectScope.id]: { projectId: 'project', count: 1 },
-      }, 'the projection retains active Human direct scopes and suppresses archived Agent direct scopes');
+        [archivedDirectScope.id]: { projectId: 'project', count: 1 },
+      }, 'the projection includes each Human direct scope while its Agent is active');
       assert.ok(!JSON.stringify(before).includes('PRIVATE'));
+      agentArchived = true;
+      assert.equal((await get()).scopes.some((scope) => scope.scopeId === archivedDirectScope.id), false, 'archiving an Agent removes its existing unread scope from the next summary');
+      agentArchived = false;
+      assert.equal((await get()).scopes.find((scope) => scope.scopeId === archivedDirectScope.id)?.count, 1, 'restoring an Agent re-reads lifecycle and restores its existing unread count');
       const path = `${base}/api/scopes/${encodeURIComponent(channel.id)}/read`;
       assert.equal((await fetch(path, { method: 'POST', headers: { cookie: session.cookie } })).status, 403);
       const post = async (scopeId: string, messageIds: readonly string[]) => fetch(`${base}/api/scopes/${encodeURIComponent(scopeId)}/read`, { method: 'POST', headers: { cookie: session.cookie, 'x-sprout-csrf': session.csrf, 'content-type': 'application/json' }, body: JSON.stringify({ messageIds, humanId: 'agent-a' }) });
       assert.equal((await post(privateScope.id, [privateScope.id])).status, 404);
       assert.equal((await post(channel.id, [channel.id, privateScope.id])).status, 400);
       assert.equal((await get()).scopes.find((scope) => scope.scopeId === channel.id)?.count, 1, 'invalid mixed receipts are atomic');
+      agentArchived = true;
       const archivedReceipt = await post(archivedDirectScope.id, [archivedDirectScope.id]);
       assert.equal(archivedReceipt.status, 200, 'archived scope history remains available to its Human for read receipts');
       assert.deepEqual(await archivedReceipt.json(), { scopeId: archivedDirectScope.id, projectId: 'project', count: 0 });
