@@ -291,6 +291,30 @@ test('a chat Project event opens its Chat timeline entry', async () => {
   } finally { h.close(); }
 });
 
+test('a run-failure activity focuses its own Project event instead of its originating Message', async () => {
+  scrollRequests.length = 0;
+  const h = await harness(390, '/feed?scope=project-a&urgency=all&activity=messages');
+  try {
+    await click('[data-activity-id="event:agent-run-failure"]');
+    assert.equal(h.router.currentRoute.value.name, 'project-chat-scope');
+    assert.equal(h.router.currentRoute.value.params.scopeId, 'dm-a');
+    assert.equal(h.router.currentRoute.value.query.project, 'project-a');
+    assert.equal(h.router.currentRoute.value.query.event, 'event-run-failure-a');
+    assert.equal(h.router.currentRoute.value.query.message, undefined);
+    const target = doc.querySelector('[data-event-id="event-run-failure-a"]');
+    assert.equal(target?.getAttribute('data-targeted'), 'event');
+    assert.equal(doc.activeElement, target, 'event activity focuses its own timeline event');
+    assert.ok(scrollRequests.some((request) => request.target === 'event-run-failure-a' && request.block === 'center'));
+    assert.match(target?.textContent ?? '', /Exact Agent run failure event A/);
+    assert.ok(doc.querySelector('#btn-pop-return'), 'the event destination retains Feed return context');
+    await click('#btn-pop-return');
+    assert.equal(h.router.currentRoute.value.name, 'feed');
+    assert.equal(h.router.currentRoute.value.query.scope, 'project-a');
+    assert.equal(h.router.currentRoute.value.query.urgency, 'all');
+    assert.equal(h.router.currentRoute.value.query.activity, 'messages');
+  } finally { h.close(); }
+});
+
 test('a pruned Feed target opens the conversation without claiming message focus', async () => {
   scrollRequests.length = 0;
   const h = await harness(390, '/feed?scope=project-a&activity=messages');

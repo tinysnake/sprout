@@ -38,16 +38,21 @@ export function journeyWire() {
   const chatActivityTarget = feedTarget({ surface: 'project-chat', projectId: project.id, scopeId: directScope.id, messageId: messages[1]!.id, runId: chatRun.id, agentId: agent.id });
   const chatEvent = { id: 'event-chat-a', projectId: project.id, kind: 'chat-completed', summary: 'Exact Chat event A', producerId: agent.id, producerKind: 'agent', disposition: 'informational', responsibleAgentIds: [], createdAt: at + 2 };
   const chatEventTarget = feedTarget({ surface: 'project-chat', projectId: project.id, eventId: chatEvent.id, agentId: agent.id });
+  const chatFailureEvent = { id: 'event-run-failure-a', projectId: project.id, kind: 'agent-run-failure', summary: 'Exact Agent run failure event A', producerId: agent.id, producerKind: 'agent', disposition: 'informational', responsibleAgentIds: [], originScopeIds: [directScope.id], createdAt: at + 3 };
+  // Mirror the event row's projected target: retain the run context but focus this Project event.
+  const chatFailureTarget = feedTarget({ surface: 'project-chat', projectId: project.id, scopeId: directScope.id, eventId: chatFailureEvent.id, runId: chatRun.id, agentId: agent.id });
   const feed: FeedSnapshot = { scopes: [{ id: 'feed:all', kind: 'all', label: 'All Projects', attentionCount: 0 }, { id: project.id, kind: 'project', label: project.displayName, attentionCount: 0 }], attention: [], inFlight: [], activity: [
     ...targets.map((target, i) => ({ id: `journey-${i}`, kind: 'message', summary: `Exact Feed destination ${i}`, scopes: [project.id], target, at })),
     { id: 'chat-completed:chat-run-a', kind: 'chat-completed', summary: 'Exact completed chat turn A', scopes: [project.id], target: chatActivityTarget, projectId: project.id, at: at + 1 },
     { id: 'event:chat-completed', kind: 'chat-completed', summary: 'Exact Chat event A', scopes: [project.id], target: chatEventTarget, projectId: project.id, at: at + 2 },
+    { id: 'event:agent-run-failure', kind: 'agent-run-failure', summary: 'Exact Agent run failure event A', scopes: [project.id], target: chatFailureTarget, projectId: project.id, at: at + 3 },
   ] };
   let sessions = [{ id: 'session-current', current: true, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }, { id: 'session-other', current: false, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }];
   const unknown: string[] = [];
   let authorized = true;
   return {
     project, agent, enrollment, task, taskRun, feed, messages, unknown,
+    chatEvent, chatFailureEvent,
     expire() { authorized = false; },
     async respond(input: string, init?: RequestInit): Promise<Response> {
       const url = new URL(input, 'http://journey.invalid');
@@ -83,7 +88,7 @@ export function journeyWire() {
         body = { messages: scopeId ? messages.filter((message) => message.scopeId === scopeId) : messages };
       }
       else if (path === '/api/projects/project-a/routing-batches') body = { batches: [] };
-      else if (path === '/api/projects/project-a/events') body = { events: [chatEvent] };
+      else if (path === '/api/projects/project-a/events') body = { events: [chatEvent, chatFailureEvent] };
       else if (path === '/api/feed') body = feed;
       // The mounted Usage journey issues this activity list/detail and aggregate set.
       else if (path === '/api/usage/activities') body = { activities: [activity] };

@@ -609,8 +609,25 @@ test('chat-related activity retains exact Message, Project event, Agent, Project
   assert.equal(snapshot.activity.find((item) => item.id === 'event:event-chat-started')?.target?.eventId, 'event-chat-started');
   assert.equal(snapshot.activity.find((item) => item.id === 'event:event-chat-error-generic')?.target?.eventId, 'event-chat-error-generic');
   const failed = snapshot.activity.find((item) => item.id === 'event:event-chat-error');
-  assert.equal(failed?.target?.messageId, 'message-error-trigger', 'run-failure events resolve through their durable run origin');
-  assert.equal(failed?.target?.runId, 'run-chat-error');
+  assert.deepEqual(
+    {
+      projectId: failed?.target?.projectId,
+      scopeId: failed?.target?.scopeId,
+      messageId: failed?.target?.messageId,
+      eventId: failed?.target?.eventId,
+      runId: failed?.target?.runId,
+      agentId: failed?.target?.agentId,
+    },
+    {
+      projectId: 'proj-chat',
+      scopeId: 'wg-proj-chat-review',
+      messageId: undefined,
+      eventId: 'event-chat-error',
+      runId: 'run-chat-error',
+      agentId: 'agent-scout',
+    },
+    'event activity focuses its own Project event while retaining safe causal run context',
+  );
   assert.equal(snapshot.activity.find((item) => item.id === 'run:run-without-origin')?.target, undefined, 'missing or hostile causal identities do not guess a Chat destination');
 });
 

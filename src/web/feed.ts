@@ -429,17 +429,21 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   const knownProject = (projectId: string | undefined): projectId is string =>
     usable(projectId) && projectRefs.has(projectId!);
   const chatOriginsByRun = new Map(chatOrigins.map((origin) => [origin.runId, origin]));
-  const chatTarget = (projectId: string, origin: FeedChatActivityOrigin | undefined, expectedAgentId?: string): FeedTarget | undefined => {
+  const chatTarget = (projectId: string, origin: FeedChatActivityOrigin | undefined, expectedAgentId?: string, focusEventId?: string): FeedTarget | undefined => {
     if (!origin || origin.projectId !== projectId || (expectedAgentId !== undefined && origin.agentId !== expectedAgentId) || !safeChatIdentity(origin.scopeId) ||
         (origin.messageId !== undefined && !safeChatIdentity(origin.messageId)) ||
         (origin.eventId !== undefined && !safeChatIdentity(origin.eventId)) ||
         (origin.messageId === undefined && origin.eventId === undefined) ||
         (origin.messageId !== undefined && origin.eventId !== undefined) ||
+        (focusEventId !== undefined && !safeChatIdentity(focusEventId)) ||
         !safeChatIdentity(origin.runId) || !safeChatIdentity(origin.agentId)) return undefined;
     return feedTarget({
       surface: 'project-chat', projectId, scopeId: origin.scopeId,
-      ...(origin.messageId !== undefined ? { messageId: origin.messageId } : {}),
-      ...(origin.eventId !== undefined ? { eventId: origin.eventId } : {}),
+      ...(focusEventId !== undefined
+        ? { eventId: focusEventId }
+        : origin.messageId !== undefined
+          ? { messageId: origin.messageId }
+          : origin.eventId !== undefined ? { eventId: origin.eventId } : {}),
       runId: origin.runId, agentId: origin.agentId,
     });
   };
@@ -701,8 +705,9 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
       ? event.deliveryKey.slice('run-failure:'.length)
       : undefined;
     const linkedFailureRun = eventRunId !== undefined ? runsById.get(eventRunId) : undefined;
-    const linkedFailureTarget = projectKnown && linkedFailureRun?.projectId === event.projectId
-      ? chatTarget(event.projectId, chatOriginsByRun.get(eventRunId!), linkedFailureRun.agentId)
+    // This is a Project event row, so its own event takes focus over the linked run's causal Message; run activity below still focuses that Message.
+    const linkedFailureEventTarget = projectKnown && linkedFailureRun?.projectId === event.projectId
+      ? chatTarget(event.projectId, chatOriginsByRun.get(eventRunId!), linkedFailureRun.agentId, event.id)
       : undefined;
     const isChatEvent = /chat|message|routing|wake|run/i.test(event.kind);
     const eventScopeId = event.originScopeIds?.length === 1 ? event.originScopeIds[0] : undefined;
@@ -716,7 +721,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         })
       : undefined;
     const eventTarget = projectKnown
-      ? linkedFailureTarget ?? (isChatEvent
+      ? linkedFailureEventTarget ?? (isChatEvent
           ? chatEventTarget
           : feedTarget({ surface: 'project-overview', projectId: event.projectId }))
       : undefined;
