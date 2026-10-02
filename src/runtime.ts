@@ -991,29 +991,31 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let recovery: EnvironmentRecoveryService;
 
+    const resolveAgent = async (agentId: string): Promise<AgentDefinition | undefined> => {
+      const durable = await agentService.get(agentId);
+      if (durable === undefined) return agents.get(agentId);
+      if (durable.status !== 'active') return undefined;
+      const configuration = currentConfiguration(durable);
+      const seed = agents.get(agentId);
+      return {
+        id: durable.id,
+        name: durable.displayName,
+        engine: configuration.options[0]!.engine,
+        capability: seed?.capability ?? 'agent-run',
+        workOptions: configuration.options,
+        configurationVersion: configuration.version,
+        ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
+        ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
+      };
+    };
+
     const orchestrator = new RunOrchestrator({
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       agents,
-      resolveAgent: async (agentId) => {
-        const durable = await agentService.get(agentId);
-        if (durable === undefined) return agents.get(agentId);
-        if (durable.status !== 'active') return undefined;
-        const configuration = currentConfiguration(durable);
-        const seed = agents.get(agentId);
-        return {
-          id: durable.id,
-          name: durable.displayName,
-          engine: configuration.options[0]!.engine,
-          capability: seed?.capability ?? 'agent-run',
-          workOptions: configuration.options,
-          configurationVersion: configuration.version,
-          ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
-          ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
-        };
-      },
+      resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
       // Agent's first compatible work option before any engine accepts the
       // work (#90, ADR-0008). The facts are the readiness store's durable
@@ -1079,6 +1081,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       store: stores.tasks,
       pool,
       agents,
+      resolveAgent,
       projects,
       runs: orchestrator,
       worker: {
