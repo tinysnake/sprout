@@ -30,7 +30,8 @@ for (const backend of ['memory', 'sqlite'] as const) {
     const credential = privateInput();
     const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() }); await auth.initializeOrRecover(credential);
     const api = createRunApi({ orchestrator: build().orchestrator, agents: new AgentRegistry([]), auth, routers: [{ name: 'read-test', handle: (context) => createChatReadRouter({ store, scopes }).handle(context) }] });
-    const { port } = await api.listen(backend === 'memory' ? 42281 : 42282);
+    const testPortBase = Number(process.env['DEV_PIPELINE_PORT_BASE'] ?? 0);
+    const { port } = await api.listen(testPortBase ? testPortBase + (backend === 'memory' ? 1 : 2) : 0);
     const base = `http://127.0.0.1:${port}`;
     try {
       assert.equal((await fetch(`${base}/api/chat/unread`)).status, 401);
