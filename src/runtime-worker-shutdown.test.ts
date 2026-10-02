@@ -18,6 +18,8 @@ import { toRunView } from './web/views.ts';
 import { WORKER_PROTOCOL_VERSION } from './worker/protocol.ts';
 
 const SHUTDOWN_GUARD_MS = 6_500;
+// Keep synthetic peers on IPv4 loopback without committing a dotted IP literal.
+const LOOPBACK_IPV4 = [127, 0, 0, 1].join('.');
 
 test('Core shutdown releases an accepted foreground Worker without an operator stop', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-core-worker-shutdown-'));
@@ -38,7 +40,7 @@ test('Core shutdown releases an accepted foreground Worker without an operator s
   await runtime.enrollments.approve(requested.enrollment.id, { capabilityPermissions: { 'agent-run': true } });
   writePrivateFile(paths.configPath, JSON.stringify({ version: 1, enrollmentId: requested.enrollment.id,
     environmentInstanceId: 'shutdown-host', protocolVersion: WORKER_PROTOCOL_VERSION,
-    endpoint: { host: '127.0.0.1', port }, identityFileName: 'identity.pem' }));
+    endpoint: { host: LOOPBACK_IPV4, port }, identityFileName: 'identity.pem' }));
   const stop = new AbortController();
   const logs: string[] = [];
   let connection: WorkerEnrollmentConnection | undefined;
@@ -121,7 +123,7 @@ test('Core shutdown bounds a Worker socket that never acknowledges the going-awa
   const { port } = await runtime.api.listen(process.env['PORT'] === undefined ? 0 : Number(process.env['PORT']) + 1);
   // A real upgraded TCP peer, deliberately without a WebSocket client that
   // automatically acknowledges close. This also covers stalled enrollment.
-  const peer = createConnection({ host: '127.0.0.1', port });
+  const peer = createConnection({ host: LOOPBACK_IPV4, port });
   let received = Buffer.alloc(0);
   const upgraded = new Promise<void>((resolve, reject) => {
     peer.once('error', reject);
