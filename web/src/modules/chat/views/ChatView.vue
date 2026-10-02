@@ -561,12 +561,12 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
               class="chat-scope-card mb-1 flex min-h-[64px] w-full items-start gap-2 rounded border p-2.5 text-left focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
               :class="activeScope?.id === scope.id ? 'border-[var(--accent-primary)] bg-[var(--bg-surface)] ring-1 ring-[var(--accent-primary)]' : 'border-transparent hover:border-[var(--border-strong)]'" @click="selectScope(scope)">
               <span class="rounded bg-[var(--bg-surface)] p-1.5 text-[var(--accent-primary)]"><Icon :name="icon(scope)" :size="17" /></span>
-              <span class="min-w-0 flex-1">
+              <span class="chat-card-content min-w-0 flex-1">
                 <span class="flex items-center gap-1.5"><strong class="truncate text-xs text-[var(--text-primary)]">{{ title(scope) }}</strong><span v-if="scopePill(scope)" class="text-[10px] text-[var(--text-muted)]">{{ scopePill(scope) }}</span><span class="ml-auto shrink-0 text-[10px] text-[var(--text-muted)]">{{ latestTime(scope) }}</span></span>
                 <span class="block text-[10px] text-[var(--text-muted)]">{{ kindLabel(scope) }}</span>
                 <span class="block truncate text-[11px] text-[var(--text-secondary)]">{{ preview(scope) }}</span>
-                <UnreadBadge :count="unread(scope)" />
               </span>
+              <UnreadBadge :count="unread(scope)" class="chat-card-unread self-center shrink-0" />
             </button>
             <template v-if="section.label.startsWith('Direct Messages')">
               <button v-for="member in unopenedAgents" :key="member.memberId" type="button" :disabled="!presentation.controlAvailable || project?.status !== 'active' || agents.some((agent) => agent.id === member.memberId && agent.status === 'archived')" class="chat-direct-unopened mb-1 flex min-h-[64px] w-full items-center gap-2 rounded border border-transparent p-2.5 text-left text-xs hover:border-[var(--border-strong)] disabled:opacity-60" @click="openAgentDirect(member.memberId)">

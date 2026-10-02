@@ -437,7 +437,7 @@ export async function buildReplyProjectionApi(
     routers: [
       createProjectRouter({ projects }),
       createConversationRouter({ scopes }),
-      createChatReadRouter({ scopes, store: collaborationStore }),
+      createChatReadRouter({ scopes, store: collaborationStore, agents: durableAgents }),
       createChatRunRouter({ collaboration, scopes, runs: orchestrator }),
       createAgentRouter({ agents: durableAgents }),
     ],
