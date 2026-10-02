@@ -38,7 +38,7 @@ function withJournalLock<T>(path: string, work: () => T): T {
   const lock = new DatabaseSync(lockPath);
   try {
     chmodSync(lockPath, PRIVATE_FILE_MODE);
-    lock.exec('PRAGMA busy_timeout = 10000');
+    lock.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000');
     lock.exec('CREATE TABLE IF NOT EXISTS journal_lock (id INTEGER PRIMARY KEY)');
     lock.exec('BEGIN IMMEDIATE');
     try {

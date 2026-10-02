@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { WorkerRecoveryJournal } from './recovery-journal.ts';
 
 test('journal survives restart, fences stale acknowledgements and compacts only after settlement ack', () => {
@@ -11,6 +12,10 @@ test('journal survives restart, fences stale acknowledgements and compacts only 
   try {
     const path = join(dir, 'journal');
     const journal = new WorkerRecoveryJournal(path, 1);
+    const lockDb = new DatabaseSync(`${path}.lock.sqlite`);
+    try {
+      assert.equal((lockDb.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
+    } finally { lockDb.close(); }
     journal.engineStarted();
     journal.context('task-1', 'prepared');
     journal.begin('session-1', 'turn-1');
