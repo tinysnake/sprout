@@ -2,7 +2,7 @@ import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
 import { TaskControlError, type TaskControlService } from '../task/control-service.ts';
 import type { Task } from '../task/model.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
-import { TaskPauseRetryRequired, TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
+import { TaskPauseRetryRequired, TaskRecoveryRefusal, TaskTerminalMutationError } from '../task/environment-lifecycle.ts';
 import { toTaskView } from './views.ts';
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 
@@ -105,6 +105,7 @@ export function createTaskControlRouter(options: {
         return json(context, 200, { task: toTaskView(task) });
       } catch (error) {
         if (error instanceof TaskPauseRetryRequired) return json(context, 409, { code: 'pause-retry-required', error: error.message });
+        if (error instanceof TaskTerminalMutationError) return json(context, 409, { code: error.code, error: error.message });
         if (error instanceof TaskControlError) {
           const status = error.code === 'unknown-task' ? 404 : error.code === 'authority-required' ? 403
             : error.code === 'invalid-command' ? 400 : 409;

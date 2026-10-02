@@ -62,6 +62,46 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   return { store, pool, lifecycle, tasks, controls, begun };
 }
 
+test('terminal Tasks reject blocker mutations with a product-owned terminal-state reason', async () => {
+  const blocker = {
+    reason: 'Approval is pending', requiredAction: 'Record approval',
+    responsible: { kind: 'external-condition' as const, condition: 'Approval arrives' }, nextAdvancer: lead,
+  };
+  const cleared = await scenario();
+  const blocked = await cleared.controls.raiseBlocker('task-1', lead, blocker);
+  await cleared.store.save({ ...blocked, status: 'cancelled', environmentLifecycleState: 'discarded' });
+  await assert.rejects(cleared.controls.clearBlockerForHuman('task-1', { reason: 'The blocker is historical' }), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error & { code?: string }).code, 'terminal-task');
+    assert.equal(error.message, 'This Task is cancelled; its blocker is historical.');
+    return true;
+  });
+
+  const raised = await scenario();
+  await raised.store.save({ ...(await raised.tasks.get('task-1'))!, status: 'cancelled', environmentLifecycleState: 'discarded' });
+  await assert.rejects(raised.controls.raiseBlocker('task-1', lead, blocker), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error & { code?: string }).code, 'terminal-task');
+    assert.equal(error.message, 'This Task is cancelled; terminal Tasks cannot record blockers.');
+    return true;
+  });
+});
+
+test('terminal completion retains prior pause state, so the browser must gate Resume by terminal status', async () => {
+  const s = await scenario();
+  await s.controls.pauseForHuman('task-1', { reason: 'Hold future Task runs during final review' });
+  await s.controls.submitCompletionClaim('task-1', lead, {
+    outcomeSummary: 'The approved work is complete', validationEvidence: ['Completion criteria passed'],
+    durableChanges: [], limitations: [], recommendedDisposition: 'complete',
+  });
+  const completed = await s.controls.validateForHuman('task-1', {
+    claimId: 'claim-1', decision: 'accept', reason: 'The evidence satisfies the acceptance criteria',
+  });
+  assert.equal(completed.status, 'done');
+  assert.equal(completed.environmentLifecycleState, 'ended');
+  assert.equal(completed.pauseState, 'paused');
+});
+
 test('lower lifecycle and service seams reject Agent escalation into Human Task controls', async () => {
   const s = await scenario();
   for (const attempt of [

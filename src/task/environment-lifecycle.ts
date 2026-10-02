@@ -15,8 +15,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
-import { serializeTaskControlDocument, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim, type TaskContent } from './model.ts';
-import { isTerminalTaskStatus } from './model.ts';
+import { serializeTaskControlDocument, isTerminalTaskStatus, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim, type TaskContent } from './model.ts';
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
@@ -68,6 +67,18 @@ export class TaskAdvanceConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'TaskAdvanceConflictError';
+  }
+}
+
+/** A blocker cannot be changed once its Task has reached a terminal status. */
+export class TaskTerminalMutationError extends Error {
+  readonly code = 'terminal-task';
+
+  constructor(status: Task['status'], mutation: 'record' | 'clear') {
+    super(mutation === 'clear'
+      ? `This Task is ${status}; its blocker is historical.`
+      : `This Task is ${status}; terminal Tasks cannot record blockers.`);
+    this.name = 'TaskTerminalMutationError';
   }
 }
 
@@ -641,6 +652,7 @@ export class TaskEnvironmentLifecycle {
   async raiseBlocker(taskId: string, actor: TaskActor, blocker: TaskBlocker): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertLeadOrHuman(task, actor);
+    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'record');
     if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
       || task.pendingCompletionClaimId !== undefined) throw new Error(`task ${taskId} cannot be blocked in its current lifecycle`);
     this.#assertActiveTaskLease(task);
@@ -657,6 +669,7 @@ export class TaskEnvironmentLifecycle {
   async clearBlocker(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'clear');
     if (task.blocker === undefined || task.activeRunId !== undefined || task.environmentLifecycleState !== 'blocked') {
       throw new Error(`task ${taskId} has no clearable blocker`);
     }
