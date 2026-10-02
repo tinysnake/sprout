@@ -2,6 +2,7 @@
 import { inject, onMounted, ref } from 'vue';
 
 import { OPERATOR_SESSION } from './auth.js';
+import { BrowserRequestError } from '../transport/browser-transport.js';
 
 const session = inject(OPERATOR_SESSION);
 const checking = ref(true);
@@ -35,8 +36,12 @@ async function signIn(): Promise<void> {
     await session.listSessions();
     credential.value = '';
     authenticated.value = true;
-  } catch {
-    error.value = 'Operator authentication failed. Check the host-supplied credential.';
+  } catch (cause) {
+    if (cause instanceof BrowserRequestError && cause.status === 401) {
+      error.value = 'The operator credential was rejected. Check the credential configured on the Sprout host.';
+    } else {
+      error.value = 'Sprout could not be reached. Check the connection and retry.';
+    }
   } finally {
     signingIn.value = false;
   }
@@ -64,7 +69,7 @@ async function signIn(): Promise<void> {
         />
         <p v-if="error" class="auth-error" role="alert">{{ error }}</p>
         <button class="auth-submit" type="submit" :disabled="signingIn">
-          {{ signingIn ? 'Signing in…' : 'Sign in' }}
+          {{ signingIn ? 'Signing in…' : error?.startsWith('Sprout could not be reached') ? 'Retry' : 'Sign in' }}
         </button>
       </form>
     </section>

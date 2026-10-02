@@ -153,6 +153,9 @@ export class SqliteStore {
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    // WAL is persistent for this database file, so legacy DELETE-mode files
+    // transition safely on open. A bounded wait handles ordinary contention.
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     const previousVersion = getSchemaVersion(this.db);
     const previouslyEmpty = isDatabaseEmpty(this.db);
     try {

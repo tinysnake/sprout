@@ -1076,7 +1076,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       store: usageStore,
     });
     orchestrator.subscribe((run) => {
-      void usageService.recordRunActivity(run);
+      void usageService.recordRunActivity(run).catch(() => {
+        process.stderr.write('Usage telemetry write failed; record dropped.\n');
+      });
     });
 
     taskLifecycle = new TaskEnvironmentLifecycle({
@@ -1178,11 +1180,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
       onRoutingAttempt: async (attempt, projectId) => {
         const telemetry = usageRoutingModel?.takeTelemetry(attempt.id);
-        await usageService.recordRoutingAttemptActivity(attempt, {
-          ...telemetry, batchId: attempt.batchId, projectId,
-          // The lifecycle's start/settlement is authoritative, not native latency.
-          durationMs: Math.max(0, attempt.finishedAt - attempt.startedAt),
-        });
+        try {
+          await usageService.recordRoutingAttemptActivity(attempt, {
+            ...telemetry, batchId: attempt.batchId, projectId,
+            // The lifecycle's start/settlement is authoritative, not native latency.
+            durationMs: Math.max(0, attempt.finishedAt - attempt.startedAt),
+          });
+        } catch {
+          process.stderr.write('Usage telemetry write failed; record dropped.\n');
+        }
       },
       onObservation:
         options.onObservation ??
