@@ -118,7 +118,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     task('ending', 'ending', { endDisposition: 'completed' }),
     task('recovery', 'recovery', { recoveryState: 'idle' }),
     task('completed', 'ended', { status: 'done', endDisposition: 'completed' }),
-    task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled' }),
+    task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled', pauseState: 'paused', blocker: { reason: 'The approval was pending when the Task ended.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
   ];
   const details = new Map(allTasks.map((entry) => [entry.id, taskDetail(entry,
     entry.activeRunId ? [{ runId: entry.activeRunId, agentId: 'agent-a', sequence: 1, linkedAt: time, contentVersion: 1,
@@ -159,7 +159,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     async advance(id: string) {
       calls.push(`advance:${id}`);
       const code = conflictCodes[nextConflict++];
-      if (code) throw new BrowserRequestError('rejected', 409, { code, message: 'server conflict' });
+      if (code) throw new BrowserRequestError('rejected', 409, { code, message: code === 'terminal-task' ? 'This Task is cancelled; its blocker is historical.' : 'server conflict' });
       return { task: allTasks.find((entry) => entry.id === id)!, runId: 'run-next', advance: { runId: 'run-next', agentId: 'agent-a', sequence: 2, linkedAt: time } };
     },
     async reviseTaskContent() { calls.push('revise-content'); return allTasks[1]!; },
@@ -191,6 +191,10 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     },
     async clearBlocker(id: string) {
       calls.push('clear-blocker');
+      const code = conflictCodes[nextConflict++];
+      if (code) throw new BrowserRequestError('rejected', 409, {
+        code, message: code === 'terminal-task' ? 'This Task is cancelled; its blocker is historical.' : 'server conflict',
+      });
       const detail = details.get(id);
       assert.ok(detail);
       const { blocker: _blocker, ...rest } = detail.task;
@@ -516,6 +520,23 @@ test('Project Tasks presents typed 409 conflicts with actionable guidance', asyn
   }
 });
 
+test('Project Tasks renders the server-owned reason for a terminal blocker refusal', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router } = await mountTasks(vite, doc, ['terminal-task']);
+    await openTaskRecord(router, 'blocked');
+    await enterField(doc, dom, 'Reason for this action', 'The blocker is historical.');
+    clickButton(doc, 'Clear blocker');
+    await settle(160);
+    const alert = doc.querySelector<HTMLElement>('[role="alert"][data-conflict-code="terminal-task"]');
+    assert.match(alert?.textContent ?? '', /This Task is cancelled; its blocker is historical\./);
+    assert.doesNotMatch(alert?.textContent ?? '', /changed before the action completed|try again/i);
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 async function openTaskRecord(router: { push: (location: unknown) => Promise<unknown> }, id: string): Promise<void> {
   await router.push({ name: 'project-task-detail', params: { taskId: id }, query: { project: projectId } });
   await settle();
@@ -691,6 +712,11 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     await openTaskRecord(router, 'completed');
     const ended = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Task ended'));
     assert.ok(ended?.disabled, 'terminal Tasks expose no new lifecycle command');
+    await openTaskRecord(router, 'cancelled');
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.includes('Clear blocker') && !button.disabled), false,
+      'terminal Tasks with historical blockers expose no actionable Clear blocker control');
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.includes('Resume Task')), false,
+      'terminal Tasks do not expose Resume even when a stale pause state is present');
     const masterList = doc.querySelector<HTMLElement>('aside[aria-label="Project Task list"]');
     assert.ok(masterList?.className.includes('hidden') && masterList.className.includes('lg:flex'), 'the master list becomes a desktop pane while detail fills the phone');
     app.unmount();

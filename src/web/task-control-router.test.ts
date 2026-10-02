@@ -6,11 +6,11 @@ import type { Task } from '../task/model.ts';
 import { TaskControlError, type TaskControlService } from '../task/control-service.ts';
 import type { ApiRequestContext } from './router.ts';
 import { createTaskControlRouter } from './task-control-router.ts';
-import { TaskPauseRetryRequired } from '../task/environment-lifecycle.ts';
+import { TaskPauseRetryRequired, TaskTerminalMutationError } from '../task/environment-lifecycle.ts';
 
 const task: Task = { id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'in-progress', createdAt: 1, updatedAt: 1 };
 
-async function invoke(options: { readonly session?: boolean; readonly body: unknown; readonly action?: string; readonly stopFailure?: TaskControlError }) {
+async function invoke(options: { readonly session?: boolean; readonly body: unknown; readonly action?: string; readonly stopFailure?: TaskControlError; readonly clearFailure?: Error }) {
   let status = 0;
   let responseBody = '';
   const response = {
@@ -26,6 +26,11 @@ async function invoke(options: { readonly session?: boolean; readonly body: unkn
       if (options.stopFailure) throw options.stopFailure;
       return task;
     },
+    clearBlockerForHuman: async () => {
+      commands += 1;
+      if (options.clearFailure) throw options.clearFailure;
+      return task;
+    },
   } as unknown as TaskControlService;
   const router = createTaskControlRouter({ controls });
   const action = options.action ?? 'pause';
@@ -38,6 +43,24 @@ async function invoke(options: { readonly session?: boolean; readonly body: unkn
   const handled = await router.handle(context);
   return { handled, status, body: JSON.parse(responseBody) as { task?: unknown; code?: string }, commands };
 }
+
+test('terminal blocker refusals preserve their product-owned code and reason over HTTP', async () => {
+  const terminal = await invoke({
+    session: true, action: 'clear-blocker', body: { reason: 'Remove the historical blocker' },
+    clearFailure: new TaskTerminalMutationError('cancelled', 'clear'),
+  });
+  assert.equal(terminal.status, 409);
+  assert.deepEqual(terminal.body, {
+    code: 'terminal-task', error: 'This Task is cancelled; its blocker is historical.',
+  });
+
+  const concurrent = await invoke({
+    session: true, action: 'clear-blocker', body: { reason: 'Clear after checking the current Task' },
+    clearFailure: new Error('task task-1 changed before blocker was recorded'),
+  });
+  assert.equal(concurrent.status, 409);
+  assert.equal(concurrent.body.code, 'lifecycle-conflict', 'the existing concurrent-change path keeps its stale-lifecycle code');
+});
 
 test('Pause CAS exhaustion returns explicit Human retry and cancellation guidance', async () => {
   let status = 0;
