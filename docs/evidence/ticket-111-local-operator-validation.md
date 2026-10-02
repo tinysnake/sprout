@@ -157,3 +157,132 @@ The SSH client reached authentication, but the owner-provided passwordless acces
 **Follow-up:** Restore the promised passwordless SSH access to the owner-provided Windows host, then redispatch F5 at the verified base. Repeat the allocated-port occupancy check before creating isolated runtime state. Resolve the engine-pin decision and obtain a successful turn before claiming the conditional active-run recovery chain.
 
 **Disposition:** Blocked. F5 remains open; this rework records an actual SSH prerequisite failure and claims no Windows product acceptance result.
+
+## Windows live exercise — corrected SSH account continuation (F5)
+
+### Provenance, prerequisites, and isolation
+
+The owner subsequently supplied the correct SSH account and confirmed passwordless access. The earlier blocked attempt above and commit `002a435e` remain an honest historical record: they used the implicit SSH account, not the owner-specified account used for this continuation. No credential workaround or authentication configuration change was made.
+
+The production tree was transferred as a `git archive` tarball from verified base `23bf7ef7`. The SHA-256 matched on both hosts: `ee3af7592720da1212123f7d99ad3b723c42c96c00e35a5220543d86108e4c8a`. The remote installation therefore exercised that base tree, not the documentation-only continuation commit. Transfer files and smoke drivers were temporary and were not committed.
+
+| Component | Windows observation |
+| --- | --- |
+| OS | Windows `10.0.26200`, AMD64 |
+| Windows PowerShell | `5.1.26100.9444`; system locale supplied by owner as zh-CN |
+| OpenSSH | Passwordless authentication succeeded; `sshd` running |
+| User session | Interactive desktop process present; Worker task principal `Interactive` |
+| Node.js | `v24.21.0` |
+| npm | `10.2.0` |
+| Git | `2.42.0.windows.2` |
+| Codex CLI | `0.154.0`, matching the recorded Codex probe pin |
+| Pi CLI | `0.87.1`, newer than the recorded Pi `0.86.1` probe pin |
+| Worker protocol / schema | `3` / `27` |
+
+All Windows state lived below a dedicated `<isolated-root>` with inheritance disabled and access granted to the current owner and SYSTEM. The Core database, Operator/session/CSRF data, one-use claim, Worker identity/configuration, logs, Task context root, and Project workspace root stayed there. The assigned port block was checked before startup and had zero occupied TCP ports. The Core listened only on `<loopback>:<allocated-port>` within that block. No preview state, existing Worker home, foreign process, or preview service was used.
+
+Remote commands used passwordless SSH with `BatchMode=yes`, `ConnectTimeout=15`, and an explicit local timeout no greater than 180 seconds. Encoded PowerShell scripts avoided shell interpolation and localized command parsing. Version checks used the Pi `.cmd` shim after PowerShell refused its `.ps1` shim; no execution policy was changed. Raw host logs remained restricted temporary data, and only finite observations are recorded here.
+
+### AC1 Windows: bootstrap and product-managed Scheduled Task
+
+```text
+$ ssh -o BatchMode=yes -o ConnectTimeout=15 <windows-host> <ASCII-safe-prerequisite-command>
+SSH-OK; OpenSSH running; interactive session present
+allocated block: zero occupied TCP ports
+
+$ git archive --format=tar <verified-base>
+transfer SHA-256: matched on Windows
+
+$ npm.cmd ci --no-audit --no-fund
+added 130 packages; exit 0
+
+$ <isolated-Core-bootstrap>  # production src/main.ts, enrollment source, private credential file
+Core listening on http://<loopback>:<allocated-port>
+
+$ <claim-secret-file> node .\bin\sprout worker enroll ws://<loopback>:<allocated-port> <enrollment-id>
+identity proven; exit 5 (awaiting Human approval)
+
+$ node .\bin\sprout worker install-service
+Installed Scheduled Task <isolated-worker-task>; exit 0
+
+$ node .\bin\sprout worker status
+state: connected; epoch: 1; protocol: 3; service: installed and loaded
+
+$ node .\bin\sprout worker uninstall-service
+Removed Scheduled Task <isolated-worker-task>; exit 0
+
+$ node .\bin\sprout worker status
+state: stopped; protocol: 3; service: not-installed
+```
+
+Windows Scheduled Tasks do not inherit the installing shell's isolation variables. The supported `SPROUT_CLI_PATH` override selected an owner-only temporary `.cmd` wrapper, which set `SPROUT_WORKER_HOME` and `SPROUT_WORKSPACE_ROOT`, changed into the isolated checkout, and dispatched the unchanged production CLI. The product registered the task, started it, inspected it, and removed it. This wrapper is an isolation harness, not a production source modification or evidence that arbitrary shell variables automatically propagate to the default Windows action.
+
+Task Scheduler reported exactly one task with the isolated wrapper action, state `Running`, trigger `MSFT_TaskLogonTrigger`, principal logon type `Interactive`, restart count `3`, restart interval `PT1M`, `StartWhenAvailable=true`, and execution limit `PT0S`. Task installation/status and removal were exercised in the existing signed-in session. A real logoff/logon, sleep transition, or automatic unexpected-exit restart was not tested.
+
+A detached Core launched through SSH disappeared when its SSH session ended. The durable exercise therefore used a separate, manually registered temporary Core harness task running production `src/main.ts`; it loaded the Operator credential from restricted temporary storage. This task was separate from the product-managed Worker task and was removed at cleanup.
+
+### AC2 Windows: enrollment, permissions, readiness, and workspace
+
+The production authenticated Web API returned `201` for Operator sign-in and pending Windows enrollment. The CLI consumed the one-use claim on stdin and proved identity; Web then approved the enrollment and explicitly allowed `agent-run`. The real Worker connected with protocol `3`; Web projected `approved`, `online`, `compatible`, `agent-run: allowed`, and work safety `clear`.
+
+Explicit non-inference readiness requests returned `201` with committed Worker receipts. Codex and Pi were both installed, authenticated, and engine-ready. Before model authorization, model availability remained unknown. A real Agent and Project membership were created; model authorization was refreshed after the Agent configuration changed the requirement revision, then a fresh probe made the selected work option available. These were production Human-authorized routes, with no runtime JSON or database amendment.
+
+A real Project was created through `POST /api/projects`. `POST /api/projects/<project-id>/access` selected the Worker-managed default workspace and returned active access with an opaque workspace identity. The isolated workspace root contained created directories. The same binding and workspace identity survived Worker reconnects and the Core restart completed with the intervention described below. No absolute workspace path was returned in the recorded Web projection.
+
+Preliminary run attempts were refused before engine execution: the first lacked Project Agent membership; the next had membership but stale model authorization. After current-revision authorization and a fresh probe, compatibility was available and both subsequent engine attempts reached the production run path with the selected work option and workspace binding. These prerequisite refusals are not product inconsistencies.
+
+### AC3 Windows: restart observations and conditional engine blocker
+
+A controlled Worker disconnect used `Stop-ScheduledTask` followed by the production `worker stop` command. The wrapper task alone did not stop its detached Node child in this harness, so task stop alone is not claimed as a disconnect. After `worker stop`, host diagnostics reported `worker: stopped`; Web reported offline connection and unknown compatibility. Approval, capability permission, and active workspace access remained durable. `Start-ScheduledTask` restored the same Worker identity at epoch `2`, with online/compatible Web state, without reenrollment.
+
+**F9 — graceful Core shutdown stalls with an accepted Worker connection:** The temporary Core harness requested the production SIGTERM handler in `src/main.ts` via `process.emit('SIGTERM')`; this exercises its handler rather than an OS-delivered Windows signal. In a bounded repeat, after 15 seconds the listener was absent, the Core Node process still existed, the Core task remained `Running`, and Worker status still said connected at epoch `3`. Stopping the isolated Worker let the Core task become `Ready` within the following three-second sample. Starting the Core and Worker tasks then restored the same identity at epoch `4`. The first observation showed the same intervention requirement and recovered at epoch `3`.
+
+Source inspection supports the connection-dependent explanation: `src/runtime.ts:1945` awaits `api.close()` before closing the Worker gateway; `src/web/api.ts:1020` awaits the HTTP server close callback. The live differential establishes that releasing the Worker connection permits shutdown. This finding is separate from F8's retry-drain deadline. No source fix was made here, and automatic Worker reconnect across an uninterrupted ordinary Core restart is not claimed.
+
+Actual authorized engine turns:
+
+| Engine | Compatibility before submission | Durable result |
+| --- | --- | --- |
+| Codex `0.154.0`, authorized `gpt-5.4` | Available | Failed after approximately 23 seconds: `codex turn failed: the engine reported an error` |
+| Pi `0.87.1`, authorized `openai-codex/gpt-5.4` | Available | Failed after approximately 8 seconds: `pi turn failed: the engine ended the turn with an error stop reason` |
+
+Neither turn produced a recognized successful result or any recorded run event. Codex reached execution with hand-off attached; Pi recorded its chosen work option and workspace binding before failing. Installation, authentication, and compatibility do not establish turn success. The sanitized product failures above are the observed blockers; the underlying provider cause was not established, and no credential workaround was attempted. The engine-pin decision remains pending with the owner.
+
+Because neither engine completed a successful turn, the conditional active-run disconnect, retained evidence, recovery reconciliation, normal recovery decision, and Force Release chain was not attempted. The final production recovery endpoint returned **zero recovery records and zero Force Release records**. No AC3 recovery acceptance is claimed.
+
+### AC4 Windows: induced failure and sanitized diagnostics
+
+```text
+$ <stop-isolated-worker-task>
+$ node .\bin\sprout worker stop
+stop signalled to the isolated Worker
+
+$ node .\bin\sprout worker status --diagnostics
+service: running; data: accessible; worker: stopped; reachability: unknown
+engine readiness: unknown
+
+$ GET /api/operator/diagnostics  # authenticated Operator session
+HTTP 200; enrollment: approved; connection: offline; compatibility: unknown
+worker: not-connected; reachability: unknown; workSafety: clear
+finite events: connection/offline, compatibility/unknown
+
+$ <start-isolated-worker-task>
+$ node .\bin\sprout worker status
+connected; epoch: 2; protocol: 3; service: installed and loaded
+
+$ GET /api/operator/diagnostics
+HTTP 200; connection: online; compatibility: compatible; worker: connected
+finite events: duplicate-same-key, connection/online, compatibility/compatible
+```
+
+The host-local `service: running` fact was returned even when Task Scheduler reported `Ready`; it must be read alongside `worker: stopped`, not as proof of a live Worker. The readiness endpoint's disconnected view was `never-connected`, while the diagnostic projection and durable events recorded `offline`. These are the actual projections observed, not normalized synonyms.
+
+A live privacy check inspected both diagnostic exports in memory for the actual temporary Operator credential, session cookie, CSRF value, claim secret, host username, isolated root, absolute Windows paths, and concrete network addresses. It passed. Exported facts contained finite states and opaque subjects, with no raw command, raw stderr, account identity, or host path. The Core restart itself is reported separately under F9 because its listener was unavailable during shutdown.
+
+### AC5, cleanup, and disposition
+
+`npm.cmd run typecheck` passed on Windows at the transferred production base. No production code, scripts, or tests changed in this continuation; the source/Web suites were not rerun, and no new baseline counters are claimed. `git diff --check` and privacy review cover the documentation addition.
+
+Cleanup used the production Worker stop and uninstall-service commands, verified the isolated Worker task absent, and observed stopped/not-installed CLI status. With the Worker stopped, the Core shutdown completed; its separate temporary harness task was unregistered. The assigned port block then had zero occupied TCP ports. The entire owned temporary exercise directory, including credentials, claim, Worker key, database, archives, scripts, logs, and workspaces, was removed. Existing services and engine login stores were preserved.
+
+**Disposition:** Partial. F5's Windows bootstrap and signed-in-user Scheduled Task exercise is now evidenced, as are enrollment, readiness, workspace persistence, Worker reconnect, and sanitized diagnostics. F9 needs a separate shutdown repair. Successful engine turns, conditional AC3 recovery/Force Release, the pin decision, and owner acceptance remain pending.
