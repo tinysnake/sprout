@@ -69,12 +69,14 @@ export function journeyWire() {
       else if (path === '/api/projects/project-a/routing-batches') body = { batches: [] };
       else if (path === '/api/projects/project-a/events') body = { events: [] };
       else if (path === '/api/feed') body = feed;
+      // The mounted Usage journey issues this activity list/detail and aggregate set.
       else if (path === '/api/usage/activities') body = { activities: [activity] };
       else if (path === '/api/usage/activities/usage-a') body = { activity, observations: [], supersessionHistory: [] };
-      else if (path.startsWith('/api/usage/')) body = aggregate;
+      else if (path === '/api/usage/aggregate') body = aggregate;
       else if (path === '/api/operator/diagnostics') body = { format: 1, scope: 'web', versions: { sprout: 'journey-version', web: 'journey-version', worker: 'journey-version', workerProtocol: { minMajor: 2, maxMajor: 2 } }, schema: 24, service: 'running', data: 'accessible', environments: [], events: [] };
       else if (path === '/api/operator/settings') body = { versions: { sprout: 'journey-version', web: 'journey-version', worker: 'journey-version', workerProtocol: { minMajor: 2, maxMajor: 2 } }, session: { authenticated: true, activeCount: sessions.length }, access: { boundary: 'private-network-and-authentication', publicInternetSupported: false }, responsibilities: { web: ['sessions'], hostLocal: ['credentials'] } };
       else if (/^\/api\/(agents|projects|environments\/enrollments)\//.test(path)) { body = { error: 'Record not found' }; status = 404; }
+      else if (path.startsWith('/api/usage/')) { unknown.push(path); body = { error: 'Unimplemented wire route' }; status = 404; }
       else { unknown.push(path); body = { error: 'Unimplemented wire route' }; status = 404; }
       return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     },
