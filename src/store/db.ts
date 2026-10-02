@@ -22,6 +22,7 @@ import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
 import { SqliteProjectCreationStore } from '../project/creation-store.ts';
 import { SqliteUsageStore } from '../usage/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
+import { configureProductSqliteConnection } from './sqlite-connection.ts';
 import {
   getSchemaVersion,
   isDatabaseEmpty,
@@ -153,9 +154,7 @@ export class SqliteStore {
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
-    // WAL is persistent for this database file, so legacy DELETE-mode files
-    // transition safely on open. A bounded wait handles ordinary contention.
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+    configureProductSqliteConnection(this.db);
     const previousVersion = getSchemaVersion(this.db);
     const previouslyEmpty = isDatabaseEmpty(this.db);
     try {
