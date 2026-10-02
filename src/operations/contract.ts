@@ -1,4 +1,6 @@
-/** Diagnostics have no free-text, identifier, path, model or log slots. */
+import { isFeedDeepLink, type FeedTarget } from '../web/feed.ts';
+
+/** Diagnostics select finite facts and validated routing identities; never content. */
 export const EVENT_STATES = {
   startup: ['ready'], migration: ['initialized', 'unchanged', 'migrated'],
   enrollment: ['requested', 'approved', 'revoked', 'reset', 'archived', 'restored', 'duplicate-same-key', 'identity-claimed', 'duplicate-new-key-refused', 'cancelled', 'secret-regenerated', 'capability-requests-amended', 'models-authorized'],
@@ -11,6 +13,27 @@ export const EVENT_STATES = {
 export type EventKind = keyof typeof EVENT_STATES;
 export type EventState = typeof EVENT_STATES[EventKind][number];
 export interface OperationalEvent { readonly sequence: number; readonly subject: string; readonly kind: EventKind; readonly state: EventState; readonly at: number }
+export interface DiagnosticCorrelation { readonly runId?: string; readonly taskId?: string }
+export interface DiagnosticEvent extends OperationalEvent {
+  readonly correlation?: DiagnosticCorrelation;
+  readonly target?: FeedTarget;
+}
+/** Route keys only: paths, host facts and prose are not correlation identities. */
+export function diagnosticIdentity(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,159}$/.test(value) && value !== '.' && value !== '..';
+}
+export function projectDiagnosticCorrelation(input: { readonly runId?: unknown; readonly taskId?: unknown }): DiagnosticCorrelation | undefined {
+  const runId = diagnosticIdentity(input.runId) ? input.runId : undefined;
+  const taskId = diagnosticIdentity(input.taskId) ? input.taskId : undefined;
+  return runId || taskId ? { ...(runId ? { runId } : {}), ...(taskId ? { taskId } : {}) } : undefined;
+}
+/** The Feed validator owns route grammar; this boundary restricts it to identities. */
+export function isDiagnosticTarget(value: unknown): value is FeedTarget {
+  if (!isFeedDeepLink(value)) return false;
+  const keys = ['projectId', 'taskId', 'proposalId', 'batchId', 'scopeId', 'messageId', 'eventId', 'runId', 'agentId', 'environmentId'];
+  if (Object.entries(value).some(([key, field]) => key !== 'surface' && key !== 'path' && (!keys.includes(key) || !diagnosticIdentity(field)))) return false;
+  return !value.surface.startsWith('project-') || diagnosticIdentity(value.projectId);
+}
 export interface DiagnosticEngine { readonly engine: 'pi' | 'codex'; readonly readiness: 'ready' | 'login-required' | 'missing' | 'unknown' }
 export interface DiagnosticVersions { readonly sprout: string; readonly web: string; readonly worker: string; readonly workerProtocol: { readonly minMajor: number; readonly maxMajor: number } }
 export interface HostDiagnosticInput {
@@ -39,7 +62,7 @@ export interface WebDiagnostic {
   readonly format: 1; readonly scope: 'web'; readonly versions: DiagnosticVersions;
   readonly schema: number | null; readonly service: 'running'; readonly data: 'accessible';
   readonly environments: readonly { readonly subject: string; readonly enrollment: 'pending' | 'approved' | 'revoked' | 'archived'; readonly connection: 'never-connected' | 'online' | 'reconnecting' | 'offline'; readonly compatibility: 'unknown' | 'compatible' | 'incompatible'; readonly worker: 'connected' | 'not-connected'; readonly reachability: 'reachable' | 'unknown'; readonly engines: readonly DiagnosticEngine[]; readonly workSafety: 'clear' | 'held' | 'reconciling' | 'recovery' }[];
-  readonly events: readonly OperationalEvent[];
+  readonly events: readonly DiagnosticEvent[];
 }
 /** Installed versions/ranges only: not negotiated Worker compatibility, schema support
  * limits, or migration safety-copy existence/retention. Those must not be inferred. */

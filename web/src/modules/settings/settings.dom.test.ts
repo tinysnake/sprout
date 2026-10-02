@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
+import { feedTarget } from '../../../../src/web/feed.ts';
 
 // Initialize JSDOM and globals before importing Vite/Vue modules
 const initialHtml = await readFile(new URL('../../../app/index.html', import.meta.url), 'utf8');
@@ -104,6 +105,7 @@ const unverifiedTransportSecurityClaims = [
 // F1–F5: observe production DOM, including controls teleported outside the view.
 async function withSettings(run: (context: {
   doc: Document;
+  router: import('vue-router').Router;
   service: import('./adapters/fixture-adapter.ts').FixtureSettingsService;
 }) => Promise<void>, configure?: (service: import('./adapters/fixture-adapter.ts').FixtureSettingsService) => void) {
   const { dom, vite, cleanup } = await setupProductionDom();
@@ -119,12 +121,78 @@ async function withSettings(run: (context: {
     await mounted.router.push('/manage/settings');
     await mounted.router.isReady();
     await settle(100);
-    await run({ doc: dom.window.document, service });
+    await run({ doc: dom.window.document, service, router: mounted.router });
   } finally {
     app?.unmount();
     await cleanup();
   }
 }
+
+const diagnosticRows = [
+  { sequence: 1, subject: 'a'.repeat(64), kind: 'interruption', state: 'interrupted', at: 1_700_000_000_000,
+    correlation: { runId: 'run-1', taskId: 'task-1' }, target: feedTarget({ surface: 'project-task-detail', projectId: 'project-1', taskId: 'task-1' }) },
+  { sequence: 2, subject: 'b'.repeat(64), kind: 'migration', state: 'migrated', at: 1_700_100_000_000 },
+  { sequence: 3, subject: 'c'.repeat(64), kind: 'recovery', state: 'resumed', at: 1_700_200_000_000,
+    correlation: { runId: 'run-2' }, target: { surface: 'agent-detail', agentId: 'agent-1', path: '/manage/settings' } },
+] as const;
+
+async function diagnosticService(service: import('./adapters/fixture-adapter.ts').FixtureSettingsService) {
+  return { ...await service.exportDiagnostics(), events: diagnosticRows };
+}
+
+test('Settings diagnostics: correlated row links to its owning Task with Project context; plain and invalid owners have no link', async () => {
+  await withSettings(async ({ doc, router }) => {
+    (doc.querySelector('.settings-tab-data') as HTMLButtonElement).click();
+    await settle();
+    const rows = doc.querySelectorAll('[data-diagnostic-event]');
+    assert.equal(rows.length, 3);
+    assert.match(rows[0]!.textContent!, /Run run-1/);
+    assert.match(rows[0]!.textContent!, /Task task-1/);
+    const link = rows[0]!.querySelector<HTMLAnchorElement>('a')!;
+    assert.ok(link);
+    assert.equal(link.getAttribute('href'), '/app/project/tasks/task-1?project=project-1');
+    assert.equal(rows[1]!.querySelector('a'), null);
+    assert.equal(rows[2]!.querySelector('a'), null);
+    link.dispatchEvent(new initialDom.window.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+    await settle();
+    assert.equal(router.currentRoute.value.name, 'project-task-detail');
+    assert.equal(router.currentRoute.value.params.taskId, 'task-1');
+    assert.equal(router.currentRoute.value.query.project, 'project-1');
+  }, service => { service.loadDiagnostics = () => diagnosticService(service); });
+});
+
+test('Settings diagnostics: all event timestamps use the same local format and machine datetime', async () => {
+  await withSettings(async ({ doc }) => {
+    (doc.querySelector('.settings-tab-data') as HTMLButtonElement).click();
+    await settle();
+    const times = doc.querySelectorAll('[data-diagnostic-event] time');
+    assert.equal(times.length, diagnosticRows.length);
+    for (const [i, time] of [...times].entries()) {
+      const date = new Date(diagnosticRows[i]!.at);
+      assert.equal(time.getAttribute('datetime'), date.toISOString());
+      assert.equal(time.textContent, date.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    }
+  }, service => { service.loadDiagnostics = () => diagnosticService(service); });
+});
+
+test('Settings diagnostics: event rendering excludes rich content and hostile routing fields', async () => {
+  await withSettings(async ({ doc }) => {
+    (doc.querySelector('.settings-tab-data') as HTMLButtonElement).click();
+    await settle();
+    const window = doc.querySelector('[aria-label="Operational events"]');
+    assert.ok(window);
+    assert.doesNotMatch(window.outerHTML, /PRIVATE_PAYLOAD|PRIVATE_HOST|PRIVATE_MESSAGE/);
+    assert.equal(window.querySelector('a'), null);
+    assert.match(window.textContent!, /Event #4/);
+  }, service => {
+    service.loadDiagnostics = async () => ({ ...await service.exportDiagnostics(), events: [{
+      sequence: 4, subject: 'd'.repeat(64), kind: 'interruption', state: 'interrupted', at: 1_700_000_000_000,
+      correlation: { runId: '/PRIVATE_HOST/path', taskId: 'PRIVATE_MESSAGE with spaces' },
+      target: { ...feedTarget({ surface: 'agent-detail', agentId: 'agent-1' }), prompt: 'PRIVATE_PAYLOAD' },
+      reason: 'PRIVATE_PAYLOAD', hostname: 'PRIVATE_HOST', message: 'PRIVATE_MESSAGE',
+    }] } as never);
+  });
+});
 
 for (const flow of ['one', 'others'] as const) {
   test(`Settings F1: open revoke-${flow} dialog freezes throughout disconnect and never queues`, async () => {
