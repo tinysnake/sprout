@@ -658,9 +658,15 @@ test('Usage F6: backing tables expose every constituent and its measurement and 
         assert.ok(text.includes(a.tokenDimensions.status));
         assert.ok(text.includes(a.observationState));
         assert.ok(text.includes(a.costValuation.billingBasis.replaceAll('_', ' ')));
+        const hasReportedTokens = [a.tokenDimensions.totalInput, a.tokenDimensions.uncachedInput, a.tokenDimensions.cachedReads,
+          a.tokenDimensions.cacheWrite, a.tokenDimensions.output, a.tokenDimensions.reasoningOutput, a.tokenDimensions.total]
+          .some((value) => value !== undefined);
         for (const dimension of ['totalInput','uncachedInput','cachedReads','cacheWrite','output','reasoningOutput','total']) {
           const cell = row.querySelector(`[data-token-dimension="${dimension}"]`)!;
-          assert.equal(cell.textContent, a.tokenDimensions[dimension] === undefined ? 'Unavailable' : a.tokenDimensions[dimension].toLocaleString());
+          const value = a.tokenDimensions[dimension] === undefined
+            ? a.tokenDimensions.status !== 'unavailable' && hasReportedTokens ? 'Not reported by engine' : 'Unavailable'
+            : a.tokenDimensions[dimension].toLocaleString();
+          assert.equal(cell.textContent, value);
         }
         const { sanitizeOperatorText } = await import('../../../../src/environment/privacy.ts');
         for (const h of a.observationHistory ?? []) assert.ok(text.includes(sanitizeOperatorText(h.note, { fallback: 'Unavailable', maxLength: 4000 })), 'append-only sanitized history note present');
@@ -669,6 +675,45 @@ test('Usage F6: backing tables expose every constituent and its measurement and 
       assert.match(region.textContent ?? '', /Token coverage/);
       assert.match(region.textContent ?? '', /API-equivalent estimate provenance/);
     }
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Usage F12: coarse and detailed reports share correct totals and name absent dimensions', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    const { FixtureUsageService } = await vite.ssrLoadModule('/src/modules/usage/adapters/fixture-adapter.ts');
+    const source = new FixtureUsageService();
+    const base = source.rawActivities.find((activity: any) => activity.kind === 'agent_run');
+    const detailed = {
+      ...base,
+      id: 'act-detailed-shape',
+      tokenDimensions: {
+        status: 'complete', totalInput: 80, uncachedInput: 60, cachedReads: 20,
+        cacheWrite: 3, output: 40, reasoningOutput: 5, total: 120, source: 'Pi detailed usage',
+      },
+    };
+    const coarse = {
+      ...base,
+      id: 'act-coarse-shape',
+      tokenDimensions: {
+        status: 'complete', totalInput: 100, output: 20, total: 120, source: 'Scripted tokenUsage',
+      },
+    };
+    const fixture = new FixtureUsageService({ activities: [detailed, coarse] });
+    const { app } = await mountedPage(vite, mount, fixture);
+
+    const summary = doc.querySelector('[data-usage-summary-kind="agent_run"] .usage-summary-kind-metrics')?.textContent ?? '';
+    assert.match(summary, /240 tokens/, 'the Usage summary adds both provider-reported totals');
+
+    (doc.querySelector('[data-usage-activity="act-coarse-shape"]') as HTMLButtonElement).click();
+    await settle(40);
+    const tokenFacts = doc.querySelector('.usage-detail-panel .token-facts')!;
+    const cachedReadValue = [...tokenFacts.querySelectorAll('div')]
+      .find((row) => row.querySelector('dt')?.textContent === 'Cached reads')
+      ?.querySelector('dd')?.textContent;
+    assert.equal(cachedReadValue, 'Not reported by engine');
+
     app.unmount();
   } finally { await cleanup(); }
 });

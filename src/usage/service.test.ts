@@ -46,7 +46,13 @@ test('record completed run with detailed token dimensions, Sprout wall duration,
         workModel: 'gpt-4o',
         effort: 'high',
       },
-      result: { status: 'completed', text: 'done', pricingContext: { route: 'openai', serviceTier: 'standard' } },
+      result: {
+        status: 'completed', text: 'done', pricingContext: { route: 'openai', serviceTier: 'standard' },
+        detailedTokens: {
+          inputTokens: 1000, uncachedInputTokens: 800, cachedInputTokens: 200,
+          cacheWriteInputTokens: 0, outputTokens: 300, reasoningOutputTokens: 50, totalTokens: 1300,
+        },
+      },
       detailedTokens: {
         inputTokens: 1000,
         uncachedInputTokens: 800,
@@ -98,6 +104,65 @@ test('record completed run with detailed token dimensions, Sprout wall duration,
     assert.equal(obs.costEstimate.priceSource, 'codex-price-snapshot');
     assert.equal(obs.costEstimate.priceSourceVersion, '2026-09-15');
     assert.equal(obs.billingBasis, 'unknown');
+  });
+});
+
+test('coarse token reports aggregate with detailed reports without inventing extra dimensions', async () => {
+  await withService(async (service) => {
+    await service.recordRunActivity({
+      id: 'run-detailed', agentId: 'agent-1', environmentInstanceId: 'env-1', projectId: 'project-1',
+      prompt: 'detailed', status: 'completed', events: [], createdAt: 1000, completedAt: 1100,
+      workOption: { id: 'pi-detailed', engine: 'pi', workModel: 'model-a', effort: 'low' },
+      detailedTokens: {
+        inputTokens: 80, uncachedInputTokens: 60, cachedInputTokens: 20,
+        cacheWriteInputTokens: 3, outputTokens: 40, reasoningOutputTokens: 5, totalTokens: 120,
+      },
+    });
+    await service.recordRunActivity({
+      id: 'run-coarse', agentId: 'agent-2', environmentInstanceId: 'env-1', projectId: 'project-1',
+      prompt: 'coarse', status: 'completed', events: [], createdAt: 1100, completedAt: 1200,
+      workOption: { id: 'codex-coarse', engine: 'scripted', workModel: 'model-b', effort: 'low' },
+      detailedTokens: {
+        inputTokens: 900, uncachedInputTokens: 700, cachedInputTokens: 200,
+        cacheWriteInputTokens: 8, outputTokens: 99, reasoningOutputTokens: 12, totalTokens: 999,
+      },
+      tokenUsage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      result: {
+        status: 'completed', text: 'done',
+        tokenUsage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      },
+    });
+
+    const coarse = (await service.getActivityByRunId('run-coarse'))?.effectiveObservation;
+    assert.deepEqual(coarse?.tokens, { inputTokens: 100, outputTokens: 20, totalTokens: 120 });
+    assert.equal(coarse?.completeness, 'complete');
+
+    const aggregate = await service.getProjectUsage('project-1');
+    assert.equal(aggregate.tokens.totalTokens, 240);
+    assert.equal(aggregate.tokens.inputTokens, 180);
+    assert.equal(aggregate.tokens.outputTokens, 60);
+    assert.equal(aggregate.tokenCoverage.complete, 2);
+    assert.equal(aggregate.tokens.cachedInputTokens, 20, 'only reported cache dimensions contribute');
+  });
+});
+
+test('a run settled without a current token report keeps earlier same-run usage partial', async () => {
+  await withService(async (service) => {
+    const running: AgentRun = {
+      id: 'run-final-usage-missing', agentId: 'agent-1', environmentInstanceId: 'env-1',
+      prompt: 'work', status: 'running', events: [], createdAt: 1000,
+      workOption: { id: 'opt-usage-missing', engine: 'pi', workModel: 'model', effort: 'low' },
+      detailedTokens: { inputTokens: 90, outputTokens: 15, totalTokens: 105 },
+    };
+    await service.recordRunActivity(running);
+    const { detailedTokens: priorRunTokens, ...withoutDetailedTokens } = running;
+    assert.ok(priorRunTokens);
+    await service.recordRunActivity({ ...withoutDetailedTokens, status: 'completed', completedAt: 1200 });
+
+    const observation = (await service.getActivityByRunId(running.id))?.effectiveObservation;
+    assert.deepEqual(observation?.tokens, { inputTokens: 90, outputTokens: 15, totalTokens: 105 });
+    assert.equal(observation?.completeness, 'partial');
+    assert.match(observation?.source ?? '', /last observed before settlement; final update reported no token dimensions/);
   });
 });
 

@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult } from './port.ts';
+import type { AgentRunEvent, DetailedTokenDimensions, EngineTurnResult, TokenUsage } from './port.ts';
 
 /**
  * Translation from `opencode run --format json` into engine-neutral run events.
@@ -27,10 +27,12 @@ import type { AgentRunEvent, EngineTurnResult } from './port.ts';
 export interface OpenCodeTurnState {
   text: string;
   failure: string | undefined;
+  tokenUsage: TokenUsage | undefined;
+  detailedTokens: DetailedTokenDimensions | undefined;
 }
 
 export function newOpenCodeTurnState(): OpenCodeTurnState {
-  return { text: '', failure: undefined };
+  return { text: '', failure: undefined, tokenUsage: undefined, detailedTokens: undefined };
 }
 
 export interface OpenCodeOutcome {
@@ -45,6 +47,7 @@ interface OpenCodePart {
   readonly state?: unknown;
   readonly name?: unknown;
   readonly title?: unknown;
+  readonly tokens?: unknown;
 }
 
 export function mapOpenCodeEvent(raw: unknown, state: OpenCodeTurnState): OpenCodeOutcome {
@@ -72,18 +75,97 @@ export function mapOpenCodeEvent(raw: unknown, state: OpenCodeTurnState): OpenCo
       };
     }
 
+    case 'step_finish': {
+      const part = frame['part'] as OpenCodePart | undefined;
+      addOpenCodeUsage(state, part?.['tokens']);
+      return { events: [] };
+    }
+
     case 'error': {
       const message = describeError(frame['error']);
       if (message === '') return { events: [], ignored: true };
       state.failure = message;
-      return { events: [], finish: { status: 'failed', message } };
+      return { events: [], finish: {
+        status: 'failed',
+        message,
+        ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+        ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
+      } };
     }
 
     default:
-      // step_start / step_finish are accounting framing for a provider hop; the
-      // adapter does not report them as run progress.
+      // step_start is framing, not run progress. Other event kinds are ignored.
       return { events: [], ignored: true };
   }
+}
+
+function addOpenCodeUsage(state: OpenCodeTurnState, raw: unknown): void {
+  if (!isRecord(raw)) return;
+  const input = raw['input'];
+  const output = raw['output'];
+  const reasoning = raw['reasoning'];
+  const reportedTotal = raw['total'];
+  if (!isTokenCount(input) || !isTokenCount(output) ||
+      (reasoning !== undefined && !isTokenCount(reasoning)) ||
+      (reportedTotal !== undefined && !isTokenCount(reportedTotal))) return;
+
+  const cache = isRecord(raw['cache']) ? raw['cache'] : undefined;
+  const cachedInputTokens = cache && isTokenCount(cache['read']) ? cache['read'] : undefined;
+  const cacheWriteInputTokens = cache && isTokenCount(cache['write']) ? cache['write'] : undefined;
+  if (cachedInputTokens !== undefined && cachedInputTokens > input) return;
+
+  const inputTokens = input + (cachedInputTokens ?? 0);
+  const uncachedInputTokens = cachedInputTokens === undefined ? undefined : input;
+  // OpenCode separates visible output and reasoning; normalized output includes
+  // both, while reasoning remains a detail within that output total.
+  const completionTokens = output + (reasoning ?? 0);
+  const totalTokens = reportedTotal ?? inputTokens + completionTokens;
+  const nextUsage: TokenUsage = { promptTokens: inputTokens, completionTokens, totalTokens };
+  const nextDetailed: DetailedTokenDimensions = {
+    inputTokens,
+    ...(uncachedInputTokens !== undefined ? { uncachedInputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+    outputTokens: completionTokens,
+    ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
+    totalTokens,
+  };
+
+  if (state.tokenUsage === undefined || state.detailedTokens === undefined) {
+    state.tokenUsage = nextUsage;
+    state.detailedTokens = nextDetailed;
+    return;
+  }
+
+  const previous = state.detailedTokens;
+  const sumReportedDimension = (left: number | undefined, right: number | undefined): number | undefined =>
+    left === undefined || right === undefined ? undefined : left + right;
+  const uncached = sumReportedDimension(previous.uncachedInputTokens, nextDetailed.uncachedInputTokens);
+  const cached = sumReportedDimension(previous.cachedInputTokens, nextDetailed.cachedInputTokens);
+  const cacheWrite = sumReportedDimension(previous.cacheWriteInputTokens, nextDetailed.cacheWriteInputTokens);
+  const reasoningOutput = sumReportedDimension(previous.reasoningOutputTokens, nextDetailed.reasoningOutputTokens);
+  state.tokenUsage = {
+    promptTokens: state.tokenUsage.promptTokens + nextUsage.promptTokens,
+    completionTokens: state.tokenUsage.completionTokens + nextUsage.completionTokens,
+    totalTokens: state.tokenUsage.totalTokens + nextUsage.totalTokens,
+  };
+  state.detailedTokens = {
+    inputTokens: (previous.inputTokens ?? 0) + inputTokens,
+    ...(uncached !== undefined ? { uncachedInputTokens: uncached } : {}),
+    ...(cached !== undefined ? { cachedInputTokens: cached } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteInputTokens: cacheWrite } : {}),
+    outputTokens: (previous.outputTokens ?? 0) + completionTokens,
+    ...(reasoningOutput !== undefined ? { reasoningOutputTokens: reasoningOutput } : {}),
+    totalTokens: (previous.totalTokens ?? 0) + totalTokens,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Tool invocations carry a name and sometimes a human title. */

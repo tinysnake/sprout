@@ -86,6 +86,41 @@ async function collect(events: AsyncIterable<AgentRunEvent>): Promise<AgentRunEv
   return collected;
 }
 
+test('a turn sums native step token dimensions before the process-exit settlement', async () => {
+  const { adapter } = adapterFor((process) => {
+    process.line({
+      type: 'step_finish',
+      sessionID: 'ses_1',
+      part: { tokens: { input: 70, output: 20, reasoning: 4, cache: { read: 30, write: 5 }, total: 124 } },
+    });
+    process.line({
+      type: 'step_finish',
+      sessionID: 'ses_1',
+      part: { tokens: { input: 10, output: 3, reasoning: 1, cache: { read: 0, write: 0 }, total: 14 } },
+    });
+    process.line({ type: 'text', sessionID: 'ses_1', part: { type: 'text', text: 'done' } });
+    process.settle(0);
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('count usage');
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') throw new Error('expected completed OpenCode turn');
+  assert.deepEqual(result.tokenUsage, { promptTokens: 110, completionTokens: 28, totalTokens: 138 });
+  assert.deepEqual(result.detailedTokens, {
+    inputTokens: 110,
+    uncachedInputTokens: 80,
+    cachedInputTokens: 30,
+    cacheWriteInputTokens: 5,
+    outputTokens: 28,
+    reasoningOutputTokens: 5,
+    totalTokens: 138,
+  });
+});
+
 test('a turn reports text as one block per hop and completes from process exit', async () => {
   const { adapter, argv } = adapterFor((process) => {
     process.line({ type: 'step_start', sessionID: 'ses_1', part: {} });
