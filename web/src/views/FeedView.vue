@@ -154,7 +154,7 @@ function severityBorder(severity: FeedSeverity): string {
 function activityGroup(item: FeedActivityItem): ActivityFilter {
   const kind = item.kind.toLowerCase();
   if (kind.includes('task') || (kind === 'agent-run' && item.target?.surface === 'project-task-detail')) return 'tasks';
-  if (/message|routing|wake|chat/.test(kind) || (kind === 'agent-run' && item.target?.surface === 'project-chat')) return 'messages';
+  if (/message|routing|wake|chat/.test(kind) || (kind !== 'agent-run' && /run/.test(kind)) || (kind === 'agent-run' && item.target?.surface === 'project-chat')) return 'messages';
   if (/environment|enrollment|lease|worker|recovery|readiness/.test(kind)) return 'envs';
   if (/usage|cost|token/.test(kind)) return 'usage';
   return 'other';
@@ -206,7 +206,15 @@ function targetLocation(target: FeedTarget | undefined): RouteLocationRaw | unde
       location = { name: 'project-task-detail', params: { taskId: target.taskId }, query: project };
       break;
     case 'project-chat':
-      location = { name: 'project-chat', query: project };
+      location = {
+        name: target.scopeId ? 'project-chat-scope' : 'project-chat',
+        ...(target.scopeId ? { params: { scopeId: target.scopeId } } : {}),
+        query: {
+          ...project,
+          ...(target.messageId ? { message: target.messageId } : {}),
+          ...(target.eventId ? { event: target.eventId } : {}),
+        },
+      };
       break;
     case 'project-chat-routing':
       if (!target.batchId) return undefined;

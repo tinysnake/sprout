@@ -18,9 +18,14 @@ export function journeyWire() {
   const recovery = { id: 'recovery-a', environmentInstanceId: 'instance-a', leaseId: 'lease-a', holderKind: 'task', taskId: 'task-a', cause: 'worker-channel-lost', phase: 'recovery', startedAt: at, updatedAt: at, unresolvedFacts: ['Exact retained evidence A'], evidenceSynchronized: false, decisions: [] };
   const task: TaskView = { id: 'task-a', projectId: project.id, title: 'Journey Task A', goal: 'Exact Task goal A', constraints: ['Exact constraint A'], status: 'in-progress', admission: { proposalId: 'proposal-a', proposalRevision: 1, contentVersion: 1, validationCriteria: ['Exact validation A'], lead: { memberId: agent.id, memberKind: 'agent' }, contextAgentId: agent.id, approvedBy: { memberId: 'operator', memberKind: 'human' }, approvedAt: at, approvalReason: 'Approved' }, environmentInstanceId: 'instance-a', environmentLeaseId: 'lease-a', environmentLifecycleState: 'recovery', taskContextState: 'recovery-retained', createdAt: at, updatedAt: at };
   const run = { id: 'run-a', agentId: agent.id, projectId: project.id, taskId: task.id, status: 'completed', createdAt: at, workOption: { ...option, configurationVersion: 1 } };
+  const chatRun = { id: 'chat-run-a', agentId: agent.id, projectId: project.id, status: 'completed', createdAt: at + 1 };
   const taskRun = { runId: run.id, agentId: agent.id, sequence: 1, linkedAt: at, contentVersion: 1, actor: { memberId: agent.id, memberKind: 'agent' } };
-  const messages = [{ id: 'message-a', scopeId: 'channel-a', projectId: project.id, authorId: 'operator', authorKind: 'human', body: 'Exact Chat message A', createdAt: at }];
+  const messages = [
+    { id: 'message-channel-a', scopeId: 'channel-a', projectId: project.id, authorId: 'operator', authorKind: 'human', body: 'Exact Chat message A', createdAt: at },
+    { id: 'message-a', scopeId: 'dm-a', projectId: project.id, authorId: 'operator', authorKind: 'human', body: 'Exact Chat message A', createdAt: at + 1 },
+  ];
   const scope = { id: 'channel-a', projectId: project.id, kind: 'project', createdAt: at, updatedAt: at };
+  const directScope = { id: 'dm-a', projectId: project.id, kind: 'direct', participants: ['operator', agent.id], createdAt: at, updatedAt: at };
   const activity = { id: 'usage-a', kind: 'agent_run', status: 'completed', engine: 'pi', model: 'journey-model', createdAt: at, settledAt: at, wallDurationMs: 1234, correlation: { runId: run.id, projectId: project.id, agentId: agent.id, taskId: task.id } };
   const aggregate = { totalActivities: 1, tokens: {}, tokenCoverage: { complete: 0, partial: 0, unavailable: 1 }, cost: { byProvenance: {} }, costCoverage: { available: 0, pending: 0, unavailable: 1 }, billedCost: { status: 'unavailable' }, activityIdentities: [{ activityId: activity.id, kind: activity.kind, status: activity.status, runId: run.id }] };
   const targets = [
@@ -30,7 +35,14 @@ export function journeyWire() {
     feedTarget({ surface: 'project-overview', projectId: project.id }),
     feedTarget({ surface: 'project-task-detail', projectId: project.id, taskId: task.id }),
   ];
-  const feed: FeedSnapshot = { scopes: [{ id: 'feed:all', kind: 'all', label: 'All Projects', attentionCount: 0 }, { id: project.id, kind: 'project', label: project.displayName, attentionCount: 0 }], attention: [], inFlight: [], activity: targets.map((target, i) => ({ id: `journey-${i}`, kind: 'message', summary: `Exact Feed destination ${i}`, scopes: [project.id], target, at })) };
+  const chatActivityTarget = feedTarget({ surface: 'project-chat', projectId: project.id, scopeId: directScope.id, messageId: messages[1]!.id, runId: chatRun.id, agentId: agent.id });
+  const chatEvent = { id: 'event-chat-a', projectId: project.id, kind: 'chat-completed', summary: 'Exact Chat event A', producerId: agent.id, producerKind: 'agent', disposition: 'informational', responsibleAgentIds: [], createdAt: at + 2 };
+  const chatEventTarget = feedTarget({ surface: 'project-chat', projectId: project.id, eventId: chatEvent.id, agentId: agent.id });
+  const feed: FeedSnapshot = { scopes: [{ id: 'feed:all', kind: 'all', label: 'All Projects', attentionCount: 0 }, { id: project.id, kind: 'project', label: project.displayName, attentionCount: 0 }], attention: [], inFlight: [], activity: [
+    ...targets.map((target, i) => ({ id: `journey-${i}`, kind: 'message', summary: `Exact Feed destination ${i}`, scopes: [project.id], target, at })),
+    { id: 'chat-completed:chat-run-a', kind: 'chat-completed', summary: 'Exact completed chat turn A', scopes: [project.id], target: chatActivityTarget, projectId: project.id, at: at + 1 },
+    { id: 'event:chat-completed', kind: 'chat-completed', summary: 'Exact Chat event A', scopes: [project.id], target: chatEventTarget, projectId: project.id, at: at + 2 },
+  ] };
   let sessions = [{ id: 'session-current', current: true, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }, { id: 'session-other', current: false, createdAt: at, lastSeenAt: at, absoluteExpiresAt: at + 86400000, idleExpiresAt: at + 3600000 }];
   const unknown: string[] = [];
   let authorized = true;
@@ -63,11 +75,15 @@ export function journeyWire() {
       else if (path === '/api/tasks/task-a') body = { task, runs: [taskRun] };
       else if (path === projectPath + '/task-proposals') body = { proposals: [] };
       else if (path === '/api/runs') body = { runs: [run] };
-      else if (path === '/api/projects/project-a/scopes') body = { scopes: [scope] };
+      else if (path === '/api/projects/project-a/scopes') body = { scopes: [scope, directScope] };
       else if (path === '/api/scopes/channel-a') body = { scope, state: { scopeId: scope.id, writable: true }, context: { scopeId: scope.id, projectId: project.id, kind: 'project', project: { contentVersion: 1, goal: 'Exact Chat context A', rules: [] } } };
-      else if (path === '/api/messages') body = { messages };
+      else if (path === '/api/scopes/dm-a') body = { scope: directScope, state: { scopeId: directScope.id, writable: true }, context: { scopeId: directScope.id, projectId: project.id, kind: 'direct', project: { contentVersion: 1, goal: 'Exact Chat context A', rules: [] } } };
+      else if (path === '/api/messages') {
+        const scopeId = url.searchParams.get('scopeId');
+        body = { messages: scopeId ? messages.filter((message) => message.scopeId === scopeId) : messages };
+      }
       else if (path === '/api/projects/project-a/routing-batches') body = { batches: [] };
-      else if (path === '/api/projects/project-a/events') body = { events: [] };
+      else if (path === '/api/projects/project-a/events') body = { events: [chatEvent] };
       else if (path === '/api/feed') body = feed;
       // The mounted Usage journey issues this activity list/detail and aggregate set.
       else if (path === '/api/usage/activities') body = { activities: [activity] };

@@ -43,6 +43,13 @@ const replacements: Record<string, unknown> = {
 for (const [key, value] of Object.entries(replacements)) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }
+const scrollRequests: { readonly target?: string; readonly block?: ScrollLogicalPosition }[] = [];
+Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', {
+  configurable: true,
+  value(this: HTMLElement, options?: ScrollIntoViewOptions) {
+    scrollRequests.push({ target: this.dataset['messageId'] ?? this.dataset['eventId'], block: options?.block });
+  },
+});
 
 const { createServer } = await import('vite');
 const { default: vue } = await import('@vitejs/plugin-vue');
@@ -70,6 +77,10 @@ const { createBrowserTransport } = await vite.ssrLoadModule('/src/transport/brow
 const { journeyWire } = await import('./production-journey-wire.ts');
 const doc = dom.window.document;
 const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+async function waitFor(predicate: () => boolean, failure: string) {
+  for (let attempt = 0; attempt < 20 && !predicate(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(predicate(), failure);
+}
 
 async function harness(width: number, initial = '/project/overview?project=project-a') {
   Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: width });
@@ -140,8 +151,12 @@ function exactTask() {
   assert.match(mainText(), /Exact validation A/);
 }
 async function click(selector: string) {
-  const control = doc.querySelector<HTMLElement>(selector);
-  assert.ok(control, 'reachable action: ' + selector);
+  let control = doc.querySelector<HTMLElement>(selector);
+  for (let attempt = 0; !control && attempt < 20; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    control = doc.querySelector<HTMLElement>(selector);
+  }
+  assert.ok(control, 'reachable action: ' + selector + '\nRendered main: ' + mainText());
   control.focus(); control.click(); await settle();
 }
 const parity = new Map<string, string[]>();
@@ -229,12 +244,67 @@ for (const width of [390, 1440]) {
       h.wire.messages.push({ id: 'message-update-a', scopeId: 'channel-a', projectId: 'project-a', authorId: 'agent-a', authorKind: 'agent', body: 'Authoritative SSE arrival A', createdAt: Date.now() });
       await h.emitRun();
       assert.match(mainText(), /Authoritative SSE arrival A/);
-      assert.ok(h.announcements.some(message => /1 new message/.test(message)), 'SSE-triggered authoritative catch-up announces the arrival');
+      await waitFor(() => h.announcements.some(message => /1 new message/.test(message)), 'SSE-triggered authoritative catch-up announces the arrival');
       await h.go('/project/tasks/task-a?project=project-a'); exactTask();
       assert.deepEqual(h.wire.unknown, [], 'all reads have explicit wire contracts');
     } finally { h.close(); }
   });
 }
+
+test('chat activity opens its exact conversation and highlights the originating message', async () => {
+  scrollRequests.length = 0;
+  const h = await harness(390, '/feed?scope=project-a&urgency=all&activity=messages');
+  try {
+    await click('[data-activity-id="chat-completed:chat-run-a"]');
+    assert.equal(h.router.currentRoute.value.name, 'project-chat-scope');
+    assert.equal(h.router.currentRoute.value.params.scopeId, 'dm-a');
+    assert.equal(h.router.currentRoute.value.query.project, 'project-a');
+    assert.equal(h.router.currentRoute.value.query.message, 'message-a');
+    const target = doc.querySelector('[data-message-id="message-a"]');
+    assert.equal(target?.getAttribute('data-targeted'), 'message');
+    assert.equal(doc.activeElement, target, 'focus follows the exact target message');
+    assert.match(target?.textContent ?? '', /Exact Chat message A/);
+    assert.match(doc.querySelector('[aria-label="Conversation detail"] header')?.textContent ?? '', /@Journey Agent A/, 'the specific Agent direct conversation is open');
+    assert.ok(scrollRequests.some((request) => request.target === 'message-a' && request.block === 'center'), 'the exact message is scrolled to the center');
+    assert.ok(doc.querySelector('#btn-pop-return'), 'the exact Chat destination retains Feed return context');
+    await click('#btn-pop-return');
+    assert.equal(h.router.currentRoute.value.name, 'feed');
+    assert.equal(h.router.currentRoute.value.query.scope, 'project-a');
+    assert.equal(h.router.currentRoute.value.query.urgency, 'all');
+    assert.equal(h.router.currentRoute.value.query.activity, 'messages');
+  } finally { h.close(); }
+});
+
+test('a chat Project event opens its Chat timeline entry', async () => {
+  scrollRequests.length = 0;
+  const h = await harness(390, '/feed?scope=project-a&activity=messages');
+  try {
+    await click('[data-activity-id="event:chat-completed"]');
+    assert.equal(h.router.currentRoute.value.name, 'project-chat');
+    assert.equal(h.router.currentRoute.value.query.project, 'project-a');
+    assert.equal(h.router.currentRoute.value.query.event, 'event-chat-a');
+    const target = doc.querySelector('[data-event-id="event-chat-a"]');
+    assert.equal(target?.getAttribute('data-targeted'), 'event');
+    assert.equal(doc.activeElement, target);
+    assert.ok(scrollRequests.some((request) => request.target === 'event-chat-a' && request.block === 'center'));
+    assert.match(target?.textContent ?? '', /Exact Chat event A/);
+  } finally { h.close(); }
+});
+
+test('a pruned Feed target opens the conversation without claiming message focus', async () => {
+  scrollRequests.length = 0;
+  const h = await harness(390, '/feed?scope=project-a&activity=messages');
+  try {
+    h.wire.messages.splice(1, 1);
+    await click('[data-activity-id="chat-completed:chat-run-a"]');
+    assert.equal(h.router.currentRoute.value.name, 'project-chat-scope');
+    assert.equal(h.router.currentRoute.value.params.scopeId, 'dm-a');
+    assert.equal(doc.querySelector('[data-message-id="message-a"]'), null);
+    assert.ok(!scrollRequests.some((request) => request.target === 'message-a'), 'a missing target is not scrolled into false focus');
+    assert.match(doc.querySelector('.chat-target-announcement')?.textContent ?? '', /unavailable.*without message focus/i);
+    assert.doesNotMatch(doc.querySelector('.chat-target-announcement')?.textContent ?? '', /highlighted/i);
+  } finally { h.close(); }
+});
 
 test('hostile Feed targets are exercised through the production click path', async () => {
   const h = await harness(390, '/feed?scope=project-a');
@@ -243,11 +313,14 @@ test('hostile Feed targets are exercised through the production click path', asy
       { surface: 'agent-detail', agentId: '<img src=x onerror=alert(1)>', path: '/manage/agents/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E' },
       { surface: 'agent-detail', agentId: 'enroll-a', path: '/manage/agents/enroll-a' },
       { surface: 'agent-detail', agentId: 'agent-a', path: '/manage/settings' },
+      { surface: 'project-chat', projectId: 'project-a', scopeId: '../settings', messageId: 'message-a', path: '/project/chat/%2E%2E%2Fsettings?message=message-a' },
+      { surface: 'project-chat', projectId: 'project-a', messageId: 'message-a', path: '/project/chat?message=message-a' },
     ];
     for (const [i, target] of hostile.entries()) {
       h.wire.feed.activity = [{ id: 'hostile-' + i, kind: 'message', summary: 'Untrusted target', scopes: ['project-a'], at: Date.now(), target: target as FeedTarget }];
       await h.go('/manage/usage'); await h.go('/feed?scope=project-a');
       await click('[data-activity-id="hostile-' + i + '"]');
+      if (i >= 3) assert.equal(h.router.currentRoute.value.name, 'feed', 'hostile or incomplete Chat identities keep the operator on Feed');
       if (h.router.currentRoute.value.name === 'feed') assert.equal(doc.querySelector('#btn-pop-return'), null);
       else {
         assert.match(mainText(), /not found|unavailable/i);
